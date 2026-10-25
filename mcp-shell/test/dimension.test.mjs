@@ -216,3 +216,78 @@ test("the fake transport used above is the shape the shell really writes", () =>
   assert.equal(io.sent.length, 1);
   assert.throws(() => new FakeLineIo().lastFrame(), /no frame written/);
 });
+
+/**
+ * The mirrored JSON Schemas carry the same dimension rule 面 A advertises.
+ *
+ * Why this leg exists: `mcp-shell/src/dimension.ts` says the advertised limits are compared
+ * against `kernel/schemas/*.schema.json`, and until this test that sentence was only half true —
+ * the comparison ran against the installed package's exported constants and against 面 B's copy,
+ * never against the schema bytes. Those are three different artefacts. The schemas are what a
+ * consumer that cannot read TypeScript (the Swift C35 leg, the archive manifest) implements, so a
+ * kernel change that moved the pattern in `dimension-context.ts` but left `run-plan.schema.json`
+ * behind would have every existing gate still green while the two answers diverged.
+ *
+ * The walk is keyed on the *property name* rather than a list of files or JSON pointers, so a new
+ * schema that starts declaring a dimension inherits the check. The `found.length` floor is the
+ * anti-vacuity guard: a walk that matched nothing would otherwise pass by having nothing to say.
+ */
+test("every dimension-shaped field in the mirrored schemas matches the advertised limits", () => {
+  const schemaDir = path.resolve(TEST_DIR, "..", "..", "kernel", "schemas");
+  const files = fs.readdirSync(schemaDir).filter((file) => file.endsWith(".json")).sort();
+  assert.ok(files.length > 0, `no schema files under ${schemaDir} — the mirror is gone, so this leg measured nothing`);
+
+  const found = [];
+  const walk = (node, key, where, schemaFile) => {
+    if (Array.isArray(node)) {
+      node.forEach((item, index) => walk(item, key, `${where}[${index}]`, schemaFile));
+      return;
+    }
+    if (node === null || typeof node !== "object") return;
+    // Three shapes carry the dimension vocabulary in the mirror: a `dimension` string field, a
+    // `dimensions` array of strings, and the `$defs/*Dimension/properties/id` entry the run-plan
+    // schema defines. The third one is the case a name-only walk misses — and it is the definition
+    // the *producer* (iterate-harness' written plan) is validated against, so leaving it out would
+    // make this leg look busy while guarding two of three files. The predicate is deliberately
+    // narrow: `id` alone would also match operation/entry ids, which are a different vocabulary
+    // (Crockford base32, 26 chars) and must not be held to the dimension rule.
+    const dimensionish =
+      key === "dimension" ||
+      key === "dimensions" ||
+      (key === "id" && where.includes("$defs/") && /Dimension\/properties\/id$/.test(where));
+    if (dimensionish) {
+      const target = key === "dimensions" && node.items !== undefined ? node.items : node;
+      if (typeof target.pattern === "string") {
+        found.push(`${schemaFile}:${where}`);
+        // The shell advertises a RegExp (that is what the kernel exports); a JSON Schema carries a
+        // string. Comparing the two without `.source` would be a test that can only ever fail, so
+        // the comparison is on the pattern text and the maxLength bound — the two things a
+        // schema-only consumer actually implements.
+        assert.equal(
+          target.pattern,
+          DIMENSION_ID_LIMITS.pattern.source,
+          `${schemaFile}:${where} carries a dimension pattern the shell does not advertise`,
+        );
+        if (target.maxLength !== undefined) {
+          assert.equal(
+            target.maxLength,
+            DIMENSION_ID_LIMITS.maxLength,
+            `${schemaFile}:${where} bounds the dimension id at ${target.maxLength}, the shell advertises ${DIMENSION_ID_LIMITS.maxLength}`,
+          );
+        }
+      }
+    }
+    for (const [childKey, child] of Object.entries(node)) walk(child, childKey, `${where}/${childKey}`, schemaFile);
+  };
+
+  for (const file of files) walk(JSON.parse(fs.readFileSync(path.join(schemaDir, file), "utf8")), null, "#", file);
+
+  assert.ok(
+    found.length >= 2,
+    `only ${found.length} dimension-shaped field(s) found across ${files.length} schemas — the mirror lost the vocabulary, and this leg is now vacuous`,
+  );
+  // The constants the schemas are compared against are the same ones the shell advertises, so the
+  // three artefacts (package constant, schema mirror, 面 A literal) cannot part ways silently.
+  assert.equal(DIMENSION_ID_LIMITS.pattern.source, DIMENSION_ID_PATTERN.source);
+  assert.equal(DIMENSION_ID_LIMITS.maxLength, DIMENSION_ID_MAX_LENGTH);
+});

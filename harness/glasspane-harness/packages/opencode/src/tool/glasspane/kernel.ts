@@ -393,36 +393,33 @@ export interface RunPlanRef {
   readonly path: string
   readonly digest: string
   readonly ids: readonly string[]
+  /**
+   * How this session came to hold a plan. `env` is an explicit hand-off; `project` is the plan
+   * file the *project itself* owns at `.iterate/run-plan.json`, written by whoever configured the
+   * run there. The distinction is published because the two have different failure modes: a stale
+   * hand-off is the operator's, a stale project file belongs to the last run in that directory.
+   */
+  readonly source: "env" | "project"
 }
 
-export function readRunPlan(
-  env: NodeJS.ProcessEnv = process.env
-): { ok: true; plan: RunPlanRef | null } | { ok: false; error: KernelRejection } {
-  const override = env.GLASSPANE_RUN_PLAN
-  if (typeof override !== "string" || override.length === 0) return { ok: true, plan: null }
-  if (!path.isAbsolute(override)) {
-    return {
-      ok: false,
-      error: {
-        code: "GP_E_RUN_PLAN_PATH",
-        message: `GLASSPANE_RUN_PLAN='${override}' is not absolute`,
-        remedy: "point it at an absolute path to the plan file the runner wrote (iterate-harness writes one with `write_run_plan`); a relative one is read wherever the agent happened to be",
-      },
-    }
-  }
-  const state = engineStateRoot(env)
-  if (!state.ok) return state
-  const resolved = path.resolve(override)
-  if (insideStateRoot(resolved, state.path)) {
-    return {
-      ok: false,
-      error: {
-        code: "GP_E_RUN_PLAN_PATH",
-        message: `GLASSPANE_RUN_PLAN='${resolved}' is inside the engine's state root ${state.path}`,
-        remedy: `choose a path outside ${state.path} (the engine's state root — ~/.glasspane unless GLASSPANE_SOCKET names another) — the engine owns that tree, and the plan belongs to whoever configured the run`,
-      },
-    }
-  }
+// The project-relative home of the plan, mirroring the producer: `run_plan.plan_path` in
+// iterate-harness writes `<project>/.iterate/run-plan.json`. Deliberately not a search — one
+// directory, one filename, and an absent file means this session was never given a plan.
+const PROJECT_PLAN_DIRECTORY = ".iterate"
+const PROJECT_PLAN_FILE = "run-plan.json"
+
+/**
+ * Read and digest one plan document by absolute path, through the kernel's own parser.
+ *
+ * `declaredBy` names where the path came from so a refusal never blames a variable the session
+ * was not given: telling someone to "unset GLASSPANE_RUN_PLAN" about a file the project wrote is
+ * the kind of remedy that sends a reader to the wrong place.
+ */
+function readPlanAt(
+  resolved: string,
+  declaredBy: string,
+  source: RunPlanRef["source"]
+): { ok: true; plan: RunPlanRef } | { ok: false; error: KernelRejection } {
   let raw: string
   try {
     raw = readFileSync(resolved, "utf8")
@@ -432,7 +429,7 @@ export function readRunPlan(
       error: {
         code: "GP_E_RUN_PLAN_READ",
         message: `cannot read the run plan at ${resolved} (${(error as Error).message})`,
-        remedy: "write the plan before the session starts, or unset GLASSPANE_RUN_PLAN so coverage is reported as unplanned rather than half-read",
+        remedy: `write the plan before the session starts, or stop declaring it (${declaredBy}) so coverage is reported as unplanned rather than half-read`,
       },
     }
   }
@@ -451,7 +448,7 @@ export function readRunPlan(
   }
   try {
     const plan = parseRunPlan(document)
-    return { ok: true, plan: { path: resolved, digest: runPlanDigest(plan), ids: plannedIds(plan) } }
+    return { ok: true, plan: { path: resolved, digest: runPlanDigest(plan), ids: plannedIds(plan), source } }
   } catch (error) {
     if (error instanceof KernelSchemaError) {
       return {
@@ -465,6 +462,54 @@ export function readRunPlan(
     }
     throw error
   }
+}
+
+export function readRunPlan(
+  env: NodeJS.ProcessEnv = process.env,
+  projectDirectory?: string
+): { ok: true; plan: RunPlanRef | null } | { ok: false; error: KernelRejection } {
+  const override = env.GLASSPANE_RUN_PLAN
+  if (typeof override === "string" && override.length > 0) {
+    if (!path.isAbsolute(override)) {
+      return {
+        ok: false,
+        error: {
+          code: "GP_E_RUN_PLAN_PATH",
+          message: `GLASSPANE_RUN_PLAN='${override}' is not absolute`,
+          remedy: "point it at an absolute path to the plan file the runner wrote (iterate-harness writes one with `write_run_plan`); a relative one is read wherever the agent happened to be",
+        },
+      }
+    }
+    const state = engineStateRoot(env)
+    if (!state.ok) return state
+    const resolved = path.resolve(override)
+    if (insideStateRoot(resolved, state.path)) {
+      return {
+        ok: false,
+        error: {
+          code: "GP_E_RUN_PLAN_PATH",
+          message: `GLASSPANE_RUN_PLAN='${resolved}' is inside the engine's state root ${state.path}`,
+          remedy: `choose a path outside ${state.path} (the engine's state root — ~/.glasspane unless GLASSPANE_SOCKET names another) — the engine owns that tree, and the plan belongs to whoever configured the run`,
+        },
+      }
+    }
+    return readPlanAt(resolved, "GLASSPANE_RUN_PLAN", "env")
+  }
+
+  // No hand-off, so ask the project. This is the producer the scenario has been waiting on:
+  // whoever configures a run in a directory writes its plan there, and a harness session opened on
+  // that directory reads exactly that one file. It is *not* a default plan — nothing is
+  // synthesised, the path is not searched or guessed, and an absent file keeps the session
+  // unplanned, which renders no coverage line. The guards are the same ones the explicit path gets
+  // (a plan inside the engine's state root is not this harness's to read), and a half-written file
+  // refuses by name rather than reporting zero coverage for a plan nobody could parse.
+  if (typeof projectDirectory !== "string" || projectDirectory.length === 0) return { ok: true, plan: null }
+  const state = engineStateRoot(env)
+  if (!state.ok) return state
+  const candidate = path.resolve(projectDirectory, PROJECT_PLAN_DIRECTORY, PROJECT_PLAN_FILE)
+  if (insideStateRoot(candidate, state.path)) return { ok: true, plan: null }
+  if (!existsSync(candidate)) return { ok: true, plan: null }
+  return readPlanAt(candidate, `the project's own ${PROJECT_PLAN_DIRECTORY}/${PROJECT_PLAN_FILE}`, "project")
 }
 
 /**

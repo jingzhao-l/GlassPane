@@ -533,6 +533,109 @@ describe("the run-plan channel (scenario 2, planned half)", () => {
   })
 })
 
+describe("the project's own run plan (scenario 2, the producer that was missing)", () => {
+  /** The file `run_plan.plan_path` writes for a project: `<project>/.iterate/run-plan.json`. */
+  function projectWithPlan(dir: string, value: unknown): string {
+    const iterate = path.join(dir, ".iterate")
+    mkdirSync(iterate, { recursive: true, mode: 0o700 })
+    writeFileSync(path.join(iterate, "run-plan.json"), JSON.stringify(value))
+    return dir
+  }
+
+  const planDocument = { schemaVersion: "iterate.run-plan/0.1", dimensions: [{ id: "security" }, { id: "correctness" }] }
+
+  test("a session opened on a configured project reads that project's plan", () => {
+    const project = projectWithPlan(privateDir(), planDocument)
+    const read = readRunPlan({ HOME: "/home/tester" }, project)
+    expect(read.ok).toBe(true)
+    if (!read.ok || read.plan === null) return
+    expect(read.plan.source).toBe("project")
+    expect(read.plan.ids).toEqual(["security", "correctness"])
+    expect(read.plan.path).toBe(path.resolve(project, ".iterate", "run-plan.json"))
+    // The digest is the same function over the same bytes as the hand-off path produces, so a
+    // plan cited from a project file and one cited from GLASSPANE_RUN_PLAN are comparable.
+    expect(read.plan.digest).toMatch(/^rp_[0-9a-f]{64}$/)
+  })
+
+  test("an explicit hand-off wins over the project file, and says it did", () => {
+    const project = projectWithPlan(privateDir(), planDocument)
+    const handedDir = privateDir()
+    const other = path.join(handedDir, "run-plan.json")
+    writeFileSync(other, JSON.stringify({ schemaVersion: "iterate.run-plan/0.1", dimensions: [{ id: "performance" }] }))
+    const read = readRunPlan({ HOME: "/home/tester", GLASSPANE_RUN_PLAN: other }, project)
+    expect(read.ok).toBe(true)
+    if (!read.ok || read.plan === null) return
+    expect(read.plan.source).toBe("env")
+    expect(read.plan.ids).toEqual(["performance"])
+  })
+
+  test("a project with no plan file is unplanned, not a refusal", () => {
+    const bare = privateDir()
+    const read = readRunPlan({ HOME: "/home/tester" }, bare)
+    expect(read.ok).toBe(true)
+    if (!read.ok) return
+    expect(read.plan).toBeNull()
+  })
+
+  test("no directory means no project read, and nothing is guessed", () => {
+    for (const directory of [undefined, ""]) {
+      const read = readRunPlan({ HOME: "/home/tester" }, directory)
+      expect(read.ok).toBe(true)
+      if (!read.ok) return
+      expect(read.plan).toBeNull()
+    }
+  })
+
+  test("a half-written project plan is refused, and the remedy does not blame a variable nobody set", () => {
+    // This is the case a shared reader tends to lose: the operator handed nothing, the project
+    // file is broken, and the remedy tells them to unset GLASSPANE_RUN_PLAN — which they never
+    // set. The refusal has to point at the file instead.
+    const junkProject = privateDir()
+    mkdirSync(path.join(junkProject, ".iterate"), { recursive: true, mode: 0o700 })
+    writeFileSync(path.join(junkProject, ".iterate", "run-plan.json"), "{ not json")
+    const read = readRunPlan({ HOME: "/home/tester" }, junkProject)
+    expect(read.ok).toBe(false)
+    if (read.ok) return
+    expect(read.error.code).toBe("GP_E_RUN_PLAN_JSON")
+    expect(read.error.message).toContain(junkProject)
+    expect(read.error.remedy).not.toContain("GLASSPANE_RUN_PLAN")
+
+    writeFileSync(
+      path.join(junkProject, ".iterate", "run-plan.json"),
+      JSON.stringify({ schemaVersion: "iterate.run-plan/0.1", dimensions: [] }),
+    )
+    const schema = readRunPlan({ HOME: "/home/tester" }, junkProject)
+    expect(schema.ok).toBe(false)
+    if (schema.ok) return
+    expect(schema.error.code).toBe("GP_E_RUN_PLAN_SCHEMA")
+    expect(schema.error.remedy).not.toContain("GLASSPANE_RUN_PLAN")
+  })
+
+  test("a project plan that cannot be read is a named read failure, not silence", () => {
+    // A directory where the file should be: `open` fails for the OS's own reason, and the
+    // session must hear "declared but unreadable" rather than "no plan".
+    const project = privateDir()
+    mkdirSync(path.join(project, ".iterate", "run-plan.json"), { recursive: true, mode: 0o700 })
+    const read = readRunPlan({ HOME: "/home/tester" }, project)
+    expect(read.ok).toBe(false)
+    if (read.ok) return
+    expect(read.error.code).toBe("GP_E_RUN_PLAN_READ")
+    expect(read.error.remedy).toContain("the project's own .iterate/run-plan.json")
+  })
+
+  test("a project living inside the engine's state root is not read as a plan", () => {
+    // The one-writer rule is about the *engine's* tree, so a candidate path inside it is
+    // treated as "nobody configured this harness a plan", never as a plan to honour.
+    const home = privateDir()
+    const state = path.join(home, ".glasspane")
+    projectWithPlan(state, planDocument)
+    const read = readRunPlan({ HOME: home }, state)
+    expect(read.ok).toBe(true)
+    if (!read.ok) return
+    expect(read.plan).toBeNull()
+  })
+})
+
 describe("the stamp the ledger records", () => {
   // The kernel's schema asks for exactly three millisecond digits; `toISOString` always
   // supplies them. The binding used to force those digits to `000`, which the schema
@@ -559,5 +662,58 @@ describe("the stamp the ledger records", () => {
     const b = decisionStamp(new Date(1_700_000_000_456))
     expect(a).not.toBe(b)
     expect(new Date(b).getTime() - new Date(a).getTime()).toBe(333)
+  })
+})
+
+describe("a chain written by iterate-harness (Python) verifies here (scenario 3)", () => {
+  // The bytes in `test/fixtures/glasspane-chain-python-written.jsonl` were appended by
+  // `kernel_decision_log.append_decision_log_entry` in the iterate-harness checkout, over drafts
+  // with fixed entryId/createdAt. The same three drafts run through the published kernel's
+  // `appendDecisionLogEntry` produce byte-identical output (measured 2026-10-25, sha256
+  // eaa9dc7dc9fabb076ca9a9cdecec10f94f50566351402cc6abb9d32f01c4dc06). That is the claim this
+  // block keeps alive: the two products do not merely share a schema, they write and read one
+  // chain. Until ④'s gate there was no reader on either side of the other's file, and "互通" was
+  // a statement about formats.
+  const fixture = path.join(import.meta.dir, "..", "fixtures", "glasspane-chain-python-written.jsonl")
+  const sha256 = (text: string) => createHash("sha256").update(text, "utf8").digest("hex")
+
+  test("the sample is still the bytes the Python writer produced", () => {
+    expect(sha256(readFileSync(fixture, "utf8"))).toBe(
+      "eaa9dc7dc9fabb076ca9a9cdecec10f94f50566351402cc6abb9d32f01c4dc06",
+    )
+  })
+
+  test("verifyLedger accepts it, and the optional fields stayed absent rather than null", () => {
+    const verified = verifyLedger(fixture)
+    expect(verified.ok).toBe(true)
+    expect(verified.entries).toBe(3)
+    const lines = readFileSync(fixture, "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0)
+    expect(lines[2]).not.toContain('"operationId":null')
+    expect(JSON.parse(lines[2]).outcome).toBe("blocked")
+  })
+
+  test("editing the first line breaks the hash the second line cites", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "gp-xchain-"))
+    const tampered = path.join(dir, "tampered.jsonl")
+    const lines = readFileSync(fixture, "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0)
+    const edited = lines.map((line, index) => (index === 0 ? line.replace('"outcome":"pass"', '"outcome":"fail"') : line))
+    writeFileSync(tampered, edited.join("\n") + "\n")
+    const verified = verifyLedger(tampered)
+    expect(verified.ok).toBe(false)
+    expect(verified.firstBrokenLine).toBe(2)
+  })
+
+  test("recomputing a link from the other side's entry gives the hash that line carries", () => {
+    // Not a fixture comparison: read the JSON, rebuild the entry object the kernel would hash,
+    // and require it to equal the `prevEntryHash` stored on the following line.
+    const lines = readFileSync(fixture, "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0)
+    const first = JSON.parse(lines[0])
+    expect(entryHashOf(first)).toBe(JSON.parse(lines[1]).prevEntryHash)
   })
 })

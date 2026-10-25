@@ -2,10 +2,38 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
-
 ## [Unreleased]
 
-（空。本轮收口后没有未归号的条目。）
+**这一段的意思是"代码在 main、还没进任何发布物"**，不是待办清单。取号与发布归版本线决定；
+本节只保证一件事：下面这些字节此刻既不在 v1.20.2 的归档里，也不在 registry 上。
+
+- **新尺子 `harness/tools/provider-surface.mjs`（场景⑤ 的读者，接进父仓 `harness-rulers`）**：
+  两个工具面各自注册同一个 provider 契约，重叠的那半声明是**手抄两遍**的
+  （`mcp-shell/src/providers.ts` 与 `harness/glasspane-harness/…/tool/glasspane/providers.ts`）。
+  两侧测试此前只跟自己比。这条尺子跑两侧的**真代码**（bun import 两个模块，版本号抹成 `probe`），
+  要求三件事：同一个 provider id、重叠方法的先决条件集合一致、"哪些方法只在一侧"必须是一份被记下来的
+  清单（当前实记：面 B 5 / 面 A 3 / 重叠 3 / 单边 2）。读不出任一侧 = **exit 2 报 `NOT OBSERVED`**，
+  不许回答"没分歧"。四条控制进 `harness/tools/rulers-selftest.mjs`（含那条测不到的）。
+- **fork 侧（面 B）的场景② 两半**：压缩钩子现在能拿到"本工程自己的运行计划"
+  （`.iterate/run-plan.json`，由配置这次运行的一侧写；显式 `GLASSPANE_RUN_PLAN` 仍优先，
+  两者不一致时不再有一个被悄悄接受），且超过上限时要丢弃的锚点**按内核的维度账目排序**——
+  本轮没声明的维度历史先丢，块里也会说它用的是哪条规则。用户读得到的是：一次维度化审查之后，
+  压缩不再把"已经查过的维度"的记录当成"无关历史"扔掉，也不会把没查的当成"已查"。
+- **场景③④ 的跨仓部分**在另一条分支上（`iterate-skill`），本段的账只记父仓/harness 这一侧；
+  两侧的字节级互认证据（同一条链、两个 writer 逐字节相同）记在
+  `harness/glasspane-harness/SYNCLOG.md` 的 2026-10-25 一条。
+- **维度回显链第一次端到端有读数**：拿 registry 上的 `glasspane-mcp@1.20.2`（隔离前缀安装，
+  不动 `/usr/local`）连本机活着的 daemon 调 `gp_last_evidence {operationId, dimension}`，回包是
+  2 个 content item，逐 item 分类拿到 `echoed_dimension="security"`，写进见证后对矛盾的声明
+  回 **`KERNEL_E_DIMENSION_CONTEST`**。同一份走查指到本机那份 1.6.2 时是
+  `GP_E_BAD_PARAMS: Unrecognized key(s) in object: 'dimension'`——旧壳不是"不回显"，是**不接受这个入参**，
+  失败是响的。把本机全局壳升上去属用户的决定（另一条线可能正在用它做真机走查）。
+- **`mcp-shell` 的一条测试腿补真**：`src/dimension.ts` 的头注一直说测试会把广告出去的 dimension
+  上限跟 `kernel/schemas/*.json` 比，实测没有比。改的是测试而不是注释：遍历镜像全部 schema，
+  覆盖 `dimension` / `dimensions` / `$defs/*Dimension/properties/id` 三种形状（run-plan 用的是第三种），
+  带防空下限；两发控制（`maxLength` 64→65、pattern 放宽大写）各自具名变红后按 sha 核回，
+  `kernel/` 无提交改动。`node --test test/*.test.mjs` 621 pass / 0 fail。
+
 
 
 ## [1.21.0] — 2026-10-24

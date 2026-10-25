@@ -325,4 +325,11 @@ if (failures.length) {
   console.error(`rulers-selftest: ${failures.length} control(s) failed to behave as claimed`)
   process.exit(1)
 }
+// provider-surface's own controls live in `harness/tools/provider-surface-selftest.mjs`, a separate
+// step placed AFTER `bun install` in this job. They cannot live here: this battery runs with no fork
+// workspace installed, so a ruler that reads two resolved `providers.ts` files would answer exit 2
+// ("NOT OBSERVED") and the control would be reporting the absence of a dependency rather than the
+// presence of a guard — the ordering lesson `kernel-pin` and the redirect-policy selftest each
+// already carry a comment about.
+
 console.log("rulers-selftest: every guard named its own rule, every mutation was restored by sha256")
