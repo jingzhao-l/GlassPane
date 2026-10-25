@@ -64,7 +64,7 @@
   而那个 provider 自带的测试在本机与 CI 都是网络红，改完证不了。按"不在证不了的测试路径上替别人决定
   运行时形状"处理：记账、每次并报份数、不动。
 
-### Fixed — 两条 CI 判据会把通过的运行判成红
+### Fixed — CI 里三种「没把判决说出来」的形状
 
 - `ci.yml` 里 MCP 重定向自测那步（以及新加的这条自测）过去靠"输出里出现 `assertion(s) FAILED` 或
   `nothing was measured` 就红"来防"吞掉自己的失败"。这条判据过宽：自测的**用例名**里本来就带
@@ -72,6 +72,12 @@
   两步都换成正向判据——必须出现该自测自己打印的通过句
   `every case verified red, and red for the named reason`，缺席才红。判据该问"承诺在不在"，
   不该问"失败字样在不在"。
+- `provider-surface` 那步（场景⑤ 的读者，随 `gp-bidi-20261024` 并进主干）的 body **没有** `set -euo pipefail`，
+  中间命令死了、`rc` 没设、管道断在半路都可能读成成功；`check-workflows` 拦下了它——这正是
+  `GitHub Actions workflows compile` 那条 job 在 CI run 40156814139 上红的根因。补齐 shell 三件套，并把它的
+  正文判据也改成正向那句（通过句 `every rule named its own reason; …` 必须在场；那句实测由
+  `provider-surface-selftest.mjs` 在有依赖的树上打印、rc=0）。这条不在本轮「只改自己那条闸」的范围内，
+  但它是同一棵树上的同一类洞，而它挡住的是别人能不能信这条 lane 的绿。
 - `product-surface` 的 `selftests` 地板 8→9，并把 `zod-bundle-selftest.mjs` 加进必须存在的名册。
   这条今天刚从手抄名单改成扫 `harness/tools/*-selftest.*`，而扫描那一半当场逮到这条新自测还没接线——
   名单改成扫描的意义就在这里。
@@ -93,9 +99,15 @@
 
 ### 留账
 
-- `harness/glasspane-harness/bun.lock` 第 384 行 workspace 自己的 `version` 仍是 `0.10.3`
-  （`packages/opencode/package.json` 已经是 `0.10.5`）。它是 `bun install` 派生的字段，本轮不手改锁文件，
-  留给下一次取号那一笔一起动。
+- **上一格写的"`bun.lock` 仍是 `0.10.3`"在合并后已经反过来了，改成实测那一格**：主干的
+  `harness/glasspane-harness/bun.lock:384` 现在写 `0.10.5`（`git show origin/main:…` 实读），留在 `0.10.3`
+  的是**发布出去的那一侧**（split main 与 v0.10.5 的树）。`release-artifact` 今天正是这样点它的：
+  CI run 40156485325 报 `bun.lock (+1 remote-only / −1 trunk-only)` 与
+  `contracts/engine-methods.json (+2 / −2)`（`swiftBlob`：主干 `ef489160…` 是 1.21.0 重推 FrameCodec 之后的值，
+  发布侧 `372e556d…` 是 v0.10.5 出厂时的），外加 `SYNCLOG.md (−19 trunk-only)`。这三条不是"发布物里有主干
+  没接住的活"，是**主干已经走过去、发布物停在原地**；处置是下一次 harness 取号时重记 + 重切（`docs/release.md`
+  步骤 3–4），而不是把旧值抄回主干。本轮不切那个号：origin/main 在二十分钟里走了 `f928e2c6 → ca00d5e9 →
+  9acda519` 三格，现在切出来的号下一笔就作废——这条账归发布 lane，不归这条交接。
 - 两份脆弱拷贝仍在 bundle 里，这是**已记账**而不是已修。真修它们的路径只有两条：刷新那个子树的解析，
   或者用一条测得到的测试路径覆盖第三方 zod major——后者目前不存在。
 
