@@ -710,6 +710,13 @@ jobs:
           # `product.json` from this directory dies with ENOENT, and it dies
           # *after* a full platform build, which is the expensive way to learn it.
           PRODUCT_JSON="../../product.json"
+          # The publish itself has to name the registry. Every *read* in this file already does
+          # (`npm view … --registry "$reg"`), and `postinstall.mjs`/`publish.ts` pin it for the same
+          # reason: npm resolves `npm_config_registry`, `NPM_CONFIG_REGISTRY`, `~/.npmrc` and a
+          # project `.npmrc`, so an ambient mirror decides where the bytes go when the command does
+          # not say. `--provenance` happens to reject hosts other than the npm public registry, which
+          # is a coincidence doing security work that a flag should do.
+          reg="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).registry" "$PRODUCT_JSON")"
           pkg="$(node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));const t=p.platformTargets.find(t=>`${t.os==="win32"?"windows":t.os}-${t.arch}`===process.argv[1]);console.log(`${p.name}-${process.argv[1]}${t?.abi?"-"+t.abi:""}`)' '${{ matrix.target }}' "$PRODUCT_JSON")"
           ver="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).version" "$PRODUCT_JSON")"
           echo "publishing $pkg@$ver"
@@ -723,13 +730,13 @@ jobs:
           # Anything else is a failure, and it has to stay a failure.
           log="$(mktemp)"
           rc=0
-          npm publish --provenance --access public >"$log" 2>&1 || rc=$?
+          npm publish --provenance --access public --registry "$reg" >"$log" 2>&1 || rc=$?
           cat "$log"
           if [ "$rc" -ne 0 ]; then
             if grep -qiE "staged publishing|only allowed through (the )?oidc|trusted publisher|publishing directly is not allowed" "$log"; then
               echo "::notice::the registry refused a direct publish for $pkg@$ver — staging instead"
-              npm stage publish . --provenance
-              echo "::notice::owner approves with: npm stage approve <stage-id> (ids: npm stage list)"
+              npm stage publish . --provenance --registry "$reg"
+              echo "::notice::owner approves with: npm stage approve <stage-id> (ids: npm stage list --registry $reg)"
               echo "STAGED, NOT PUBLISHED: $pkg@$ver is waiting for owner approval."
               # Fail the job. This run has not put the package on the registry, and a green
               # `publish-platform` is what `publish-wrapper` trusts — v0.7.6 shipped exactly that
@@ -876,7 +883,10 @@ jobs:
             if grep -qiE "staged publishing|only allowed through (the )?oidc|trusted publisher|publishing directly is not allowed" "$log"; then
               echo "::notice::the registry refused a direct publish of the wrapper — staging instead"
               cd dist/glasspane-harness
-              npm stage publish . --provenance
+              # Pinned for the same reason as the platform lane: the fallback must not let an
+              # ambient `.npmrc`/`npm_config_registry` decide where the wrapper's bytes land.
+              reg="$(node -p "JSON.parse(require('fs').readFileSync('../../product.json','utf8')).registry")"
+              npm stage publish . --provenance --registry "$reg"
               echo "::error::the wrapper is STAGED, NOT PUBLISHED — it is waiting for the owner's 2FA approval"
               echo "STAGED, NOT PUBLISHED: the wrapper is waiting for owner approval."
               echo "::error::run 'npm stage list' and approve it; this job must not end green while nothing is installable"
@@ -973,7 +983,9 @@ jobs:
             fs.writeFileSync("package.json", JSON.stringify(p, null, 2))
             console.log("probe version:", p.version)
           '
-          npm stage publish . --provenance
+          # Same pinning as the two publish lanes: this probe is the job that proves the OIDC
+          # trusted publisher works, and a probe aimed at an ambient mirror would prove the mirror.
+          npm stage publish . --provenance --registry "$(node -p "JSON.parse(require('fs').readFileSync('../../product.json','utf8')).registry")"
           # The registry attributes the stage to "GitHub Actions (trusted automation)"
           # when the trusted publisher matched, so this line is the proof.
           echo "::notice::staged through OIDC — the trusted publisher matched (repo, workflow, environment)"
