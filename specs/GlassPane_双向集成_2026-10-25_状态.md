@@ -235,28 +235,20 @@ git -C /Volumes/Eng-Dev/GlassPane merge --no-ff gp-bidi-20261024   # = c4556a9b�
 4. **iterate-harness 这一侧的取号本会话自己发了**（用户 2026-10-25 授权到发版）：
    ②③④ 的代码在 2.11.0 里，复审挖出的那条"闸答没有读者"的修复与四句文案改正在 **2.11.1**。
    五格读数见下一节。
-5. **留在 fork 树里的一句夸张，本会话没有动它**（动它就要求重切发布物，而 `release-artifact` 只容忍
-   SYNCLOG 那一格台账差）：`harness/glasspane-harness/docs/kernel-integration.md` 的
+5. **留在 fork 树里的四处夸张/stale，本会话没有动它**（动它就要求重切发布物，而 `release-artifact`
+   只容忍 SYNCLOG 那一格台账差）：`harness/glasspane-harness/docs/kernel-integration.md` 的
    "Behaviour parity: measured across two implementations" 只在有人传 `--impl` 时成立——不带它时
-   **16 fixture(s) through 1 implementation(s)`（本机 rc=0 实测）。另一处 stale 引用在 fork 的源码注释里
-   （`packages/opencode/src/tool/glasspane/index.ts` 写 "one emitter, `Dispatcher.swift:156`"，而
-   `grep -rn evidencePack engine/Sources/` 今天全仓唯一一条命中是 `Dispatcher.swift:216`——`:156` 那行
-   站着的是 `handleAct`）。**下一笔 harness 取号时把这两处一起改**，
-   改法是把"两侧都量过"写成"哪一侧在 CI 里量、另一侧靠哪条操作者命令量"。父仓 README 与
-   `iterate-harness` README 里对应的句子本轮已经按这个口径改过，不留两份结论。
-
-
-仍归发布线（不是"我没时间"，是**不该由这条会话做**）：
-
-1. 推 GlassPane 的 main —— 本地领先 origin 的那一叠笔里多数是发布线自己的字节（写入这格时 18 笔中
-   占 11），代推＝代发布。要不要连他们的一起推，由那条线自己决定；先复量
-   `git -C /Volumes/Eng-Dev/GlassPane rev-list --count origin/main..main`。
-2. `git subtree split --prefix=harness/glasspane-harness -b split/glasspane-harness` + 快进推送，
-   再切 **harness 0.10.6** 补上"发布物 == 主干"。`release-artifact --check` 在合并树 `c4556a9b` 上
-   量到的读数是 `0 agreement(s) / 2 problem(s)`（trunk `1be98d92` 对 v0.10.5 的 `dea2c83a`），
-   并额外警告"发布物里有 85 行 / 5 个文件主干没有 ⇒ 今天重切会覆盖它们"；那之后主干又长了发布线的
-   若干笔，数字只会更大，取号前须重跑一次再记。
-3. 父仓的下一个号（1.21.x）由发布线按它自己的判据取。
+   `bun script/kernel-conformance.mjs` 自己打的是 `16 fixture(s) through 1 implementation(s)`
+   （本机 rc=0 实测）；同页第 255 行 "each harness **now verifies** the chain the *other* one wrote"
+   与本轮 README 判过的那句同形——生产里的读者只有回路这一侧（fork 的 `verifyLedger` 在 `src/` 里
+   零调用者，只有测试与一条离线脚本驱动它）；第 256 行 "the answer is written into that round's
+   ledger line and `/iterate gate` reads it back" 到 2.11.1 才为真，且它只写了 session 那一扇门。
+   另一处 stale 引用在 fork 的源码注释里（`packages/opencode/src/tool/glasspane/index.ts` 写
+   "one emitter, `Dispatcher.swift:156`"，而 `grep -rn evidencePack engine/Sources/` 今天全仓唯一一条
+   命中是 `Dispatcher.swift:216`——`:156` 那行站着的是 `handleAct`）。
+   **下一笔 harness 取号时把这四处一起改**，改法是把"两侧都量过／都能读"写成"哪一侧在生产里跑、
+   另一侧靠哪条测试或哪条操作者命令背书"。父仓 README 与 `iterate-harness` README 里对应的句子本轮
+   已按这个口径改过，不留两份结论。
 
 `provider-surface` 那步 CI 根因的修复已由发布线落进 `5964aed6`，本会话那一行被更完整的版本取代，
 两边不留两份结论。
