@@ -40,14 +40,17 @@ export type PlanRead = { ok: true; plan: RunPlanRef | null } | { ok: false; erro
  *    Neither channel synthesises a plan: no file and no variable means no plan, and
  *    the coverage line stays absent rather than rendering "0/9 verified" against a
  *    plan nobody ran.
- *    The remaining asymmetry is measured, not assumed: the anchors that can carry a
- *    declared dimension come only from calls that recorded a decision, and the engine
+ *    The remaining asymmetry is measured and printed, not assumed: the anchors that can
+ *    carry a declared dimension come only from calls that recorded a decision, and the engine
  *    emits an `evidencePack` on one method, `last_evidence` (`Dispatcher.swift:156`),
  *    so a dimension declared on `gp_act`, `gp_observe`, `gp_attach` or `gp_diagnose`
  *    never reaches an anchor at all — those calls record no decision, and an anchor is
- *    where a declared dimension would have been transcribed. A session with a plan and
- *    zero decisions gets "0/N dimensions verified", which is the useful sentence; a
- *    session with no plan gets silence, because there is no coverage to state.
+ *    where a declared dimension would have been transcribed. `declaredWithoutAnchor` counts
+ *    exactly those calls and the block prints the number, so the width of the engine's
+ *    emitting surface is a reading a later run can compare instead of a sentence here. A
+ *    session with a plan and zero decisions gets "0/N dimensions verified", which is the
+ *    useful sentence; a session with no plan gets silence, because there is no coverage to
+ *    state.
  *    `selectAnchors` is where the plan changes behaviour beyond reporting: with a plan
  *    in force the cap drops unplanned-dimension history before planned-dimension
  *    history (综述 §8.5 row 2's "优先压缩无关维度历史"), and the block says which rule
@@ -93,6 +96,22 @@ export type AnchorCollection = {
   anchors: EvidenceAnchor[]
   withoutDecision: number
   /**
+   * Settled calls that declared a review dimension but reached no anchor, because the call recorded
+   * no decision (a failed call, or a completed one the engine gave no ledger receipt for).
+   *
+   * This is the measured form of an asymmetry this module previously only described in a comment: the
+   * engine emits an evidence pack on one method (`last_evidence`), so a dimension declared on
+   * `gp_act`/`gp_observe`/`gp_attach`/`gp_diagnose` has nothing to be transcribed into. Counting it
+   * rather than leaving it to prose is the point — a comment cannot go red when the surface widens,
+   * and this number is what says whether a session's declared dimensions survived compaction at all.
+   *
+   * `collectEvidenceAnchors` always fills it. Optional because a hand-built collection (the
+   * coverage tests build one to drive arithmetic only) may legitimately say nothing on the subject,
+   * and the renderer keeps quiet when the field is absent: an unmeasured gap must not render as a
+   * gap of zero.
+   */
+  declaredWithoutAnchor?: number
+  /**
    * The dimension ids this session was reviewed against, as configured. Empty
    * is a legitimate value and means the session was never given a plan — the
    * kernel then reports zero coverage rather than this module inventing a
@@ -136,6 +155,7 @@ export function collectEvidenceAnchors(messages: unknown): AnchorCollection {
   const list = Array.isArray(messages) ? messages : []
   const anchors: EvidenceAnchor[] = []
   let calls = 0
+  let declaredWithoutAnchor = 0
 
   for (const item of list) {
     const parts = isRecord(item) && Array.isArray(item.parts) ? item.parts : []
@@ -147,22 +167,33 @@ export function collectEvidenceAnchors(messages: unknown): AnchorCollection {
       const status = state ? text(state.status) : undefined
       // A pending/running part is a call that has not settled: at compaction time
       // it is not history yet and has no outcome to preserve.
-      if (status !== "completed" && status !== "error") continue
+      if (!state || (status !== "completed" && status !== "error")) continue
       calls += 1
-      if (status !== "completed" || !state) continue
 
       const metadata = isRecord(state.metadata) ? state.metadata : {}
-      const method = text(metadata.method) ?? tool.slice(GLASSPANE_TOOL_PREFIX.length)
-      const note = isRecord(metadata.decisionLog) ? metadata.decisionLog : undefined
       // The dimension the caller declared on this call, echoed back by the shell in
       // the result metadata. It is the caller's claim about which review dimension the
       // call served, not an engine measurement — which is exactly why an absent one
-      // stays absent rather than being guessed from the method name.
+      // stays absent rather than being guessed from the method name. Read before the
+      // decision-receipt tests below, because a declaration that is about to be lost is
+      // still a declaration: this is the number that measures how narrow the engine's
+      // evidence-emitting surface is.
       const dimension = text(metadata.dimension)
+
+      if (status !== "completed") {
+        if (dimension !== undefined) declaredWithoutAnchor += 1
+        continue
+      }
+
+      const method = text(metadata.method) ?? tool.slice(GLASSPANE_TOOL_PREFIX.length)
+      const note = isRecord(metadata.decisionLog) ? metadata.decisionLog : undefined
       // The note is M2's ledger receipt. No receipt = the chain holds no entry for
       // this call (status-only method, or a call the engine refused) — that is
       // counted, not papered over with a guessed outcome.
-      if (!note || note.status !== "logged") continue
+      if (!note || note.status !== "logged") {
+        if (dimension !== undefined) declaredWithoutAnchor += 1
+        continue
+      }
 
       // operationId is the only field read from the pack itself; optional because
       // the receipt can outlive a body the kernel's read-side parser rejects.
@@ -179,7 +210,7 @@ export function collectEvidenceAnchors(messages: unknown): AnchorCollection {
     }
   }
 
-  return { calls, anchors, withoutDecision: calls - anchors.length }
+  return { calls, anchors, withoutDecision: calls - anchors.length, declaredWithoutAnchor }
 }
 
 /**
@@ -331,6 +362,17 @@ export function renderAnchorBlock(collected: AnchorCollection, plan: PlanRead = 
   if (collected.withoutDecision > 0) {
     lines.push(
       "- calls without a decision record are status-only or failed calls (not every engine method emits an evidence pack) — counted, not guessed",
+    )
+  }
+  const declarationsLost = collected.declaredWithoutAnchor ?? 0
+  if (declarationsLost > 0) {
+    // The asymmetry gets its own number instead of a paragraph in this file's header: a
+    // dimension declared on a method whose reply the engine does not archive has no decision
+    // to be transcribed onto, so it contributes to no anchor. Saying the count out loud is
+    // what makes the gap comparable between runs — and it drops toward zero on its own if the
+    // engine ever widens the surface that emits an evidence pack.
+    lines.push(
+      `- dimension declarations that reached no anchor: ${declarationsLost} — those calls recorded no decision, so the dimension they named cannot be shown as verified here`,
     )
   }
   if (omitted > 0) {
