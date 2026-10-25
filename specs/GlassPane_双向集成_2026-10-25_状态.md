@@ -118,6 +118,44 @@
     `chain: verified, 3 entries, 1 of them a passing outcome carrying an operation id` +
     `genesis pinned: dl_AAAA…`；`gate` 答"那是缺席，不是通过"；改过一个字段的链拒绝并**退 1**、
     点名 `LEDGER_LINK_E_LEDGER_CHAIN`、报断在第 2 行，`.iterate/` 零写入；链接文件 `0600`、父目录 `0700`。
+  - 第二十次的**交付读数（2.11.1，本机，退出码一律取命令自身）**：
+    - 五格位置：主仓 `52c79227`（修复＋文案＋两把闸）→ `e97f11ec`（取号）已推 `origin/main`；独立仓
+      `3a336a9a` 已推，同步前后逐文件 blob 比对 **621 个路径两侧逐字节相等、无单边文件**；tag `v2.11.1`
+      = `3a336a9a`（tag 对象 `29b2cc2c…`）；Release 非 draft、3 件资产，wheel **1,052,100 字节**；
+      PyPI latest=**2.11.1**；npm `iterate-harness@2.11.1` 9 文件 / 75,697 unpacked /
+      `dist.shasum 6507222cf2c3ef6043d01d10b2a45655c7f398b1`。
+    - **三条通道的同一份字节第一次互相对上**：PyPI `urls[0].digests.sha256` == GitHub `assets[].digest`
+      == 本机 `curl` 下来那份的 `shasum -a 256` ==
+      `cbfc86ccfac52dbdaf04ba2e4e4b3a89109954fbb42b576d3f3405c24f009944`（尺寸同为 1,052,100）。以往只信
+      API digest 是因为本机重下会被截断；这次三者逐字相等，所以这条可以记成等式而不是近似。
+    - 发布前本地闸：`pytest tests` **3077 passed / 6 failed / 6 skipped / 4m20s**，那 6 条是已知的本机
+      环境恒红组；同一棵树在 load 71-93 下先 **12 failed / 36m27s** 后 **7 failed**，多出来的那些
+      **单跑全绿**（`2 passed in 8.38s`）——负载假红按"隔离复跑＋逐条具名"分类，不改判据也不掩盖。
+      `ruff` 0；`mypy src` 269 文件 0；`check_kernel_fixtures.py` 10 份对上 `0.1.10`；npm 包装器
+      **89 passed / 0 fail**；`tsc --noEmit` 0。
+    - **交付形状跑在发布出去的那份上，不是仓库树**：`ih --version` = `iterate_harness 2.11.1`；一轮真
+      通过的项目 → `InvariantReport(passed=True, checks_run=1, violations=[])` → `spawned=False` +
+      `reason='the invariant report passed…'` → 账本里 **1 行 `kind: recipe-gate`** → `ih iterate gate`
+      读回 `round 1: recipe gate — not allowed` / `invariant verdict: pass` /
+      `refused: RECIPE_E_NOT_ASKED` 带 remedy 原文。**这就是本轮那个 P0 的对照**：同一句问话在 2.11.0
+      上只能回 "no recipe gate recorded yet"。同一本账再从链接侧读一次：
+      `chain: verified, 1 entries, 0 of them a passing outcome carrying an operation id`——既证明新行在
+      链里且验得过，也证明它不算修复证据。
+    - 跨仓三条实测在这份交付物上各再跑一遍，全 rc=0：`check_run_plan_channel.py`（env / project 两条通道
+      各自 `source` 正确、9 维度、digest `rp_68049dadeff6c85c…2380e` 两侧相等）、
+      `check_glasspane_channel.py`（16 个 `gp_*` 工具经产品自己的 `McpClientManager` 可见）、
+      `check_glasspane_reverification.py`（`failing=2 of 3` → `iv_4dc9d87d…` → **2/2 回包正确分类**：
+      1 条 evidence/diagnosis + 1 条码具名拒绝 `GP_E_NOT_ATTACHED`）。
+    - 本机环境两条新事实：tuna 镜像**还没收录 2.11.1**（那句 `from versions:` 的末端是 2.11.0），官方索引
+      解析得动但这条代理只有 ~17 kB/s，撞上包装器 15 分钟 bootstrap 上限——它如实打
+      "bootstrap timed out… check your network access to the index and retry"，没有静默装旧的；收口把
+      **digest 对上的**本地 wheel 装进包装器 venv，`ih` 随后报
+      `iterate-harness 2.11.1 was installed by another process; reusing it.`（那正是并发守卫该有的读数）。
+    - **仍挂着的一格**：main CI 的 `Python tests (3.10/3.11)`。第二次仪表（独立 `--collect-only` 一步 +
+      跑测试改 `-v` + job 级 `timeout-minutes: 90`）之后，run 40179763746 里 `Collect the suite`
+      **13 秒通过**（⇒ 卡住的不是收集期也不是 import 阻塞），`Run test suite` 到 09:45 已推进 31 分钟
+      仍未死——**此前四次都在第 45 分钟整因"无输出"被判 runner 失联，并把日志一起带走**。这一格的最终
+      判决以这条 run 为准，写进 `RELEASE.md` 的 2.11.1 记录。
 
 ## 第二十次补记（同日）· 两条 README 由"读代码的人"复审，判出四句假、两句半真
 
@@ -157,7 +195,6 @@
 处置：第 1-7 条全部改写成实测形状（GlassPane README 双语 + 本仓父 README 双语 +
 `iterate-harness` README 双语 + `harness/iterate-harness/CHANGELOG.md`），fork 树一个字节未动
 （`git diff --stat -- harness/` 空），所以不需要重切发布物。三条新闸落进去，各带自己的控制：
-
 - `scripts/check-doc-links.mjs` 新增可复算主张"接受 dimension 的工具数"，真源是**两份源码**，
   两面不等时返回"真源读不到"而不是拿一侧当结论；四条新用例分别证红（数量写错／两侧不等／
   改回旧句／判据空转），`node --test updater/test/scripts-check-doc-links.test.mjs` **33 passed / 0 fail**。
@@ -198,6 +235,16 @@ git -C /Volumes/Eng-Dev/GlassPane merge --no-ff gp-bidi-20261024   # = c4556a9b�
 4. **iterate-harness 这一侧的取号本会话自己发了**（用户 2026-10-25 授权到发版）：
    ②③④ 的代码在 2.11.0 里，复审挖出的那条"闸答没有读者"的修复与四句文案改正在 **2.11.1**。
    五格读数见下一节。
+5. **留在 fork 树里的一句夸张，本会话没有动它**（动它就要求重切发布物，而 `release-artifact` 只容忍
+   SYNCLOG 那一格台账差）：`harness/glasspane-harness/docs/kernel-integration.md` 的
+   "Behaviour parity: measured across two implementations" 只在有人传 `--impl` 时成立——不带它时
+   **16 fixture(s) through 1 implementation(s)`（本机 rc=0 实测）。另一处 stale 引用在 fork 的源码注释里
+   （`packages/opencode/src/tool/glasspane/index.ts` 写 "one emitter, `Dispatcher.swift:156`"，而
+   `grep -rn evidencePack engine/Sources/` 今天全仓唯一一条命中是 `Dispatcher.swift:216`——`:156` 那行
+   站着的是 `handleAct`）。**下一笔 harness 取号时把这两处一起改**，
+   改法是把"两侧都量过"写成"哪一侧在 CI 里量、另一侧靠哪条操作者命令量"。父仓 README 与
+   `iterate-harness` README 里对应的句子本轮已经按这个口径改过，不留两份结论。
+
 
 仍归发布线（不是"我没时间"，是**不该由这条会话做**）：
 
