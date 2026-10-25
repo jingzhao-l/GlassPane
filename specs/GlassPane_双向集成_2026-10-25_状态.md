@@ -171,7 +171,7 @@
       `pytest-ci.log` 传出来——它是这个 job 里唯一"输出比 runner 活得久"的通道，它的第一行就是至今
       没人拿到的那次观测。判据在 `tests/test_ci_workflow_shape.py`（9 条：`timeout`／重定向＋`cat`／
       `-v`／faulthandler 两个 ini／artifact 必须在且挂 `always()`），抽掉任一件红在该件上。
-      **下一问：那份 artifact 到手之后，名单停在哪一行。**
+      **而 5 秒对照已经回答了“这把刀是不是刀”：run 40190097615 里 `Prove the ceiling is enforced…` 这一步 11:44:23→11:44:28 **5 秒 success**（`timeout 5 sleep 30` 如期回 124 且 <=10s）。所以这个 job 里的上限真的会落地，runner 活着且在上报。于是同一 run 里若 `Run test suite` 再次越过它自己的 1200 s 上限，剩下的解释就只有 (i)：真有东西活过了信号——而 artifact 会说出它等到了哪一行。**下一问：artifact 到手之后，名单停在哪一行。**
       **这一格落地前本版"CI 绿"不成立**；其余四格（tag／Release／PyPI／npm）成立。
 
 ## 第二十次补记（同日）· 两条 README 由"读代码的人"复审，判出四句假、两句半真
