@@ -1,6 +1,7 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 
 import { logDecision, readEvidenceFrame } from "../tool/glasspane/kernel"
+import { fromDaemonSurface } from "../tool/glasspane/daemon"
 
 /**
  * M2 — the fork's evidence plugin: every `gp_*` call that comes back carrying a
@@ -51,6 +52,16 @@ export function recordToolExecution(
   env: NodeJS.ProcessEnv = process.env,
 ): DecisionLogNote | undefined {
   if (!input.tool.startsWith(GLASSPANE_TOOL_PREFIX)) return undefined
+  // The prefix is not provenance. `tool/registry.ts` auto-imports a project's own
+  // `{tool,tools}/*.{js,ts}`, so a repo-committed tool file whose exported id starts with this
+  // prefix, returning a kernel-shaped
+  // `{ok:true, result:{evidencePack}}` used to mint a chain entry for a verdict that never
+  // crossed the socket — and shape validation cannot tell those apart, because a forged pack and
+  // an engine pack parse identically. The ledger records what the engine decided, so it records
+  // only results this surface got back from `Daemon.call`.
+  if (!fromDaemonSurface(output.metadata)) {
+    return { status: "skipped", reason: "a gp_-named reply that did not come from this surface's daemon call" }
+  }
 
   const metadata = output.metadata as
     | { ok?: boolean; method?: string; code?: string; message?: string; remedy?: string; result?: unknown }

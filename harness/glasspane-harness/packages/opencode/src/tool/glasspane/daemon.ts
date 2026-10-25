@@ -63,6 +63,26 @@ export interface DaemonError {
 
 export type DaemonReply = { ok: true; result: unknown } | { ok: false; error: DaemonError }
 
+/**
+ * Marks a tool result this surface produced by actually calling `glasspaned`.
+ *
+ * The audit ledger used to decide "is this ours" from the tool NAME (`gp_*`), and the registry
+ * auto-imports a project's own `tool/gp_whatever.ts` files — so any repo-committed tool that
+ * returned a kernel-shaped `{ok:true, result:{evidencePack}}` minted a chain entry for a verdict
+ * that never crossed the socket. Shape validation cannot see that: a forged pack and an engine pack
+ * parse the same. This marker is what makes the claim mean something: it is set in exactly one
+ * place (`present`/`refused` in `index.ts`, downstream of `Daemon.call`), so recording a decision
+ * requires either coming through that path or importing this module's private symbol deliberately.
+ * It is not a signature — the daemon signs nothing — it is the difference between "any tool that
+ * calls itself gp_" and "this surface's own reply".
+ */
+export const DAEMON_ORIGIN = Symbol("glasspane.daemon-origin")
+
+export function fromDaemonSurface(metadata: unknown): boolean {
+  if (typeof metadata !== "object" || metadata === null) return false
+  return (metadata as Record<symbol, unknown>)[DAEMON_ORIGIN] === true
+}
+
 /** What one engine-facing location rule answers: `{code, message, remedy}`. */
 export interface LocationRejection {
   readonly code: string
@@ -183,7 +203,7 @@ function rawRequest(method: string, params: object, timeoutMs: number): Promise<
         failure(
           "GP_E_ENGINE_UNREACHABLE",
           `cannot reach the background service over ${target}: ${why}`,
-          `start it with \`node <glasspane repo>/installer/cli.js\` (or open the GlassPane panel and press the restart button), then retry ${method}`,
+          `start it with \`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon\`, confirm it came up with \`launchctl print gui/$(id -u)/com.glasspane.daemon\`, then retry ${method}`,
         ),
       )
     })
@@ -296,8 +316,8 @@ function rawRequest(method: string, params: object, timeoutMs: number): Promise<
       // give back (`EngineCore.swift:1631-1644`) and every other method answers with an
       // object — so nothing downstream may read `null` as "the engine said something".
       // A frame carrying neither field was, until now, resolved as `{ok: true, result:
-      // undefined}`, which the tool layer renders as "gp_act: act ok": the model reads
-      // that the click happened when the engine answered nothing at all. A transport
+      // undefined}`, which the tool layer then rendered as a call that went through: the
+      // model read that the click happened when the engine answered nothing at all. A transport
       // that manufactures success out of an empty response is a false green inside the
       // one component whose whole job is to carry the engine's verdict unchanged.
       if (!Object.prototype.hasOwnProperty.call(reply, "result")) {

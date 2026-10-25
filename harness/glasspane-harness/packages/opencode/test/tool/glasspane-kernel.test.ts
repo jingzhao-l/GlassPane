@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
@@ -215,6 +215,50 @@ describe("the ledger location rule", () => {
     expect(resolved.error.remedy).toContain("~/.glasspane")
   })
 
+  test("a symlink into the engine's state root is refused — the guard reads where the bytes land", () => {
+    // THE ESCAPE `path.resolve` LEFT OPEN. `path.resolve` normalises `.` and `..` and never
+    // follows a symlink, so a named path that is lexically OUTSIDE the root whose target is a
+    // directory INSIDE it walked straight past the prefix test. Measured before the fix, with
+    // `elsewhere/ledger-dir -> <root>/.glasspane/sub` already created: `resolveLedger` returned
+    // `{ok: true, source: "env"}`, `logDecision` mkdir'd through the symlink, appended, and left
+    // `.glasspane/sub/decisions.jsonl` in the tree the engine owns — the projects.json double
+    // writer this file's header says is impossible, reopened through a path read as text.
+    const home = privateDir()
+    const state = path.join(home, ".glasspane")
+    mkdirSync(path.join(state, "sub"), { recursive: true })
+    mkdirSync(path.join(state, "plan"), { recursive: true })
+    const outside = path.join(home, "elsewhere")
+    mkdirSync(outside)
+    symlinkSync(path.join(state, "sub"), path.join(outside, "ledger-dir"))
+    symlinkSync(path.join(state, "plan"), path.join(outside, "plan-dir"))
+    const env = { HOME: home, GLASSPANE_SOCKET: path.join(state, "engine.sock") }
+
+    const ledger = resolveLedger({ ...env, GLASSPANE_DECISION_LOG: path.join(outside, "ledger-dir", "decisions.jsonl") })
+    expect(ledger.ok).toBe(false)
+    if (ledger.ok) return
+    expect(ledger.error.code).toBe("GP_E_DECISION_LOG_PATH")
+    // The refusal still names the setting the operator wrote, not a rewritten path.
+    expect(ledger.error.message).toContain(path.join(outside, "ledger-dir", "decisions.jsonl"))
+
+    // Same for the writer itself: it refuses before the mkdir, so the engine's tree gains nothing.
+    const attempt = logDecision(goodPack("ok-01"), { env: { ...env, GLASSPANE_DECISION_LOG: path.join(outside, "ledger-dir", "decisions.jsonl") } })
+    expect(attempt.ok).toBe(false)
+    expect(existsSync(path.join(state, "sub", "decisions.jsonl"))).toBe(false)
+
+    // And the run-plan branch, which shares the one guard, refuses rather than reading a plan
+    // out of the engine's tree.
+    writeFileSync(path.join(state, "plan", "run-plan.json"), JSON.stringify({ schemaVersion: "iterate.run-plan/0.1", dimensions: [{ id: "security" }] }))
+    const plan = readRunPlan({ ...env, GLASSPANE_RUN_PLAN: path.join(outside, "plan-dir", "run-plan.json") })
+    expect(plan.ok).toBe(false)
+    if (plan.ok) return
+    expect(plan.error.code).toBe("GP_E_RUN_PLAN_PATH")
+
+    // A path that really is outside the tree is still accepted — the guard is about the
+    // destination, not about symlinks existing.
+    const clean = resolveLedger({ ...env, GLASSPANE_DECISION_LOG: path.join(outside, "decisions.jsonl") })
+    expect(clean.ok).toBe(true)
+  })
+
   test("the state root follows GLASSPANE_SOCKET, not just HOME", () => {
     const home = privateDir()
     const socketDir = path.join(home, "somewhere", "engine-state")
@@ -254,8 +298,13 @@ describe("the ledger location rule", () => {
     if (plan.ok) return
     expect(plan.error.code).toBe("GP_E_SOCKET_PATH")
 
-    // A CWD-relative path is what the old code computed; it must not be the root.
-    expect(path.resolve("engine.sock")).not.toBe("/nonexistent-root/engine.sock")
+    // What the product actually guarantees about the relative name: it names the setting and
+    // the value it refused, so the reader can find the variable that produced this answer.
+    // (The line here used to read `expect(path.resolve("engine.sock")).not.toBe("/nonexistent-root/engine.sock")`
+    // — an assertion about Node's `path` module, which no change to this repository could make
+    // fail.)
+    expect(located.error.message).toContain("GLASSPANE_SOCKET='engine.sock'")
+    expect(located.error.message).toContain("not absolute")
   })
 
   test("the default ledger location is guarded by the same rule, not only the override", () => {
@@ -650,10 +699,16 @@ describe("the stamp the ledger records", () => {
     expect(decisionStamp(new Date("2026-10-11T02:28:11.042Z"))).toBe("2026-10-11T02:28:11.042Z")
   })
 
-  test("and still satisfies the kernel's own createdAt pattern", () => {
-    for (const iso of ["2026-10-11T02:28:11.042Z", "2026-01-01T00:00:00.000Z", "2026-12-31T23:59:59.999Z"]) {
-      expect(new RegExp(CREATED_AT).test(iso)).toBe(true)
-    }
+  test("and what the live clock produces satisfies the kernel's own createdAt pattern", () => {
+    // The three hand-written ISO strings this test used to loop over were a second copy of
+    // the schema's regex — they passed no matter what `decisionStamp` did, because nothing in
+    // the loop called it. `logDecision` feeds `new Date()` (kernel.ts), so the leg worth
+    // pinning is the producer under the clock the product actually runs on: a producer that
+    // went back to forcing `.000`, dropping the offset, or emitting a local-time string would
+    // take both assertions below red.
+    const live = decisionStamp(new Date())
+    expect(live).toMatch(new RegExp(CREATED_AT))
+    expect(new Date(live).toISOString()).toBe(live)
     expect(decisionStamp(new Date("2026-10-11T02:28:11.042Z"))).toMatch(new RegExp(CREATED_AT))
   })
 

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 
 import { GlasspaneDecisionLogPlugin, decisionLogWarning, recordToolExecution } from "../../src/plugin/glasspane-decision-log"
+import { DAEMON_ORIGIN, fromDaemonSurface } from "../../src/tool/glasspane/daemon"
 import { verifyLedger } from "../../src/tool/glasspane/kernel"
 
 import { kernelFixturesDir } from "../lib/kernel-contract"
@@ -29,11 +30,22 @@ function ledgerEnv() {
   return { dir, env: { GLASSPANE_DECISION_LOG: path.join(dir, "decisions.jsonl"), HOME: dir } }
 }
 
-function toolResult(result: unknown, ok = true) {
+function toolResult(result: unknown, ok = true, fromSurface = true) {
   return {
     title: "gp_observe: observe ok",
     output: "observed 1 window; no anomaly",
-    metadata: ok ? { ok: true, method: "observe", code: null, message: null, remedy: null, result } : {
+    metadata: ok ? {
+      ok: true,
+      method: "observe",
+      code: null,
+      message: null,
+      remedy: null,
+      result,
+      // The real surface sets this in `present()`; a fixture that omits it is pretending to be a
+      // project-local tool that merely calls itself `gp_*`, which is case "a gp_-named reply from
+      // somewhere else" below.
+      ...(fromSurface ? { [DAEMON_ORIGIN]: true } : {}),
+    } : {
       ok: false,
       method: "observe",
       code: "GP_E_NOT_ATTACHED",
@@ -73,7 +85,7 @@ describe("what the plugin records", () => {
 
     const lines = readFileSync(ledger, "utf8").trimEnd().split("\n")
     expect(JSON.parse(lines[1]).prevEntryHash.length).toBe(64)
-    expect(verifyLedger(ledger)).toMatchObject({ ok: true, entries: 2 })
+    expect(verifyLedger(ledger)).toMatchObject({ ok: true, exists: true, entries: 2 })
     const entry = JSON.parse(lines[1])
     expect(entry.summary).toContain("gp_diagnose in session ses_test")
     expect(entry.summary).toContain("diagnosis T2")
@@ -96,11 +108,27 @@ describe("what the plugin records", () => {
 })
 
 describe("what the plugin refuses to invent", () => {
+  test("a gp_-named reply from somewhere else is not a decision the engine made", () => {
+    // `tool/registry.ts` auto-imports a project's own `tool/gp_*.js`, so the name proves nothing:
+    // this is that tool, returning a pack that satisfies the kernel's contract byte for byte.
+    // Shape validation cannot refuse it — only provenance can.
+    const { env, dir } = ledgerEnv()
+    const forged = toolResult(pack("ok-01"), true, false)
+    expect(fromDaemonSurface(forged.metadata)).toBe(false)
+    const note = recordToolExecution(input("gp_observe"), forged, env)
+    expect(note?.status).toBe("skipped")
+    if (note?.status !== "skipped") return
+    expect(note.reason).toContain("did not come from this surface's daemon call")
+    expect(verifyLedger(path.join(dir, "decisions.jsonl"))).toEqual({ ok: true, exists: false, entries: 0 })
+  })
+
   test("a non-glasspane tool is not ours to record", () => {
     const { env, dir } = ledgerEnv()
     const note = recordToolExecution(input("read"), toolResult({ evidencePack: pack("ok-01") }), env)
     expect(note).toBeUndefined()
-    expect(verifyLedger(path.join(dir, "decisions.jsonl"))).toEqual({ ok: true, entries: 0 })
+    // `entries: 0` alone cannot tell "nothing was written" from "there was nothing to verify";
+    // this test's whole claim is the first one, so it reads the field that says so.
+    expect(verifyLedger(path.join(dir, "decisions.jsonl"))).toEqual({ ok: true, exists: false, entries: 0 })
   })
 
   test("a failed gp_* call writes no decision — the engine never got to evidence anything", () => {
@@ -108,6 +136,7 @@ describe("what the plugin refuses to invent", () => {
     const note = recordToolExecution(input("gp_observe"), toolResult(null, false), env)
     expect(note?.status).toBe("skipped")
     expect(verifyLedger(path.join(dir, "decisions.jsonl")).entries).toBe(0)
+    expect(verifyLedger(path.join(dir, "decisions.jsonl")).exists).toBe(false)
   })
 
   test("a result with no evidence frame is reported, not guessed at", () => {

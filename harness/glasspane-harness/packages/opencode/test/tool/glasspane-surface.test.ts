@@ -54,8 +54,20 @@ describe("what the registry receives", () => {
 
   test("every def is a unique raw gp_* id with a description and a parser", async () => {
     const defs = await loadDefs()
-    expect(defs.length).toBeGreaterThan(0)
     const ids = defs.map((def) => def.id)
+    // The exact surface, not "more than zero". `defs.length > 0` was satisfied by one
+    // surviving def, so a `glasspaneDefs` that dropped five of the six — the five that carry
+    // the permission patterns, the declared-dimension parameter and the evidence citation —
+    // stayed green while the product lost most of its tools. The set is `glasspaneDefs`'s
+    // own list (src/tool/glasspane/index.ts): the six `gp_*` tools this fork ships.
+    expect([...ids].sort()).toEqual([
+      "gp_act",
+      "gp_attach",
+      "gp_diagnose",
+      "gp_last_evidence",
+      "gp_observe",
+      "gp_probe_status",
+    ])
     expect(new Set(ids).size).toBe(ids.length)
     for (const def of defs) {
       expect(def.id.startsWith("gp_")).toBe(true)
@@ -159,6 +171,26 @@ describe("what the model reads on the success path", () => {
       remedy: null,
       result: { pid: 4242 },
     })
+  })
+
+  test("a transport that got an answer titles it answered, not ok", () => {
+    // `metadata.ok` is a fact about this call: the engine sent a frame and did not send an
+    // error frame. The title is read by the TUI row and by the transcript line, and it used
+    // to spell that fact `${tool}: ${method} ok` — so a reply whose own payload reads
+    // `actConfirmed: false` (the engine's verdict: the click did not take) displayed beside a
+    // word that means the opposite. Deciding what the payload means is the Swift engine's job
+    // and nothing in this fork may synthesize it, including here: the row now says only what
+    // this layer observed.
+    const reply: Daemon.DaemonReply = {
+      ok: true,
+      result: { operationId: "op_AAAAAAAAAAAAAAAAAAAAAAAAAA", actConfirmed: false, axChanged: false, pixelChanged: false },
+    }
+    const row = present("gp_act", "act", reply, (result) => JSON.stringify(result, null, 2))
+    expect(row.title).toBe("gp_act: act answered")
+    expect(row.title).not.toMatch(/\bok\b/i)
+    // The engine's verdict survives untouched in the payload the agent reads.
+    expect(row.output).toContain('"actConfirmed": false')
+    expect((row.metadata as { result: Record<string, unknown> }).result.actConfirmed).toBe(false)
   })
 })
 
@@ -719,11 +751,13 @@ describe("what a remedy is allowed to say", () => {
    * dead end: nobody is reading, and the turn ends with a claim it cannot act on.
    *
    * Three shapes, because the surface writes remedies in three shapes:
-   *  - `remedy: <literal>` in an error object (kernel.ts, the inline daemon frame guard),
+   *  - `remedy: <literal>` in an error object (kernel.ts, providers.ts, the inline daemon
+   *    frame guard),
    *  - the third positional argument of `failure(code, message, remedy)` (daemon.ts builds
    *    every transport remedy that way),
-   *  - `const remedy = <literal>` where a stage assembles its own refusal
-   *    (glasspane-compaction.ts has no `remedy:` key at all).
+   *  - a staged `const …remedy… = <literal>` where a file assembles its own refusal before
+   *    returning it (glasspane-compaction.ts's `const remedy`, index.ts's
+   *    `const CAPABILITY_REMEDY` — neither has a `remedy:` key at all).
    * A scanner that read only the first shape measured 1 remedy in daemon.ts where 10 are
    * built, and 0 in the compaction plugin — and the aggregate guard below could not see
    * either file going dark, which is why each file's own count is asserted by name.
@@ -780,14 +814,24 @@ describe("what a remedy is allowed to say", () => {
   const remediesIn = (file: string) => {
     const source = readFileSync(path.join(import.meta.dir, "../..", file), "utf8")
     const keyed = [...source.matchAll(/remedy:\s*(?:"([^"]*)"|`([^`]*)`)/g)].map((m) => m[1] ?? m[2] ?? "")
-    const staged = [...source.matchAll(/\bconst remedy\s*=\s*(?:"([^"]*)"|`([^`]*)`)/g)].map((m) => m[1] ?? m[2] ?? "")
+    // `\w*remedy\w*`, not `remedy`: the tool surface stages its one remedy as
+    // `const CAPABILITY_REMEDY = ...`, and a scan keyed to the lowercase name read 0 remedies
+    // in index.ts — the file that writes the remedy a model sees when the engine has not
+    // advertised a method. Any wording that file chose was unscanned.
+    const staged = [...source.matchAll(/\bconst\s+\w*remedy\w*\s*=\s*(?:"([^"]*)"|`([^`]*)`)/gi)].map((m) => m[1] ?? m[2] ?? "")
     const positional = callArguments(source, "failure")
       .map((args) => literalText(args[2]))
       .filter((text): text is string => text !== undefined)
     return { keyed, staged, positional }
   }
   const remedyLiterals = (file: string) => Object.values(remediesIn(file)).flat()
-  const files = ["src/tool/glasspane/daemon.ts", "src/tool/glasspane/kernel.ts", "src/plugin/glasspane-compaction.ts"]
+  const files = [
+    "src/tool/glasspane/daemon.ts",
+    "src/tool/glasspane/kernel.ts",
+    "src/tool/glasspane/index.ts",
+    "src/tool/glasspane/providers.ts",
+    "src/plugin/glasspane-compaction.ts",
+  ]
 
   test("the scan finds the remedies it claims to scan, file by file", () => {
     // The aggregate guard this replaced (`found.length > 3` over all three files) was
@@ -798,8 +842,13 @@ describe("what a remedy is allowed to say", () => {
     const shapes: Record<string, keyof ReturnType<typeof remediesIn>> = {
       // The transport hands every remedy to `failure(code, message, remedy)`.
       "src/tool/glasspane/daemon.ts": "positional",
-      // The plugin writes its refusals as `remedy:` error-object fields.
+      // The kernel module writes its refusals as `remedy:` error-object fields.
       "src/tool/glasspane/kernel.ts": "keyed",
+      // The tool surface stages its one remedy as a named const, and gates every `gp_*` call
+      // with it.
+      "src/tool/glasspane/index.ts": "staged",
+      // The provider doorway writes its one refusal as a `remedy:` field.
+      "src/tool/glasspane/providers.ts": "keyed",
       // The compaction stage assembles its note before returning it, as `const remedy`.
       "src/plugin/glasspane-compaction.ts": "staged",
     }
@@ -824,6 +873,68 @@ describe("what a remedy is allowed to say", () => {
         expect(remedy.length).toBeGreaterThan(0)
       }
     }
+  })
+
+  /** A human's hands. An agent reading this has no way to finish the sentence. */
+  const GUI_ACTION = /\bpress(?:ing)?\s+(?:the|a|it)?\s*[\w-]*\s*button\b|\bclick\s+(?:the|on)\b|\bopen\s+the\s+[\w\s-]{0,30}panel\b|\bask\s+(?:a|the)\s+(?:human|user|operator)\b|\btell\s+the\s+user\s+to\b|\bmanually\b/i
+  /** A `<…>` used as a path segment: a hole the reader is expected to fill from nowhere. */
+  const PLACEHOLDER_PATH = /<[a-z][a-z ]*>[/\\]/i
+  /** Told to bring the service back, given no command that does it. */
+  const SERVICE_WITHOUT_COMMAND = /\b(?:start|restart|update)\b[^\n]{0,60}background\s+service/i
+
+  test("and no remedy names a GUI action, a placeholder path, or a service start with no command", () => {
+    // The rule every remedy has to satisfy is that the reader can RUN it. Three shapes break
+    // it, and all three were live in this surface at the same time:
+    //  - daemon.ts told the unreachable-engine reader to "open the GlassPane panel and press
+    //    the restart button" — a GUI action, for a reader with no GUI and no hands;
+    //  - the same remedy said `node <glasspane repo>/installer/cli.js`, a path with a hole in
+    //    it that nobody running a tool call can fill;
+    //  - index.ts's capability remedy said "start or update the GlassPane background service"
+    //    and stopped, in a file the scanner did not even read (its remedy is a named const,
+    //    not a `remedy:` field — see `remediesIn`).
+    // What replaces them is the launchd job this product already names in its own timeouts:
+    // `launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`.
+    for (const file of files) {
+      for (const remedy of remedyLiterals(file)) {
+        const label = `${file}: ${remedy}`
+        expect(label, `a remedy names a GUI action an agent cannot perform: ${remedy.slice(0, 120)}`).not.toMatch(GUI_ACTION)
+        expect(label, `a remedy carries an unresolved placeholder path: ${remedy.slice(0, 120)}`).not.toMatch(PLACEHOLDER_PATH)
+        if (SERVICE_WITHOUT_COMMAND.test(remedy))
+          expect(label, `a remedy orders the reader to bring the background service back without naming the command: ${remedy.slice(0, 120)}`).toMatch(/\blaunchctl\b/)
+      }
+    }
+  })
+
+  test("the unreachable-daemon remedy is the restart command, measured over a real dead socket", async () => {
+    // Driven, not scraped: this is the frame the agent actually receives when nothing is
+    // listening, and the assertion is about the text it can copy into a shell.
+    const previous = process.env.GLASSPANE_SOCKET
+    process.env.GLASSPANE_SOCKET = path.join(tmpdir(), "gp-m1-restart-remedy-no-such-daemon.sock")
+    try {
+      const reply = await Effect.runPromise(Daemon.call("attach", {}, 5_000))
+      expect(reply.ok).toBe(false)
+      if (reply.ok) return
+      expect(reply.error.code).toBe("GP_E_ENGINE_UNREACHABLE")
+      expect(reply.error.remedy).toContain("launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon")
+      expect(reply.error.remedy).not.toMatch(GUI_ACTION)
+      expect(reply.error.remedy).not.toMatch(PLACEHOLDER_PATH)
+    } finally {
+      if (previous === undefined) delete process.env.GLASSPANE_SOCKET
+      else process.env.GLASSPANE_SOCKET = previous
+    }
+  })
+
+  test("and the capability gate's own remedy carries the same command, measured at the gate", async () => {
+    // index.ts writes this one string itself, and it is the only remedy the gate can give for
+    // "the engine does not advertise this method" — so it is asserted off the rendered row
+    // rather than off the source.
+    const blocked = await withGate("capability-remedy", (conn) =>
+      conn.write(`${JSON.stringify({ id: 1, result: { version: "0.9.1", protocolVersion: "1", capabilities: ["observe"], permissions: {} } })}\n`),
+    )
+    expect(blocked?.metadata).toMatchObject({ ok: false, code: "GP_E_CAPABILITY_UNAVAILABLE" })
+    expect(blocked?.output).toContain("launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon")
+    expect(blocked?.output).not.toMatch(GUI_ACTION)
+    expect(blocked?.output).not.toMatch(PLACEHOLDER_PATH)
   })
 
   test("and the malformed-frame remedy names a call to make, not a person to find", async () => {

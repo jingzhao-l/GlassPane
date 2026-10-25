@@ -86,9 +86,25 @@ export function present(
 ): Tool.ExecuteResult {
   if (!reply.ok) return refused(tool, method, reply.error, dimension, provider)
   return {
-    title: `${tool}: ${method} ok`,
+    // "answered", not "ok". The transport got a frame, which is the only thing this layer
+    // knows; whether the action *took* is in the payload (`actConfirmed`, `axChanged`,
+    // `pixelChanged`), and the fork's first rule is that the Swift engine decides that. A
+    // title reading `${tool}: ${method} ok` over a reply carrying `actConfirmed: false` put
+    // the opposite verdict in the TUI row and in the transcript line, so an unconfirmed
+    // click displayed as a confirmed one.
+    title: `${tool}: ${method} answered`,
     output: summary(reply.result),
-    metadata: { ok: true, method, code: null, message: null, remedy: null, dimension, provider, result: reply.result as object },
+    metadata: {
+      ok: true,
+      method,
+      code: null,
+      message: null,
+      remedy: null,
+      dimension,
+      provider,
+      result: reply.result as object,
+      [Daemon.DAEMON_ORIGIN]: true,
+    },
   }
 }
 
@@ -114,9 +130,11 @@ export function refused(
 }
 
 /** The remedy this surface writes for itself, because the engine has not answered
- *  yet and there is one thing the agent can still do: ask the engine what it
- *  advertises. */
-const CAPABILITY_REMEDY = "start or update the GlassPane background service, then call gp_probe_status to see what the engine advertises"
+ *  yet and there is one thing the agent can still do: bring the service back by itself,
+ *  then ask the engine what it advertises. The command is the same launchd job label the
+ *  transport's own remedies name (`daemon.ts`), so the reader is never sent to a GUI or
+ *  to a person. */
+const CAPABILITY_REMEDY = "restart the background service with 'launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon' and confirm it with 'launchctl print gui/$(id -u)/com.glasspane.daemon', then call gp_probe_status to see what the engine advertises"
 
 /**
  * Refuse a method the running engine has not announced. Reading capabilities from

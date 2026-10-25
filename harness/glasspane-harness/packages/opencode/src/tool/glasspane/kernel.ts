@@ -25,7 +25,7 @@
  * double-write that produced audit findings B-1 and A-15 — one defect, two
  * copies, fixed twice).
  */
-import { existsSync, mkdirSync, readFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
 import path from "node:path"
 
 import { Global } from "@opencode-ai/core/global"
@@ -203,9 +203,49 @@ function engineStateRoot(env: NodeJS.ProcessEnv): StateRoot {
   return stateRootOf(env)
 }
 
-/** Whether one resolved path is the engine's root or something under it. */
+/**
+ * One path, as the filesystem would see it: the nearest EXISTING ancestor through
+ * `realpathSync`, with the not-yet-created remainder kept lexical.
+ *
+ * `path.resolve` normalises `.` and `..` and never touches a symlink, which is the whole
+ * reason this exists: measured 2026-10-26, `GLASSPANE_DECISION_LOG=<tmp>/elsewhere/ledger-dir/decisions.jsonl`
+ * with `ledger-dir` a symlink to `<tmp>/.glasspane/sub` passed the guard below and the
+ * ledger landed inside the engine's tree — the projects.json double writer, re-opened
+ * through a path the guard had only read as text. `src/util/filesystem.ts`'s own `resolve`
+ * refuses `path.resolve` for the same reason ("we cannot rely on path.resolve() here").
+ *
+ * The leaf is normally absent — that is what the writer is about to create — so resolving
+ * it is not an option; resolving to the first ancestor that exists catches every symlink a
+ * caller can actually name. A path that cannot be realpaths at all comes back unchanged:
+ * this is a guard, not a resolver, and a refusal it produces must be about the bytes.
+ */
+function physicalPath(candidate: string): string {
+  if (candidate.length === 0) return candidate
+  const absent: string[] = []
+  let current = candidate
+  while (!existsSync(current)) {
+    const parent = path.dirname(current)
+    if (parent === current) return candidate
+    absent.unshift(path.basename(current))
+    current = parent
+  }
+  try {
+    return path.join(realpathSync(current), ...absent)
+  } catch {
+    return candidate
+  }
+}
+
+/**
+ * Whether one resolved path is the engine's root or something under it — lexically AND
+ * physically. The lexical test stays because it is the one that reads the setting the
+ * operator wrote; the physical test is the one that says where the bytes would land.
+ */
 function insideStateRoot(candidate: string, state: string): boolean {
-  return candidate === state || candidate.startsWith(state + path.sep)
+  if (candidate === state || candidate.startsWith(state + path.sep)) return true
+  const root = physicalPath(state)
+  const here = physicalPath(candidate)
+  return here === root || here.startsWith(root + path.sep)
 }
 
 /**
@@ -593,11 +633,23 @@ export function logDecision(
  * chain, and the sentence that used to say so here described a consumer that does not
  * exist, which is how a reader ends up hunting for a call site to fix.
  */
-export function verifyLedger(ledgerPath: string): { ok: boolean; entries: number; firstBrokenLine?: number; reason?: string } {
-  if (!existsSync(ledgerPath)) return { ok: true, entries: 0 }
+export function verifyLedger(ledgerPath: string): {
+  ok: boolean
+  exists: boolean
+  entries: number
+  firstBrokenLine?: number
+  reason?: string
+} {
+  // `exists` is the answer to the question `{ok:true, entries:0}` could not tell apart: a chain
+  // that was verified end to end and a chain that was never started are different facts, and a
+  // reader that cannot see which one it is holding can mistake "nothing recorded" for "everything
+  // checks out". The empty case keeps `ok:true` — refusing to call an absent ledger a corrupt one
+  // is what the 2026-10-18 write-side flip decided — it just no longer claims a verified chain.
+  if (!existsSync(ledgerPath)) return { ok: true, exists: false, entries: 0 }
   const verified = readDecisionLog(ledgerPath)
   return {
     ok: verified.ok,
+    exists: true,
     entries: verified.entries.length,
     firstBrokenLine: verified.firstBrokenLine,
     reason: verified.reason,
