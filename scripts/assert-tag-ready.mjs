@@ -18,8 +18,9 @@
  *   · 版本号形状 + `v<version>` 尚不存在（本地与远端都查）——tag 一旦发布绝不移动；
  *   · HEAD 必须就是 `origin/main` 的 tip——tag 指到 main 之外的提交，registry 上的字节就没有
  *     任何一条 CI 记录为它背书；
- *   · 这笔 commit 的 `ci.yml` 最新一条必须已完成且 success（判据复用
- *     `assert-ci-green.mjs` 的 `judgeCiGreen`，两处共用一套口径，避免"两份闸两种说法"）。
+ *   · `--workflow`（默认 `ci.yml`）在**这笔 commit 上**、`event=push` 那条通道里的最新一条必须
+ *     已完成且 success（判据复用 `assert-ci-green.mjs` 的 `judgeCiGreen`，两处共用一套口径，
+ *     避免"两份闸两种说法"；问的是哪一棵树由 `ciRunsApiPath` 钉，不是由文案钉）。
  *
  * 用法：node scripts/assert-tag-ready.mjs <X.Y.Z> [--repository owner/name] [--workflow ci.yml]
  * 退出：0 可以打；1 不可以（点名哪一条、给补救）；2 问不到（git/gh 读不动 = 环境问题，不当作绿）。
@@ -37,6 +38,47 @@ export const WORKFLOW_DEFAULT = 'ci.yml'
 /** tag 名与版本形状：`v` + 三段数字，别的形状一律不当作发布锚点。 */
 export function tagShapeOk(version) {
   return /^\d+\.\d+\.\d+$/.test(String(version ?? ''))
+}
+
+/**
+ * The runs API path — the same shape `assert-ci-green.mjs`'s `fetchRuns` builds, and for the
+ * same reason (D1, 2026-10-24 复核). It used to be `…/workflows/ci.yml/runs?per_page=50`, i.e.
+ * the workflow name was a literal (so `--workflow` only ever reached the *prose*, never the
+ * question) and, worse, unscoped: no `head_sha`, no `event`. GitHub answers that query with the
+ * 50 most recent runs of the workflow **across every commit and every trigger channel**, and the
+ * judge this file reuses (`judgeCiGreen`) sorts by `created_at` and never reads
+ * `run.head_sha`. So "ci.yml 在 <headSha> 上是 success" could be vouched for by a run of a
+ * *different* commit — or of a `schedule`/`workflow_dispatch`/`pull_request` run of this one —
+ * and a commit CI never verified would get a signed tag. `head_sha=` makes the question about
+ * the object being tagged; `event=push` makes it about the channel that actually builds `main`
+ * (a PR run of the same sha tested the merge ref, not these bytes).
+ */
+export function ciRunsApiPath({ repository, workflow = WORKFLOW_DEFAULT, sha }) {
+  if (!/^[0-9a-f]{40}$/i.test(String(sha ?? ''))) {
+    // An empty `head_sha=` is the缺陷的形状 itself: GitHub answers "every recent run", and the
+    // judge downstream cannot tell which commit it is vouching for. Refuse the question.
+    throw new TypeError(`ciRunsApiPath: sha 不是一枚 commit id（${JSON.stringify(sha ?? null)}）——不带 head_sha 的 runs 查询跨所有 commit，正是这条闸要堵的那一格`)
+  }
+  const apiPath = `repos/${repository}/actions/workflows/${encodeURIComponent(workflow)}/runs`
+  return `${apiPath}?head_sha=${String(sha).toLowerCase()}&event=push&per_page=100`
+}
+
+/**
+ * Second half of the same fix, and the half that cannot be delegated to the query string: keep
+ * only runs that do **not** contradict the sha being tagged. A run carrying a different
+ * `head_sha` is dropped, so a green run from another commit can never be the evidence. A run
+ * that carries no `head_sha` at all passes: the GitHub API always fills the field, so the only
+ * way to see it absent is a synthetic payload, and refusing those would mean rewriting the
+ * fixtures that already pin this judge. This is a filter on a *claimed* disagreement, not a
+ * claim that every run was checked — that is why the query above still has to be scoped.
+ */
+export function runsForSha(payload, sha) {
+  const runs = Array.isArray(payload?.workflow_runs) ? payload.workflow_runs : []
+  const wanted = String(sha ?? '').toLowerCase()
+  return runs.filter((run) => {
+    const at = String(run?.head_sha ?? '').toLowerCase()
+    return !at || at === wanted
+  })
 }
 
 /**
@@ -74,7 +116,14 @@ export function judgeTagReady({ version, headSha, originMainSha, existingTags = 
         + 'registry 与 Release 的字节就没有任何一条 CI 运行为它背书；先推 main，或在 main 上重新走一遍。',
     }
   }
-  const ci = judgeCiGreen(ciPayload ?? {}, { workflow, sha: headSha })
+  const scopedRuns = runsForSha(ciPayload, headSha)
+  const dropped = (Array.isArray(ciPayload?.workflow_runs) ? ciPayload.workflow_runs : []).length - scopedRuns.length
+  const ci = judgeCiGreen({ workflow_runs: scopedRuns }, { workflow, sha: headSha })
+  if (dropped > 0 && !ci.ok) {
+    // Say what was thrown away: "没有记录" and "只有别的 commit 的记录" are different facts, and
+    // the second one is exactly the defect this line exists to close.
+    ci.reason = `${ci.reason}（本轮另见 ${dropped} 条 ${workflow} 记录，head_sha 不是 ${headSha}，已按"别的 commit"排除）`
+  }
   if (ci.pending === true) {
     return {
       ok: false,
@@ -126,8 +175,9 @@ export function main(argv, { cwd = path.resolve(path.dirname(fileURLToPath(impor
     }
     let ciPayload = null
     if (repository) {
-      const file = 'ci.yml'
-      const json = execFileSync('gh', ['api', `repos/${repository}/actions/workflows/${file}/runs?per_page=50`],
+      // Scoped to the commit being tagged and to the channel that builds it, and asked about
+      // the workflow the caller named — see `ciRunsApiPath` for what the old literal bought.
+      const json = execFileSync('gh', ['api', ciRunsApiPath({ repository, workflow, sha: headSha })],
         { cwd, encoding: 'utf8' })
       ciPayload = JSON.parse(json)
     }

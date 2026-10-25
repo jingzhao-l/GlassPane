@@ -16,20 +16,29 @@
  * in both directions, so a corpus file added to the mirror without being pinned is as red as a
  * pinned file missing from it.
  *
- * What this gate does NOT measure — said out loud because the header used to claim it does: the
- * check leg compares the mirror against the *pin*, not against the installed package. The
- * pin-vs-installed leg runs under `--record` (which refuses to record bytes that disagree with the
- * pin), because `harness/glasspane-harness/node_modules` exists on a maintenance machine and not
- * in CI; a check that is red on one and green on the other is noise, not a gate. Check mode
- * therefore prints what the installed package actually is whenever it can find one, so a stale
- * install is visible instead of silently unmeasured.
+ * What the installed-package leg measures (D2, 2026-10-24). It used to probe ONLY
+ * `harness/glasspane-harness/node_modules`, a directory CI never has — while the one lane that runs
+ * this gate (`install-gate`, .github/workflows/ci.yml) does `npm ci` at the repository root first, so
+ * `node_modules/iterate-kernel` is measurably present there and was never looked at. The leg therefore
+ * printed "未观测" and exited 0: a gate that never speaks is not a gate, and this file's own argument
+ * above ("a corpus file added to the mirror without being pinned is as red as a pinned file missing
+ * from it" — nothing that was not measured may be stamped onto the green baseline) applies here
+ * exactly as much. So: the repository root's `node_modules/iterate-kernel` is now the FIRST candidate,
+ * and having nothing to compare against is red — exit 2 when no candidate dir exists at all, exit 1
+ * when installs exist but none carries the version the pin records. Once a version-matched package is
+ * found, every corpus file is hashed against the pin *inside that package* too, so the pin's bytes are
+ * measured against the artifact the registry served instead of merely being re-quoted at the mirror.
+ * A machine that genuinely has no install may say so out loud with `GLASSPANE_KERNEL_CORPUS_ALLOW_SKIP=1`
+ * (the shape `engine/.signal_smoke.py`'s `GLASSPANE_SMOKE_ALLOW_SKIP` already established); it excuses
+ * "nothing to compare against", never a byte that disagrees, and must never be set in CI.
  *
  * The third leg (check mode, always) asks the question a mirror cannot answer by itself: does the
  * version `mcp-shell` bundles equal the version the fork pins? That is where the two consumers of
  * this contract are proved to consume the *same* one — see "the shell's leg" below the check.
  *
- *   node scripts/check-kernel-corpus.mjs            # check (exit 1 = drift, 2 = cannot measure)
+ *   node scripts/check-kernel-corpus.mjs            # check (exit 1 = disagreement, 2 = cannot measure)
  *   node scripts/check-kernel-corpus.mjs --record   # rewrite the mirror from the pinned package
+ *   node scripts/check-kernel-corpus.mjs --help     # legs, exit codes, and the allow-skip switch
  */
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -40,6 +49,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const pinPath = join(root, 'harness/glasspane-harness/contracts/kernel-pin.json')
 const mirror = join(root, 'kernel')
 const SUBDIRS = ['fixtures', 'schemas']
+const PACKAGE_NAME = 'iterate-kernel'
+/** Escape hatch for a machine that has no install at all — opt-in, loud, never set in CI. */
+const ALLOW_SKIP_ENV = 'GLASSPANE_KERNEL_CORPUS_ALLOW_SKIP'
 
 function die(code, message, remedy) {
   console.error(`kernel-corpus: ${message}`)
@@ -47,17 +59,46 @@ function die(code, message, remedy) {
   process.exit(code)
 }
 
+function usage() {
+  console.log(`usage: node scripts/check-kernel-corpus.mjs [--record | --help]
+
+legs, in check mode (exit 0 only when every one of them is measured AND agrees):
+  mirror ↔ pin        every file under kernel/{${SUBDIRS.join(',')}} must hash to what
+                      ${relative(root, pinPath)} records, in both directions (1 = disagreement).
+  installed ↔ pin     the installed ${PACKAGE_NAME} must exist, carry the pinned version, and hash
+                      to the pin file-by-file. 2 = nothing installed in any candidate dir,
+                      1 = an install exists but disagrees with the pin.
+  mcp-shell ↔ pin     the version the shell bundles must equal the pin (1 = two ecosystems, one name).
+
+candidate install dirs, in order (the repository root first — CI's install-gate runs npm ci there):
+  node_modules/${PACKAGE_NAME}
+  harness/glasspane-harness/node_modules/${PACKAGE_NAME}
+  harness/glasspane-harness/packages/opencode/node_modules/${PACKAGE_NAME}
+
+  ${ALLOW_SKIP_ENV}=1   excuses the installed ↔ pin leg on a machine that has NO install to
+                        compare against (prints a SKIP line and continues). It never excuses a
+                        byte that disagrees, and it must not be set in CI — that is where this
+                        leg exists. Without it the leg is RED by default.`)
+}
+
 function sha256(file) {
   return createHash('sha256').update(readFileSync(file)).digest('hex')
 }
 
-/** Where the published package sits, using the same two candidates `kernel-pin.mjs` probes. */
-function installedKernel() {
+/**
+ * Every candidate dir that actually carries a manifest. The repository root's own
+ * `node_modules/iterate-kernel` is FIRST: `install-gate` does `npm ci` at the root and mcp-shell
+ * declares `iterate-kernel` at one exact version, so that path is the one a green CI run always has.
+ * The two product-tree dirs (the ones `harness/glasspane-harness/script/kernel-pin.mjs` probes) exist
+ * on a maintenance machine with a bun install, and are a fallback here, not the only probe.
+ */
+function installedKernelCandidates() {
   const productRoot = join(root, 'harness/glasspane-harness')
-  for (const dir of [join(productRoot, 'node_modules/iterate-kernel'), join(productRoot, 'packages/opencode/node_modules/iterate-kernel')]) {
-    if (existsSync(join(dir, 'package.json'))) return dir
-  }
-  return null
+  return [
+    join(root, 'node_modules', PACKAGE_NAME),
+    join(productRoot, 'node_modules', PACKAGE_NAME),
+    join(productRoot, 'packages/opencode/node_modules', PACKAGE_NAME),
+  ].filter((dir) => existsSync(join(dir, 'package.json')))
 }
 
 /** The version the installed package states, or null when there is nothing to read. */
@@ -68,6 +109,14 @@ function installedVersion(dir) {
   } catch {
     return 'unreadable'
   }
+}
+
+// --help answers the question a reader of a red CI step asks: which leg, which exit code, and is
+// there a switch. It is handled before any read so it works on a checkout that has no harness product
+// next door — and it writes nothing.
+if (process.argv.includes('--help') || process.argv.includes('-h')) {
+  usage()
+  process.exit(0)
 }
 
 // A pin that is absent or unparseable has not been measured against. That is a different fact
@@ -88,11 +137,18 @@ if (!Array.isArray(pin.corpus) || pin.corpus.length === 0) {
 }
 
 const record = process.argv.includes('--record')
-const installed = installedKernel()
-if (record && installed === null) {
-  die(2, 'cannot record: the pinned package is not installed', 'bun install in harness/glasspane-harness, or run without --record to only check')
+const candidates = installedKernelCandidates()
+// Recording and the check leg both want *the pinned artifact*, so prefer the candidate that states the
+// pinned version rather than the first directory found — a stale install must not become the source.
+const pinnedInstall = candidates.find((dir) => installedVersion(dir) === pin.version) ?? null
+const recordSource = pinnedInstall ?? candidates[0] ?? null
+if (record && recordSource === null) {
+  die(2, `cannot record: no installed ${PACKAGE_NAME} in any candidate dir`,
+    `npm ci at the repository root (node_modules/${PACKAGE_NAME}) or bun install in harness/glasspane-harness, `
+      + 'or run without --record to only check')
 }
 if (record) {
+  const installed = recordSource
   // Recording means copying the *installed, pinned* bytes in — never re-stamping the pin from
   // whatever the mirror happens to hold, which would launder drift into "expected".
   for (const entry of pin.corpus) {
@@ -121,7 +177,7 @@ if (record) {
       pruned.push(rel)
     }
   }
-  console.log(`kernel-corpus: refreshed ${pin.corpus.length} file(s) into kernel/ from iterate-kernel@${pin.version}`
+  console.log(`kernel-corpus: refreshed ${pin.corpus.length} file(s) into kernel/ from ${relative(root, installed)} (iterate-kernel@${pin.version})`
     + (pruned.length ? `; pruned ${pruned.length} unpinned file(s): ${pruned.join(', ')}` : '; no unpinned extras to prune'))
   process.exit(0)
 }
@@ -165,15 +221,49 @@ if (drift.length + missing.length > 0) {
   process.exit(1)
 }
 console.log(`kernel-corpus: ${expected.size} corpus file(s) match the pin (iterate-kernel@${pin.version}).`)
-const have = installedVersion(installed)
-if (have === null) {
-  console.log('  installed-package leg: 未观测 — 这个 checkout 里没有安装 iterate-kernel（CI 的正常形状）。'
-    + 'pin 与已发布字节的对照在 --record 那条路上做，那条路缺包直接拒（exit 2）。')
-} else if (have !== pin.version) {
-  console.log(`  installed-package leg: 本机装的是 ${have}，pin 记的是 ${pin.version} —— 安装态落后于 pin。`
-    + ' mirror↔pin 这条判据仍然成立；要把安装态一起核就在本机跑 --record（它先拒掉与 pin 不符的字节）。')
+
+// ---- the installed package's leg --------------------------------------------
+// Reaching this line means the mirror agrees with the pin. That is still only half the contract: the
+// pin is a *claim about the published artifact*, and the artifact is what a fresh install serves. The
+// old probe looked only inside the harness product, so on the one lane that runs this gate in CI it
+// found nothing, printed "未观测" and exited 0 — the file's header argument that a thing not looked at
+// may not be stamped onto the green baseline applies here, so the leg is red by default now.
+if (pinnedInstall === null) {
+  const found = candidates.map((dir) => `${relative(root, dir)}@${installedVersion(dir)}`).join(', ')
+  if (process.env[ALLOW_SKIP_ENV] === '1') {
+    console.log(`  installed-package leg: SKIP（${ALLOW_SKIP_ENV}=1 显式要求）：没有一份已安装的 ${PACKAGE_NAME} 与 pin（${pin.version}）同号`
+      + `——候选里读到的是 ${candidates.length ? found : '一份都没有'}。这条腿默认是红的；开关只豁免"本机没有可比的东西"，`
+      + '不豁免对不上的字节，CI 里设它等于把这条闸关掉。')
+  } else if (candidates.length === 0) {
+    die(2, `no installed ${PACKAGE_NAME} found in any candidate dir — the pin's bytes were never compared with the artifact the registry served`,
+      `run npm ci at the repository root (its node_modules/${PACKAGE_NAME} is the first candidate and the shape CI's install-gate has); `
+        + `a machine with no install at all may set ${ALLOW_SKIP_ENV}=1, and CI must not`)
+  } else {
+    die(1, `the installed ${PACKAGE_NAME} is not the version the pin records: found ${found}, pin is ${pin.version}`,
+      `install ${pin.version} (npm ci at the repository root, or bump the shell's dependency and re-record the pin in the same batch); `
+        + `a stale install is a disagreement, not a skip — ${ALLOW_SKIP_ENV}=1 exists only for a machine with no install at all`)
+  }
 } else {
-  console.log(`  installed-package leg: 本机装的也是 ${have}，与 pin 同源。`)
+  const installedProblems = []
+  for (const entry of pin.corpus) {
+    const src = join(pinnedInstall, entry.file)
+    if (!existsSync(src)) {
+      installedProblems.push(`${entry.file}: the pin and the mirror both carry it, the installed package does not`)
+      continue
+    }
+    const actual = sha256(src)
+    if (actual !== entry.sha256) {
+      installedProblems.push(`${entry.file}: installed ${actual.slice(0, 12)}… != pinned ${entry.sha256.slice(0, 12)}…`)
+    }
+  }
+  if (installedProblems.length > 0) {
+    die(1, `${installedProblems.length} file(s) disagree with the pin inside ${relative(root, pinnedInstall)} (iterate-kernel@${pin.version}):\n`
+      + installedProblems.map((line) => `  ✗ ${line}`).join('\n')
+      + '\n  The mirror matching the pin is not a pass while the installed artifact disagrees — the pin would be recording bytes nobody can install.',
+      'check the install (a swapped registry artifact, a hand-edited node_modules, a half run of npm ci); re-install from the lock before re-recording the pin')
+  }
+  console.log(`  installed-package leg: 逐文件核过 ${pin.corpus.length} 份，${relative(root, pinnedInstall)} 装的正是 ${pin.version} ——`
+    + ' mirror ↔ pin ↔ 已安装包三份字节同源。')
 }
 
 // ---- the shell's leg ------------------------------------------------------

@@ -49,6 +49,12 @@ jobs:
     name: release archive (source + built JavaScript) + SHA256SUMS
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    # D5（2026-10-24 复核：这条 lane 原来一条 `timeout-minutes` 都没有，14 个 job 全在默认 6 小时上）。
+    # 这里的 45 不是"实测最慢的那次"（`gh api …/jobs` 量到 22–313s）而是**判据允许的最坏一次**：
+    # 第一步 `assert-ci-green` 的等待预算本身就是 1200000ms = 20 分钟，再加构建、签名、建 Release
+    # 与读回。给 30 会在一棵"CI 还在跑、正在等"的正常树上把这一格咬断——那比没有 timeout 更糟。
+    # 同批补的数值口径写在 ci.yml 顶部那段（实测耗时 × 5–8 倍，且不低于判据内部的等待预算）。
+    timeout-minutes: 45
     # 签名私钥配在这个环境里，job 不声明它就读不到 —— v1.4.0 首跑正是因为没声明，
     # detect 步走了"没配"那条分支，于是照常发了货、只是没有 .asc。环境本身无保护规则
     # （protection_rules 为空、can_admins_bypass），所以声明它不会给打 tag 增加人工审批。
@@ -326,6 +332,11 @@ jobs:
     name: publish bare names with provenance
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # 60 分钟同样是**判据允许的最坏一次**而不是实测：这一条里同时住着两个 20 分钟级的等待——
+    # `assert-ci-green` 的 1200000ms 预算，以及两个包各自最多 24×30s = 12 分钟的 registry 回查
+    # （重复版本那支与"退 0 之后必须核实在架"那支各一条，串行）。20 + 12 + 12 + 构建 ≈ 48 分钟，
+    # 所以这道闸的额度必须容得下它自己的判据，否则 timeout 就成了"在最慢的那一次红"的另一种写法。
+    timeout-minutes: 60
     environment: release
     # Two publishers for the same tag must not interleave: the second `npm publish` of a
     # version is refused by the registry, but the first one's provenance attestation and the
@@ -363,6 +374,11 @@ jobs:
         # `_npmVersion` 就是 12.2.0（见 harness/glasspane-harness 的 release.yml 同名步骤）。
         # 照旧把版本打出来：钉的与实际装上的不一致时，不许被读成"发布成功"。
         run: |
+          set -euo pipefail
+          # 两条命令，没有 set 就得靠 runner 的默认 shell 兜着：`npm install -g` 失败会退，
+          # 但那条 echo 报的"钉死版本"读的是**装上的**那份，装不上时它照样打印一句
+          # `npm in this publish lane: <旧版本>`——而下面几步全部按"这台机器上的 npm 是 12.2.0"
+          # 做不可逆的 publish。把闸门写在这条正文里，而不是写在默认行为里。
           npm install -g npm@12.2.0
           echo "npm in this publish lane: $(npm --version)"
       - name: Install workspaces from root lockfile
@@ -441,6 +457,65 @@ jobs:
             --repository "${GITHUB_REPOSITORY}" \
             --workflow ci.yml \
             --budget 1200000 --poll 30000
+      - name: This tag must already be a public GitHub Release before the registry gets it
+        # D2（2026-10-24 复核）：上面两步问的是「这棵树等于这个 tag」与「这棵树的 CI 是绿的」，
+        # 没有任何一环问「这个 tag 的 GitHub Release 在不在、对外不对外、资产齐不齐」。两条发布
+        # 通道是**故意**不串在一起的（见文件开头），所以 dispatch 一个 `github-release` 从未跑过的
+        # tag 这个形状是可达的：registry 上多了两个包，`releases/latest` 继续服务上一版。后果本
+        # 文件里 `github-release` 那步已经写死了——`updater/lib/check.js` 把「最新已发布的版本比
+        # 本机跑的还旧」读成 `up-to-date` + exit 0，于是每台机器安静地不再更新，而这一格是绿的。
+        # `needs: github-release` 不是修法：那个 job 写的是 `if: github.event_name == 'push'`，
+        # dispatch 时它是 skipped，而 GitHub 把 needs 上游的 skipped 判成未满足，加上去等于永久
+        # 锁死 npm 这条通道。所以这里问的是**状态**而不是**顺序**：Release 存在、非草稿、target
+        # 就是本轮 commit、资产非空——四条判据与 `github-release` 那段读回逻辑同一形状，各自单独
+        # 变红。dry 模式不查：它不写 registry，而「tag 还没对外」正是 dry 与 publish 之间的正常状态。
+        # 字段名以 gh 自己列出的那份为准（`latest` 不在里面；规则 3a2 盯着的就是这件事）。
+        env:
+          MODE: ${{ github.event.inputs.mode }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${MODE:-dry}" != "publish" ]; then
+            echo 'mode 不是 publish：这一步不查 Release——dry 不写 registry，而 tag 还没对外正是 dry 之后、publish 之前的正常状态'
+            exit 0
+          fi
+          VERSION=$(node -p "require('./package.json').version")
+          WANT="v${VERSION}"
+          HEAD_SHA=$(git rev-parse HEAD)
+          # 读不回来（404＝这个 tag 根本没有 Release）与读回来不合格是两种红，分开说。
+          READBACK=$(gh release view "$WANT" --json tagName,isDraft,assets,targetCommitish \
+            --jq '[(.isDraft|tostring), (.assets|length|tostring), (.targetCommitish // "")] | @tsv') \
+            || { echo "::error::${WANT} 的 GitHub Release 读不回来（多半是它还没建——打 tag 那条通道没跑过，或它被删了）。" \
+              "registry 是不可逆的，所以不发这一版：先 push tag、等 github-release 那一格绿，再重跑 dispatch。"; exit 1; }
+          IFS=$'\t' read -r DRAFT ASSET_COUNT TARGET_READ <<<"$READBACK"
+          # 三件事各自判，与 github-release 的读回步同口径：少任何一件，对外都不是这一版。
+          if [ "${DRAFT:-<空>}" != "false" ]; then
+            echo "::error::release ${WANT} 读回 isDraft=${DRAFT:-<空>}，它没有对外：/releases/latest 还在服务上一个 tag，" \
+              "每台机器的 updater 会把「查不到更新」读成 up-to-date。这一版不能被放上 registry。"
+            exit 1
+          fi
+          case "${ASSET_COUNT:-}" in
+            ''|*[!0-9]*)
+              echo "::error::release ${WANT} 的资产数量读回的是「${ASSET_COUNT:-<空>}」，不是一个数字：无法证明归档与签名件挂上了这个发布。"
+              exit 1 ;;
+          esac
+          if [ "${ASSET_COUNT}" -lt 1 ]; then
+            echo "::error::release ${WANT} 已非草稿但资产列表是空的（assets=0）——没有归档与 SHA256SUMS 的发布，" \
+              "updater 第 3 道校验只会拒绝；把包发上 registry 只是让每台机器多一个装不上去的版本。"
+            exit 1
+          fi
+          case "${TARGET_READ:-}" in
+            ''|*[!0-9a-f]*)
+              echo "::error::release ${WANT} 的 targetCommitish 读回的是「${TARGET_READ:-<空>}」，不是一枚 commit id：target 无法核实就是没有核实。"
+              exit 1 ;;
+          esac
+          SHORT=$(git rev-parse --short "$HEAD_SHA")
+          if [ "${TARGET_READ}" != "${HEAD_SHA}" ] && [ "${TARGET_READ}" != "${SHORT}" ]; then
+            echo "::error::release ${WANT} 的 target 读回 ${TARGET_READ}，不是本轮要发的 commit ${HEAD_SHA}——" \
+              "Release 服务的是别的树，而 registry 马上要收的是这一棵。两边内容不一致时，装到用户机上的是哪一份没人说得清。"
+            exit 1
+          fi
+          echo "已核实 ${WANT} 的 GitHub Release：draft=${DRAFT}，${ASSET_COUNT} 件资产，target=${TARGET_READ}（本轮 ${HEAD_SHA}）——registry 这一侧现在可以跟上"
       - name: Publish (or pack-check) glasspane-mcp
         working-directory: mcp-shell
         run: |

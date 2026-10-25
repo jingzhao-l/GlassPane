@@ -67,6 +67,11 @@ function makeWorkflowTree({ rootScripts, workspaceScripts = {}, workspaces = ['w
 
 // 夹具与真 workflow 同形：顶层必须声明 permissions——闸本身现在就要求这一点，
 // 夹具不带它就会在每个用例里先红一条与断言无关的问题（那等于测试在自己的桩里翻车）。
+// 2026-10-24（D5/D6）：这份合成 fixture 现在必须自带 `timeout-minutes` 与 `set -euo pipefail`。
+// 那两条是本轮立进 `check-workflows.mjs` 的新规则，而规则判的是**任何** job/run 块——fixture 少
+// 哪一行，这三条对照就会红在"与本用例无关的形状"上（红得对，但红错了地方）。加这两行不是放宽
+// 判据：真正的缺行由 `qoder-20261024-rel-release-chain-gates.test.mjs` 与闸自己的 `--self-test`
+// 变异档判红，那边才是要它红的地方。
 const HEADER = `name: CI
 on:
   push:
@@ -77,6 +82,7 @@ jobs:
   build:
     name: build the thing
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 `
@@ -102,6 +108,7 @@ test('a second `npm run` reference on a later line is still checked (the shared-
     tree,
     `${HEADER}      - name: two commands
         run: |
+          set -euo pipefail
           npm run present
           npm run absent
 `,
@@ -122,6 +129,7 @@ test('a `run` reference in a step block after an earlier one is checked per line
     tree,
     `${HEADER}      - name: three commands
         run: |
+          set -euo pipefail
           npm run a
           npm run b
           npm run c
@@ -145,6 +153,7 @@ test('a --workspace selector is resolved to that workspace, not asserted against
     tree,
     `${HEADER}      - name: ordered build
         run: |
+          set -euo pipefail
           npm ci --no-audit
           npm run build
           npm run bundle --workspace gpws
@@ -160,6 +169,7 @@ test('a --workspace selector is resolved to that workspace, not asserted against
     brokenTree,
     `${HEADER}      - name: ordered build
         run: |
+          set -euo pipefail
           npm ci --no-audit
           npm run build
           npm run bundle --workspace gpws

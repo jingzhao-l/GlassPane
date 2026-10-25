@@ -313,3 +313,132 @@ test('分诊③：gh 成功且名字在列 → ok；只含前缀的那一行不�
   assert.doesNotMatch(repoLevel.text, /environment 'release'/, '仓库级那条判决不许挂上环境名')
 })
 
+
+/* ------------------------------------------------------------------ *
+ * F4（2026-10-24）：`forget` —— 签名凭据的两半必须能被真正清掉，而且清没清要回头看一眼。
+ *
+ * 这条缺陷的形状是"有 seed/install，没有任何删除路径"：私钥 + 口令以 base64（编码，不是加密）
+ * 常驻登录钥匙串，任何同用户进程调 `security find-generic-password -w` 都读得到（keychain 的 ACL
+ * 认创建者二进制，不认调用者），拿到它的人能给所有用户的 updater 投毒。
+ * 夹具是一个**有状态**的 security stub：条目是沙箱里的文件，delete 会真的把它删掉，find 按文件
+ * 在不在回答。stub 不实现任何 keychain 语义——它只回答"这条命令之后，那个名字还在不在"。
+ * ------------------------------------------------------------------ */
+
+function makeKeychainSandbox({ deleteRc = 0, deleteActuallyRemoves = true, present = ['private-key', 'passphrase'] } = {}) {
+  const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-keychain-'))
+  const bin = path.join(base, 'bin')
+  const store = path.join(base, 'store')
+  fs.mkdirSync(bin)
+  fs.mkdirSync(store)
+  for (const account of present) {
+    fs.writeFileSync(path.join(store, account), 'entry')
+  }
+  const log = path.join(base, 'calls.log')
+  fs.writeFileSync(path.join(bin, 'security'), [
+    '#!/bin/sh',
+    `printf 'ARGV|security|%s\\n' "$*" >> '${log}'`,
+    "account=''; prev=''; verb=''",
+    'for a in "$@"; do',
+    '  [ "$prev" = "-a" ] && account="$a"',
+    '  case "$a" in find-generic-password|delete-generic-password) verb="$a" ;; esac',
+    '  prev="$a"',
+    'done',
+    `entry="${store}/$account"`,
+    'if [ "$verb" = "delete-generic-password" ]; then',
+    `  if [ ${deleteRc} -ne 0 ]; then exit ${deleteRc}; fi`,
+    `  ${deleteActuallyRemoves ? 'rm -f "$entry"' : 'true'}`,
+    '  exit 0',
+    'fi',
+    '[ -f "$entry" ] || exit 44',
+    `printf '%s' ${JSON.stringify(FAKE_ARMORED)} | base64`,
+    'exit 0',
+    '',
+  ].join('\n'), { mode: 0o755 })
+  return {
+    base, bin, log, store,
+    calls: () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean) : []),
+    remaining: () => fs.readdirSync(store).sort(),
+    cleanup: () => fs.rmSync(base, { recursive: true, force: true }),
+  }
+}
+
+function runForget(sandbox, args = ['forget']) {
+  return spawnSync('/bin/bash', [SCRIPT, ...args], {
+    encoding: 'utf8',
+    env: {
+      PATH: `${sandbox.bin}:/usr/bin:/bin`,
+      TMPDIR: sandbox.base,
+      HOME: sandbox.base,
+      GP_SIGNING_SERVICE: 'gpg-signing-test-fixture',
+    },
+  })
+}
+
+test('gpg-signing.sh forget: 两半都删，删完读回为空，退 0', () => {
+  const sandbox = makeKeychainSandbox()
+  try {
+    const r = runForget(sandbox)
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`)
+    const deletes = sandbox.calls().filter((l) => l.includes('delete-generic-password'))
+    assert.equal(deletes.length, 2, `两半各删一次，实得 ${JSON.stringify(deletes)}`)
+    assert.ok(deletes.some((l) => /\bprivate-key\b/.test(l)), deletes.join('\n'))
+    assert.ok(deletes.some((l) => /\bpassphrase\b/.test(l)), deletes.length)
+    assert.deepEqual(sandbox.remaining(), [], '钥匙串里不该再有任何一半')
+    assert.match(r.stdout, /neither half/, r.stdout)
+  } finally {
+    sandbox.cleanup()
+  }
+})
+
+test('gpg-signing.sh forget: delete 回 0 而条目仍在 = 判红，不许说成清掉了', () => {
+  // 读回判据的反例：`security delete` 成功返回但条目没走（锁/ACL/并发）。没有这一眼，
+  // 这一条命令就只是"看起来删了"，而读者会据此认为凭据已经不驻留。
+  const sandbox = makeKeychainSandbox({ deleteActuallyRemoves: false })
+  try {
+    const r = runForget(sandbox)
+    assert.equal(r.status, 1, `条目还在却报了成功：${r.stdout}\n${r.stderr}`)
+    assert.match(r.stdout + r.stderr, /STILL in the keychain/, r.stdout)
+    assert.equal(sandbox.remaining().length, 2, 'stub 的条目本来就不该被这次 delete 带走')
+  } finally {
+    sandbox.cleanup()
+  }
+})
+
+test('gpg-signing.sh forget: delete 失败要说"它仍然读得到"，并给人工出路', () => {
+  const sandbox = makeKeychainSandbox({ deleteRc: 1 })
+  try {
+    const r = runForget(sandbox)
+    assert.equal(r.status, 1, `${r.stdout}\n${r.stderr}`)
+    const text = `${r.stdout}\n${r.stderr}`
+    // 折行不许影响判据：报文按 80 列排版，"Keychain Access" 会被拆到两行，判据读的是**说了什么**
+    // 而不是它占第几行（换行处把断言钉死，等于给下一次排版改动埋一条假红）。
+    const unwrapped = text.replace(/\s+/g, ' ')
+    assert.match(unwrapped, /STILL readable by any process this user account runs/, text)
+    assert.match(unwrapped, /Keychain Access/, `要给一条跑得到的下一步：${text}`)
+    assert.equal(sandbox.remaining().length, 2, text)
+  } finally {
+    sandbox.cleanup()
+  }
+})
+
+test('gpg-signing.sh forget: 条目本来就不在 = 如实说"没有可忘的"，退 0 且不假装删过', () => {
+  const sandbox = makeKeychainSandbox({ present: [] })
+  try {
+    const r = runForget(sandbox)
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`)
+    assert.deepEqual(sandbox.calls().filter((l) => l.includes('delete-generic-password')), [],
+      '没有条目就不许发 delete')
+    assert.match(r.stdout, /nothing to forget/, r.stdout)
+  } finally {
+    sandbox.cleanup()
+  }
+})
+
+test('gpg-signing.sh: Usage 块与分发表里都有 forget（新增子命令不许没人说得出）', () => {
+  const source = fs.readFileSync(SCRIPT, 'utf8')
+  const usage = source.split('\n').filter((l) => /^# +gpg-signing\.sh \w/.test(l)).map((l) => l.replace(/^# +/, ''))
+  assert.ok(usage.some((l) => l.startsWith('gpg-signing.sh forget')), JSON.stringify(usage))
+  assert.match(source, /^ {2}forget\) {3}shift; cmd_forget "\$@" ;;$/m, '分发表里这一条必须存在')
+  // 这条断言不是形式主义：上一轮 discover 过 Usage 块由 awk 自己算，写死行号的那版**从来没打出过用法**。
+  assert.ok(source.includes('cmd_forget()'), '实现必须存在')
+})

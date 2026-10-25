@@ -736,8 +736,51 @@ def lldb_command_quote(text):
     return "'" + str(text).replace("'", "'\\''") + "'"
 
 
+#: `GPBRIDGE_BUDGET` 是"在 lldb 里面等多久"，写错它的人只有一个下场：桥以 traceback
+#: 离场、`--out` 与 `--send-sock` 零字节（D3，2026-10-24 上一泳道本机实测复现）。那违背
+#: 本文件 §6.2「失败也以 JSON 离场」，而且违背得最彻底——调用方拿到的是一个 Python
+#: ValueError 和退 1，一个字段都读不到。所以现在：解析不进去就用默认值，并且把这件事
+#: 如实写进 errors[]；值一律钳进 `[BUDGET_FLOOR_S, 外层 timeout]`——比 30s 还短的预算
+#: 连 debugserver 冷启动都不够（F5 实测 >5min 的首次attach 说的就是这件事），比外层
+#: 还长则根本不可能被观测到（外层先 killpg）。
+BUDGET_DEFAULT_S = 60.0
+BUDGET_FLOOR_S = 30.0
+
+
+def capture_budget_s(raw_env_value, timeout=None):
+    """Resolve the in-lldb capture budget: returns `(seconds, error_or_None)`.
+
+    Pure, and takes the env value as an argument rather than reading `os.environ`,
+    so both arms (a garbage value and an out-of-range one) are testable without
+    mutating the interpreter's environment.
+    """
+    text = None if raw_env_value is None else str(raw_env_value).strip()
+    if text is None or text == "":
+        return BUDGET_DEFAULT_S, None
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        return BUDGET_DEFAULT_S, (
+            "GPBRIDGE_BUDGET=%r is not a number: using the %gs default. A budget that cannot be "
+            "parsed is not a budget of zero and not a failure to start — §6.2 says this bridge "
+            "leaves with JSON, so the run proceeds and this line says what was ignored."
+            % (raw_env_value, BUDGET_DEFAULT_S))
+    if value != value or value in (float("inf"), float("-inf")):  # NaN / Infinity
+        return BUDGET_DEFAULT_S, ("GPBRIDGE_BUDGET=%r is not a finite number: using the %gs default."
+                                  % (raw_env_value, BUDGET_DEFAULT_S))
+    floor = BUDGET_FLOOR_S
+    ceiling = floor if timeout is None else max(floor, float(timeout))
+    clamped = min(max(value, floor), ceiling)
+    if clamped != value:
+        return clamped, ("GPBRIDGE_BUDGET=%g clamped to %g (allowed %g..%g = the 30s cold-start "
+                         "floor up to the outer --timeout; a budget above the outer timeout can "
+                         "never be observed, because the process group is killed first)."
+                         % (value, clamped, floor, ceiling))
+    return value, None
+
+
 def build_lldb_argv(bridge_path, mode, pid=None, exe=None, exe_args=None,
-                    samples=TRACE_SAMPLES, extra_script=None):
+                    samples=TRACE_SAMPLES, extra_script=None, timeout=None):
     """Compose the `xcrun lldb --batch` invocation (pure; unit-tested)."""
     argv = ["xcrun", "lldb", "--batch"]
     if pid is not None:
@@ -754,8 +797,12 @@ def build_lldb_argv(bridge_path, mode, pid=None, exe=None, exe_args=None,
         if exe and pid is None:
             # SB-API driver: batch would end the session at the crash stop,
             # so one script command does launch+wait+collect+emit.
-            spec = {"exe": exe, "args": exe_args, "mode": "capture",
-                    "budget_s": max(30.0, float(os.environ.get("GPBRIDGE_BUDGET", "60")))}
+            budget, error = capture_budget_s(os.environ.get("GPBRIDGE_BUDGET"), timeout)
+            spec = {"exe": exe, "args": exe_args, "mode": "capture", "budget_s": budget}
+            if error:
+                # The spec is base64'd JSON, so the note can ride to the child without any
+                # quoting hazard; `run_capture_cli_b64` puts it in the payload it sends back.
+                spec["budget_note"] = error
             argv += ["-o", "script glasspane_bridge.run_capture_cli_b64('%s')"
                      % encode_capture_spec(spec)]
         else:
@@ -910,6 +957,28 @@ def _release_pipes_and_reap(proc):
             pass
 
 
+def _kill_process_group(proc):
+    """SIGKILL the child's whole process group — idempotently, and only if it is there.
+
+    D7 (2026-10-24 复核)：这一步从前只写在 `except subprocess.TimeoutExpired` 里面。
+    `finally` 只走 `_release_pipes_and_reap`（关管道 + wait），而 :922-926 整段论证的
+    就是"只杀直接子进程会把被 attach 的目标留在 SIGSTOP"——所以 `communicate()` 抛出的
+    **任何一种**别的异常（解码、ValueError、被信号打断的 syscall）都绕过那段论证：管道
+    被关掉、孩子被 wait 收掉，debugserver 与它手里那个停住的进程留在原地。
+    挪进幂等的清理路径就是修这个：`getpgid` 先问一次有没有这个组（孩子已经退出时它是
+    ProcessLookupError，不是"杀成功了"），杀不到就说杀不到。
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        return (False, "no process group to kill for pid %s" % proc.pid)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError) as error:
+        return (False, "killpg(%d) did not land: %r" % (pgid, error))
+    return (True, None)
+
+
 def run_child_captured(argv, timeout, env=None):
     """Spawn the lldb child and drain it: **lossy** decode, whole-group kill.
 
@@ -936,16 +1005,15 @@ def run_child_captured(argv, timeout, env=None):
         argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, errors="replace", start_new_session=True, env=env,
     )
+    delivered = False
     try:
         out, err = proc.communicate(timeout=timeout)
+        delivered = True
         return _Completed(proc.returncode, out, err), False
     except subprocess.TimeoutExpired as first:
         out = _keep_widest("", first.output)
         err = _keep_widest("", first.stderr)
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+        _kill_process_group(proc)
         try:
             drained_out, drained_err = proc.communicate(timeout=CHILD_DRAIN_TIMEOUT_S)
         except subprocess.TimeoutExpired as second:
@@ -956,13 +1024,67 @@ def run_child_captured(argv, timeout, env=None):
             err = _keep_widest(err, drained_err)
         return _Completed(proc.returncode, out, err), True
     finally:
+        # `not delivered` is the whole judgement: a run whose bytes came back has nothing
+        # left to kill, and killing a group that may still hold the user's launched target
+        # would be a new way to destroy evidence. Everything else — a non-timeout exception
+        # from `communicate()`, an early `return` above that never ran, an interrupt — gets
+        # the group, and it gets it idempotently (the timeout branch has already killed and
+        # `getpgid` will simply say the group is gone). Then, and only then, the fds.
+        if not delivered:
+            _kill_process_group(proc)
         _release_pipes_and_reap(proc)
+
+
+def _process_is_stopped(pid):
+    """Is this pid *right now* stopped? `ps` answers; None means "cannot tell", not "no"."""
+    try:
+        got = subprocess.run(["ps", "-p", str(int(pid)), "-o", "state="],
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    text = (got.stdout or "").strip()
+    if not text:
+        return None
+    return text[0].upper() == "T"
+
+
+def resume_frozen_target(pid):
+    """F7 (2026-10-24 复核)：超时整组 SIGKILL 之后，唤醒被 attach 的目标，并**如实**说唤醒没唤醒。
+
+    被 `--pid` 附上的进程是 lldb 用 SIGSTOP 停住的；把 lldb 与 debugserver 杀掉，留下的
+    就是那个 SIGSTOP——全仓此前没有一处 `SIGCONT`，所以用户的应用一直冻在那里。而超时
+    载荷那一句 "a target that had been stopped here is no longer held by this bridge"
+    说的恰恰相反：那不是判决，是一次谎。现在先 `kill(pid, SIGCONT)`，再用 `ps` 读回状态，
+    把读到的写进 payload——三种结局（醒了 / 进程已经不在了 / 杀不动或读不到）各是各的话。
+    """
+    if pid is None:
+        return (False, "no --pid: this bridge attached nothing, so it wakes nothing")
+    try:
+        numeric = int(pid)
+    except (TypeError, ValueError):
+        return (False, "pid %r is not a number: nothing was resumed" % (pid,))
+    try:
+        os.kill(numeric, signal.SIGCONT)
+    except ProcessLookupError:
+        return (True, "pid %d is gone: nothing left stopped" % numeric)
+    except OSError as error:
+        return (False, "SIGCONT to pid %d failed (%r): the target is STILL held stopped"
+                % (numeric, error))
+    stopped = _process_is_stopped(numeric)
+    if stopped is False:
+        return (True, "pid %d was sent SIGCONT and reads as running again" % numeric)
+    if stopped is True:
+        return (False, "pid %d was sent SIGCONT and STILL reads as stopped: something else holds it"
+                % numeric)
+    return (False, "pid %d was sent SIGCONT and `ps` could not read its state; "
+                   "whether it woke was NOT measured" % numeric)
 
 
 def run_outer(args):
     """Parent-process path: exec lldb, extract payload, re-emit per §6.2."""
     bridge_path = os.path.abspath(__file__)
     exe_args = list(args.exe_args) if args.exe_args else None
+    _budget, budget_note = capture_budget_s(os.environ.get("GPBRIDGE_BUDGET"), args.timeout)
     argv = build_lldb_argv(
         bridge_path,
         mode=args.mode,
@@ -971,6 +1093,7 @@ def run_outer(args):
         exe_args=exe_args,
         samples=args.samples,
         extra_script=args.setup,
+        timeout=args.timeout,
     )
     # 本轮的哨兵 nonce 只经**子进程环境**交给 lldb 内的那个脚本：被调试目标若自己
     # 打印一对固定标记，它匹配不上带 nonce 的 begin，也就不可能被当成载荷（加上
@@ -985,19 +1108,33 @@ def run_outer(args):
     if timed_out:
         # F5: lldb --batch can hang pre-timeout on machines where debug attach
         # is gated or cold-started. Structured refusal, never a silent hang.
+        # 整组已经 SIGKILL 过了（`run_child_captured` 的清理路径）。现在这一步做的是
+        # 那一步做不到的事：被 `--pid` 附上的目标不会因为杀掉调试器而自由——它停在
+        # SIGSTOP 上。先唤醒，再把"唤没唤醒"照实写进载荷，而不是沿用那句没人验过的
+        # "no longer held by this bridge"。
+        woke, wake_detail = resume_frozen_target(args.pid)
+        errors = [
+            "lldb did not produce a capture within %ss. On this machine "
+            "debugger attach/launch is permission-gated (P6 §0 F1/F2/F5): "
+            "grant System Settings > Privacy & Security > Developer Tools to the "
+            "calling process, or run inside an already-authorized Terminal session. "
+            "The whole lldb process group was SIGKILLed on timeout; about the target: %s "
+            "(%s)" % (args.timeout,
+                      "it was resumed" if woke else "IT IS NOT CONFIRMED RESUMED — check the pid",
+                      wake_detail),
+        ]
+        if not woke and args.pid is not None:
+            errors.append("remedy for a target left stopped by an attach: kill -CONT %s; "
+                          "if that is refused the process belongs to another debugger session "
+                          "and only that session can release it." % args.pid)
+        if budget_note:
+            errors.append(budget_note)
         payload = assemble_result(
             mode=args.mode,
             target={"pid": args.pid, "exe": args.exe},
             status="failed",
             threads=[],
-            errors=[
-                "lldb did not produce a capture within %ss. On this machine "
-                "debugger attach/launch is permission-gated (P6 §0 F1/F2/F5): "
-                "grant System Settings > Privacy & Security > Developer Tools to the "
-                "calling process, or run inside an already-authorized Terminal session. "
-                "Note: the whole lldb process group was killed on timeout, so a target "
-                "that had been stopped here is no longer held by this bridge." % args.timeout,
-            ],
+            errors=errors,
         )
         try:
             emit(payload, out_path=args.out, send_sock=args.send_sock)
@@ -1026,8 +1163,14 @@ def run_outer(args):
                 % (completed.returncode,
                    sentinel_absence_clue(completed.stdout, nonce), _cause, remedy,
                    stderr_tail),
-            ],
+            ] + ([budget_note] if budget_note else []),
         )
+    elif budget_note:
+        # 采到了载荷也不能把"预算被钳过/退回默认值"这件事丢掉：载荷里的 errors[] 就是
+        # §6.2 让读者看判决的地方，而这条判决是关于**这一趟跑了多久**的。
+        payload.setdefault("errors", [])
+        if isinstance(payload["errors"], list):
+            payload["errors"].append(budget_note)
     try:
         emit(payload, out_path=args.out, send_sock=args.send_sock)
     except OSError as error:
@@ -1359,23 +1502,41 @@ def no_payload_cause(stderr_text, stdout_text=None, bridge_path=None):
     if ("importing failed" in combined or "invalid pathname" in combined
             or "no such file or directory" in combined
             or "module not found" in combined):
+        # F2/F3（2026-10-24 复核）。这段文字是**给 agent 抄进 shell 的命令**，所以它受同一条
+        # 规矩约束：一个路径必须是**一个词**，而 `'%s'` 不是保证——`bridge_path` 来自 `__file__`，
+        # checkout 目录名里有一个 `'` 就把它自己那个引号组撕开，句子剩下的部分从此是 shell 文本。
+        # `mcp-shell/test/remedy-shell-quoting.test.mjs` 管着 TS 与 updater 那一侧，扫描面从来不含
+        # `bridge/*.py`（那条闸住在 mcp-shell 里，本泳道没有写权限），所以这里的词形由
+        # `bridge/test_bridge.py` 的 `RemedyCommandsStayOneShellWord` 自己钉住。
+        # 第二处更糟：旧落点是 `/tmp/glasspane_bridge.py`——世界可写目录里的一个**可预测名字**，
+        # 任何本地账号先建那个文件，这条 remedy 就在用户自己的机器上跑别人的代码。`mktemp -d`
+        # 是 0700、名字不可预测，写不进去也就换不了。
+        quoted = shlex.quote(str(named_us))
         return ("bridge-not-imported",
                 "lldb never imported the bridge: its own command tokenizer split "
                 "`command script import %s`, so the checkout path is the suspect, NOT a "
                 "permission seat. The historical shape was an unquoted path carrying a "
                 "space, but `build_lldb_argv` quotes every token through "
                 "`lldb_command_quote` now — re-quoting the -o text is a source edit, not "
-                "a step an operator can take, so work the arms that are runnable as-is: "
-                "(1) `ls -l '%s'` — the file has to exist and be readable at the path in "
+                "a step an operator can take, so work the arms that are runnable as-is "
+                "(each path below is quoted for a POSIX shell, so it stays ONE word "
+                "whatever the checkout directory is called): "
+                "(1) `ls -l %s` — the file has to exist and be readable at the path in "
                 "the argv; (2) if that argv did not come from `build_lldb_argv` (a "
                 "hand-run lldb, or an --setup line), take the quoted token from the "
-                "bridge itself: `python3 -c \"import glasspane_bridge as gb; "
-                "print(gb.lldb_command_quote('%s'))\"`; (3) if the path itself is what "
-                "lldb refuses, run a copy that sits on a plain path, since the bridge "
-                "imports its own __file__: `cp '%s' /tmp/glasspane_bridge.py` and re-run "
-                "`python3 /tmp/glasspane_bridge.py capture --pid <pid>`. "
+                "bridge itself, passing the path as an argument so nothing is re-quoted "
+                "inside a quoted program: `python3 -c 'import glasspane_bridge as gb, "
+                "sys; print(gb.lldb_command_quote(sys.argv[1]))' %s`; (3) if the path "
+                "itself is what lldb refuses, run a copy that sits on a plain path, since "
+                "the bridge imports its own __file__: `dest_dir=$(mktemp -d) && cp %s "
+                "\"$dest_dir/glasspane_bridge.py\" && python3 "
+                "\"$dest_dir/glasspane_bridge.py\" capture --pid <pid>` — `mktemp -d` is "
+                "0700 with an unpredictable name, which is why this does NOT say "
+                "`/tmp/glasspane_bridge.py`: a fixed name in a world-writable directory is "
+                "a file another local account created first, and this command would then "
+                "run their code as you. "
                 "No seat in System Settings fixes this one."
-                % (named_us, named_us, named_us, named_us))
+                % (named_us, quoted, quoted, quoted))
     return ("debug-gated",
             "the bridge imported but produced no payload: debug attach/launch is "
             "permission-gated on this machine (P6 §0 F1/F2, §7.1) — grant System "
@@ -1638,14 +1799,25 @@ def _arm_watchpoint(debugger, entry):
 
 
 def _disarm_watchpoint(addr):
-    """Disable the debugger-side watchpoint so its hardware slot is really free."""
-    watchpoint = _LIVE_WATCHPOINTS.pop(addr, None)
+    """Disable the debugger-side watchpoint so its hardware slot is really free.
+
+    D4（2026-10-24 复核）：`_LIVE_WATCHPOINTS.pop()` 从前发生在 `Disable()` **之前**。
+    Disable 失败时那个 SBWatchpoint 就永久失联了——没有任何别的地方还拿着它，硬件槽位
+    没让出，而账本已经在同一条路径上 `release(addr)` 并把队头 arm 进同一个槽
+    （:1776-1781 只补一条 note，没有重试）。下一次 `_addr_for_watchpoint_id` 在这条
+    监视点上打出一个停，也认不出它是谁。现在只在成功时摘句柄：失败的那一条留在表里，
+    下一次 reconcile 还看得见它、还能再试一次 Disable。
+    """
+    watchpoint = _LIVE_WATCHPOINTS.get(addr)
     if watchpoint is None:
         return (False, "no live watchpoint was tracked for %s" % addr)
     disable = getattr(watchpoint, "Disable", None)
     if disable is None:
         return (False, "this lldb binding has no SBWatchpoint.Disable()")
-    return _outcome_ok(disable())
+    ok, detail = _outcome_ok(disable())
+    if ok:
+        _LIVE_WATCHPOINTS.pop(addr, None)
+    return (ok, detail)
 
 
 def _addr_for_watchpoint_id(watchpoint_id):
@@ -1906,17 +2078,21 @@ def run_capture_cli(spec_json):
     """
     import lldb
     spec = json.loads(spec_json)
+    # D3：预算是被钳过还是退回默认值，只有出现在**载荷的 errors[]** 里才算被说过——外层
+    # 读的就是那一个字段，而 §6.2 要求失败也带着自己的判决离场。
+    notes = [spec["budget_note"]] if spec.get("budget_note") else []
     debugger = _LIVE_DEBUGGER
     if debugger is None:
         print(_sentinel(assemble_result(mode="capture", target={"exe": spec.get("exe")},
                                         status="failed", threads=[],
-                                        errors=["bridge imported without a debugger handle"])))
+                                        errors=["bridge imported without a debugger handle"] + notes)))
         return
     debugger.SetAsync(False)
     target = debugger.CreateTarget(spec.get("exe") or "")
     if not target.IsValid():
         print(_sentinel(assemble_result(mode="capture", target={"exe": spec.get("exe")},
-                                        status="failed", threads=[], errors=["invalid executable"])))
+                                        status="failed", threads=[],
+                                        errors=["invalid executable"] + notes)))
         return
     listener = lldb.SBListener("glasspane.bridge")
     process = target.LaunchSimple(spec.get("args") or None, None,
@@ -1924,7 +2100,7 @@ def run_capture_cli(spec_json):
     if not process.IsValid():
         print(_sentinel(assemble_result(mode="capture", target={"exe": spec.get("exe")},
                                         status="failed", threads=[],
-                                        errors=["launch failed (LaunchSimple returned invalid process)"])))
+                                        errors=["launch failed (LaunchSimple returned invalid process)"] + notes)))
         return
     # Wait for the first stop (crash) or exit within the budget.
     budget = float(spec.get("budget_s", 60))
@@ -1948,6 +2124,10 @@ def run_capture_cli(spec_json):
     payload = _payload_from_process(process, spec.get("mode", "capture"))
     if exited and not stopped:
         payload["status"] = "exited-before-stop"
+    if notes:
+        payload.setdefault("errors", [])
+        if isinstance(payload["errors"], list):
+            payload["errors"].extend(notes)
     print(_sentinel(payload))
     try:
         process.Kill()

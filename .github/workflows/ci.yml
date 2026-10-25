@@ -19,10 +19,18 @@ on:
 permissions:
   contents: read
 
+# 每条 job 都带 `timeout-minutes`（2026-10-24 复核 D5：这条文件原来一条都没有，14 个 job 全在
+# GitHub 默认的 6 小时上跑）。默认值不是"没人管"而是"没人管 6 小时"：一次 hung 的 `swift test`、
+# 一个卡在 `npm ci` 的网络、一条停在 lldb attach 上的用例，都要占着并发额度到第六个小时才红，
+# 而这条 lane 的结论就是当天能不能收工。数值不是拍的：取自主仓最近若干次 run 的 job 实测耗时
+# （`gh api repos/<repo>/actions/runs/<id>/jobs`，1.20.1 前后），再按各自最慢的一条放大到 5–8 倍——
+# 宁可宽一档也不能比实际短，一条被 timeout 咬掉的正常发布比一条慢的 CI 贵得多。macOS 那三条
+# （swift 429s、macos-node-gate 229s、publish-gate-selftest 51s）给到 30 分钟。
 jobs:
   swift:
     name: engine (Swift)
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -35,13 +43,16 @@ jobs:
         working-directory: engine
         # pipefail 是这条闸的一半：没有它，`swift test | tee` 的退出码是 tee 的，
         # 一趟真失败的测试会被包装脚本判成绿（本仓栽过：包装脚本的退出码不可信）。
+        # -e 与 -u 同批补上（2026-10-24 复核 D6）：`check-workflows.mjs` 现在要求每条 run 正文
+        # 自己声明闸门，而不是押在 Actions 给 run 块的那个默认 shell 上——默认是 `bash -e`，
+        # 而"默认"是 runner 镜像的行为，不是这个文件承诺过的行为。
         run: |
-          set -o pipefail
+          set -euo pipefail
           swift test 2>&1 | tee /tmp/gp-engine-tests.log
       - name: Test probe SDK package (GlassPaneProbe SPM target)
         working-directory: engine/probe
         run: |
-          set -o pipefail
+          set -euo pipefail
           swift test 2>&1 | tee /tmp/gp-probe-tests.log
       - name: "测试计数闸：一条用例都没跑不许算绿"
         # `swift test` 的退出码只说"没失败"，不说"有没有东西在跑"：用例全删掉、glob 匹配空、
@@ -56,6 +67,7 @@ jobs:
   bridge:
     name: LLDB bridge (Python, pure-logic suite)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -70,6 +82,7 @@ jobs:
   mcp-shell:
     name: mcp-shell (TypeScript)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -132,6 +145,7 @@ jobs:
   install-gate:
     name: root workspace gate (installer + all workspaces)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -172,6 +186,7 @@ jobs:
   macos-node-gate:
     name: macOS node suites (updater + installer, the darwin-only assertions)
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -191,6 +206,7 @@ jobs:
   docs:
     name: public docs (links, anchors, bilingual parity)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -205,6 +221,7 @@ jobs:
   version-line:
     name: version line (single source of truth)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -228,6 +245,7 @@ jobs:
   harness-rulers:
     name: harness rulers (divergence, surfaces, branding, kernel provenance)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -465,6 +483,7 @@ jobs:
   publish-gate-selftest:
     name: publish gate selftest (verify-published, macOS-only product)
     runs-on: macos-14
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -519,6 +538,7 @@ jobs:
   workflow-lint:
     name: GitHub Actions workflows compile
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

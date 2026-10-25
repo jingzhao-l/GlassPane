@@ -24,10 +24,15 @@ on:
 permissions:
   contents: read
 
+# 两条 job 都带 `timeout-minutes`（2026-10-24 复核 D5：原来一条没有，默认 6 小时）。数值取自
+# 这条 lane 最近几次 run 的 job 实测耗时（`gh api …/actions/runs/<id>/jobs`：contract 15–23s、
+# kernel-drift 7–22s），但这条 lane 的耗时下限由**网络**决定——它要拉 142 MB 的上游 tarball 与
+# 一次 registry 查询，所以给的是"慢十倍仍然过"的额度，不是"跑得快"的额度。
 jobs:
   contract:
     name: hook-liveness vs upstream (${{ matrix.purpose }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -45,7 +50,7 @@ jobs:
           PURPOSE: ${{ matrix.purpose }}
           PROBE_TAG: ${{ github.event.inputs.probe_tag }}
         run: |
-          set -eu
+          set -euo pipefail
           pinned="$(node -p "require('./harness/upstream.json').tag")"
           if [ "$PURPOSE" = "pinned" ]; then
             echo "tag=$pinned" >> "$GITHUB_OUTPUT"
@@ -60,7 +65,11 @@ jobs:
           fi
           # 手动输入的 tag 会进 curl URL 与摘要文本：先钳成 release tag 的形状，
           # 不给它任何成为 shell 片段或 ref 注入的机会。
-          if ! printf '%s' "$resolved" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+          # 判据走 here-string 而不是 `printf | grep -q`：这条正文现在带 pipefail，而
+          # `grep -q` 命中即退出，printf 随后死在 SIGPIPE 上——管道状态成了 141，`if !` 把它读成
+          # "形状不合法"，一个**合法**的 probe_tag 会被自己这道闸拒掉。同一个坑本仓已经记过两次
+          # （ci.yml 的 `npm pack | tail`、release.yml 的 `case` 换掉 `printf | grep -q`）。
+          if ! grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' <<<"$resolved"; then
             echo "::error title=probe_tag 形状不合法::期望 vMAJOR.MINOR.PATCH，收到 '$resolved'（未执行任何下载）。"
             exit 1
           fi
@@ -73,6 +82,11 @@ jobs:
           PURPOSE: ${{ matrix.purpose }}
           RESOLVED: ${{ steps.tag.outputs.tag }}
         run: |
+          set -euo pipefail
+          # D6 点名的就是这一步：从前它一行闸门都没有。`RESOLVED` 来自上面那步的 output，
+          # 那步没跑成时它是空的，`[ "$RESOLVED" = "$pinned" ]` 于是判成"不相等"→ 继续往下走，
+          # 而 `node -p` 自己失败时（upstream.json 读不到）正文里的 `$( )` 返回空串加一条 stderr，
+          # 整步照样退 0。默认 shell 的 `-e` 管不到"命令答了个空串"，也管不到管道中间那一段。
           pinned="$(node -p "require('./harness/upstream.json').tag")"
           if [ "$PURPOSE" = "latest" ] && [ "$RESOLVED" = "$pinned" ]; then
             echo "上游最新 release 就是 pin（$pinned）——没有新版本可探查，跳过。" >> "$GITHUB_STEP_SUMMARY"
@@ -87,7 +101,7 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
           DIR: ${{ steps.tag.outputs.checkout_dir }}
         run: |
-          set -eu
+          set -euo pipefail
           mkdir -p "$DIR"
           curl -fsSL -o "$DIR/oc.tgz" "https://codeload.github.com/anomalyco/opencode/tar.gz/refs/tags/$TAG"
           tar xzf "$DIR/oc.tgz" -C "$DIR" --strip-components=1
@@ -106,7 +120,7 @@ jobs:
           HARNESS_UPSTREAM_CHECKOUT: ${{ steps.tag.outputs.checkout_dir }}
           PROBED_TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          set -eu
+          set -euo pipefail
           pinned="$(node -p "require('./harness/upstream.json').tag")"
           # The verdict is the tool's exit code, not the presence of a word in its output.
           # This used to be `out="$(… || true)"` followed by `grep -q "drift"`, which made
@@ -142,6 +156,7 @@ jobs:
       - name: Offline self-consistency (always, cheap)
         if: matrix.purpose == 'pinned'
         run: |
+          set -euo pipefail
           node harness/tools/hook-liveness.mjs --offline
           node -e "const j=require('./harness/contracts/hook-liveness.json');const dead=j.hooks.filter(h=>h.kind==='dead').map(h=>h.name);console.log('known dead hooks:', JSON.stringify(dead));if(!(dead.length===1&&dead[0]==='permission.ask')){console.error('金样的死钩子集与调研结论不符');process.exit(1)}"
           # 这条 lane 自己的判决逻辑也在闸面上：探针改为吃 exit 码之后，"测不了"必须还能
@@ -167,6 +182,7 @@ jobs:
   kernel-drift:
     name: kernel drift probe
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

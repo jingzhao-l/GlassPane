@@ -24,6 +24,8 @@ import contextlib
 import io
 import json
 import os
+import re
+import shlex
 import shutil
 import signal
 import socket
@@ -31,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -1680,12 +1683,15 @@ class StubProcess(object):
 
 
 class StubWatchpoint(object):
-    """SBWatchpoint: the two reads the ledger seam makes. `Disable()` hands back a
-    plain bool — one of the shapes `_outcome_ok` has to normalise."""
+    """SBWatchpoint: the two reads the ledger seam makes. `Disable()` hands back a plain
+    bool — one of the shapes `_outcome_ok` has to normalise. `disable_results` (added for
+    D4) makes the **failure** arm reachable: a queue of outcomes is consumed per call and
+    the last one repeats, so `disable_results=[False]` is "always refuses to disable"."""
 
-    def __init__(self, wp_id):
+    def __init__(self, wp_id, disable_results=None):
         self._id = wp_id
         self.disable_calls = 0
+        self._disable_results = list(disable_results or [])
 
     def IsValid(self):
         return True
@@ -1695,6 +1701,9 @@ class StubWatchpoint(object):
 
     def Disable(self):
         self.disable_calls += 1
+        if self._disable_results:
+            return self._disable_results.pop(0) if len(self._disable_results) > 1 \
+                else self._disable_results[0]
         return True
 
 
@@ -2352,11 +2361,586 @@ class RealMachineCrashScene(unittest.TestCase):
         self.assertEqual(completed.returncode, 3)
 
 
+def _ps_state_stopped(pid):
+    """The fixture's own reading of `ps`, independent of the bridge: a test that can only
+    ask the implementation-under-test whether the process woke is a test that goes red for
+    the wrong reason (and green when the code claims what it did not do)."""
+    got = subprocess.run(["ps", "-p", str(int(pid)), "-o", "state="],
+                         capture_output=True, text=True)
+    text = (got.stdout or "").strip()
+    return bool(text) and text[0].upper() == "T"
+
+
+def _emitted_payload(stdout_text):
+    """`emit` 写出去的那一行是**带哨兵对**的，不是裸 JSON——读它要用桥自己的读法，
+    第二份解析器只会造出第二种错。"""
+    payload, _raw = gb.extract_sentinel(stdout_text)
+    assert payload is not None, "stdout 里没有一个可解析的哨兵载荷：%r" % stdout_text
+    return payload
+
+
+def _kill_quietly(pid):
+    try:
+        os.kill(int(pid), signal.SIGKILL)
+    except (OSError, ValueError):
+        pass
+    try:
+        os.waitpid(int(pid), 0)
+    except (OSError, ValueError):
+        pass
+
+
 def _remove_quietly(path):
     try:
         os.unlink(path)
     except OSError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-24 发布链/尺子/桥 泳道（qoder-20261024-rel-*）补的桥侧用例：D3 / D4 / D7 / F7 / F2-F3。
+# 每一条都是先对着**未改的实现**跑红的：写在下面的注释里的是那一次红的名字。
+# ---------------------------------------------------------------------------
+
+class CaptureBudgetIsClampedNotFatal(unittest.TestCase):
+    """D3：`GPBRIDGE_BUDGET=abc` 从前让桥以一段 ValueError traceback 离场、退 1，
+    `--out` 与 `--send-sock` 零字节——本机已被上一泳道实测复现。§6.2 说的是"失败也以
+    JSON 离场"，而 traceback 不是 JSON：一个字段都读不到。"""
+
+    def test_unparsable_budget_falls_back_to_the_default_and_says_so(self):
+        # 红的名字：`AttributeError: module 'glasspane_bridge' has no attribute
+        # 'capture_budget_s'`（未改实现里没有这一个判据）。
+        budget, note = gb.capture_budget_s("abc", 120)
+        self.assertEqual(60.0, budget, "解析不进去就用 BUDGET_DEFAULT_S，不是崩、也不是 0")
+        self.assertIsNotNone(note, "被忽略的那个值必须被说出来，不能悄悄换成默认")
+        self.assertIn("abc", note)
+
+    def test_budget_is_clamped_between_the_floor_and_the_outer_timeout(self):
+        self.assertEqual((30.0, gb.capture_budget_s("1", 120)[1]),
+                         gb.capture_budget_s("1", 120),
+                         "比 debugserver 冷启动还短的预算要钳到 30s 地板")
+        budget, note = gb.capture_budget_s("99999", 120)
+        self.assertEqual(120.0, budget,
+                         "比外层 --timeout 还长的预算永远不会被观测到——外层先 killpg")
+        self.assertIn("clamped", note)
+        self.assertEqual((60.0, None), gb.capture_budget_s(None, 120),
+                         "没设这个环境变量时不许编出一条 note")
+
+    def test_build_lldb_argv_survives_a_garbage_budget(self):
+        """未改实现的那一条红：`ValueError: could not convert string to float: 'abc'`
+        从 `build_lldb_argv` 里抛出来，早于任何一次 spawn。"""
+        with mock.patch.dict(os.environ, {"GPBRIDGE_BUDGET": "abc"}):
+            argv = gb.build_lldb_argv("/tmp/glasspane_bridge.py", mode="capture",
+                                      exe="/bin/false", timeout=120)
+        spec = json.loads(base64.b64decode(
+            [a for a in argv if a.startswith("script glasspane_bridge.run_capture_cli_b64(")][0]
+            .split("'", 2)[1]).decode("utf-8"))
+        self.assertEqual(60.0, spec["budget_s"])
+        self.assertIn("GPBRIDGE_BUDGET", spec.get("budget_note", ""),
+                      "被退回默认值这件事要跟着载荷走，而不是只在外层说说")
+
+    def test_run_outer_leaves_json_when_the_budget_env_is_garbage(self):
+        """整条路径的判据：§6.2 的"失败也以 JSON 离场"必须由**退出码 + stdout** 一起兑现。"""
+        seen = {}
+
+        def fake_child(argv, timeout, env=None):
+            seen["nonce"] = (env or {}).get(gb.SENTINEL_NONCE_ENV)
+            payload = {"mode": "capture", "status": "eStateStopped", "threads": [{"id": 1}]}
+            return gb._Completed(0, gb.wrap_sentinel(json.dumps(payload), nonce=seen["nonce"]), ""), False
+
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"GPBRIDGE_BUDGET": "abc"}), \
+                mock.patch.object(gb, "run_child_captured", side_effect=fake_child), \
+                contextlib.redirect_stdout(out):
+            code = gb.main(["capture", "--exe", "/bin/false", "--timeout", "120"])
+        self.assertIn(code, (0, 1, 3), "退 1 加一段 traceback 就是 D3 的本体")
+        emitted = _emitted_payload(out.getvalue())
+        joined = " ".join(emitted.get("errors", []))
+        self.assertIn("GPBRIDGE_BUDGET", joined,
+                      "载荷里读不到这一句，调用方就永远不知道自己跑的是哪一档预算")
+
+
+class DisarmFailureKeepsTheWatchpointHandle(unittest.TestCase):
+    """D4：`_disarm_watchpoint` 从前在 `Disable()` 成功**之前**就 `pop`。失败时那个
+    SBWatchpoint 永久失联（没有第二处还拿着它）、硬件槽位没让出，而账本已经在同一条
+    路径上 `release(addr)` 并把队头 arm 进同一个槽。"""
+
+    def setUp(self):
+        self.live = {}
+        mock.patch.object(gb, "_LIVE_WATCHPOINTS", self.live).start()
+        self.addCleanup(mock.patch.stopall)
+
+    def test_failed_disable_leaves_the_handle_tracked_for_the_next_reconcile(self):
+        # 红的名字：`AssertionError: 0x1001 must stay tracked` —— 未改实现先 pop 再 Disable。
+        stuck = StubWatchpoint(7, disable_results=[False, True])
+        self.live["0x1001"] = stuck
+        ok, detail = gb._disarm_watchpoint("0x1001")
+        self.assertFalse(ok, detail)
+        self.assertIn("0x1001", self.live,
+                      "Disable 没成功就把句柄摘掉，下一次 reconcile 再也认不出这条监视点")
+        self.assertEqual(1, stuck.disable_calls)
+        # 第二次调用（"下一次 reconcile"）必须还能试，并且成功之后才摘。
+        ok2, _detail = gb._disarm_watchpoint("0x1001")
+        self.assertTrue(ok2, ok2)
+        self.assertEqual(2, stuck.disable_calls)
+        self.assertNotIn("0x1001", self.live, "成功之后句柄才该走")
+
+    def test_reconcile_notes_the_unconfirmed_disable_and_still_records_the_hit(self):
+        queue = gb.WatchQueue()
+        live = {}
+        armed_calls = []
+
+        def fake_arm(debugger, entry):
+            armed_calls.append(dict(entry))
+            return (True, str(len(armed_calls)))
+
+        for attribute, value in (("_WATCH_QUEUE", queue), ("_LIVE_WATCHPOINTS", live),
+                                 ("_RECONCILED_STOPS", set())):
+            mock.patch.object(gb, attribute, value).start()
+        mock.patch.object(gb, "_arm_watchpoint", side_effect=fake_arm).start()
+        self.addCleanup(mock.patch.stopall)
+        for index in range(gb.HW_WATCHPOINT_SLOTS):
+            addr = "0x%x" % (0x1000 + index)
+            queue.add({"addr": addr, "size": 8, "mode": "w"})
+            queue.mark_live(addr)
+            live[addr] = StubWatchpoint(100 + index, disable_results=[False])
+        queue.add({"addr": "0x2000", "size": 8, "mode": "w"})
+        stuck = live["0x1001"]
+        threads = [StubThread(tid=11, stop_reason=4, stop_data=(stuck.GetID(), 0x1001),
+                              frames=[StubFrame(function="main")])]
+        process = StubProcess(threads=threads, stop_id=7)
+        report = gb.reconcile_watchpoint_stops(StubDebugger(process), process)
+        self.assertEqual(["0x1001"], report["hits"], report)
+        # 那条 note 住在**账本**里（它要随每个 payload 的 errors[] 出去），而不是 report["notes"]：
+        # 判据落在读它的那一侧，而不是落在测试方便写的那一侧。
+        self.assertTrue(any("not confirmed disabled" in n for n in queue.notes),
+                        (report["notes"], queue.notes))
+        self.assertIn("0x1001", live, "判据不许把没让出的槽位说成已经让出")
+        self.assertIn("0x2000", [call["addr"] for call in armed_calls],
+                      "队头仍然被 arm 进那个槽——这正是 note 要说出来的代价")
+
+
+class NonTimeoutChildFailureStillKillsTheGroup(unittest.TestCase):
+    """D7：`communicate()` 抛**非 TimeoutExpired** 异常时，`finally` 只关管道 + wait，
+    从不 killpg——而 :922-926 整段论证的就是"只杀直接子进程会把目标留在 SIGSTOP"。"""
+
+    def test_injected_non_timeout_exception_still_kills_the_child_group(self):
+        real_popen = subprocess.Popen
+        created = []
+
+        class Exploding(object):
+            """A real child whose `communicate()` raises something that is not a timeout."""
+
+            def __init__(self, argv, **kwargs):
+                self._p = real_popen(argv, **kwargs)
+                created.append(self._p)
+
+            def communicate(self, timeout=None):
+                raise ValueError("injected non-timeout failure inside communicate()")
+
+            def __getattr__(self, name):
+                return getattr(self._p, name)
+
+        with mock.patch.object(subprocess, "Popen", Exploding):
+            with self.assertRaises(ValueError):
+                gb.run_child_captured([sys.executable, "-c", "import time; time.sleep(300)"],
+                                      timeout=30.0)
+        self.assertEqual(1, len(created))
+        child = created[0]
+        # 红的名字：`AssertionError: the child outlived a non-timeout communicate() failure`
+        # ——未改实现那条路径关管道、wait 到超时，然后留下一个活着的进程组。
+        pid = child.pid
+        alive = True
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                alive = False
+                break
+            time.sleep(0.05)
+        self.assertFalse(alive,
+                         "pid %d 还活着：非超时的失败没被整组收掉，被 attach 的目标就留在那里" % pid)
+
+
+class TimeoutWakesTheAttachedTarget(unittest.TestCase):
+    """F7：超时整组 SIGKILL 之后，被 `--pid` 附上的进程仍停在 SIGSTOP（全仓无 SIGCONT），
+    而载荷那一句写的是 "a target that had been stopped here is no longer held by this
+    bridge"。那不是判决，是一次谎。"""
+
+    def _stopped_child(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        self.addCleanup(lambda: _kill_quietly(child.pid))
+        os.kill(child.pid, signal.SIGSTOP)
+        deadline = time.time() + 5
+        while time.time() < deadline and not _ps_state_stopped(child.pid):
+            time.sleep(0.05)
+        self.assertTrue(_ps_state_stopped(child.pid),
+                        "夹具没能造出一个停住的进程，这一条就测不到任何东西")
+        return child
+
+    def test_resume_frozen_target_wakes_a_sigstopped_pid(self):
+        # 红的名字：`AttributeError: module 'glasspane_bridge' has no attribute
+        # 'resume_frozen_target'`（未改实现连唤醒都不做）。
+        child = self._stopped_child()
+        woke, detail = gb.resume_frozen_target(child.pid)
+        self.assertTrue(woke, detail)
+        self.assertFalse(_ps_state_stopped(child.pid),
+                         "说过它醒了，就必须读回一个不是 T 的状态")
+
+    def test_resume_reports_a_gone_pid_and_a_missing_pid_honestly(self):
+        spawned = self._stopped_child()
+        pid = spawned.pid
+        spawned.kill()
+        spawned.wait()
+        woke, detail = gb.resume_frozen_target(pid)
+        self.assertTrue(woke, detail)
+        self.assertIn("gone", detail)
+        woke, detail = gb.resume_frozen_target(None)
+        self.assertFalse(woke, "没有 --pid 时不许声称自己唤醒过什么")
+        self.assertIn("no --pid", detail)
+
+    def test_timeout_payload_says_whether_the_target_actually_woke(self):
+        child = self._stopped_child()
+        timed_out = gb._Completed(None, "", "")
+
+        def fake_child(argv, timeout, env=None):
+            return timed_out, True
+
+        out = io.StringIO()
+        with mock.patch.object(gb, "run_child_captured", side_effect=fake_child), \
+                contextlib.redirect_stdout(out):
+            code = gb.main(["capture", "--pid", str(child.pid), "--timeout", "1"])
+        self.assertEqual(1, code)
+        emitted = _emitted_payload(out.getvalue())
+        joined = " ".join(emitted.get("errors", []))
+        self.assertNotIn("no longer held by this bridge", joined,
+                         "那句无人验过的断言不许回来：它就是这一条缺陷的本体")
+        self.assertNotIn("IT IS NOT CONFIRMED RESUMED", joined, joined)
+        self.assertIn("it was resumed", joined, joined)
+        self.assertFalse(_ps_state_stopped(child.pid),
+                         "载荷说醒了而进程还停着，就是同一句谎的第二个版本")
+
+    def test_unmeasurable_wake_is_reported_as_unmeasured_not_as_woken(self):
+        child = self._stopped_child()
+        timed_out = gb._Completed(None, "", "")
+        out = io.StringIO()
+        with mock.patch.object(gb, "run_child_captured", side_effect=lambda *a, **k: (timed_out, True)), \
+                mock.patch.object(gb, "_process_is_stopped", return_value=None), \
+                contextlib.redirect_stdout(out):
+            gb.main(["capture", "--pid", str(child.pid), "--timeout", "1"])
+        emitted = _emitted_payload(out.getvalue())
+        joined = " ".join(emitted.get("errors", []))
+        self.assertIn("NOT measured", joined, joined)
+        self.assertNotIn("it was resumed", joined,
+                         "读不到状态就是没测到，不许写成已经醒了")
+
+
+class RemedyCommandsStayOneShellWord(unittest.TestCase):
+    """F2/F3：remedy 是给 agent 抄进 shell 的一行。旧文案四处 `'%s'` 插值**没走 quoting**
+    （`bridge_path` 来自 `__file__`，目录名里一个 `'` 就破形），落点还是世界可写目录里
+    一个可预测的名字。`mcp-shell/test/remedy-shell-quoting.test.mjs` 的扫描面不含
+    `bridge/*.py`，而那条闸住在别的泳道里（本泳道没有 mcp-shell 的写权限），所以 Python
+    面的词形由这一条自己钉。"""
+
+    HOSTILE = ["/tmp/gp/it's/glasspane_bridge.py",
+               "/tmp/gp sp/glasspane_bridge.py",
+               "/tmp/x`;touch /tmp/pwned/glasspane_bridge.py"]
+    STDERR = "error: module importing failed: invalid pathname '/tmp/gp'\n"
+
+    def _commands(self, remedy):
+        """每一支当场可跑的补救：反引号里、以命令词开头的那些（prose 那一支跳过）。"""
+        heads = ("ls ", "python3 ", "dest_dir=", "rm ")
+        return [span for span in re.findall(r"`([^`]+)`", remedy)
+                if span.strip().startswith(heads)]
+
+    def test_every_remedy_command_parses_with_the_path_as_one_word(self):
+        """词形判据。反引号是这段文字的 markdown 边界，所以**名字里带反引号**的路径不能
+        用"取反引号之间的命令"这个读法——那测的是 markdown 而不是 shell。真正的注入面
+        是 `'`（把引号组撕开的那一枚）与空格，两者都在这里逐词判；反引号那一支由
+        `test_remedy_never_interpolates_the_path_unquoted` 用同一个 shlex.quote 形态判。"""
+        for path in [p for p in self.HOSTILE if "`" not in p] + ["/tmp/it's/glasspane_bridge.py"]:
+            cause, remedy = gb.no_payload_cause(self.STDERR, "", path)
+            self.assertEqual("bridge-not-imported", cause)
+            commands = self._commands(remedy)
+            self.assertTrue(commands, "remedy 里一支可跑的命令都没有：%s" % remedy)
+            for cmd in commands:
+                try:
+                    words = shlex.split(cmd)
+                except ValueError as error:
+                    self.fail("路径 %r 让 remedy 的这一支不再是合法 shell：%r\n  %s"
+                              % (path, error, cmd))
+                if "ls -l" in cmd or " cp " in cmd or cmd.startswith("python3 -c"):
+                    self.assertIn(path, words,
+                                  "路径必须是**一个词**，而它被拆成了：%r" % (words,))
+                    self.assertNotIn("touch", words, "破形之后多出来的那个词就是注入：%r" % (words,))
+                    self.assertNotIn("/tmp/pwned", words)
+                    self.assertNotIn("s/glasspane_bridge.py", words,
+                                     "被 `'` 撕开之后剩下的那半截就是第二个词：%r" % (words,))
+
+    def test_the_landing_spot_is_no_longer_a_predictable_world_writable_path(self):
+        _cause, remedy = gb.no_payload_cause(self.STDERR, "", "/tmp/it's/glasspane_bridge.py")
+        # 只看**当场要跑的那几行**：prose 里可以出现那个名字（本条就在说它为什么不行），
+        # 而 `cp … /tmp/<固定名>` 那一支一旦出现就是把自己交给第一个抢到那个名字的本地账号。
+        for cmd in self._commands(remedy):
+            self.assertNotIn("/tmp/glasspane_bridge.py", cmd,
+                             "世界可写目录里的固定名字：谁先建谁就是这段代码的作者\n  %s" % cmd)
+        self.assertTrue(any("mktemp -d" in cmd for cmd in self._commands(remedy)),
+                        "0700、名字不可预测，才是这条 cp 该有的落点")
+
+    def test_remedy_quotes_the_path_it_interpolates(self):
+        """对着未改实现的红那一行：`AssertionError: 旧文案的插值形态 '<path>' 还在
+        remedy 里` —— 那是 `'%s'` 直接拼出来的东西，目录名里一个 `'` 就破形。"""
+        for path in self.HOSTILE:
+            _cause, remedy = gb.no_payload_cause(self.STDERR, "", path)
+            self.assertIn(shlex.quote(path), remedy,
+                          "remedy 里的路径必须已经是 POSIX-shell 引用过的形态：%r" % path)
+            if "'" in path:
+                self.assertNotIn("'%s'" % path, remedy,
+                                 "裸的 \"'\" + path + \"'\" 不是引用，是把 path 里那个引号当边界")
+        # 旧落点：世界可写目录里一个可预测的名字，谁先建谁就是这段代码的作者。
+        _cause, remedy = gb.no_payload_cause(self.STDERR, "", "/tmp/x/glasspane_bridge.py")
+        for cmd in self._commands(remedy):
+            self.assertNotIn("/tmp/glasspane_bridge.py", cmd, cmd)
+
+
+# ---------------------------------------------------------------------------
+# 收口补测（qoder-20261024-release-chain）：上面那批 `qoder-20261024-rel-*` 用例写完了
+# D3/D4/D7/F7/F2-F3 的主干，本段补的是它们没各自点到的格子——预算五种输入的**逐档**
+# 形状（inf / 0 / 负数在前面的表里只是一格）、run_outer 对每一档垃圾值都"以 JSON 离场、
+# 不以 traceback 离场"、`resume_frozen_target` 四条出路在桩下逐条对报文（不借真进程，
+# 桩化 os.kill 与 `ps` 输出本身）、`_disarm_watchpoint` 失败时**账本不 release**（前面
+# 判的是 reconcile 层的代价，这里判的是这个函数自己的边界），以及 remedy 里
+# `python3 -c` 那一支把路径**当参数递进去**而不是插进被引起来的程序体。
+# REVERSE MUTATIONS（每条 2026-10-24 实测过红，备份在
+# /var/tmp/glasspane-main-check/snapshots/relt/，shasum -a 256 核回）：
+#   · `if value != value or value in (inf, -inf):` → `if False:` → 五种输入那条红在
+#     "inf 那一档必须说 not a finite number"；
+#   · `clamped = min(max(value, floor), ceiling)` → `clamped = value` → 同一条红在
+#     0/负数那一档（预算原样返回、note 为空）；
+#   · `build_lldb_argv` 里改用回旧写法 `max(30.0, float(os.environ.get(...)))` →
+#     traceback 那条红在 "abc 让 main 抛了出来"（正是 D3 的本体）；
+#   · `stopped = _process_is_stopped(numeric)` 之后把 True 那一支报成"已恢复" →
+#     四条出路那条红在"读完仍是 stopped 不许说醒了"；
+#   · `_disarm_watchpoint` 里 `if ok:` → `if True:` → 句柄/账本那条红在"失败后地址
+#     还该在表里"；
+#   · `quoted = shlex.quote(str(named_us))` → `quoted = str(named_us)` → remedy 那条红在
+#     "`python3 -c` 那一支不再是一个合法词序列"。
+# ---------------------------------------------------------------------------
+
+class CaptureBudgetFiveArmsAndNoTracebackExit(unittest.TestCase):
+    """D3 的逐档表：非数、inf、超大值、0/负数、缺省，各回各的形状，note 点名原值；
+    且每一档下 run_outer 都以 §6.2 的 JSON 离场，不是 traceback。"""
+
+    def test_each_input_answers_its_documented_arm(self):
+        cases = [
+            # (输入, timeout, 期望秒数, note 必须含的子串)
+            ("abc", 120, 60.0, ["not a number", "abc"]),
+            ("inf", 120, 60.0, ["not a finite number", "inf"]),
+            ("-inf", 120, 60.0, ["not a finite number", "-inf"]),
+            ("99999", 120, 120.0, ["clamped", "99999"]),
+            ("0", 120, 30.0, ["clamped", "GPBRIDGE_BUDGET=0"]),
+            ("-5", 120, 30.0, ["clamped", "-5"]),
+            (None, 120, 60.0, None),
+            ("45", 120, 45.0, None),
+        ]
+        for raw, timeout, want, note_parts in cases:
+            with self.subTest(raw=raw):
+                budget, note = gb.capture_budget_s(raw, timeout)
+                self.assertEqual(want, budget)
+                if note_parts is None:
+                    self.assertIsNone(note, "合法值与缺省不许编出一条 note：%r" % (note,))
+                    continue
+                self.assertIsNotNone(note)
+                for part in note_parts:
+                    self.assertIn(part, note, "errors 文案必须点名原值/原档位：%r" % note)
+
+    def test_no_garbage_budget_leaves_the_bridge_through_a_traceback(self):
+        """§6.2 的离场判据逐档走一遍：main 不许抛，stdout 必须是带哨兵的 JSON，
+        且 payload 的 errors[] 里读得到那句"这个值被动过"。"""
+        for raw in ("abc", "inf", "-inf", "0", "-5", "99999"):
+            with self.subTest(raw=raw):
+                seen = {}
+
+                def fake_child(argv, timeout, env=None):
+                    seen["nonce"] = (env or {}).get(gb.SENTINEL_NONCE_ENV)
+                    payload = {"mode": "capture", "status": "eStateStopped",
+                               "threads": [{"id": 1}]}
+                    return gb._Completed(0, gb.wrap_sentinel(json.dumps(payload),
+                                                             nonce=seen["nonce"]), ""), False
+
+                out = io.StringIO()
+                try:
+                    with mock.patch.dict(os.environ, {"GPBRIDGE_BUDGET": raw}), \
+                            mock.patch.object(gb, "run_child_captured", side_effect=fake_child), \
+                            contextlib.redirect_stdout(out):
+                        code = gb.main(["capture", "--exe", "/bin/false", "--timeout", "120"])
+                except Exception as error:
+                    self.fail("GPBRIDGE_BUDGET=%r 让 main 抛了（%r）——traceback 不是 JSON 离场，"
+                              "就是 D3 的本体" % (raw, error))
+                self.assertIn(code, (0, 1, 3), "退出码必须是既定的那一族，不是解释器的 1+traceback")
+                emitted = _emitted_payload(out.getvalue())
+                joined = " ".join(emitted.get("errors", []))
+                self.assertIn("GPBRIDGE_BUDGET", joined,
+                              "每一档都得在载荷里留下名字：%r" % (emitted,))
+                self.assertIn(raw, joined, "errors 要点名原值：%r" % joined)
+
+
+class ResumeFrozenTargetOutcomesUnderStubs(unittest.TestCase):
+    """F7 的桩面版：四条出路（唤醒成功 / SIGCONT 失败 / 读完仍是 stopped / 读不到状态）
+    各自喂一个桩化的 os.kill 与 `ps` 输出——报文必须与**被桩掉的观测**一致，不许把
+    "没观测"写成"已恢复"，也不许在 kill 都没落到时去读 ps 并编出一条状态。"""
+
+    def _run(self, kill_side_effect, ps_stdout):
+        run_calls = []
+
+        def fake_run(argv, **kwargs):
+            run_calls.append(argv)
+            return types.SimpleNamespace(stdout=ps_stdout, returncode=0)
+
+        with mock.patch.object(gb.os, "kill", side_effect=kill_side_effect), \
+                mock.patch.object(gb.subprocess, "run", side_effect=fake_run):
+            woke, detail = gb.resume_frozen_target(4242)
+        return woke, detail, run_calls
+
+    def test_wake_success_is_reported_only_when_ps_reads_not_stopped(self):
+        woke, detail, calls = self._run(None, "S")
+        self.assertTrue(woke, detail)
+        self.assertIn("reads as running again", detail)
+        self.assertEqual(1, len(calls), "唤醒判据必须真的读了 ps，而不是没读就说醒了")
+        self.assertEqual(["ps", "-p", "4242"], calls[0][:3])
+
+    def test_failed_sigcont_says_still_held_and_never_consults_ps(self):
+        woke, detail, calls = self._run(PermissionError(1, "Operation not permitted"), "S")
+        self.assertFalse(woke, detail)
+        self.assertIn("STILL held stopped", detail)
+        self.assertIn("SIGCONT to pid 4242 failed", detail)
+        self.assertEqual([], calls, "kill 没落到时读到的任何状态都是编的")
+
+    def test_still_stopped_after_cont_is_reported_as_not_resumed(self):
+        woke, detail, _calls = self._run(None, "T")
+        self.assertFalse(woke, "读完仍是 stopped 却报成唤醒，就是那句谎的桩版")
+        self.assertIn("STILL reads as stopped", detail)
+        self.assertNotIn("running again", detail)
+
+    def test_unreadable_state_is_reported_as_not_measured(self):
+        woke, detail, _calls = self._run(None, "   ")
+        self.assertFalse(woke, detail)
+        self.assertIn("could not read its state", detail)
+        self.assertIn("NOT measured", detail)
+        self.assertNotIn("running again", detail, "读不到 = 没测到，不是测到了'没停'")
+
+    def test_gone_and_nonexistent_pid_arms(self):
+        woke, detail, _ = self._run(ProcessLookupError(3, "no such process"), "")
+        self.assertTrue(woke, detail)
+        self.assertIn("gone", detail)
+        woke, detail = gb.resume_frozen_target(None)
+        self.assertFalse(woke)
+        self.assertIn("no --pid", detail)
+        woke, detail = gb.resume_frozen_target("not-a-pid")
+        self.assertFalse(woke)
+        self.assertIn("not a number", detail)
+
+
+class DisarmFailureIsItsOwnLedgerBoundary(unittest.TestCase):
+    """D4 的函数边界：上面的 reconcile 用例判的是"代价要 note 出来"，这里判的是
+    `_disarm_watchpoint` 自己——失败时句柄留在表里、`_addr_for_watchpoint_id` 还认得它、
+    账本一条不动；成功时只摘句柄，release 仍然是调用方的事。"""
+
+    def setUp(self):
+        self.live = {}
+        self.queue = gb.WatchQueue()
+        mock.patch.object(gb, "_LIVE_WATCHPOINTS", self.live).start()
+        mock.patch.object(gb, "_WATCH_QUEUE", self.queue).start()
+        self.addCleanup(mock.patch.stopall)
+        self.assertEqual("armed", self.queue.add({"addr": "0x2001", "size": 8, "mode": "w"})[0])
+        self.queue.mark_live("0x2001")
+
+    def test_failed_disable_keeps_the_handle_resolvable_and_touches_no_ledger(self):
+        stuck = StubWatchpoint(9, disable_results=[False])
+        self.live["0x2001"] = stuck
+        ok, detail = gb._disarm_watchpoint("0x2001")
+        self.assertFalse(ok, detail)
+        self.assertIn("0x2001", self.live, "Disable 失败后句柄必须还在表里")
+        self.assertEqual("0x2001", gb._addr_for_watchpoint_id(9),
+                         "下一次停打在这条监视点上，还必须认得出它是谁")
+        self.assertEqual(["0x2001"], [e["addr"] for e in self.queue.armed],
+                         "这个函数不许动账本：release 是命中处理那条路径的事")
+        self.assertEqual([], self.queue.spent, "失败的一支不许被记成 spent")
+
+    def test_successful_disable_pops_only_the_handle(self):
+        done = StubWatchpoint(10, disable_results=[True])
+        self.live["0x2001"] = done
+        ok, detail = gb._disarm_watchpoint("0x2001")
+        self.assertTrue(ok, detail)
+        self.assertNotIn("0x2001", self.live, "成功之后句柄才该走")
+        self.assertIsNone(gb._addr_for_watchpoint_id(10),
+                          "句柄走了这条监视点就不许再被认成活的")
+        self.assertEqual(["0x2001"], [e["addr"] for e in self.queue.armed],
+                         "pop 句柄不等于替调用方 release 账本")
+
+    def test_untracked_address_and_missing_binding_answer_honestly(self):
+        ok, detail = gb._disarm_watchpoint("0xdead")
+        self.assertFalse(ok)
+        self.assertIn("no live watchpoint", detail)
+
+        class NoDisable(object):
+            def GetID(self):
+                return 11
+
+        self.live["0x3002"] = NoDisable()
+        ok, detail = gb._disarm_watchpoint("0x3002")
+        self.assertFalse(ok, detail)
+        self.assertIn("no SBWatchpoint.Disable()", detail)
+        self.assertIn("0x3002", self.live, "连 Disable 都没有的绑定，句柄同样不许消失")
+
+
+class RemedyArmsAreQuotedArgumentsNotInterpolations(unittest.TestCase):
+    """F2/F3 的另两个角：`python3 -c` 那一支把路径**作为 argv 词**递进去（程序体里
+    不许再出现插值——那是第二个 quoting surface），cp 那一支的落点是 `$dest_dir` 引起来的
+    字面量、全程读不出裸 `/tmp/glasspane_bridge.py` 这个词。"""
+
+    HOSTILE = ["/tmp/gp/it's/glasspane_bridge.py", "/tmp/gp sp/glasspane_bridge.py"]
+
+    def _arms(self, remedy):
+        heads = ("ls ", "python3 ", "dest_dir=")
+        return [span for span in re.findall(r"`([^`]+)`", remedy)
+                if span.strip().startswith(heads)]
+
+    def test_python_c_arm_carries_the_path_as_argv_and_no_path_in_the_program(self):
+        for path in self.HOSTILE:
+            with self.subTest(path=path):
+                _cause, remedy = gb.no_payload_cause(
+                    "error: module importing failed: invalid pathname '/tmp/gp'\n", "", path)
+                arm = [cmd for cmd in self._arms(remedy) if cmd.startswith("python3 -c")]
+                self.assertEqual(1, len(arm), remedy)
+                try:
+                    words = shlex.split(arm[0])
+                except ValueError as error:
+                    self.fail("带 %r 的 checkout 路径把 remedy 撕开了：%r（%s）" % (path, error, arm[0]))
+                self.assertEqual(4, len(words), "python3 -c <程序体> <路径>，一词不多一词不少：%r" % (words,))
+                self.assertEqual(["python3", "-c"], words[:2])
+                self.assertIn("sys.argv[1]", words[2], "路径必须经 argv 递进去，不许插进被引起来的程序体")
+                self.assertNotIn(path, words[2], "程序体里出现原路径 = 又一次裸插值")
+                self.assertEqual(path, words[3], "路径必须整体是一个词：%r" % (words,))
+
+    def test_copy_arm_lands_in_a_private_dir_and_never_names_the_fixed_tmp_path(self):
+        for path in self.HOSTILE + ["/tmp/x/glasspane_bridge.py"]:
+            with self.subTest(path=path):
+                _cause, remedy = gb.no_payload_cause(
+                    "error: module importing failed: invalid pathname '/tmp/gp'\n", "", path)
+                arms = self._arms(remedy)
+                self.assertTrue(any("mktemp -d" in cmd for cmd in arms), remedy)
+                for cmd in arms:
+                    words = shlex.split(cmd)
+                    self.assertNotIn("/tmp/glasspane_bridge.py", words,
+                                     "世界可写目录里的可预测名字不许以任何一支命令的形式回来：%s" % cmd)
+                cp_arm = [cmd for cmd in arms if cmd.startswith("dest_dir=")]
+                self.assertEqual(1, len(cp_arm), remedy)
+                words = shlex.split(cp_arm[0])
+                self.assertIn(path, words, "cp 的源必须是原路径的那一个词：%r" % (words,))
+                self.assertIn('"$dest_dir/glasspane_bridge.py"', cp_arm[0],
+                              "落点只能是那个引起来的 $dest_dir 字面量")
 
 
 if __name__ == "__main__":

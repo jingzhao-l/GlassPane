@@ -21,6 +21,13 @@
  * 为什么要原子回滚："部分统一"比"改不动"危险得多——npm 包版本、daemon 自报版本
  * 与 install.sh 钉的发布 tag 一旦各自漂移，用户装到的和仓库里的就对不上了。
  *
+ * 取号只接受**三段号**（C12，2026-10-24）：`x.y.z`，带 prerelease 尾巴的一律在写任何东西之前拒。
+ * 原因不是风格：更新器解析发布 tag 的那两处判据（`updater/lib/version.js` 的 `TAG_RE`、
+ * `updater/lib/selfcheck.js` 的 `requirePlainVersion`）与 `scripts/assert-tag-ready.mjs` 的
+ * `tagShapeOk` 都只认三段，而 `scripts/version-sites.mjs` 的 `SEMVER_RE` 认整条 npm semver。
+ * 就是这个 prerelease 尾巴的口径差，落在"取号全绿、发布后每台机器的更新链永久 tag-unparseable"上——
+ * 见下面那条拒的文案，测试在 `updater/test/qoder-20261024-version-corpus.test.mjs`。
+ *
  * 故意不做的事：不建 git tag、不建 GitHub Release、不 npm publish——那些是发布
  * 动作，由 owner 显式触发（tag/Release 资产走 release.yml；npm 走 CI provenance）。
  */
@@ -41,10 +48,36 @@ function fail(message) {
 
 const arg = process.argv[2]
 if (!arg || arg === '--help' || arg === '-h') {
-  process.stdout.write(`用法: node ${path.relative(process.cwd(), import.meta.filename)} <semver> [--no-lock]\n`)
+  process.stdout.write(`用法: node ${path.relative(process.cwd(), import.meta.filename)} <X.Y.Z> [--no-lock]\n`)
+  process.stdout.write('      X.Y.Z 必须是三段号：带 prerelease（1.2.0-beta.1）的号会被直接拒掉——更新器只认三段。\n')
   process.exit(arg ? 0 : 1)
 }
 if (!SEMVER_RE.test(arg)) fail(`版本号不是合法 semver：${arg}`)
+
+/**
+ * 三段判据（C12，2026-10-24）：`SEMVER_RE` 是 `scripts/version-sites.mjs` 里那条形状，它写的是
+ * "核心 `x.y.z` + 一条**可选**的 prerelease 尾巴 `(?:-[0-9A-Za-z.-]+)?`"。发布线要的正是
+ * "有核心、没有那条尾巴"，所以这里不重抄第二条正则（那就会有两份形状），只否掉那条尾巴本身。
+ * 为什么不另 import `scripts/assert-tag-ready.mjs` 的 `tagShapeOk`：那是打 tag 那一步的闸，它
+ * 自己又拉起 `assert-ci-green.mjs`（gh），把取号器接在发布闸的模块图上不是必要的一条边；而且
+ * `updater/test/scripts-set-version.test.mjs` 的夹具只往 scratch 里复制 set-version / version-sites
+ * / check-version 三份脚本，新增一条同目录 import 会让那一套用例全部红在 ERR_MODULE_NOT_FOUND。
+ * 真源仍然只有一份形状（`SEMVER_RE`），等价性由 `updater/test/qoder-20261024-version-corpus.test.mjs`
+ * 逐样本对着 `tagShapeOk` 与更新器自己的 `TAG_RE` 钉住：任一侧改形状，那条测试点名它。
+ */
+if (arg.includes('-')) {
+  fail(`版本号带 prerelease 尾巴：${arg} —— 取号这一步拒了，一个字都没写。
+
+为什么这不是风格偏好：发布线对更新器是**可解析性**判据。updater/lib/version.js 的 TAG_RE 与
+updater/lib/selfcheck.js 的 requirePlainVersion、scripts/assert-tag-ready.mjs 的 tagShapeOk
+都只认 x.y.z。今天这条线允许 prerelease：写满 ${SITES.length} 个位点、所有闸全绿；而一旦按它打出
+tag 发 Release，每台装了 updater 的机器都会永久 tag-unparseable——更新链静默停摆，且今天没有任何
+一个读者会替它喊。所以这一拒落在取号，而不是落在发布之后。
+
+下一步（确切的）：取一个三段号重跑同一条命令，例如 node scripts/set-version.mjs ${arg.split('-')[0]}；
+要发预发布通道请走 npm 的 dist-tag，它不在这条钉死发布 tag 的版本线上。`)
+}
+
 const skipLock = process.argv.slice(3).includes('--no-lock')
 
 // --- ① 只读试算 -------------------------------------------------------------

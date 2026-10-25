@@ -20,8 +20,8 @@
  * 用法：
  *   node scripts/check-workflows.mjs              # 体检全部 workflow，有问题退 1
  *   node scripts/check-workflows.mjs --self-test  # 每条规则各打一档变异，要求它按声明回答
- *   node scripts/check-workflows.mjs --jobs       # 把 job 表（名字/行号/runs-on/run 正文）打成
- *                                                 # JSON 退 0；一条 job 都没读到就退 2，不用空数组
+ *   node scripts/check-workflows.mjs --jobs       # 把 job 表（名字/行号/runs-on/timeout-minutes/run 正文）
+ *                                                 # 打成 JSON 退 0；一条 job 都没读到就退 2，不用空数组
  *                                                 # 冒充"没有 job"
  *
  * Exit codes: 0 clean, 1 a workflow is broken, 2 no workflows found (caliber
@@ -94,8 +94,9 @@ const RUN_SCRIPT = new RegExp(
  * Returns `{ lines, jobKeys, jobs, runRefs, shells, hasTopPermissions }`:
  *   `jobKeys` — every 2-space key under `jobs:` with its line, duplicates included (a parser would
  *               collapse them, and a collapsed duplicate is the defect rule 1 names);
- *   `jobs`    — one record per job key: `{ name, line, runsOn, runs }`, where `runs` holds the
- *               `run:` step bodies as this scanner sees them (block bodies arrive line by line);
+ *   `jobs`    — one record per job key: `{ name, line, runsOn, timeoutMinutes, runs }`, where
+ *               `runs` holds the `run:` step bodies as this scanner sees them (block bodies arrive
+ *               line by line);
  *   `runRefs` — every `run:` line, flat, with its step's `working-directory`. A step written in
  *               the shorthand (`- run: …`) is captured too; before this reader existed the scanner
  *               only matched a line that *begins* with `run:`, so rules 2/2b/2c were blind to the
@@ -104,6 +105,10 @@ const RUN_SCRIPT = new RegExp(
  *               place this walk grew scope, and every workflow in this repo re-verified clean
  *               against it on 2026-10-22);
  *   `shells`  — whole `run:` bodies re-joined, because rule 2a judges a shell as one script.
+ *               `block: true` marks a YAML block scalar (`run: |`), which is the shape rules 2d
+ *               reads: a one-line inline `run:` is one command and inherits its verdict from the
+ *               shell's exit status, while a multi-statement body is a script that has to declare
+ *               its own gates.
  */
 function walkWorkflow(text) {
   const lines = text.split("\n")
@@ -155,13 +160,18 @@ function walkWorkflow(text) {
     }
     if (section === "jobs" && job && !nested) {
       jobKeys.push({ name: job[1], line: i + 1 })
-      current = { name: job[1], line: i + 1, runsOn: null, runs: [] }
+      current = { name: job[1], line: i + 1, runsOn: null, timeoutMinutes: null, runs: [] }
       jobs.push(current)
       continue
     }
     const runsOn = /^ {4}runs-on:\s*(.+)$/.exec(line)
     if (runsOn) {
       if (current) current.runsOn = runsOn[1].trim().replace(/^["']|["']$/g, "")
+      continue
+    }
+    const timeout = /^ {4}timeout-minutes:\s*(\S+)$/.exec(line)
+    if (timeout) {
+      if (current) current.timeoutMinutes = timeout[1].replace(/^["']|["']$/g, "")
       continue
     }
     const wd = /^\s*working-directory:\s*(\S+)\s*$/.exec(line)
@@ -176,10 +186,10 @@ function walkWorkflow(text) {
       if (/[|>]/.test(inline)) {
         inRun = true
         runIndent = indent.length
-        shellBlock = { line: i + 1, lines: [] }
+        shellBlock = { line: i + 1, lines: [], block: true }
         shells.push(shellBlock)
       } else if (inline) {
-        shells.push({ line: i + 1, lines: [inline] })
+        shells.push({ line: i + 1, lines: [inline], block: false })
       }
     }
   }
@@ -196,8 +206,10 @@ function inspect(target) {
   const { dir, file } = target
   const base = path.join(dir, file)
   const text = readFileSync(base, "utf8")
-  const { lines, jobKeys, runRefs, shells, hasTopPermissions } = walkWorkflow(text)
+  const { lines, jobKeys, jobs: jobRecords, runRefs, shells, hasTopPermissions } = walkWorkflow(text)
   const problems = []
+  // Findings the rules would raise but this root may not be red for (see the scope note at 4a/4b).
+  const advisories = []
   // 1. duplicate job keys inside the jobs: section
   const seen = new Map()
   for (const j of jobKeys) seen.set(j.name, [...(seen.get(j.name) ?? []), j.line])
@@ -458,9 +470,39 @@ function inspect(target) {
   //     `actions/checkout@v4`: the exact attack the parent's own release.yml documents ("a retagged
   //     `@v4` would run attacker code there, sign an attacker archive with the real key"). Both
   //     roots are pinned now, so the rule has nothing left to look away from.
+  // 3d. (D6-c) a step that calls `gh` must carry a token in its own `env:` — enforced for every
+  //     root this tool scans, because the audit says nothing here would be a false positive:
+  //     `release.yml`'s two gh-free-looking steps name gh only inside an `::error::` remedy
+  //     string, and the fork's gh steps all set `GH_TOKEN`. See `ghTokenProblems` for why the
+  //     prose exclusion is the whole rule.
+  problems.push(...ghTokenProblems(lines, jobKeys))
+
+  // 4a/4b. (D5 / D6-a, D6-b) every job declares a ceiling, and every multi-statement `run:` body
+  //        declares its own shell gates. Scoped to THIS repository's workflows, and the reason is
+  //        a write-scope fact, not a judgement: the fork subtree under `harness/` is scanned by
+  //        this tool but edited by another lane's gate, so a red here would be an unfollowable
+  //        instruction. That is why the non-primary root gets the same counts printed as a `△`
+  //        advisory instead of being quietly exempted — the same shape
+  //        `updater/test/scripts-test-suite-is-run.test.mjs` chose for `harness/` on 2026-10-16
+  //        ("这一条例外写在报告里，而不是把判据放宽成'大概都跑了'").
+  //        HAND-OFF: `updater/test/scripts-check-workflows.test.mjs` builds its rule-2b fixture
+  //        from a `HEADER` that predates these two rules, so its three "the clean fixture exits 0"
+  //        controls are red until that fixture grows a `timeout-minutes:` on the job and a
+  //        `set -euo pipefail` in the block it appends — the same two lines its own comment says a
+  //        fixture owes a real workflow ("夹具与真 workflow 同形"). This lane may not write that
+  //        file; the rules stay red-for-real because a ceiling nobody demands is a ceiling nobody
+  //        has.
+  if (target.primary) {
+    problems.push(...timeoutProblems(jobRecords, base))
+    problems.push(...setHeaderProblems(shells))
+  } else {
+    advisories.push(...timeoutAdvisories(jobRecords))
+    advisories.push(...setHeaderAdvisories(shells))
+  }
+
   problems.push(...jobPolicyProblems(lines))
 
-  return { jobs: [...seen.keys()], problems }
+  return { jobs: [...seen.keys()], problems, advisories }
 }
 
 /**
@@ -522,6 +564,223 @@ function ghJsonFieldProblems(text, base, known = GH_RELEASE_VIEW_FIELDS) {
     }
   }
   return problems
+}
+
+/**
+ * The three shell gates a multi-statement `run:` body has to declare for itself (D6-b).
+ *
+ * Rule 2a already asks "does this body parse as shell"; 2a cannot see the question this one asks,
+ * which is whether the body *stops* on the first failing command. That used to be bought from the
+ * runner: Actions' default shell for a `run:` block is `bash -e`, so errexit was the accident of an
+ * image rather than the promise of a file — and pipefail and nounset were never on at all. Both
+ * have cost this repository real money: `PKG=$(npm pack --silent | tail -1)` at ci.yml:93 shipped a
+ * green step that had tested the working tree instead of the tarball, because the pipeline's status
+ * was `tail`'s zero, and `harness-contract.yml`'s skip step read an empty `steps.tag.outputs.tag`
+ * as "not equal" and walked on. A gate that lives in a default is a gate nobody edits.
+ *
+ * The exemption is rule 2a's own (`python3|node|bun` as the head — that body is one script in
+ * another language) plus single-statement bodies: one command's exit status IS the step's verdict,
+ * so `-e`, `-u` and `-o pipefail` have nothing there to change. Requiring a header on those would
+ * add noise without adding a judgement.
+ */
+const SHELL_GATES = ["e", "u", "pipefail"]
+
+function setGateFlags(head) {
+  const m = /^set\s+(.+)$/.exec(head)
+  if (!m) return null
+  const flags = new Set()
+  const tokens = m[1].split(/\s+/)
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]
+    if (token === "-o") {
+      flags.add(tokens[++i] ?? "")
+      continue
+    }
+    if (/^-[a-z]+$/.test(token)) for (const ch of token.slice(1)) flags.add(ch)
+  }
+  if (/pipefail/.test(m[1])) flags.add("pipefail") // `set -euo pipefail`: bundled flag + bare option
+  return flags
+}
+
+/** The bodies that would run without a gate they have not declared, as `{ line, head, missing }`. */
+function setHeaderFindings(shells) {
+  const out = []
+  for (const block of shells) {
+    if (!block.block) continue // a one-line `run: cmd` inherits its verdict from the command itself
+    const code = block.lines.filter((l) => l && !l.startsWith("#"))
+    if (code.length < 2) continue
+    const first = code[0]
+    if (/^(python3|node|bun)\s/.test(first)) continue
+    const flags = setGateFlags(first)
+    if (flags === null) {
+      out.push({ line: block.line, head: first, missing: [...SHELL_GATES] })
+      continue
+    }
+    const missing = SHELL_GATES.filter((gate) => !flags.has(gate))
+    if (missing.length) out.push({ line: block.line, head: first, missing })
+  }
+  return out
+}
+
+function setHeaderProblems(shells) {
+  return setHeaderFindings(shells).map((f) => {
+    return `line ${f.line}: this \`run:\` body opens with \`${f.head}\` and never declares ` +
+      `${f.missing.map((g) => (g === "pipefail" ? "pipefail" : `-${g}`)).join("/")} — ` +
+      `errexit, nounset and pipefail are what make a failing middle command, an unset variable and a ` +
+      `pipeline that died before its last stage reach the step's exit code. Actions' default shell gives ` +
+      `you \`-e\` by accident of the image, never the other two. Write \`set -euo pipefail\` as the first line.`
+  })
+}
+
+function setHeaderAdvisories(shells) {
+  const found = setHeaderFindings(shells)
+  if (!found.length) return []
+  return [`${found.length} \`run:\` block(s) declare no shell gate of their own ` +
+    `(lines ${found.map((f) => f.line).join(", ")}) — reported to that root's own gate, not enforced from here`]
+}
+
+/** Rule 4a (D5): a job without a ceiling runs on GitHub's default, which is six hours. */
+function timeoutProblems(jobs, base) {
+  const out = []
+  for (const job of jobs) {
+    if (job.timeoutMinutes === null) {
+      out.push(
+        `job "${job.name}" (line ${job.line}) declares no "timeout-minutes" — GitHub's default is 360 minutes, ` +
+          `so a hung ${job.runsOn ?? "runner"} here holds the concurrency slot for six hours before anything is ` +
+          `reported. Name a ceiling above the slowest measured run of this job (and above any wait the job's own ` +
+          `steps budget for, e.g. assert-ci-green's --budget), not below it: a timeout that bites a normal run is ` +
+          `worse than none, because it becomes the thing people widen.`,
+      )
+      continue
+    }
+    if (!/^\d+$/.test(job.timeoutMinutes) || Number(job.timeoutMinutes) < 1) {
+      out.push(
+        `job "${job.name}" (line ${job.line}) sets "timeout-minutes: ${job.timeoutMinutes}" — that is not a positive ` +
+          `whole number of minutes, so GitHub either rejects the file or applies no ceiling at all.`,
+      )
+    }
+  }
+  return out
+}
+
+function timeoutAdvisories(jobs) {
+  const missing = jobs.filter((j) => j.timeoutMinutes === null)
+  if (!missing.length) return []
+  return [`${missing.length} job(s) without "timeout-minutes" (${missing.map((j) => j.name).join(", ")}) ` +
+    `— reported to that root's own gate, not enforced from here`]
+}
+
+/**
+ * Rule 3d (D6-c): a step that calls `gh` must hand it a token.
+ *
+ * WHY, with the measured cost: the release lane's CI-green step died on `gh api` because the runner
+ * gives a step `GITHUB_TOKEN` while `gh` reads `GH_TOKEN` — v1.16.2, run 38855034310, and the fix
+ * recorded in `release.yml`'s own comment was to name `GH_TOKEN: ${{ github.token }}` on the step.
+ * Nothing enforced that, so the next gh-calling step can forget it again and fail at the same place.
+ *
+ * The judgement is deliberately narrow, because the wide version of this rule is a lie: every gh
+ * invocation this repository has sits in *prose* somewhere — `echo "::error::… | gh secret set
+ * GPG_PRIVATE_KEY --env release"` is a remedy string an operator reads, not a command the runner
+ * executes, and reddening it would get the prose deleted instead of the step fixed (the same reason
+ * `ghJsonFieldProblems` below skips comment lines). So a line counts only when it is a gh call in
+ * command position — not a comment, and not a continuation of a line that began with `echo`/`printf`
+ * — and a step is satisfied by `GH_TOKEN`/`GITHUB_TOKEN` anywhere in its own block, its job's block,
+ * or the workflow's top-level `env:`.
+ */
+const GH_CALL = /(^|[^\w-])gh[ \t]+([a-z][a-z-]*)/g
+const GH_VERBS = new Set(["api", "release", "run", "secret", "workflow", "issue", "pr", "repo",
+  "attestation", "variable", "environment", "label", "milestone", "org", "project", "search",
+  "tag", "gist", "auth", "browse", "cache", "codespace", "config", "status", "ruleset", "delete",
+  "create", "edit", "view", "upload", "download", "list", "set", "rerun", "cancel"])
+
+/** The gh invocations on these lines that a runner would actually execute, with line numbers. */
+function ghCallLines(lines) {
+  const hits = []
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i]
+    if (/^\s*#/.test(raw)) continue
+    // One logical command can span physical lines through `\`. Its head says whether anything on
+    // those lines executes at all: a head of `echo`/`printf` is a sentence being printed, and the
+    // gh named inside it is an instruction for a human. release.yml:193 and the fork's 497 are
+    // exactly that shape, and reddening them buys a deleted comment plus an unchecked command.
+    let head = i
+    while (head > 0 && /\\\s*$/.test(lines[head - 1].replace(/\s+$/, ""))) head--
+    const headLine = lines[head].replace(/^(\s*(?:-\s+)?)run:\s*/, "$1")
+    if (/^\s*(?:-\s+)?(?:echo|printf|cat|sed|awk|grep)\b/.test(headLine)) continue
+    // A YAML inline `- run: gh …` is a command; strip the key before matching.
+    const text = raw.replace(/^(\s*(?:-\s+)?)run:\s*/, "$1")
+    GH_CALL.lastIndex = 0
+    let m
+    while ((m = GH_CALL.exec(text)) !== null) {
+      if (!GH_VERBS.has(m[2])) continue
+      hits.push({ line: i + 1, verb: m[2] })
+    }
+  }
+  return hits
+}
+
+/** `[start, end)` line ranges for the steps and jobs a `run:` line can belong to. */
+function enclosingRanges(lines, jobKeys, at) {
+  const index = at - 1
+  const stepMarkers = lines
+    .map((l, i) => (/^ {4,6}-\s/.test(l) || /^ {6}-\s|^ {4}-\s/.test(l) ? i : -1))
+    .filter((i) => i >= 0 && i <= index)
+  const stepStart = stepMarkers.length ? stepMarkers[stepMarkers.length - 1] : 0
+  const stepEnd = (() => {
+    for (let i = index + 1; i < lines.length; i++) {
+      if (/^ {4,6}-\s/.test(lines[i])) return i
+      if (/^ {2}[A-Za-z0-9_.-]+:\s*$/.test(lines[i])) return i
+      if (/^[A-Za-z0-9_-]+:/.test(lines[i])) return i
+    }
+    return lines.length
+  })()
+  const jobStart = jobKeys.filter((j) => j.line - 1 <= index).map((j) => j.line - 1).pop() ?? 0
+  const jobEnd = (() => {
+    for (const j of jobKeys) {
+      if (j.line - 1 > index) return j.line - 1
+    }
+    for (let i = index + 1; i < lines.length; i++) if (/^[A-Za-z0-9_-]+:/.test(lines[i])) return i
+    return lines.length
+  })()
+  return { step: [stepStart, stepEnd], job: [jobStart, jobEnd] }
+}
+
+/**
+ * Line ranges the `run:` line at `at` belongs to: its own step, and the part of its job that is
+ * NOT another step (a sibling step's `env:` must not vouch for this one, or the rule could never
+ * see the defect it names). Built from the same indentation markers the walker uses, because "did
+ * this step declare a token" is a question about one step, not about the file.
+ */
+function ghTokenProblems(lines, jobKeys) {
+  const out = []
+  const hasToken = (block) => /(^\s{2,}(?:-\s+)?env:\s*$)/m.test(block) && /(GH_TOKEN|GITHUB_TOKEN):/.test(block)
+  for (const hit of ghCallLines(lines)) {
+    const { step, job } = enclosingRanges(lines, jobKeys, hit.line)
+    const stepBlock = lines.slice(step[0], step[1]).join("\n")
+    // The job's own keys, up to (not through) its `steps:` — its job-level `env:` block.
+    const jobHeaderEnd = (() => {
+      for (let i = job[0]; i < job[1]; i++) if (/^ {4}steps:\s*$/.test(lines[i])) return i
+      return job[1]
+    })()
+    const jobBlock = lines.slice(job[0], jobHeaderEnd).join("\n")
+    // The workflow's own top-level `env:` block (a 2-space key under a top-level `env:`).
+    const topEnv = (() => {
+      const start = lines.findIndex((l) => /^env:\s*$/.test(l))
+      if (start < 0) return ""
+      let end = start + 1
+      while (end < lines.length && (/^\s*$/.test(lines[end]) || /^ {2}\S/.test(lines[end]))) end++
+      return lines.slice(start, end).join("\n")
+    })()
+    if ([stepBlock, jobBlock, topEnv].some(hasToken)) continue
+    out.push(
+      `line ${hit.line} runs \`gh ${hit.verb}\` and no \`env:\` in its step, in its job's own keys or at the ` +
+        `workflow level names GH_TOKEN — gh reads GH_TOKEN, while the runner hands steps GITHUB_TOKEN, and ` +
+        `the gap is what killed the v1.16.2 release lane (run 38855034310: ` +
+        `"gh api 回了 4: … please set the GH_TOKEN environment variable"). Add ` +
+        `env: { GH_TOKEN: \${{ github.token }} } to that step, with the scopes the call needs.`,
+    )
+  }
+  return out
 }
 
 function jobPolicyProblems(lines) {
@@ -761,6 +1020,7 @@ jobs:
   build:
     name: build the thing
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: run the real script
@@ -769,6 +1029,18 @@ jobs:
         if: \${{ secrets.NPM_TOKEN != '' }}
         run: node scripts/check-version.mjs
 `
+
+  // The two shapes rules 4a/2d/3d accept, used by the counter-cases below. Written as functions of
+  // BASE so a mutation that changes one anchor cannot quietly make the "must stay silent" case stop
+  // testing anything: it re-checks the same text the red case just broke.
+  const WITH_GATE = BASE.replace(
+    "        run: node scripts/check-version.mjs\n      - name: gated on a secret",
+    "        run: |\n          set -euo pipefail\n          npm --version\n          echo done\n      - name: gated on a secret",
+  )
+  const WITH_TOKEN = BASE.replace(
+    "      - name: gated on a secret",
+    "      - name: ask GitHub\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: gh release view v1 --json tagName\n      - name: gated on a secret",
+  )
 
   const cases = [
     {
@@ -934,6 +1206,70 @@ jobs:
         ),
       absent: /which gh does not answer/,
     },
+    {
+      id: "a job that declares no timeout-minutes (D5)",
+      // 14 个 job、0 条 `timeout-minutes` 是本仓 2026-10-24 实测到的形状：默认值是 6 小时，
+      // 而"卡住六小时才红"与"十五分钟就红"是两种 CI。删掉这一行，规则必须点名是哪条 job。
+      apply: (t) => t.replace("    timeout-minutes: 30\n", ""),
+      expect: /declares no "timeout-minutes"/,
+    },
+    {
+      id: "a job that declares timeout-minutes is not a defect",
+      // Counter-case: the same file with the ceiling named must stay silent, or 4a is a permanent
+      // red somebody switches off. The rule asks for a number, never for a particular one.
+      apply: (t) => t,
+      absent: /timeout-minutes/,
+    },
+    {
+      id: "a run body that leans on the runner's default shell (D6-b)",
+      // Parses as shell (so 2a stays silent) and does everything right except declare its own
+      // gates: `harness-contract.yml`'s skip step was exactly this — it read an empty step output
+      // as "not equal" and walked on. The body must name -e, -u and pipefail itself.
+      apply: (t) =>
+        t.replace(
+          "      - name: run the real script\n        run: node scripts/check-version.mjs\n",
+          "      - name: run the real script\n        run: |\n          npm --version\n          node scripts/check-version.mjs\n",
+        ),
+      expect: /never declares -e\/-u\/pipefail/,
+    },
+    {
+      id: "the same body with set -euo pipefail declared",
+      // Counter-case for the rule above, on the corrected text the red case just broke.
+      apply: () => WITH_GATE,
+      absent: /never declares/,
+    },
+    {
+      id: "a gh call whose step declares no GH_TOKEN (D6-c)",
+      apply: (t) =>
+        t.replace(
+          "      - name: gated on a secret",
+          "      - name: ask GitHub\n        run: gh release view v1 --json tagName\n      - name: gated on a secret",
+        ),
+      expect: /names GH_TOKEN/,
+    },
+    {
+      id: "the same gh call with env.GH_TOKEN on the step",
+      apply: () => WITH_TOKEN,
+      absent: /names GH_TOKEN/,
+    },
+    {
+      id: "a gh command that only appears inside a remedy string",
+      // release.yml:193 and the fork's line 497 both name `gh secret set` inside an `::error::`
+      // echo — an instruction for a human, never executed. Reddening that buys a deleted comment
+      // and an unchecked command, the trade this file already refused once (see
+      // `ghJsonFieldProblems`), so the prose shape has to be a case rather than a hope.
+      apply: (t) =>
+        t.replace(
+          "      - name: gated on a secret",
+          "      - name: name the remedy\n" +
+            "        run: |\n" +
+            "          set -euo pipefail\n" +
+            "          echo \"setup: \" \\\n" +
+            "            \"printf '%s' <key> | gh secret set GPG_PRIVATE_KEY --env release\"\n" +
+            "      - name: gated on a secret",
+        ),
+      absent: /names GH_TOKEN/,
+    },
   ]
 
   const dir = mkdtempSync(path.join(tmpdir(), "check-workflows-selftest-"))
@@ -1015,6 +1351,7 @@ if (process.argv.includes("--jobs")) {
         name: job.name,
         line: job.line,
         runsOn: job.runsOn,
+        timeoutMinutes: job.timeoutMinutes,
         runs: job.runs.map((r) => ({ line: r.line, text: r.text, dir: r.dir })),
       })
     }
@@ -1033,7 +1370,7 @@ if (process.argv.includes("--jobs")) {
 
 let bad = 0
 for (const target of targets) {
-  const { jobs, problems } = inspect(target)
+  const { jobs, problems, advisories } = inspect(target)
   if (!jobs.length) {
     console.error(`check-workflows: ${target.label} declares no jobs at all — nothing verified`)
     bad++
@@ -1043,6 +1380,10 @@ for (const target of targets) {
     console.error(`  ✗ ${target.label}: ${p}`)
     bad++
   }
+  // `△` is this repository's existing spelling for "measured, announced, not this gate's verdict"
+  // (see the two reverse cases in patched-deps' selftest). It is printed so a scope limit stays a
+  // finding somebody sees every run, rather than a comment nobody reads.
+  for (const a of advisories) console.log(`  △ ${target.label}: ${a}`)
   if (!problems.length) console.log(`  ok ${target.label}: ${jobs.length} job(s), every referenced script exists`)
 }
 

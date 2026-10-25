@@ -44,6 +44,13 @@
 #                              # 把"一次 gh 读取的三种结局"分诊：present / absent / empty /
 #                              # failed。verify 走的就是这一个函数；测试喂**假**的三样，不碰网络。
 #   gpg-signing.sh selftest              # prove the guards trip when they should
+#   gpg-signing.sh forget                # delete BOTH keychain entries (private-key + passphrase)
+#                              # 签名/发布收尾用这一条。私钥+口令长期驻留登录钥匙串时，任何同用户
+#                              # 进程调 `/usr/bin/security find-generic-password -w` 都能把它们读出
+#                              # （keychain 的 ACL 认的是**创建者二进制**，不认调用者），而拿到它们
+#                              # 的人能给所有用户的 updater 投毒——`updater/lib/signature.js` 那枚
+#                              # pin 也在同一份树里，换密钥的人连 pin 一起换。base64 不是加密，只是
+#                              # 编码。日常审查/构建不需要这两条条目：CI 从 repository secret 里取。
 set -euo pipefail
 
 KEYCHAIN_SERVICE="${GP_SIGNING_SERVICE:-gpg-signing}"
@@ -372,6 +379,40 @@ emit_secret_verdict() {  # $1=repo $2=env $3=want $4=verdict $5=gh 退出码 $6=
       ;;
     *) say "error: 内部错误：未知判决 '$4'"; exit 2 ;;
   esac
+}
+
+cmd_forget() {
+  need security
+  local name removed=0 missing=0 left=0
+  for name in private-key passphrase; do
+    if security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$name" >/dev/null 2>&1; then
+      if security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "$name" >/dev/null 2>&1; then
+        removed=$((removed + 1))
+        ok "deleted keychain entry '$KEYCHAIN_SERVICE' / $name"
+      else
+        say "error: could not delete '$KEYCHAIN_SERVICE' / $name — 'security' answered failure."
+        say "       the entry is STILL readable by any process this user account runs; this is not a"
+        say "       'nothing to do' case. remedy: run it again, and if it still fails open Keychain"
+        say "       Access, search '$KEYCHAIN_SERVICE' and delete both items by hand."
+        exit 1
+      fi
+    else
+      missing=$((missing + 1))
+      warn "no keychain entry for '$KEYCHAIN_SERVICE' / $name — nothing to forget"
+    fi
+  done
+  # 删完回头看一眼：`delete` 回 0 而条目仍在（锁、ACL、并发）就等于宣称清掉了却没清。
+  for name in private-key passphrase; do
+    if security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$name" >/dev/null 2>&1; then
+      left=$((left + 1))
+    fi
+  done
+  if [ "$left" -ne 0 ]; then
+    say "error: $left entry(ies) are STILL in the keychain after delete answered success — the signing"
+    say "       credential has not been forgotten, and the day's work is not done until it has."
+    exit 1
+  fi
+  ok "keychain holds neither half of the signing credential ($removed deleted, $missing already absent)"
 }
 
 cmd_verify() {
@@ -819,6 +860,7 @@ case "${1:-}" in
   audit)    shift; cmd_audit "$@" ;;
   secret-verdict) shift; cmd_secret_verdict "$@" ;;
   selftest) shift; cmd_selftest "$@" ;;
+  forget)   shift; cmd_forget "$@" ;;
   # usage 由文件自己算出来（与 tools/release-signing-gate.sh 的 usage() 同一招）：从前这里写死
   # `sed -n '2,34p'`，而 Usage 块在 36 行之后 —— 也就是说**没有任何一条路径会把用法打给读者**，
   # 新加的子命令同样永远不会出现在帮助里。行号是第二份抄本，抄本会过期，这里不再抄。
