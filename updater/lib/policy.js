@@ -99,7 +99,16 @@ export function decideSwapPermission({ probe, jobArgs, ourStateRoot, consented =
     return {
       status: 'deferred',
       code: CODES.busyOrUnreachable,
-      reason: probe?.reason ?? 'the daemon did not answer the idle probe',
+      // finding C7 (2026-10-24): a probe that carries its own reason keeps it (that is
+      // where the measured fact and the next steps live). This fallback is the shape a
+      // caller's stub or an older `lib/idle.js` hands back, and it used to be a bare
+      // diagnosis-free sentence — while the other three gates each name a command.
+      // The swap stays refused here, so this is the only place that sentence is ever read.
+      reason: probe?.reason
+        ?? 'the daemon did not answer the idle probe, so this run has no evidence it is safe to restart it: nothing was swapped, built, packed or restarted. '
+          + 'This measures only "no reply before the deadline" — a queued act, a wedged daemon and a different service owning the socket all look identical from here. '
+          + 'Next: `launchctl print gui/$(id -u)/com.glasspane.daemon` to see whether launchd holds the job at all, "updater status --json" for what the last recorded run saw '
+          + '(no network), and `node installer/cli.js --restore-launchd` if the daemon answers nothing — then re-run "updater apply".',
       swapped: false,
     }
   }

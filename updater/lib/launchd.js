@@ -180,13 +180,66 @@ function unescapePlistString(value) {
     .replaceAll('&amp;', '&')
 }
 
-function defaultRun(bin, args) {
-  const res = spawnSync(bin, args, { encoding: 'utf8', timeout: 15_000 })
+/**
+ * What one `launchctl` consultation produced, as the three states this repo already
+ * uses for every other probe (`installer/cli.js`'s `PROBE_STATES` is the pattern):
+ *
+ *  · `available`  — launchd answered 0 and the job's book is in the reply;
+ *  · `absent`     — launchd answered and said in so many words it has no such service;
+ *  · `unverified` — the tool never got an answer it can read as presence or absence:
+ *    the spawn failed, it timed out, launchctl was killed by a signal, or it exited
+ *    with something that is not a statement about this job.
+ *
+ * `unverified` is the one that used to be missing. `defaultRun` folded it into
+ * `status: 1` and dropped the error text when stderr came back blank, so
+ * `readRunningJob` reported "answered 1 … the daemon job is not loaded" — an
+ * *unobserved* thing written as a *negative observation*, which then fed §2's swap
+ * gate and `apply`'s "the running daemon job could not be identified".
+ */
+export const JOB_READS = Object.freeze({ available: 'available', absent: 'absent', unverified: 'unverified' })
+
+/**
+ * The one octal spelling this product prints for a mode.
+ *
+ * Same rule as `installer/cli.js`'s `formatMode` (that file is why it exists: a number
+ * quoted in a refusal has to line up with what `ls -l` / `stat -f %Lp` answers on the
+ * same machine). The two packages ship separately and cannot share an import, so the
+ * *judgement* is what is duplicated here — `qoder-20261024-updater-lane.test.mjs`
+ * compares the two outputs value by value, which is what makes it a copy of one rule
+ * rather than a second rule.
+ */
+export function formatMode(mode) {
+  return `0${(Number(mode ?? 0) & 0o777).toString(8).padStart(3, '0')}`
+}
+
+/**
+ * Run one system binary and report **whether it answered**, not what this tool wishes
+ * the answer had been. `spawn` is a test seam for exactly that reason: the shapes below
+ * (a timed-out child with an empty stderr, an ENOENT with no stdout at all) are what
+ * node really hands back, and none of them may be flattened into an exit code.
+ */
+export function defaultRun(bin, args, { spawn = spawnSync } = {}) {
+  const res = spawn(bin, args, { encoding: 'utf8', timeout: 15_000 })
+  const status = typeof res?.status === 'number' ? res.status : null
+  const error = res?.error ? String(res.error.message ?? res.error) : null
+  const out = String(res?.stderr ?? '')
+  // Never let a blank stderr swallow the reason the child did not answer: with the
+  // old `res.stderr ?? (res.error ? … : '')` the error text survived only while stderr
+  // was `undefined`, and a killed-but-started child answers with `''`.
+  const err = error !== null && !out.includes(error) ? (out ? `${out} ${error}` : error) : out
   return {
-    status: res.status ?? 1,
-    stdout: res.stdout ?? '',
-    stderr: res.stderr ?? (res.error ? String(res.error.message) : ''),
+    status,
+    answered: status !== null,
+    stdout: res?.stdout ?? '',
+    stderr: err,
+    error,
+    signal: res?.signal ?? null,
   }
+}
+
+/** Did the reply actually say "there is no such job"? Quoted, not guessed. */
+function launchctlSaysNoSuchService(text) {
+  return /could not find service|no such process|service is not loaded|does not exist/i.test(String(text ?? ''))
 }
 
 export function currentUid({ run = defaultRun } = {}) {
@@ -207,16 +260,55 @@ export function readRunningJob({
 } = {}) {
   const resolved = uid ?? currentUid({ run })
   if (!resolved) {
-    return { ok: false, unknown: true, code: CODES.busyOrUnreachable, reason: 'the current uid could not be read, so the running daemon job cannot be identified' }
-  }
-  const res = run('launchctl', ['print', `gui/${resolved}/${label}`])
-  if (res.status !== 0) {
     return {
       ok: false,
       unknown: true,
-      loaded: false,
+      read: JOB_READS.unverified,
       code: CODES.busyOrUnreachable,
-      reason: `launchctl print gui/${resolved}/${label} answered ${res.status}: ${(res.stderr || 'no stderr').trim().slice(0, 200) || 'the daemon job is not loaded'}`,
+      reason: 'the current uid could not be read (`id -u` gave nothing), so the running daemon job was never consulted — this says nothing about whether it is loaded. Next: run `/usr/bin/id -u` in this shell and get a number back — a shell whose environment was stripped or replaced is the usual reason it does not — then re-run this command in your own login shell.',
+    }
+  }
+  const res = run('launchctl', ['print', `gui/${resolved}/${label}`])
+  const errText = String(res?.stderr ?? '').trim()
+  const why = res?.error ? String(res.error) : null
+  if (res?.answered === false || (typeof res?.status !== 'number' && res?.answered === undefined)) {
+    // Nothing was observed. `status ?? 1` used to make this look like an exit code and
+    // the blank stderr then read as "not loaded" — the same unobserved thing written as
+    // a negative observation that `installer/cli.js`'s PROBE_STATES exists to prevent.
+    return {
+      ok: false,
+      unknown: true,
+      loaded: null,
+      read: JOB_READS.unverified,
+      code: CODES.busyOrUnreachable,
+      reason: `launchctl print gui/${resolved}/${label} did not answer`
+        + `${why ? ` (${why})` : errText ? ` (${errText.slice(0, 160)})` : ' (no exit code, no output)'}: `
+        + 'this run observed nothing about the daemon job either way, so it is **not** a reading of "unloaded". '
+        + 'Nothing was swapped or restarted. Next: read it yourself with `launchctl print gui/$(id -u)/' + label + '` '
+        + '— if that answers too, this process just could not ask launchctl, and "updater status --json" shows what the last '
+        + 'recorded run saw.',
+    }
+  }
+  if (res.status !== 0) {
+    const absent = res.status === 113 || res.status === 3 || launchctlSaysNoSuchService(errText)
+    return {
+      ok: false,
+      // `unknown` is this product's "the §2 gate may not proceed on this reading" flag,
+      // not a synonym for "unverified" — a job launchd says it does not hold is still a
+      // job this run must not swap against, so both arms keep it true and the three
+      // states live in `read`.
+      unknown: true,
+      loaded: absent ? false : null,
+      read: absent ? JOB_READS.absent : JOB_READS.unverified,
+      code: CODES.busyOrUnreachable,
+      reason: absent
+        ? `launchctl print gui/${resolved}/${label} answered ${res.status}: ${(errText || 'no stderr').slice(0, 200)} — `
+          + 'launchd itself says it holds no such job, so the daemon is not running under this label. Next: '
+          + '`node installer/cli.js --restore-launchd` re-registers and verifies it (it asks before unloading anything that is loaded), '
+          + 'or run the GlassPane installer.'
+        : `launchctl print gui/${resolved}/${label} answered ${res.status}${errText ? `: ${errText.slice(0, 200)}` : ''} — `
+          + 'that is not an answer this tool can read as "loaded" or "unloaded", so the job was **not observed**, and nothing was swapped or restarted on the strength of it. '
+          + `Next: run \`launchctl print gui/$(id -u)/${label}\` and read what it says; if it names a domain or permission problem, "updater status --json" shows what the last recorded run saw.`,
     }
   }
   const block = parseArgumentsBlock(res.stdout)
@@ -227,7 +319,8 @@ export function readRunningJob({
       loaded: true,
       program: parseLaunchctlProgram(res.stdout),
       code: CODES.busyOrUnreachable,
-      reason: `launchctl print's argument list could not be read (${block.reason}), so this tool cannot tell which state root the daemon writes to`,
+      read: JOB_READS.available,
+      reason: `launchctl print's argument list could not be read (${block.reason}), so this tool cannot tell which state root the daemon writes to. Next: run \`launchctl print gui/$(id -u)/${label}\` and read its arguments block yourself; the swap stays refused until it is decidable`,
     }
   }
   const args = block.args
@@ -244,7 +337,8 @@ export function readRunningJob({
       loaded: true,
       program: parseLaunchctlProgram(res.stdout),
       code: CODES.busyOrUnreachable,
-      reason: `the running job names the state-root flag more than once (${named.join(', ')}), so which state root it writes is not decidable and no version was swapped`,
+      read: JOB_READS.available,
+      reason: `the running job names the state-root flag more than once (${named.join(', ')}), so which state root it writes is not decidable and no version was swapped. Next: put that job's argument list down to one state root (\`launchctl print gui/$(id -u)/${label}\` shows the list), then re-run \`updater apply\` against that root`,
     }
   }
   // A flag that is *there* with a value that cannot be decoded is not a flag that is absent:
@@ -257,13 +351,18 @@ export function readRunningJob({
       loaded: true,
       program: parseLaunchctlProgram(res.stdout),
       code: CODES.busyOrUnreachable,
-      reason: `the running job names the state-root flag with a value that cannot be read (${JSON.stringify(named[0])}: the flag is last in the argument list, its value begins with "-", or nothing follows the "="), so which state root it writes is not decidable and no version was swapped`,
+      read: JOB_READS.available,
+      reason: `the running job names the state-root flag with a value that cannot be read (${JSON.stringify(named[0])}: the flag is last in the argument list, its value begins with "-", or nothing follows the "="), so which state root it writes is not decidable and no version was swapped. Next: read \`launchctl print gui/$(id -u)/${label}\` and give that job exactly one readable state-root flag, then re-run \`updater apply\``,
     }
   }
   return {
     ok: true,
     unknown: false,
     loaded: true,
+    // launchd answered 0 and the book parsed: the job is *observed present*. Every other
+    // arm of this function is either `absent` (launchd says it holds no such job) or
+    // `unverified` (nothing was observed) — see `JOB_READS`.
+    read: JOB_READS.available,
     program: parseLaunchctlProgram(res.stdout),
     jobState: parseLaunchctlState(res.stdout),
     args,
@@ -403,7 +502,7 @@ export function preparePrivateLogFile(logPath, {
       return {
         ok: false,
         mode,
-        error: `the agent log ${logPath} is still ${(mode & 0o777).toString(8)} after chmod(0600): this volume does not hold permission bits, so an owner-only log is not achievable here`,
+        error: `the agent log ${logPath} is still ${formatMode(mode)} after chmod(0600): this volume does not hold permission bits, so an owner-only log is not achievable here`,
       }
     }
     return { ok: true, mode, error: null }

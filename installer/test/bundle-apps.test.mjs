@@ -111,18 +111,31 @@ test('installBundles: 覆盖式安置两个 .app，源缺失即跳过且不报�
   const plan = bundlePlan({ homeDir: '/Users/dev', buildDir: BUILD_DIR })
   const removed = []
   const copied = []
+  const renamed = []
   const existsSources = new Set([plan.builtSettingsApp, plan.settingsApp]) // 只有面板产物存在（且目标已有一份旧的）
   const { installed, declined } = installBundles({
     plan,
     exists: (p) => existsSources.has(p),
     remove: (target) => removed.push(target),
     copy: (source, target) => copied.push([source, target]),
+    rename: (from, to) => renamed.push([from, to]),
     mkdir: () => {},
+    token: 'tok',
   })
   assert.deepEqual(installed, [plan.settingsApp])
   assert.deepEqual(declined, [], 'allowReplace 默认放行：覆盖是既有语义')
-  assert.deepEqual(removed, [plan.settingsApp], '覆盖安装：先删旧目标再拷')
-  assert.deepEqual(copied, [[plan.builtSettingsApp, plan.settingsApp]])
+  // 2026-10-24 改判（finding C9）：下面两条从前钉的是「先删旧目标再拷」
+  // （removed=[目标]、copied=[[源,目标]]）——那个顺序**就是缺陷本身**：cpSync 中途
+  // ENOSPC/EACCES 会留下"旧的没了、新的是半棵"，既跑不动也回不去。现在钉的是修好后的
+  // 顺序：新的一份整体落到 .tmp- → 旧的一份改名让位（改名，不是删除，所以随时能放回）→
+  // 改名就位 → 最后才删备份位。断言一条没少，只是把"错误的顺序"换成"正确的顺序"；
+  // 三条失败路径（拷贝断/让位断/落位断）在 qoder-20261024-installer-lane.test.mjs 里各自有闸。
+  assert.deepEqual(copied, [[plan.builtSettingsApp, `${plan.settingsApp}.tmp-tok`]],
+    '拷贝的落点必须是暂存位：目标本身被直接拷进去就是"半棵"的来路')
+  assert.deepEqual(renamed, [[plan.settingsApp, `${plan.settingsApp}.old-tok`], [`${plan.settingsApp}.tmp-tok`, plan.settingsApp]],
+    '旧的一份是被改名的，不是被删的；新的一份靠 rename 就位')
+  assert.deepEqual(removed, [`${plan.settingsApp}.old-tok`],
+    'rm 只许落在备份位上，且必须在新的一份就位之后')
 })
 
 test('installBundles: allowReplace=false 时目标已存在的那一份不被动，并如实进 declined', () => {

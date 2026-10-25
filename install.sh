@@ -21,6 +21,10 @@
 # 零 bashism（POSIX sh，/bin/sh 直跑）；GLASSPANE_INSTALL_DRY_RUN=1 时只报告
 # 决策不执行（供 CI 语法/分支测试）——纯检查（Node 预检、两个覆盖位的形状闸）在
 # dry-run 里照跑，因为它们报的就是"这条命令会走到哪一步"。
+# 形状闸的位置是这句承诺的一部分：它在**源码定位之前**（下面的 --- 2)，所以"定位到本地
+# 仓库、这一趟不 clone"的那一条也照样被问；从前它只住在"要 clone"那一支里，于是同一条
+# `GLASSPANE_REF='+bad'` 在 clone 那一趟被拒、在本地那一趟回 0（两条一键入口对同一个覆盖
+# 位给两个答案）。钉它的用例：installer/test/qoder-20261024-installer-lane.test.mjs。
 set -eu
 
 # 发布线锚点（版本真源=根 package.json，由 scripts/set-version.mjs 统一改写，
@@ -185,7 +189,22 @@ NODE_MAJOR=$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null |
 [ "$NODE_MAJOR" -ge 18 ] 2>/dev/null || fail "Node.js 需要 >= 18，当前主版本为 ${NODE_MAJOR}：先换够格的 Node（brew install node 或用 nvm 切一个）再重跑，本轮没有 clone、没有写入任何东西。"
 say "Node.js $NODE_MAJOR 预检通过"
 
-# --- 2) 源码定位：GLASSPANE_REPO → 当前目录 → 既有 clone → 自动 clone --------
+# --- 2) 两个覆盖位先过形状闸，再谈源码定位 ------------------------------------
+# 头里那句"纯检查（Node 预检、两个覆盖位的形状闸）在 dry-run 里照跑，因为它们报的就是
+# '这条命令会走到哪一步'"要成立，这两道闸就不能只住在"要 clone"那一支里。
+# 2026-10-24 复核（finding C8）：它们从前就在那里，于是定位到本地仓库的那一趟
+# （GLASSPANE_REPO 指定的、当前目录这棵 checkout、既有 clone）一步都不过闸——实测
+# `GLASSPANE_REF='+bad' GLASSPANE_INSTALL_DRY_RUN=1 sh install.sh` 回 0，`+bad` 只出现在
+# 提示行里；`GLASSPANE_REPO_URL='ext::sh -c touch'` 同样回 0。那两个值确实进不了这一趟的
+# `git clone`（这一趟不 clone），但它们进了**委托给 installer 的那条命令的环境**，而
+# installer 的 `--bootstrap` 那一支会拿同一对值去 clone 别的树：形状闸的产出是一份
+# "这两个值是可执行的"的许可，而它本该在**决定要不要给这份许可之前**问完。
+# 提到分支之前也顺手把头里的承诺兑现成一条能被用例钉住的顺序：闸在定位之前，
+# 因此对"这一趟会不会走到 clone"这个结论是**先于**它说话的。
+assert_repo_url "$REPO_URL"
+assert_ref "$REF"
+
+# --- 3) 源码定位：GLASSPANE_REPO → 当前目录 → 既有 clone → 自动 clone --------
 REPO=""
 if [ -n "${GLASSPANE_REPO:-}" ] && looks_like_repo "$GLASSPANE_REPO"; then
   REPO="$GLASSPANE_REPO"
@@ -213,10 +232,9 @@ if [ -z "$REPO" ]; then
       fail "本安装器只支持 macOS（uname -s = $(uname -s)）：Swift/XCTest、launchd 与 TCC 席位都在 macOS 这一侧，本轮没有 clone、没有写入任何东西。要在别的系统上用 GlassPane，等它把引擎搬到那一侧再说，现在这一步没有可绕的旗标。"
     fi
   fi
-  # 走到这里就一定要 clone（连 dry-run 也是要说清"将要 clone 什么"），所以两个覆盖位
-  # 先过形状闸，再谈执行；dry-run 同样校验，CI 才能在零副作用下读到这条拒绝。
-  assert_repo_url "$REPO_URL"
-  assert_ref "$REF"
+  # 走到这里就一定要 clone（连 dry-run 也是要说清"将要 clone 什么"）。两个覆盖位的
+  # 形状闸**已经在上面的 --- 2) 跑过**（dry-run 也跑），这里不再重复：同一份判据在
+  # 一个脚本里跑两遍，就是给下一次改一处漏一处留的口子。
   if [ "$DRY_RUN" = "1" ]; then
     # dry-run 也要把 REPO 定下来：否则后面委托行打印成 "/installer/cli.js"，
     # CI 的分支测试就读不出真实将要执行的路径。
@@ -256,7 +274,7 @@ if [ -z "$REPO" ]; then
   fi
 fi
 
-# --- 3) 委托 installer（参数原样透传，如 --no-gui / --no-app） -----------------
+# --- 4) 委托 installer（参数原样透传，如 --no-gui / --no-app） -----------------
 # 三道破坏性确认（覆盖已存在的 .app、bootout 已加载的 launchd 作业、结束在跑的 glasspaned）
 # 在 installer 里是三档：交互终端问一句、给了 `--no-prompt` 才照做、非交互又没给这个 flag
 # 就**跳过**并打印各自的补救命令（finding 11/12）。

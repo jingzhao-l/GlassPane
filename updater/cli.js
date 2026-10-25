@@ -351,6 +351,41 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
   const write = (line) => (stderr ?? process.stderr).write(line.endsWith('\n') ? line : `${line}\n`)
   const envDisabled = env.GLASSPANE_UPDATE_DISABLE === '1'
   const merged = { ...defaultDeps({ stateRoot, appsDir, env, flags }), ...deps }
+  /**
+   * `readLocal()` is a *reading*, and a reading that cannot be taken is data, not an
+   * exception — the contract at the top of this file says "Never throws", and this was
+   * the one seam in the switch that did not honour it (finding C5, 2026-10-24).
+   *
+   * `lib/version.js` no longer throws out of a half-written `Info.plist` any more, but the
+   * wrapper stays on purpose: any `deps.readLocal` (the installer's pointer reader, a
+   * future second reader, a test double) that throws would otherwise sail past here into
+   * `main()`'s last resort, which prints to stderr, exits 3 and **writes no state** — and
+   * the state file is the only place the panel and `gp_diagnose` look for the reason. A
+   * refusal that never reaches it is a machine that fails silently from the user's seat.
+   */
+  const readLocal = () => {
+    try {
+      const reading = merged.readLocal()
+      if (!reading || typeof reading !== 'object') {
+        return {
+          ok: false,
+          code: CODES.versionMismatchLocal,
+          version: null,
+          message: 'the installed version came back as nothing at all, so this run has no starting point: nothing was fetched, staged or swapped. Re-run the GlassPane installer, then "updater check --json".',
+        }
+      }
+      return reading
+    } catch (error) {
+      return {
+        ok: false,
+        code: error instanceof UpdaterError ? error.code : CODES.versionMismatchLocal,
+        version: null,
+        message: `reading the installed version threw (${String(error?.message ?? error)}) — that is a refusal, not a crash, and nothing was fetched, staged or swapped. `
+          + 'Next: re-run the GlassPane installer (it rewrites the bundles this reading depends on), then "updater check --json"; '
+          + '"updater status --json" shows this refusal recorded in the state the panel reads.',
+      }
+    }
+  }
   let cachedContext = null
   /**
    * Which socket to probe, and what the running job looks like. Both are read
@@ -380,7 +415,7 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
 
   switch (command) {
     case 'check': {
-      const local = merged.readLocal()
+      const local = readLocal()
       const result = await runCheck({
         stateRoot,
         env,
@@ -407,7 +442,7 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
           exitCode: EXIT.REFUSED,
         }
       }
-      const local = merged.readLocal()
+      const local = readLocal()
       if (local.ok !== true) {
         // A machine whose two version readings disagree is half-installed; the
         // answer is the installer, not a swap.

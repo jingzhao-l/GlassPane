@@ -78,8 +78,22 @@ export function bumpKind(candidate, current) {
  * Text-scanned rather than `plutil`-parsed: the value is a one-line string key
  * in a file this project generates, and shelling out to a system tool to read
  * one line is a bigger failure surface than the regex.
+ *
+ * **A value that is not a plain `x.y.z` is no reading, not an exception**
+ * (finding C5, 2026-10-24). This used to hand the string to `parsePlainVersion`,
+ * which throws — so a half-installed or hand-edited bundle (`1.20`,
+ * `1.20.1-beta`, an empty `<string>`) took down `readLocal()` itself. That throw
+ * escaped `runCommand`'s switch (no `try` there) and landed in `main()`'s last
+ * resort, which prints to stderr and exits 3 **without writing state**: the panel
+ * and `gp_diagnose` read `lastError`, and on such a machine they never saw the
+ * reason. `parseTag`'s throw, by contrast, is wrapped at `check.js:231` and does
+ * reach the record. The file header's contract is "Never throws: refusals are
+ * data". `readBundleVersion` therefore yields `null` (no reading) and
+ * `bundleVersionReading` keeps the raw string, so `localVersion` can refuse with
+ * the unreadable value named — "present but unreadable" is its own fact, neither
+ * "not installed" nor "the readings disagree".
  */
-export function readBundleVersion(appPath, { readFile = (p) => fs.readFileSync(p, 'utf8') } = {}) {
+export function bundleVersionReading(appPath, { readFile = (p) => fs.readFileSync(p, 'utf8') } = {}) {
   const plistPath = path.join(appPath, 'Contents', 'Info.plist')
   let text
   try {
@@ -87,11 +101,22 @@ export function readBundleVersion(appPath, { readFile = (p) => fs.readFileSync(p
   } catch {
     // No bundle at all (headless install, moved directory, or simply not installed
     // yet): a reading that is *absent* is not the same as a reading that disagrees.
-    return null
+    return { value: null, raw: null, state: 'absent' }
   }
   const match = /<key>CFBundleShortVersionString<\/key>\s*<string>([^<]*)<\/string>/.exec(text)
-  if (!match) return null
-  return parsePlainVersion(match[1]).version
+  if (!match) return { value: null, raw: null, state: 'no-key' }
+  const raw = String(match[1]).trim()
+  // `PLAIN_SEMVER_RE` straight, never `parsePlainVersion`: this function reports
+  // what the bundle *says*, and "it says something unreadable" is a reading that
+  // came back empty, not an exception.
+  const plain = PLAIN_SEMVER_RE.exec(raw)
+  return plain
+    ? { value: plain[0], raw, state: 'ok' }
+    : { value: null, raw, state: 'unreadable' }
+}
+
+export function readBundleVersion(appPath, opts = {}) {
+  return bundleVersionReading(appPath, opts).value
 }
 
 /**
@@ -147,11 +172,35 @@ function defaultRun(bin, args) {
  * verdict. `mismatch` carries both readings so `lastError.details` can name them.
  */
 export function localVersion({ appsDir, daemonExecutable, settingsAppName, daemonAppName, run = defaultRun, readFile }) {
-  const bundle = readBundleVersion(path.join(appsDir, daemonAppName), { readFile })
-  const settingsBundle = readBundleVersion(path.join(appsDir, settingsAppName), { readFile })
+  const daemonReading = bundleVersionReading(path.join(appsDir, daemonAppName), { readFile })
+  const settingsReading = bundleVersionReading(path.join(appsDir, settingsAppName), { readFile })
+  const bundle = daemonReading.value
+  const settingsBundle = settingsReading.value
   const daemon = readDaemonVersion(daemonExecutable, { run })
   const seen = { daemonApp: bundle, settingsApp: settingsBundle, daemonBinary: daemon }
   const readings = [bundle, settingsBundle, daemon].filter((v) => v !== null)
+  // A bundle that *is* there and says something unreadable is a different fact from
+  // a machine with nothing installed, and the two need different next steps: the
+  // first is a half-finished or hand-edited install, the second is no install at all.
+  // It is also not the same as a reader that had **nothing** to say (no bundle, no
+  // `--version` flag): an unreadable `Info.plist` is evidence the §1.1 "the readings
+  // must agree" rule cannot be evaluated, so it refuses instead of letting the one
+  // legible reading become the baseline on its own.
+  const unreadable = [[daemonAppName, daemonReading], [settingsAppName, settingsReading]]
+    .filter(([, reading]) => reading.state === 'unreadable')
+    .map(([name, reading]) => `${name} reports ${JSON.stringify(reading.raw)}`)
+  if (unreadable.length > 0) {
+    return {
+      ok: false,
+      code: CODES.versionMismatchLocal,
+      version: null,
+      seen,
+      message: `the installed bundles are present but unreadable as versions — ${unreadable.join(', ')}; `
+        + 'a version this tool can only guess at cannot be compared with a release tag, so nothing was fetched, staged or swapped. '
+        + 'Next: re-run the GlassPane installer (it rewrites those Info.plist files from the release it installs), '
+        + 'then "updater check --json" — and "updater status --json" shows this refusal recorded in the state the panel reads.',
+    }
+  }
   if (readings.length === 0) {
     return {
       ok: false,

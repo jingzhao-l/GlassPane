@@ -116,7 +116,16 @@ function isBlankBlock(block) {
   return true
 }
 
-/** Parse a pax extended-header record set; returns `{ path }` when present. */
+/**
+ * Parse a pax extended-header record set.
+ *
+ * A record is `<len> <key>=<value>\n` and `<len>` counts the trailing newline, so the
+ * value is cut **with the newline taken off** — `pendingName = pax.path` used to keep it,
+ * which is a name ending in a control character handed to the filesystem.
+ * `mode` is read here too: the point of an extended header is that it overrides the
+ * ustar fields for the entry that follows it, and a reader that parses `path` while
+ * dropping `mode` is a reader with one documented rule and one undocumented exception.
+ */
 function parsePax(text) {
   const out = {}
   let offset = 0
@@ -127,10 +136,31 @@ function parsePax(text) {
     if (!Number.isFinite(len) || len <= 0) break
     const record = text.slice(space + 1, offset + len)
     const eq = record.indexOf('=')
-    if (eq !== -1) out[record.slice(0, eq)] = record.slice(eq + 1)
+    if (eq !== -1) out[record.slice(0, eq)] = record.slice(eq + 1).replace(/\n$/, '')
     offset += len
   }
   return out
+}
+
+/**
+ * The `mode=` of a pax extended header, as the number it declares.
+ *
+ * Refused rather than ignored when it is not octal: an archive whose own metadata is
+ * corrupt is not a tree this tool should guess its way through (`stagedMode`'s
+ * "absent means the archive declared nothing" is a *different* fact from "the archive
+ * declared garbage"). Whatever does land then goes through `stagedMode`, which strips
+ * setuid/setgid/sticky and the group/other write bits — so a `mode=4777` cannot ask
+ * this extractor for anything the member header could not already ask for.
+ */
+function parsePaxMode(value, name) {
+  const text = String(value ?? '').trim()
+  if (!/^[0-7]{1,7}$/.test(text)) {
+    throw new UpdaterError(
+      CODES.archiveUnreadable,
+      `pax extended header for ${JSON.stringify(name)} declares mode=${JSON.stringify(value)}, which is not an octal mode: nothing was extracted, because a release archive whose own metadata is unparseable is a release to re-publish, not a tree to guess at. Run "updater check" again against a corrected release.`,
+    )
+  }
+  return Number.parseInt(text, 8)
 }
 
 /**
@@ -180,7 +210,14 @@ export function readTarGz(buffer, { maxOutputLength = MAX_DECOMPRESSED_BYTES } =
     }
     if (header.typeFlag === 'x' || header.typeFlag === 'X') {
       const pax = parsePax(Buffer.from(data.subarray(0, header.size)).toString('utf8'))
-      if (header.typeFlag === 'x' && pax.path) pendingName = pax.path
+      if (header.typeFlag === 'x') {
+        if (pax.path) pendingName = pax.path
+        // `pendingMode` is not decoration: it is how the extended header's `mode=`
+        // overrides the member header's, which is what POSIX says an extended header
+        // is for. A `global` ('X') record sets neither — it applies to later entries
+        // only via their own extended headers.
+        if (pax.mode !== undefined) pendingMode = parsePaxMode(pax.mode, pax.path ?? pendingName ?? header.name)
+      }
       continue
     }
     const name = pendingName ?? header.name
@@ -297,11 +334,22 @@ export function extractTarGz(buffer, destDir, { allowedRoot, maxOutputLength = M
   // entry list, so "what does this point at" is decided by the archive's contents and
   // never by whatever happens to exist on the machine.
   const byTarget = new Map()
+  const firstAt = new Map()
   for (const { entry, target } of targets) {
-    if (byTarget.has(target) && entry.type !== 'link') {
-      throw new UpdaterError(CODES.archiveEntryUnsafe, `archive carries two entries named ${JSON.stringify(entry.name)}: the second would silently replace the first`)
+    // Every entry type counts, links included (finding C10, 2026-10-24). The guard used
+    // to read `byTarget.has(target) && entry.type !== 'link'`, so "a file at p, then a
+    // link at p" passed — and the second pass then wrote the *link's target's bytes*
+    // over the file's, which is precisely the "the second would silently replace the
+    // first" this sentence promises to refuse. Two links on one path are the same event.
+    if (byTarget.has(target)) {
+      throw new UpdaterError(
+        CODES.archiveEntryUnsafe,
+        `archive carries two entries named ${JSON.stringify(entry.name)} (a ${firstAt.get(target)} and a ${entry.type}): the second would silently replace the first, `
+        + 'so nothing was written anywhere in the staging tree. Re-run "updater check" against a release whose archive holds each path once.',
+      )
     }
     byTarget.set(target, entry)
+    firstAt.set(target, entry.type)
   }
   const links = []
   for (const { entry, target } of targets) {

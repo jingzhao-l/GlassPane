@@ -684,25 +684,74 @@ export function bundlesToReplace({ plan, exists = fs.existsSync } = {}) {
     .map(([, target]) => target)
 }
 
+/** 安置一份 bundle 时那条"没落地"的拒绝：说清动到哪一步、旧的一份还在不在、下一步跑什么。
+ *  finding C9（2026-10-24）：从前这里只把 `cpSync` 的 errno 原样抛出去——读的人既不知道
+ *  旧 bundle 是否还在（旧实现是先 `rm -rf` 再拷，中途失败就是"旧的没了、新的是半棵"），
+ *  也没有一句下一步。现在每一种失败各自点名"原件在不在"，并给一条真能跑的命令。 */
+function bundlePlacementFailureText({ source, target, staged, retired, error, step, stagedRemoved = true }) {
+  const raw = String(error?.message ?? error)
+  const errno = error?.code && !raw.startsWith(String(error.code)) ? `${error.code}: ${raw}` : raw
+  const head = `安置 ${target} 失败（来源 ${source}）：${errno}`
+  const dir = JSON.stringify(path.dirname(target))
+  const q = (p) => JSON.stringify(p)
+  if (step === 'copy' || step === 'retire') {
+    return `${head}\n`
+      + `新的一份只走到暂存位置就断了，原件还在原位——${target} 仍是上一轮那份**完整**的 bundle，`
+      + `本轮没有任何一步动过它的内容。下一步：空间不够看 \`df -h ${dir}\`，权限/旗标看 `
+      + `\`ls -ld ${dir}\` 与 \`ls -lO ${q(target)}\`（macOS 的 immutable 旗标 uchg 会让改名与覆盖都失败），`
+      + `腾出来或修好之后重跑 install.sh。`
+      + (stagedRemoved
+        ? `本轮的暂存副本 ${staged} 已删，不需要手工清理。`
+        : `本轮的暂存副本 ${staged} 没能删掉（同一个错误也挡住了它），重跑前手工 \`rm -rf ${q(staged)}\` 即可。`)
+  }
+  if (step === 'restore') {
+    return `${head}\n`
+      + `这一步之后本机已经没有 ${target} 了：新的一份在 ${staged}，上一轮那份完整的备份在 ${retired}，`
+      + `而把它们放回原位的改名也被同一个错误挡住。这一步归人（安装器不发放提权命令）：`
+      + `先 \`mv ${q(retired)} ${q(target)}\` 把旧的一份放回原位，或 \`mv ${q(staged)} ${q(target)}\` 用本轮新的一份；`
+      + `两个都跑不通就是 ${path.dirname(target)} 的权限问题，看 \`ls -ld ${dir}\`，修好后重跑 install.sh。`
+  }
+  // step === 'place'：新的一份没能落位，旧的一份已经被挪回原位——机器上此刻仍是完整的一版。
+  return `${head}\n`
+    + `${target} 已经放回上一轮那一份（先把备份 ${retired} 挪回原位再报错），本轮新的一份留在 ${staged}——`
+    + `本机现在不是"半棵"，是旧的那版在位。下一步：\`ls -ld ${dir}\` 看这个目录当前账号能不能写`
+    + `（EACCES 通常是目录属主不是您，或这卷不保存权限位），修好后重跑 install.sh；`
+    + `两处残留 ${staged} 与 ${retired} 想清就 \`rm -rf\`，留着也不影响下一轮。`
+}
+
 /** 把 make-app.sh 的两个 bundle 安置到 ~/Applications（覆盖式，幂等）。
- *  返回 `{ installed, declined }`（finding 11）：
+ *  返回 `{ installed, declined, leftovers }`（finding 11）：
  *  - `installed` = 本轮真的写进去的条目；
  *  - `declined` = 目标**已存在**而 `allowReplace=false`（人回答 n，或非交互环境没给
  *    `--no-prompt`）因此没有覆盖的条目——留着的是上一轮的旧 bundle，daemon 启动路径
  *    会照旧选中它。这不是"无所谓"的分支：收尾那次版本核对正是靠它拦住"装了新版、
  *    跑的还是旧版"。
- *  源缺失即跳过（--no-app 或构建产物不全时不报错）。 */
+ *  - `leftovers` = 没能删干净的暂存/备份目录（磁盘动作失败不影响安置结论，但要如实报出来）。
+ *  源缺失即跳过（--no-app 或构建产物不全时不报错）。
+ *
+ *  finding C9（2026-10-24）的**顺序**就是修复本身。从前是 `remove(target)` → `copy(source,
+ *  target)`：`cpSync` 在中途 ENOSPC/EACCES 就留下"旧的没了、新的是半棵"——一个既不能跑也
+ *  没法回滚的目录，而报错只有 errno。现在四步，每一步失败时机器上的 bundle 都是完整的：
+ *   1. 新的一份整体拷到 `${target}.tmp-<token>`（旧目标还好好在原位）；
+ *   2. 旧的一份**改名**到 `${target}.old-<token>`（不是删除，所以随时能放回原位）；
+ *   3. 把暂存的一份**改名**到目标——同目录内的 rename 是原子的，目标要么整个是旧的、
+ *      要么整个是新的，"半棵"这一档压根不存在；
+ *   4. 删掉备份位（这一步失败只是留个残骸，进 `leftovers`，不算安置失败）。
+ *  第 2/3 步抛出时先把旧的一份放回原位，再带着"动到哪一步 + 原件在不在 + 下一步跑什么"报出去。 */
 export function installBundles({
   plan,
   exists = fs.existsSync,
   remove = fs.rmSync,
   copy = fs.cpSync,
   mkdir = fs.mkdirSync,
+  rename = fs.renameSync,
+  token = `${process.pid}-${Date.now().toString(36)}`,
   allowReplace = true,
 } = {}) {
   const installed = []
   const declined = []
-  if (!plan?.appsDir) return { installed, declined }
+  const leftovers = []
+  if (!plan?.appsDir) return { installed, declined, leftovers }
   mkdir(plan.appsDir, { recursive: true })
   const pairs = [
     [plan.builtSettingsApp, plan.settingsApp],
@@ -714,11 +763,51 @@ export function installBundles({
       declined.push(target)
       continue
     }
-    remove(target, { recursive: true, force: true })
-    copy(source, target, { recursive: true })
-    installed.push(target)
+    const staged = `${target}.tmp-${token}`
+    const retired = `${target}.old-${token}`
+    let step = 'copy'
+    let stagedRemovalFailed = false
+    try {
+      // 上一轮被打断留下的同名暂存位先清掉，否则本轮的拷贝会落在一棵半截树上面。
+      if (exists(staged)) remove(staged, { recursive: true, force: true })
+      copy(source, staged, { recursive: true })
+      if (exists(target)) {
+        step = 'retire'
+        rename(target, retired)
+      }
+      step = 'place'
+      rename(staged, target)
+      step = 'cleanup'
+      try {
+        remove(retired, { recursive: true, force: true })
+      } catch {
+        leftovers.push(retired)
+      }
+      installed.push(target)
+    } catch (error) {
+      if (step === 'place' || step === 'retire') {
+        // 目标此刻是空的（旧的挪走了、新的没落位）——把旧的一份放回原位。
+        try {
+          if (exists(retired) && !exists(target)) rename(retired, target)
+        } catch (restoreError) {
+          throw new Error(bundlePlacementFailureText({
+            source, target, staged, retired, error: restoreError, step: 'restore',
+          }), { cause: restoreError })
+        }
+      } else {
+        try {
+          remove(staged, { recursive: true, force: true })
+        } catch {
+          leftovers.push(staged)
+          stagedRemovalFailed = true
+        }
+      }
+      throw new Error(bundlePlacementFailureText({
+        source, target, staged, retired, error, step, stagedRemoved: !stagedRemovalFailed,
+      }), { cause: error })
+    }
   }
-  return { installed, declined }
+  return { installed, declined, leftovers }
 }
 
 /** 生成 launchd 用户代理 plist（纯函数，零副作用；XML 转义防路径注入）。
@@ -1030,6 +1119,16 @@ export function socketHello(
  *  - 作业已加载且自报 granted → 无需任何动作，如实报告；
  *  - 已加载但自报非 granted（含 permissions 缺失）→ TCC 按进程缓存，
  *    kickstart -k 换一个新判定进程再验——勾完框重跑本命令即可闭环。
+ *
+ * finding C3（2026-10-24）：上面那条"作业已加载但定义变了"的路要 **bootout** 一个
+ * 已加载作业，而 install() 对同一个动作是有 `confirm` 门的（autoYes 只由 `--no-prompt`
+ * 决定）。本命令从前调 `bootstrapFn(label, resolvedPlist)` 时不传 `allowBootout`，默认
+ * true ——于是 `--restore-launchd`（产品交给 agent 的"daemon 不可达"补救命令，
+ * `mcp-shell/src/tools.ts` 甚至专门叮嘱过"这一步别重启东西，在飞的 act 会被打断"）
+ * 可以在用户应用正在 act 中途卸掉一个健康作业且一句不问。现在复用同一道门：
+ * 先按"不许 bootout"探一次（`launchctlBootstrap` 的 `bootoutDeclined` 那一支就是为此
+ * 存在的只读答案，一次 launchctl 都不多写），真需要 bootout 才问；非交互且没给
+ * `--no-prompt` 就回拒，且磁盘与 launchd 都没被动过。
  */
 export async function restoreLaunchd({
   label = LAUNCHD_LABEL,
@@ -1042,6 +1141,8 @@ export async function restoreLaunchd({
   waitFn = waitForSocket,
   helloFn = socketHello,
   existsFn = (p) => fs.existsSync(p),
+  confirmFn = confirm,
+  autoYes = false,
   serveTimeoutMs = 10000,
 } = {}) {
   // finding 4：这条路径也是拿 HOME 拼出来的（旧代码在参数默认值里读
@@ -1066,8 +1167,38 @@ export async function restoreLaunchd({
       message: `launchd plist 不存在（${resolvedPlist}）：从未安装或已被删除，请重跑 install.sh 完整安装`,
     }
   }
-  const boot = bootstrapFn(label, resolvedPlist)
+  // 第一趟一律按"不许 bootout"问：需要卸掉已加载作业时它回 `bootoutDeclined` 且一个字节
+  // 都不动，这就是"要不要问人"的那个只读答案；不需要 bootout 的常规路径（未加载 →
+  // bootstrap，或已加载且定义一致 → already）照旧一次问都不问。
+  let boot = bootstrapFn(label, resolvedPlist, { allowBootout: false })
+  let bootoutDeclined = false
+  if (boot.ok !== true && boot.bootoutDeclined === true) {
+    const allowBootout = await confirmFn(
+      `${label} 已加载且跑的是旧定义，而 ${resolvedPlist} 写的是另一份——卸载它才能换新定义，`
+      + '这会打断 daemon 正在替用户执行的 act',
+      { autoYes },
+    )
+    if (allowBootout) {
+      boot = bootstrapFn(label, resolvedPlist, { allowBootout: true })
+    } else {
+      bootoutDeclined = true
+    }
+  }
   if (!boot.ok) {
+    if (bootoutDeclined) {
+      return {
+        ok: false,
+        action: 'bootout-declined',
+        verified: null,
+        message: `没有卸载已加载的 ${label}（本轮未获得确认），因此也没有 bootstrap——launchd 与磁盘都没被动过，什么都没改。`
+          + `现况：${boot.message}\n`
+          + '下一步（三选一，没有一项会静动别人的作业）：① 在自己的交互终端里重跑 '
+          + 'node installer/cli.js --restore-launchd 并回答继续；'
+          + '② 脚本/自动化里显式带上放行旗标：node installer/cli.js --restore-launchd --no-prompt'
+          + '（带上就等于允许这一步 bootout 已加载的作业）；'
+          + `③ 不想换新定义就什么都不用做——launchd 仍在按它手里那份旧定义服务，${resolvedPlist} 也没被改写。`,
+      }
+    }
     // 两种"没注册上"要分开说：bootout 失败意味着旧作业还在跑旧定义（agent 下一步是把它卸掉），
     // bootstrap 失败才是"卸干净了但装不上"。合成一句会把人支到错的那条命令上去。
     return {
@@ -1612,9 +1743,12 @@ export function run(cmd, args, { cwd } = {}) {
  *  - 交互终端：问一句，回车继续、`n` 跳过；
  *  - 非交互又没给 flag：**回 false**，不阻塞、也不"替用户同意"。
  *  旧实现在这里把非 TTY 当成"自动同意"，于是 `curl | sh`（管道里没有终端）替每一条
- *  破坏性动作点了"是"——而 `install.sh` 正是文档里那条命令。现在由入口脚本在非 TTY 时
- *  显式补 `--no-prompt`（install.sh 的 SILENT），放行这件事变成一条写在脚本里的、可被读到的
- *  决定，而不是一个默认值。`interactive`/`ask` 是测试接缝：没有它们这三档只能靠真终端验。 */
+ *  破坏性动作点了"是"——而 `install.sh` 正是文档里那条命令。现在入口脚本**不代答**：
+ *  它在非 TTY 时只说明"这一趟会跳过什么、怎么放行"（`sh -s -- --no-prompt`），放行这件事
+ *  是一条写在调用行里的、可被读到的决定，而不是一个藏在脚本里的默认值。
+ *  （从前这里写的是"由入口脚本在非 TTY 时显式补 `--no-prompt`（install.sh 的 SILENT）"——
+ *  那个代答在 2026-10-20 被废，SILENT 变量也已经由 review-2026-10-09.test.mjs 钉死不许回来。
+ *  `interactive`/`ask` 是测试接缝：没有它们这三档只能靠真终端验。） */
 export async function confirm(question, {
   autoYes = false,
   interactive = Boolean(process.stdin.isTTY),
@@ -1849,12 +1983,14 @@ export function usageText() {
     '选项:',
     '  --repo <目录>      指定项目根目录（默认自动向上查找）',
     '  --no-prompt        跳过破坏性步骤的确认（脚本/自动化场景）。被它拦住的是三件：',
-    '                     ① bootout 已加载的 launchd daemon 作业（会打断正在跑的 act）；',
+    '                     ① bootout 已加载的 launchd daemon 作业（会打断正在跑的 act；',
+    '                     install 与 --restore-launchd 走的是同一道门）；',
     '                     ② 覆盖 ~/Applications 里已存在的 .app；③ --replace-daemon 结束',
     '                     已在跑的实例。交互终端会逐条问；非交互（stdin 不是终端）**且没给**本 flag 时',
     '                     这三步一律不执行（不阻塞等待、也不默认同意）并打印说明——',
-    '                     所以 CI / e2e / `curl | sh` 这类调用必须显式带 --no-prompt',
-    '                     （install.sh 在 stdin 非 TTY 时已经自动补上）。',
+    '                     所以 CI / e2e / `curl | sh` 这类调用必须显式带 --no-prompt。',
+    '                     入口脚本 install.sh 不代答：stdin 不是终端时它只说明这一趟会跳过',
+    '                     什么、怎么放行，把决定留给敲命令的人。',
     '  --no-daemon        不启动 glasspaned',
     '  --replace-daemon   先结束已在跑的 glasspaned 实例（旧构建的 daemon 会继续占',
     '                     socket，让系统设置里的授权条目与实际服务实例对不上）',
@@ -1867,7 +2003,8 @@ export function usageText() {
     '                     检查"；手动 check/apply 仍可用。等价的环境开关由 updater 自己',
     '                     判定（本安装器不重复解读那个环境变量）',
     '  --restore-launchd  只做 launchd 恢复：检测作业被 bootout → bootstrap → hello',
-    '                     校验 daemon 自报席位（勾完 TCC 框后重跑即自动换进程复验）',
+    '                     校验 daemon 自报席位（勾完 TCC 框后重跑即自动换进程复验）；',
+    '                     恢复要换的是**已加载**作业的定义时，它和 install 一样先过 ① 那道门',
     '  --skip-build       跳过 npm/tsc/swift 编译（已构建过时使用）',
     '  --no-bootstrap     本地找不到仓库时不自动 clone，改为打印定位指引',
     '  -h, --help         显示本帮助',
@@ -2512,7 +2649,8 @@ export async function install({
     // （另有 bootout 已加载作业、结束在跑的实例）。`--no-prompt` 过去是**惰性**的——
     // confirm() 没有任何调用方，README 与 --help 却写着"跳过每步确认"。现在它真的有
     // 一档可跳过：交互终端里会问一句；`--no-prompt` 直接放行；非交互又没给 flag 则不覆盖
-    // （install.sh 在 stdin 非 TTY 时本来就会补 --no-prompt，CI/e2e 与 `curl | sh` 行为不变）。
+    // （install.sh 在 stdin 非 TTY 时**不代答**，它只把"这一趟会跳过什么"说出来——CI / e2e /
+    //  `curl | sh` 要放行就自己带上 --no-prompt，见 install.sh 末节与 install-sh 那组用例）。
     const replaceTargets = bundlesToReplace({ plan })
     let allowReplace = true
     if (replaceTargets.length > 0) {
@@ -2531,6 +2669,11 @@ export async function install({
     }
     for (const app of bundles.declined) {
       printStep(paint(`未覆盖（回答跳过）：${app}——里面还是上一轮的产物`, 'yellow'))
+    }
+    // 备份位删不掉不是安置失败（新的一份已经在位），但也不能不说：它是个看得见、
+    // 没人认领的目录，留在 ~/Applications 里下一次安装还得再挪一次。
+    for (const leftover of bundles.leftovers ?? []) {
+      printStep(paint(`已安置，但备份没能删净：${leftover}——手工 \`rm -rf\` 掉它即可，本轮结论不受影响`, 'yellow'))
     }
     if (bundles.installed.length === 0 && bundles.declined.length === 0) {
       printStep('未安置任何 .app（make-app.sh 未产出 bundle），后续按裸二进制形态运行')
@@ -2846,7 +2989,9 @@ if (isMain) {
   } else if (options.restoreLaunchd) {
     // 审计项④：恢复 + 校验全机器化，退出码即判定（0=daemon 就位且已按实际
     // 自报如实报告；1=作业/服务面失败），agent 可直接执行并按 message 续办。
-    const result = await restoreLaunchd()
+    // finding C3：这一支也可能 bootout 一个已加载作业，所以它读同一个同意门——
+    // `--no-prompt` 是唯一的显式放行，交互终端问一句，非交互又没给旗标就拒且零改动。
+    const result = await restoreLaunchd({ autoYes: options.prompt === false })
     process.stdout.write(`${result.message}\n`)
     process.exitCode = result.ok ? 0 : 1
   } else {

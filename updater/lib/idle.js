@@ -110,7 +110,23 @@ export function probeIdle({
       finish({
         answered: false,
         code: CODES.busyOrUnreachable,
-        reason: `the daemon did not answer the idle probe within ${timeoutMs}ms, so something is queued in front of it`,
+        // Finding C7 (2026-10-24). This sentence used to name a cause: "so something
+        // is queued in front of it". Nothing measured that — the one fact is *no reply
+        // within ${timeoutMs}ms*, and `check.js`'s own rule for an errno says a cause
+        // nobody measured is not allowed to be told as a diagnosis. A queued act, a
+        // wedged daemon and a different service owning this socket all produce exactly
+        // this observation, and they are not the same next step for a person.
+        // It also used to carry **no action at all** while the other three refusal
+        // gates each hand the reader a command (`policy.js`'s rule), and this string is
+        // what lands in `lastError.message` — the sentence the panel prints verbatim.
+        reason: `the daemon did not answer the idle probe within ${timeoutMs}ms, so nothing was swapped and the daemon was not restarted. `
+          + `What this run measured is only "no reply on ${socketPath} in ${timeoutMs}ms"; it cannot tell apart an act queued in front of the reply, `
+          + 'a daemon that stopped taking connections, and something else owning that socket name. '
+          + 'What distinguishes them, in order: `launchctl print gui/$(id -u)/com.glasspane.daemon` shows whether launchd holds the job and with which '
+          + '--socket-path; "updater status --json" shows what the last recorded run saw without touching the network; '
+          + 'and a daemon that answers nothing is repaired by the installer\'s `node installer/cli.js --restore-launchd` '
+          + '(it asks before unloading a job that is loaded, so an act in flight is not cancelled by it). '
+          + 'Re-run "updater apply" once the probe is answered — until then the swap stays refused, which is the safe side.',
       })
     }, timeoutMs)
     const settleOnce = (verdict) => {

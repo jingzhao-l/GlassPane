@@ -81,7 +81,12 @@ test('preparePrivateLogFile: chmod 没落住 = 失败，不许报成"至少试�
       close: (fd) => { closed += 1; fs.closeSync(fd) },
     })
     assert.equal(result.ok, false, '卷存不住权限位时，owner-only 的日志就是做不到')
-    assert.match(result.error, /still 644 after chmod\(0600\)/, result.error)
+    // 2026-10-24 改判（finding C11）：这里从前钉的是 `still 644`——一个**少前导零**的读数，
+    // 而 `installer/cli.js` 的 `formatMode()` 早就专门存在，理由就是"拒绝里出现的数要能和
+    // ls -l / stat -f %Lp 的答案对上"。同一台机器上两份权限读数（0644 与 644）是那条缺陷本身。
+    // 断言一条没少，只把字面量换成修好后的形态；同源判据由
+    // `qoder-20261024-updater-lane.test.mjs` 逐值比对两个 `formatMode`。
+    assert.match(result.error, /still 0644 after chmod\(0600\)/, result.error)
     assert.equal(closed, 1, '决定失败也要把打开的 fd 关掉')
   } finally {
     removeDir(dir)
