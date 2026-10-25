@@ -809,6 +809,12 @@ final class SettingsModel: ObservableObject {
             recordProbeFailure(.writeFailed)
         case .spawnFailed:
             recordProbeFailure(.spawnFailed)
+        case .submitRefused(let status, let detail):
+            // 阶段落在 `.spawnFailed` 这一档（`CapabilityFailure` 的词表只有四类，而这一条
+            // 说的正是"任务没起来"），但文案必须是**拒绝**而不是超时：`launchctl` 回了非 0，
+            // 它说的就是它为什么不肯起。判据与文案抽成纯函数（`submitRefusalText`），因为
+            // "把拒绝说成超时"正是这条缺陷本体，它得能在不碰 launchd/TCC 的情况下被验红。
+            recordProbeFailure(.spawnFailed, Self.submitRefusalText(status: status, detail: detail))
         case .timedOut:
             recordProbeFailure(.timedOut)
         case .directoryUnsafe(let reason):
@@ -817,6 +823,22 @@ final class SettingsModel: ObservableObject {
             recordProbeFailure(.writeFailed,
                 "调试能力没有实测：\(reason) 下一步：确认 TMPDIR 指向本用户专有、同组与其他人都写不动的目录（ls -ld 那个目录），或清掉 TMPDIR 让系统回到默认的每用户临时目录后重试。")
         }
+    }
+
+    /// 一次性任务被 `launchctl submit` **拒了**的那句话（纯函数，供单测）。
+    ///
+    /// 这条文案的存在理由就是这条缺陷：从前提交那一趟是 `try? process.run()`，起了就走、
+    /// 退出码从不落地，于是"标签已存在""作业被拒"只能靠"输出文件一直没内容"发现，dev-tools
+    /// 那一趟等完整笔预算（260 秒）之后报 `.timedOut`，用的还是
+    /// `CapabilityFailure.timedOut.fallbackText` 那句"这次验证等得有点久……再点一次"。
+    /// 一次**实测到的拒绝**被说成一次超时，而给出的下一步（再点一次）不会改变 launchd 的回答。
+    nonisolated static func submitRefusalText(status: Int32, detail: String) -> String {
+        "调试能力没有实测：\(Launchctl.path) submit 退出码 \(status)。"
+            + ConsoleModel.quoteDaemonWords(detail)
+            + " 一次性任务没有被 launchd 收下，那一趟 daemon 探测一次也没有跑，所以这张卡没有新结论、"
+            + "状态保持\"未验证\"。这一步不是超时：上面那句是 launchctl 自己说的为什么不肯起。"
+            + "下一步：按那句处理（同一个标签还在就先让它结束，路径不认就核对服务装的在哪），"
+            + "再点一次「验证调试能力」——单靠再点一次不会改变 launchd 的回答。"
     }
 
     /// 记录一次验证失败：文案（可覆盖为上下文更贴切的说法）+ 可判读的失败阶段。
@@ -986,6 +1008,10 @@ final class SettingsModel: ObservableObject {
         case text(String)
         case writeFailed
         case spawnFailed
+        /// `launchctl submit` **回了非 0**：这一趟一次性任务被 launchd 拒了，理由是它自己
+        /// 回的那句话。单列一态，因为它的下一步与 `.timedOut` 完全不同——再点一次不会
+        /// 改变 launchd 的回答，而"等得有点久"那句文案会把一次实测的拒绝洗成一次没测。
+        case submitRefused(status: Int32, detail: String)
         case timedOut
         /// 临时目录本身不合格（别人拥有、同组/其他人可写、或那个位置不是目录）。
         /// 单列一态：它的下一步不是"重试一次"，而是换一个可隔离的临时目录——
@@ -1047,15 +1073,31 @@ final class SettingsModel: ObservableObject {
         FileManager.default.createFile(
             atPath: outputPath, contents: Data(), attributes: [.posixPermissions: 0o600]
         )
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: command.launchPath)
-        process.arguments = command.arguments
-        do {
-            try process.run()
-        } catch {
-            FileHandle.standardError.write(Data("runOneShot launchctl submit failed: \(error)\n".utf8))
+        // `launchctl submit` 那一趟走**带退出码的通道**（`ConsoleModel.runDaemonCLI`，
+        // 同文件重启那腿 :947 用的就是它）。从前这里是 `try? process.run()`：起了就走，
+        // 不等、不读码，于是"标签已存在""作业被 launchd 拒了"这种**实测到的拒绝**只能靠
+        // "输出文件一直没内容"发现——dev-tools 那一趟把整笔预算（260 秒）等完之后报
+        // `.timedOut`，文案是"这次验证等得有点久……再点一次「验证调试能力」"：一次拒绝
+        // 被说成一次超时，下一步也被指成了一个不会改变回答的重试。
+        let submit = ConsoleModel.runDaemonCLI(
+            binary: command.launchPath, arguments: command.arguments, timeoutSeconds: 10
+        )
+        guard let submit else {
+            removeJobLabel(command.jobLabel)
+            try? FileManager.default.removeItem(atPath: scriptPath)
+            try? FileManager.default.removeItem(atPath: outputPath)
             return .spawnFailed
         }
+        if submit.status != 0 {
+            let detail = submit.errorOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? submit.output
+                : submit.errorOutput
+            removeJobLabel(command.jobLabel)
+            try? FileManager.default.removeItem(atPath: scriptPath)
+            try? FileManager.default.removeItem(atPath: outputPath)
+            return .submitRefused(status: submit.status, detail: detail)
+        }
+        // 提交成了（那一趟回 0）——任务在 launchd 那边跑，读数落在 `outputPath`。
         var result: OneShotOutcome = .timedOut
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         while Date() < deadline {
@@ -1066,14 +1108,20 @@ final class SettingsModel: ObservableObject {
             }
             Thread.sleep(forTimeInterval: 0.25)
         }
-        let cleanup = PermissionGuide.daemonRequestCleanupCommand(jobLabel: command.jobLabel)
-        let remover = Process()
-        remover.executableURL = URL(fileURLWithPath: cleanup.launchPath)
-        remover.arguments = cleanup.arguments
-        try? remover.run()
+        removeJobLabel(command.jobLabel)
         try? FileManager.default.removeItem(atPath: scriptPath)
         try? FileManager.default.removeItem(atPath: outputPath)
         return result
+    }
+
+    /// `launchctl remove <label>`：幂等清理，失败静默——它不产出任何面向用户的结论。
+    /// 但它现在**等得到退出码**（从前是 `try? remover.run()`，起了就走，留下一个没人收
+    /// 的子进程与一次没有读者的失败）。
+    nonisolated private static func removeJobLabel(_ jobLabel: String) {
+        let cleanup = PermissionGuide.daemonRequestCleanupCommand(jobLabel: jobLabel)
+        _ = ConsoleModel.runDaemonCLI(
+            binary: cleanup.launchPath, arguments: cleanup.arguments, timeoutSeconds: 5
+        )
     }
 
     /// 按回落表逐个探：第一个真回 hello 的名字赢。都没回话时也要把两件事分开说——

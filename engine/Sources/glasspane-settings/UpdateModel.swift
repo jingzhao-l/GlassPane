@@ -48,6 +48,10 @@ final class UpdateModel: ObservableObject {
         case panelComputed
     }
     @Published private(set) var stateRootSource: StateRootSource = .panelComputed
+    /// 后台服务这一帧自报、而这一侧**拒收**的状态根（nil = 从没拒过）。与
+    /// `ConsoleModel.refusedDaemonStateRoot` 同一道闸的另一半：两条腿各自采纳同一个值时，
+    /// 只装一处就是半修（`ConsoleModel.swift:148-152` 记过这个形状）。
+    @Published private(set) var refusedDaemonStateRoot: String?
     /// node 程序位置；nil 表示每次按 `UpdatePanel.nodeCandidates` 现找。
     private let injectedNodePath: String?
     /// 起子进程时那份环境的底子。可注入是为了让测试能把"这台机器本来就带着
@@ -93,22 +97,48 @@ final class UpdateModel: ObservableObject {
         }
         let reported = daemonStateRoot?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let reported, !reported.isEmpty {
-            let next = StateRoot(path: reported).path
-            if next != stateRootPath {
-                stateRootPath = next
-                // 根换了，这一页手里那份"更新器位置"与结论都来自**另一个安装**：
-                // 留着它们就等于让旧根的数字在新根的名字下说话。
-                snapshot = nil
-                pointer = .failed(.missingPointer)
-                readFailure = nil
+            // 采纳前先过 `StateRootArgument.rejection(for:)`——与 `ConsoleModel.adoptDaemonReport`
+            // 同一道闸、同一个判据函数（TS 侧对同一个值 mirror 的也是这一条：
+            // `mcp-shell/src/project-registry.ts` 的 `stateRootRefusal`）。这一页拿这个根去
+            // 起更新器（`--state-dir` 那一条）并按它读 `update-install.json` 与 `ca-roots.pem`，
+            // 而它是 peer 在 `hello` 里自报的、engine.sock 无 peer 鉴权：少这一句，同用户一帧
+            // 回话就能让这一页把更新器指到别处的安装记录上、把根证书束从别处读。
+            // 拒收时保留上一个根，出处不升格。
+            if let defect = StateRootArgument.rejection(for: reported) {
+                refusedDaemonStateRoot = reported
+                FileHandle.standardError.write(
+                    Data("glasspane-settings: update page refused self-reported state root \(reported) (\(defect))\n".utf8)
+                )
+            } else {
+                refusedDaemonStateRoot = nil
+                let next = StateRoot(path: reported).path
+                if next != stateRootPath {
+                    stateRootPath = next
+                    // 根换了，这一页手里那份"更新器位置"与结论都来自**另一个安装**：
+                    // 留着它们就等于让旧根的数字在新根的名字下说话。
+                    snapshot = nil
+                    pointer = .failed(.missingPointer)
+                    readFailure = nil
+                }
+                stateRootSource = .daemonReported
             }
-            stateRootSource = .daemonReported
         } else if stateRootSource == .daemonReported {
             stateRootSource = .daemonReportedEarlier
         }
     }
 
-    /// 状态根那一行唯一的一句话：路径 + 它是谁认定的。
+    /// 那一拒的原话。**措辞与 `ConsoleModel.refusedDaemonStateRootCaption` 同源**
+    /// （同一种事在两扇门上不许讲成两个故事），只有"这一页拿根去做什么"那半句按本页改写：
+    /// 这一页不起 `--project-remove`，它起更新器、并按这个根读那份根证书束。
+    var refusedDaemonStateRootCaption: String {
+        guard let refused = refusedDaemonStateRoot else { return "" }
+        let reason = StateRootArgument.rejection(for: refused) ?? "它不是这套安装自己拥有的专用目录"
+        return "后台服务自报的状态根不能被这个面板采用：\(reason)。"
+            + "这一页仍按上一个根 \(stateRoot) 起更新器与读那份根证书束，没有按它创建或收紧过任何目录。"
+            + "下一步：让后台服务带着属于这套安装的 `--state-dir <专用目录>` 重启，然后点侧栏底部的「刷新」重连。"
+    }
+
+    /// 状态根那一行唯一的一句话：路径 + 它是谁认定的 +（有拒绝时）那一拒的原话。
     var stateRootCaption: String {
         let origin: String
         switch stateRootSource {
@@ -116,7 +146,14 @@ final class UpdateModel: ObservableObject {
         case .daemonReportedEarlier: origin = "后台服务早前上报的（这一帧没再报）"
         case .panelComputed: origin = "面板自己算的（后台服务从没报过它实际在用的根）"
         }
-        return "\(origin)状态根 \(stateRoot)——本页的更新器指针与根证书束都按它读"
+        var text = "\(origin)状态根 \(stateRoot)——本页的更新器指针与根证书束都按它读"
+        let refusal = refusedDaemonStateRootCaption
+        if let refused = refusedDaemonStateRoot, !refusal.isEmpty {
+            // 那一拒要说给屏幕上看，并且**点名被拒的那一个值**：只写进 stderr 等于没说——
+            // 读的人看到的是"这一页按的就是服务报的那个根"，而事实是它被拒了、用的仍是上一个。
+            text += "；后台服务这一帧报的根 \(refused) 被这一侧拒了，本行说的仍是上一个被采纳的根。" + refusal
+        }
+        return text
     }
 
     // MARK: - 派生呈现
@@ -190,6 +227,7 @@ final class UpdateModel: ObservableObject {
             isRunning: inFlight,
             pointerReady: pointer.isReady,
             updaterPath: pointer.cliPath,
+            stateRoot: stateRootPath,
             now: now
         )
     }

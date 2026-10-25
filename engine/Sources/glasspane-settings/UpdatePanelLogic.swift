@@ -401,6 +401,9 @@ enum UpdatePanel {
         /// 到这一个真实路径：这台机器上没有一个叫 `updater` 的可执行文件，
         /// 让人去跑 `updater status` 是一条走不通的路。
         var updaterPath: String? = nil
+        /// 这一页此刻认的状态根（`UpdateModel.stateRoot`）。`non-default-state-dir` 那道门的
+        /// 那条转述命令要把它写进 `--state-dir`，否则给人的还是半成品、跑不通。
+        var stateRoot: String? = nil
         var now: Date
 
         static func reading(_ status: Status?, staged: Bool = false, exitCode: Int? = nil,
@@ -408,11 +411,12 @@ enum UpdatePanel {
                             code: String? = nil,
                             running: Bool = false, pointerReady: Bool = true,
                             updaterPath: String? = nil,
+                            stateRoot: String? = nil,
                             now: Date = Date(timeIntervalSince1970: 0)) -> ButtonContext {
             ButtonContext(status: status, hasStagedOffer: staged, exitCode: exitCode,
                           current: current, stagedVersion: stagedVersion, code: code,
                           isRunning: running, pointerReady: pointerReady,
-                          updaterPath: updaterPath, now: now)
+                          updaterPath: updaterPath, stateRoot: stateRoot, now: now)
         }
     }
 
@@ -476,12 +480,66 @@ enum UpdatePanel {
     ///
     /// 从前这里写的是"跑一次 `updater status`"，而这台机器上没有任何叫 `updater`
     /// 的可执行文件——那句话指的路人走不通，而它是这一屏唯一给出的下一步。
-    static func consentGateNextStepText(updaterPath: String?) -> String {
-        if let updaterPath, !updaterPath.isEmpty {
-            return "要看清缺什么、以及怎么把它补上，就把下面「更新器」那一栏记着的这一份读一次状态："
-                + "node \(updaterPath) status"
+    ///
+    /// `code == "non-default-state-dir"` 这一档另有一半：`updater/lib/policy.js:141` 那条
+    /// 拒绝**自己就带着一件跑得完的命令**（`apply --state-dir <这一侧认的根> --consent
+    /// state-dir`，路径按 `quoteShellArg` 单引号包好）。从前这一屏只把人支去读 status，
+    /// 于是读者看到的是"这一道门只能看，不能过"——而门的作者给出的恰恰是"人签了字就过得去"。
+    /// 面板不代签也不代跑：这里只把那条命令**原样转述**出来（它的 `updater` 换成这一页认出的
+    /// 那一份程序，理由与上面那句一样——这台机器上没有叫 `updater` 的可执行文件），
+    /// 并且说清**这一枚按下去会发生什么**：这一枚什么都不会发生，会动它的是你自己敲的那一条。
+    static func consentGateNextStepText(
+        updaterPath: String?, stateRoot: String? = nil, code: String? = nil
+    ) -> String {
+        guard let updaterPath, !updaterPath.isEmpty else {
+            return "要看清缺什么、以及怎么把它补上，得先让这一页认出更新器在哪（看下面「更新器」那一栏），再读它那句原话。"
         }
-        return "要看清缺什么、以及怎么把它补上，得先让这一页认出更新器在哪（看下面「更新器」那一栏），再读它那句原话。"
+        let readIt = "要看清缺什么、以及怎么把它补上，就把下面「更新器」那一栏记着的这一份读一次状态："
+            + "node \(updaterPath) status"
+        guard code == nonDefaultStateDirCode, let stateRoot, !stateRoot.isEmpty else {
+            return readIt
+        }
+        return readIt + "。这一道门不是只能看：更新器自己就备了一条走得完的安装命令，"
+            + "面板不替这台机器签字、也不替它跑，只把原话转述在这里，跑不跑由你决定："
+            + "node \(updaterPath) apply --state-dir \(RemedyCommand.quote(stateRoot)) --consent state-dir。"
+            + "这一枚按下去不会发生任何事——这一道确认不在面板手里，它按不动说的就是这件事；"
+            + "上面那一条由你自己敲出去的命令才会动它：那一次安装带着你这一次给的确认去换版，"
+            + "确认不写进任何默认值，每天定时的那一次永远不带它，"
+            + "而换版仍然只在你的后台服务空闲时动手。"
+    }
+
+    /// `updater/lib/policy.js` 给 `non-default-state-dir` 那道门配的 `--consent` 代号本体。
+    static let nonDefaultStateDirCode = "non-default-state-dir"
+
+    // MARK: - 「安装更新」这一枚的名字与标识（只有一个作者）
+
+    /// 这一枚按钮在这屏上的中文标题，**这一处是唯一定义的地方**：按钮本体、禁用理由那一行、
+    /// 提示条、以及对更新器英文原话的指认都从这里取名。规格钉的就是这四个字
+    /// （`specs/GlassPane_规格_自动更新_2026-09-27.md:222`），不许为了迁就英文原话改成英文，
+    /// 也不许再添第二种叫法——名字各写一遍就会漂，漂开的那一次读者就找不到该按哪一枚。
+    static let applyButtonTitle = "安装更新"
+
+    /// 同一枚按钮的稳定无障碍标识：文案里指的那一枚、自动化点的那一枚、禁用理由挂着的那一行，
+    /// 必须是同一个标识。标识里放中文，按标识就选不中元素（与 `reasonLine` 同一条规矩）。
+    static let applyButtonIdentifier = "gp-update-apply"
+
+    /// 更新器那句英文原话给这一枚起的名字（`updater/lib/policy.js` 与 `updater/lib/apply.js`
+    /// 的对外文案）。那是别人家的契约，这一侧不改它，只在指认里原样引它。
+    static let updaterEnglishButtonName = "Install update"
+
+    /// 更新器给的那句原话是**英文**的，里面点名的按钮写作 "Install update"
+    /// （`updater/lib/policy.js:70`、`apply.js:1438`），而这一屏那枚按钮的中文标题是
+    /// 「安装更新」。读者照着原话在屏幕上找 "Install update" 时两边对不上号——那不是两个动作，
+    /// 是两个名字，而对不上号就等于这一屏没有下一步。
+    ///
+    /// 修在面板这一侧，两处指同一枚：按钮带着稳定标识（`applyButtonIdentifier`），
+    /// 这句指认用**描述性指代**说出屏幕上看得见的那几个字，两者都取自 `applyButtonTitle`
+    /// 这一个常量，所以「文案指的那一枚」与「画出来的那一枚」不可能各自漂移。
+    /// 判据是"这句话里真的出现过那个英文名"，所以它不会凭空出现在别的失败句下面。
+    static func remedyButtonGloss(forVerbatim text: String) -> String? {
+        guard text.contains(updaterEnglishButtonName) else { return nil }
+        return "那句英文原话里的 \"\(updaterEnglishButtonName)\"，就是这一屏标着「\(applyButtonTitle)」的那枚按钮——"
+            + "按它一次就够，这一页没有第二枚做同一件事的按钮。"
     }
 
     /// 按钮开关的唯一实现：不可用是**带着理由的禁用**，不是把按钮藏掉。
@@ -553,11 +611,17 @@ enum UpdatePanel {
             case .none:
                 // 面板无权代签的那一道（或代号读不出来）：说清是哪一道门，
                 // 绝不写"先点「立即检查」"——那正是把人绕回死循环的那半句。
+                // `non-default-state-dir` 那一档还把更新器自己给的那条 `apply --consent
+                // state-dir` 原样转述出来：只说"读一次 status"会把一道**人签了字就过得去**
+                // 的门说成一扇只能看的门。
                 let which = ctx.code ?? "这一页认不出的代号"
                 return Buttons(checkEnabled: true, checkReason: nil,
                                applyEnabled: false,
                                applyReason: "拦住更新的是「\(which)」这一道确认，面板不替它签字。"
-                                   + consentGateNextStepText(updaterPath: ctx.updaterPath),
+                                   + consentGateNextStepText(
+                                        updaterPath: ctx.updaterPath,
+                                        stateRoot: ctx.stateRoot,
+                                        code: ctx.code),
                                toggleEnabled: true, toggleReason: nil,
                                applyArguments: [])
             }
@@ -630,25 +694,26 @@ enum UpdatePanel {
         }
         if snapshot.disabled {
             return "自动更新已关闭（上次检查：\(checkAgeText(lastCheckAt: snapshot.lastCheckAt, now: now))）。"
-                + "「立即检查」与「安装更新」仍然可以手动用。"
+                + "「立即检查」与「\(Self.applyButtonTitle)」仍然可以手动用。"
         }
         if status == .staged || status == .available {
             let version = snapshot.stagedVersion ?? snapshot.latest ?? "新版本"
-            return "\(version) 已经备好，点「安装更新」就会在你的后台服务空闲时换上。"
+            return "\(version) 已经备好，点这一屏动作区里标着「\(Self.applyButtonTitle)」的那枚，"
+                + "它会在你的后台服务空闲时换上。"
         }
         if status == .needsConsent {
             let version = snapshot.stagedVersion ?? snapshot.latest ?? "新版本"
             switch consentGate(code: snapshot.code, current: snapshot.current,
                                stagedVersion: snapshot.stagedVersion) {
             case .major:
-                return "\(version) 是跨大版本升级，可能改变对外行为，点「安装更新」才装。"
+                return "\(version) 是跨大版本升级，可能改变对外行为，点这一屏动作区里标着「\(Self.applyButtonTitle)」的那枚才装。"
             case .unsignedRelease:
                 return "\(version) 没有可核验的签名（\(snapshot.code ?? "作者身份未证明")）。"
                     + "自动更新不会替这个发布签字；你核对过发布页的校验和后，"
                     + "点「信任这个发布并重新检查」才会把它下载并暂存。"
             case .none:
                 return "\(version) 停在一道需要你本人判断的确认上（\(snapshot.code ?? "代号未给出")），"
-                    + "面板不替它签字。"
+                    + "面板不替它签字；这一道门怎么走过去，写在下面「\(Self.applyButtonTitle)」那一行里。"
             }
         }
         return nil

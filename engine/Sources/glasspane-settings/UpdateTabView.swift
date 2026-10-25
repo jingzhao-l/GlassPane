@@ -221,6 +221,16 @@ struct UpdateTabView: View {
             Text("这句话是更新器原样给的，可以选中后复制。")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+            // 那句英文原话点名的按钮写作 "Install update"，这一屏那一枚画出来的是「安装更新」——
+            // 两个名字、一个动作。指认只在原话里真的出现过那个名字时才出现，
+            // 且与按钮标题取自同一个常量，所以它不可能指着屏上不存在的那一枚。
+            if let gloss = UpdatePanel.remedyButtonGloss(forVerbatim: text) {
+                Text(gloss)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("gp-update-remedy-button-gloss")
+            }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -229,6 +239,9 @@ struct UpdateTabView: View {
 
     // MARK: - 动作卡
 
+    /// 两个按钮的标题与标识都取自 `UpdatePanel`（`applyButtonTitle` / `applyButtonIdentifier`），
+    /// 这一屏不再各自写一遍——更新器那句英文原话点名的 "Install update" 靠
+    /// `failureCard` 里那句指认落到这枚按钮上，两处指的是同一枚。
     private var actionCard: some View {
         let buttons = model.buttons
         return VStack(alignment: .leading, spacing: 10) {
@@ -239,10 +252,10 @@ struct UpdateTabView: View {
                     .disabled(!buttons.checkEnabled)
                     .help(buttons.checkReason ?? "现在问一次源上有没有新版本")
 
-                Button("安装更新") { model.applyUpdate() }
+                Button(UpdatePanel.applyButtonTitle) { model.applyUpdate() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                    .accessibilityIdentifier("gp-update-apply")
+                    .accessibilityIdentifier(UpdatePanel.applyButtonIdentifier)
                     .disabled(!buttons.applyEnabled)
                     .help(buttons.applyReason ?? "装那份已经校验过的新版本")
 
@@ -289,7 +302,7 @@ struct UpdateTabView: View {
                 reasonLine(key: "check", title: "立即检查", reason: reason)
             }
             if !buttons.applyEnabled, let reason = buttons.applyReason {
-                reasonLine(key: "apply", title: "安装更新", reason: reason)
+                reasonLine(key: "apply", title: UpdatePanel.applyButtonTitle, reason: reason)
             }
             if !buttons.toggleEnabled, let reason = buttons.toggleReason {
                 reasonLine(key: "auto", title: "自动更新", reason: reason)

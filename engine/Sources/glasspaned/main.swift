@@ -98,6 +98,11 @@ private struct Options {
     var checkDeveloperTools = false
     var probeSocketPath: String?
     var probeEnabled = true
+    /// **出现过**的修饰旗标名单（不是它们的值）：`--dry-run` 与"给了 `--dry-run`"在
+    /// `Options` 里是同一个 `true`，可"这条命令根本不读它"这件事只有数过 argv 才说得出。
+    /// 分发段因此读这一份名单，而不是猜哪个布尔被设过（默认值 30 的 `--older-than`
+    /// 用值本身永远数不出来）。
+    var appearedModifiers: Set<String> = []
 }
 
 private enum ParseResult {
@@ -128,6 +133,9 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
     var index = 1
     while index < arguments.count {
         let argument = arguments[index]
+        if OneShotFlagScope.modifiers.contains(argument) {
+            options.appearedModifiers.insert(argument)
+        }
         switch argument {
         case "--help", "-h":
             return .help
@@ -148,12 +156,22 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
         case "--permissions":
             options.permissionsJSON = true
         case "--request-permission":
+            // Both of these are usage errors in the same sense as `--state-dir` with
+            // nothing after it, so they take the `.error` route: message **plus the
+            // whole usage block**, exit 64. They used to be `.errorCode(…, 64)`,
+            // which writes one stderr line and no usage — while `--help`'s 64 entry
+            // promises the block ("printed with the whole usage block") and the five
+            // sibling value flags (`--state-dir`, `--socket-path`,
+            // `--probe-socket-path`, `--active-project`, `--project`,
+            // `--recipe-validate`) all print it. Measured on this machine at HEAD:
+            // rc=64, one stderr line, 0 bytes of stdout. Same failure class, two
+            // different answers — and the quieter one taught a caller nothing.
             guard index + 1 < arguments.count else {
-                return .errorCode("--request-permission requires one of: accessibility | input-monitoring | screen-recording | developer-tools", 64)
+                return .error("--request-permission requires one of: accessibility | input-monitoring | screen-recording | developer-tools")
             }
             index += 1
             guard let kind = PermissionKind.from(cliValue: arguments[index]) else {
-                return .errorCode("--request-permission unknown kind: \(arguments[index])", 64)
+                return .error("--request-permission unknown kind: \(arguments[index])")
             }
             options.requestPermission = kind
         case "--check-developer-tools":
@@ -213,7 +231,10 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
             options.projectPrune = true
         case "--project-remove":
             guard index + 1 < arguments.count else {
-                return .errorCode("--project-remove requires a project ID", 2)
+                // 与 `--active-project` 缺值同一码、同一形状（都是 64 + 整块 usage）。
+                // 从前这两支一个回 2 一个回 64，同一个失败类两套退出码，读 rc 的人
+                // 无法预判（`--help` 虽然如实写了两个码，但"照表分叉"的调用方仍是猜）。
+                return .error("--project-remove requires a project ID")
             }
             index += 1
             options.projectRemoveId = arguments[index]
@@ -233,10 +254,13 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
             options.evidenceStats = true
         case "--older-than":
             guard index + 1 < arguments.count else {
-                return .errorCode("--older-than requires a day count", 2)
+                // 缺值 = 用法错（64 + 整块 usage，与其余取值开关同一条）。
+                return .error("--older-than requires a day count")
             }
             index += 1
             guard let days = Int(arguments[index]), days >= 1 else {
+                // 值给到了却用不了 = 2：旗标听懂了，它带的这个值没听懂（`--help` 的
+                // 2 段说的就是这一档）。
                 return .errorCode("--older-than requires a positive integer (days), got: \(arguments[index])", 2)
             }
             options.pruneOlderThanDays = days
@@ -274,6 +298,59 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
         index += 1
     }
     return .parsed(options)
+}
+
+// MARK: - One-shot form: which modifier flags this invocation actually honours
+
+/// 一次性子命令形态下，一枚修饰旗标**归不归这条命令读**的表。
+///
+/// 为什么需要这张表：`--state-dir X --list-projects --older-than 7` 这类调用（HEAD 上实测
+/// rc=0、一个字不提示）把两副形态混在了一条 argv 里——分发段是那条 first-match 的 `if` 链，
+/// 命中一次性命令就 `exit`，服务形态那批旗标从此没有任何读者。socket 面早就有对照：
+/// `Dispatcher.acceptedParamKeys` + `requireOnlyKnownKeys` 把 params 里读不到的键判成缺陷，
+/// CLI 面却留着"一表达过意图的旗标被静默吃掉"。这里把 CLI 面补齐，判据与那条链同源：
+/// 只列分发段**真的读**的那几枚。
+private enum OneShotFlagScope {
+    /// 会改变一次运行行为的修饰旗标全集（服务形态的那批 + 维护命令的取值旗标）。
+    /// `--state-dir` 与 `-v/--verbose` 不在这里：见 `stateNotice` 与 `verboseNotice`。
+    static let modifiers: Set<String> = [
+        "--dry-run", "--older-than", "--project",
+        "--socket-path", "--probe-socket-path", "--force-socket", "--force-probe-socket",
+        "--no-probe", "--no-c33", "--unattended-window",
+    ]
+
+    /// 每条一次性命令真的读的修饰旗标（判据就是分发段那几行代码：它只碰列出来的键）。
+    static func allowedModifiers(for command: String) -> Set<String> {
+        switch command {
+        case "--project-prune", "--project-remove":
+            return ["--dry-run"]
+        case "--prune-evidence":
+            return ["--dry-run", "--older-than", "--project"]
+        case "--evidence-stats":
+            return ["--project"]
+        default:
+            return []
+        }
+    }
+
+    /// 一条命令都不读状态的那几位（文件头说的就是它们）：`--state-dir` 点名了也不会被
+    /// 读到，但**不拒**——点名状态根是唯一一个永远不该被惩罚的动作（拒它会把调用方
+    /// 推向"干脆不带隔离根"，那正是本文件 `resolvedStateRoot` 那段注释反对的事）。
+    /// 这一趟给一行 stderr 说明它没被读到。
+    static let stateFreeCommands: Set<String> = [
+        "--version", "--grant-accessibility", "--check-screen-permission",
+        "--guide-screen-permission", "--check-input-permission", "--check-accessibility",
+        "--permissions", "--request-permission", "--check-developer-tools",
+        "--recipe-validate",
+    ]
+
+    /// 这一趟该拒绝的旗标（点了名却不归这条命令读）。
+    static func refused(options: Options, command: String) -> [String] {
+        options.appearedModifiers
+            .intersection(modifiers)
+            .subtracting(allowedModifiers(for: command))
+            .sorted()
+    }
 }
 
 private func printUsage() {
@@ -319,6 +396,17 @@ private func printUsage() {
                                  isolation has to name --state-dir. The first
                                  state-touching command of such a run writes one
                                  line to stderr saying the home default was used.
+                                 Every subcommand accepts it, including the ones that
+                                 read no state (`--version`, `--permissions`,
+                                 `--request-permission`, `--grant-accessibility`,
+                                 `--guide-screen-permission`,
+                                 `--check-screen-permission`,
+                                 `--check-input-permission`,
+                                 `--check-accessibility`,
+                                 `--check-developer-tools`, `--recipe-validate`):
+                                 naming a root is never punished, but such a run says
+                                 on stderr that it did not consult it, rather than
+                                 letting the flag vanish without a word.
         --socket-path <path>   Unix socket path (default: ~/.glasspane/engine.sock,
                                  or <state-dir>/daemon.sock when --state-dir names
                                  a root). Must be an **absolute** path: this run
@@ -331,7 +419,10 @@ private func printUsage() {
                                  must also be free or already a socket: a regular
                                  file, a directory or a symlink here is a fatal
                                  refusal and is never removed.
-        --verbose, -v         Log frames and state transitions to stderr
+        --verbose, -v         Log frames and state transitions to stderr — the
+                                 serving daemon has the only reader. A one-shot
+                                 subcommand prints no log lines, so such a run says
+                                 out loud that this flag changed nothing in it.
         --grant-accessibility  Onboarding: ask for accessibility permission **for the
                                  process running this command** — not for the daemon,
                                  whose seat GP_E_AX_UNAVAILABLE is about. It blocks up
@@ -363,12 +454,29 @@ private func printUsage() {
                                  `updater/lib/version.js` pairs with the bundle plist. Reads no state,
                                  so it takes no state root.
         --permissions              Print this process's TCC seats as JSON:
-                                 {"subject":…,"permissions":…} and exit. Called as a
+                                 {"subject":…,"permissions":…,"verdict":…,"verdictSeats":…,
+                                 "verdictExcludes":…,"seatsNotGranted":…,"next":…} and exit.
+                                 The seat keys are spelled the way `--request-permission`
+                                 takes them (`accessibility`, `input-monitoring`,
+                                 `screen-recording`, `developer-tools`), so a reader can
+                                 copy a key straight into the command that asks for that
+                                 seat. Called as a
                                  one-shot it measures the one-shot — not whichever
                                  daemon happens to be serving; the `subject` block is
                                  there so a reader can see whose seats these are
                                  (`ProtocolErrors` refuses to let a caller read this
-                                 as the daemon's state).
+                                 as the daemon's state). Every seat that does not read
+                                 `granted` carries a ready command under
+                                 `seatsNotGranted`: the `launchctl submit` ask as the
+                                 daemon's own identity, plus the Settings pane URL and
+                                 the re-read line. The exit code states what the seats
+                                 **read**, the same rule `--check-developer-tools`
+                                 follows — 0 only when the three seats this command can
+                                 measure all read `granted`, 1 for every other reading.
+                                 `developer-tools` is **excluded from that verdict**: TCC
+                                 answers no query for it, so this command never measures
+                                 it and never calls it denied; its entry names
+                                 `--check-developer-tools` as the measurement that does.
         --request-permission <kind>  Ask for <kind> TCC access **as this very
                                  process** (no pane navigation, no waiting) and
                                  print the resulting JSON. Kinds: accessibility |
@@ -474,18 +582,22 @@ private func printUsage() {
                 archive into, partial removal in --project-prune, a
                 --request-permission seat that does not read granted, a report
                 that could not be encoded for output)
-        2   a value-taking flag was given no usable value (--project-remove,
-                --older-than) or --recipe-validate named a file that cannot be
-                read. NOT a usage error in the 64 sense: the flag was understood,
-                its argument was not
+        2   a value-taking flag was given a value this command cannot use:
+                --older-than not a positive integer, or --recipe-validate named a file
+                that cannot be read. NOT a usage error in the 64 sense: the flag was
+                understood, its argument was not
         3   --project-remove named an id that is not registered
         64  usage error, printed with the whole usage block: an unknown argument;
                 more than one subcommand in one invocation (this binary answers
-                exactly one per invocation, and such a run executes none of them);
-                a missing or rejected value for --state-dir, --socket-path (either
-                spelling), --probe-socket-path; a value-taking flag given nothing —
-                --active-project, --project, --recipe-validate; or a missing or
-                malformed --request-permission kind
+                exactly one per invocation, and such a run executes none of them); a
+                modifier flag that the named subcommand does not read appearing
+                alongside it (`--list-projects --older-than 7` asks for a day count
+                nothing can use — the flag is named on stderr and the run executes
+                nothing, because the argv itself is malformed); a missing value for
+                any value-taking flag — --state-dir, --socket-path,
+                --probe-socket-path, --active-project, --project, --project-remove,
+                --older-than, --recipe-validate, --request-permission (a missing or
+                malformed kind included); an unknown `--request-permission` kind
         65   a live instance already owns the socket (refuse to displace it)
 
     PROTOCOL:
@@ -532,12 +644,18 @@ private func resolvedStateRoot(injected: StateRoot?) -> StateRoot {
 private let permissionProbes = PermissionProbeSet()
 
 /// 权限快照的对外 JSON 形态（CLI `--permissions` / `--request-permission` 共用）。
+///
+/// 席位出键用 `PermissionKind.cliValue`（`input-monitoring`、`screen-recording`、
+/// `developer-tools`），与 `--request-permission` **吃**的名字同一个真源：从前这一面出
+/// camelCase、那条命令吃 kebab-case，读到一个键名再照着喂回另一条命令就是一次失败的
+/// 调用。`hello` 线上那一面仍是 camelCase（协议形状，本轮不动，见
+/// `DaemonPermissionSnapshot.permissionsWire`），而读侧两种拼写都认。
 private func permissionSnapshotJSON(_ snapshot: DaemonPermissionSnapshot) -> [String: Any] {
     let subject = snapshot.subject.wireValue.merging(
         ["entryName": snapshot.subject.tccEntryName],
         uniquingKeysWith: { _, new in new }
     )
-    return ["subject": subject, "permissions": snapshot.permissionsWire]
+    return ["subject": subject, "permissions": PermissionSeatReport.cliWire(statuses: snapshot.statuses)]
 }
 
 /// CLI 的机器可读出口：任何一行都经过 JSON 转义（R5-03）。历史上这几处是字符串
@@ -813,6 +931,50 @@ if requestedCommandNames.count > 1 {
 // 起服务时没有命令名，保持 `glasspaned`）。
 cliCommandLabel = requestedCommandNames.first ?? "glasspaned"
 
+// 一次性形态 + 服务形态旗标同现：那几枚旗标在这条 `if` 链里没有任何读者，从前一个字
+// 都不提示就退 0。这里逐条点名并拒绝（用法错误 64 + 整块 usage，与上面"一次要两条
+// 命令"那支同一口径：都是这一串 argv 本身不成立，而它一条也没跑）。
+if let oneShotCommand = requestedCommandNames.first {
+    let refused = OneShotFlagScope.refused(options: options, command: oneShotCommand)
+    if !refused.isEmpty {
+        let allowed = OneShotFlagScope.allowedModifiers(for: oneShotCommand).sorted()
+        // 这一整段是一句话，逐段 `+=` 只是为了让类型检查在预算内走完：前面那一支十几个
+        // `+` 连成的式子在本仓的 Swift 6.2 工具链上是 "unable to type-check this expression
+        // in reasonable time"（`swift build --package-path engine` 在 glasspaned 那一步直接
+        // 失败），整包编译不过。措辞逐字未动。
+        var message = "glasspaned: \(refused.joined(separator: ", ")) "
+        message += (refused.count == 1 ? "is" : "are") + " not read by \(oneShotCommand) — this "
+        message += "invocation mixes a one-shot subcommand with service-form or "
+        message += "other-command modifiers, so nothing those flags ask for would have happened, "
+        message += "and it ran none of them. \(oneShotCommand) reads "
+        message += (allowed.isEmpty ? "no modifier flags at all" : "only " + allowed.joined(separator: ", "))
+        message += " besides these. Next step: drop "
+        message += refused.joined(separator: ", ") + ", or name the command that does read "
+        message += "them (e.g. --older-than and --project belong to --prune-evidence, "
+        message += "--dry-run to --project-prune/--project-remove/--prune-evidence; --no-probe, "
+        message += "--no-c33, --socket-path, --probe-socket-path, --force-socket, "
+        message += "--force-probe-socket and --unattended-window only mean something when this "
+        message += "run serves the socket)."
+        FileHandle.standardError.write(Data(message.utf8 + Data("\n".utf8)))
+        printUsage()
+        exit(64)
+    }
+    if OneShotFlagScope.stateFreeCommands.contains(oneShotCommand), options.stateDir != nil {
+        FileHandle.standardError.write(Data((
+            "glasspaned: note — \(oneShotCommand) reads no state, so the --state-dir root "
+            + "this run named was not consulted: nothing was read, created, tightened or "
+            + "written under it."
+        ).utf8 + Data("\n".utf8)))
+    }
+    if options.verbose {
+        FileHandle.standardError.write(Data((
+            "glasspaned: note — --verbose logs frames and state transitions of the "
+            + "serving daemon only; \(oneShotCommand) is a one-shot report and no line "
+            + "of it changed because of this flag."
+        ).utf8 + Data("\n".utf8)))
+    }
+}
+
 if options.printVersion {
     // 一行、一个出处、退出码 0：读的就是 `hello` 里那个 `version`。这一句不碰状态根，
     // 所以它既不会创建目录，也不会触发那次收紧扫描——与 `--permissions` 同一个道理。
@@ -864,8 +1026,18 @@ if options.checkAccessibility {
 }
 
 if options.permissionsJSON {
-    writeJSON(permissionSnapshotJSON(permissionProbes.snapshot()))
-    exit(0)
+    // 载荷与判据都在库里（`PermissionSeatReport`）：这一面从前无条件退 0，四个席位
+    // 里三个没批也报"跑成功了"，而它既不给 `next` 也不给补救命令——本文件其它 27 个
+    // 机器可读出口都带 `next`。现在退出码说的是**这一面测得到的那三个席位读成了什么**
+    // （与下面 `--check-developer-tools` 那一支同一规矩），开发者工具那一位不参与判决、
+    // 也不被折成拒绝：这一面从没测过它，它拿到的是一条实测命令 `--check-developer-tools`。
+    let snapshot = permissionProbes.snapshot()
+    let nonce = "\(Int(Date().timeIntervalSince1970))"
+    let payload = PermissionSeatReport.payload(
+        subject: snapshot.subject, statuses: snapshot.statuses, nonce: nonce
+    )
+    writeJSON(payload)
+    exit(PermissionSeatReport.exitCode(snapshot.statuses))
 }
 
 if let kind = options.requestPermission {
@@ -876,6 +1048,13 @@ if let kind = options.requestPermission {
     var payload = permissionSnapshotJSON(snapshot)
     payload["requested"] = kind.cliValue
     payload["requestedStatus"] = status.rawValue
+    if status != .granted {
+        // 没批下来的那一位要说得出下一步：开哪一扇系统面板、用什么命令再问一次。
+        payload["pane"] = PermissionGuide.systemPaneURL(for: kind)
+        payload["next"] = kind == .developerTools
+            ? "glasspaned --check-developer-tools — this seat has no public query API, so the ask itself answers nothing; the probe is the measurement"
+            : "re-read with `glasspaned --permissions`; until the seat reads granted this command keeps exiting 1, which is the reading, not a failure of the ask"
+    }
     writeJSON(payload)
     // 退出码说的是**这个席位读成了什么**，不是"这条命令跑完了"：脚本按 rc 分叉，
     // 一份 denied/notDetermined/unverifiable 的报告配一个 0，读起来就是"批下来了"。

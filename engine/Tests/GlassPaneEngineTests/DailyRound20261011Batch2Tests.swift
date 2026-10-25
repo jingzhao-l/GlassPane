@@ -64,10 +64,19 @@ final class DailyRound20261011Batch2Tests: XCTestCase {
         XCTAssertTrue(equals.err.contains("must be an absolute path"), equals.err)
 
         // 对照：绝对路径必须**不被这道闸拒**，否则这条修复只是永远报错。
+        // 2026-10-24（A9）之后这一条 argv 退 64——但红它的不是路径闸，而是"一次性子命令 +
+        // 服务形态旗标"那一条新判据（`--list-projects` 没有读者来执行一个 socket 路径）。
+        // 两件事各自量：这一条仍然证"合法绝对路径过了路径闸"（stderr 里没有那句 absolute path），
+        // 另起一条只带 `--state-dir` 的对照证"这条命令本身照旧退 0"。谁都不许被对方冒充。
         let good = run(["--state-dir", dir.path, "--socket-path", dir.appendingPathComponent("engine.sock").path,
                         "--list-projects"])
-        XCTAssertEqual(good.status, 0, "合法路径要能过解析：\(good.err)")
-        XCTAssertFalse(good.err.contains("absolute path"), good.err)
+        XCTAssertEqual(good.status, 64, "一次性命令不读 --socket-path，这一趟要点名拒绝而不是静默吞掉：\(good.err)")
+        XCTAssertTrue(good.err.contains("--socket-path"), "拒绝要说出是哪一枚旗标：\(good.err)")
+        XCTAssertFalse(good.err.contains("absolute path"),
+                       "路径闸这一侧必须照旧放行合法绝对路径：\(good.err)")
+
+        let plain = run(["--state-dir", dir.path, "--list-projects"])
+        XCTAssertEqual(plain.status, 0, "只带状态根的一次性命令要能跑：\(plain.err)")
     }
 
     // MARK: - 开发者工具卡：实测到的系统拒绝不得折成"已授权"

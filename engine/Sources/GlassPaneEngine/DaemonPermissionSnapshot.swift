@@ -104,6 +104,10 @@ public struct DaemonPermissionSnapshot: Equatable, Sendable {
     }
 
     /// `hello` 线上的 `permissions` 字典（kind.rawValue → status.rawValue）。
+    ///
+    /// 这一面**不跟着 CLI 改键名**：`hello` 的读者（mcp-shell、面板的 `DaemonProbe`）
+    /// 今天读的就是 camelCase，换键是一次协议变更，不属于本轮。CLI 那一面另有
+    /// `cliWire(statuses:)`，出键与 `--request-permission` 吃的名字同源。
     public var permissionsWire: [String: String] {
         var value: [String: String] = [:]
         for (kind, status) in statuses {
@@ -112,16 +116,135 @@ public struct DaemonPermissionSnapshot: Equatable, Sendable {
         return value
     }
 
-    /// 从 `hello` 响应还原四类席位；缺失或非法值一律跳过（旧 daemon 兼容）。
+    /// 从 `hello` 响应或 CLI 自报 JSON 还原四类席位；缺失或非法值一律跳过（旧 daemon 兼容）。
+    ///
+    /// 两种拼写都认：`hello` 线用 `kind.rawValue`（camelCase），`--permissions` /
+    /// `--request-permission` 的出键自本轮起用 `kind.cliValue`（kebab-case，与
+    /// `--request-permission` 吃的名字同一真源）。面板的重探读的是后者的输出
+    /// （`PermissionReprobe.parse`），所以这一句必须两个都收 —— 只认一形就是让
+    /// 面板对着一次它其实读到了的自报说"读不懂"。
     public static func statuses(from wire: [String: Any]?) -> [PermissionKind: PermissionStatus] {
         guard let wire else { return [:] }
         var result: [PermissionKind: PermissionStatus] = [:]
         for kind in PermissionKind.allCases {
-            if let raw = wire[kind.rawValue] as? String, let status = PermissionStatus(rawValue: raw) {
+            let raw = (wire[kind.cliValue] as? String) ?? (wire[kind.rawValue] as? String)
+            if let raw, let status = PermissionStatus(rawValue: raw) {
                 result[kind] = status
             }
         }
         return result
+    }
+}
+
+// MARK: - `--permissions` 的机器可读出口
+
+/// `glasspaned --permissions` 那一行 JSON 的形状与判决。
+///
+/// 为什么这份判据在库里而不是在 `main.swift`：CLI 里拼的载荷没有读者也没有闸，本仓
+/// 已经为同一形状修过三轮（`ProjectRegistry.pruneUnreadableAtLoadPayload` 那批）。
+///
+/// 三条口径：
+///  1. 出键用 `cliValue`——从前它出 `developerTools/inputMonitoring/screenRecording`，
+///     而 `--request-permission` 只吃 `developer-tools/input-monitoring/screen-recording`：
+///     读到一个键名、照着抄回去喂给另一条命令就是一次失败的调用；
+///  2. 每一个非 granted 席位带一条**现成能跑**的命令（`PermissionGuide.systemPaneURL`
+///     与 `daemonRequestCommand` 早就拼好了，只是没接到这一面），并且带 `next`——
+///     本文件其它 27 个机器可读出口都带；
+///  3. 退出码说的是这一面**测得到**的那三个席位读成了什么（与 `--check-developer-tools`
+///     同规矩）：开发者工具这一面无从测量（TCC 无公开查询接口，恒 `unverifiable` 是设计），
+///     所以它既不参与判决、也不许被折成一次拒绝——它拿到的是一条实测命令，不是一个码。
+public enum PermissionSeatReport {
+    /// 这一面能测量的席位（其余的读数由别的命令承担）。
+    public static let measuredKinds: [PermissionKind] = [.accessibility, .inputMonitoring, .screenRecording]
+    /// 这一面测量不了的席位：报读数，不参与退出码。
+    public static let unmeasuredKinds: [PermissionKind] = [.developerTools]
+
+    /// CLI 出键形状：`kind.cliValue` → `status.rawValue`。
+    public static func cliWire(statuses: [PermissionKind: PermissionStatus]) -> [String: String] {
+        var value: [String: String] = [:]
+        for kind in PermissionKind.allCases {
+            value[kind.cliValue] = (statuses[kind] ?? .unverifiable).rawValue
+        }
+        return value
+    }
+
+    /// 测得到的席位是否全部 `granted`——`--permissions` 退出码的唯一判据。
+    public static func allMeasuredSeatsGranted(_ statuses: [PermissionKind: PermissionStatus]) -> Bool {
+        measuredKinds.allSatisfy { statuses[$0] == .granted }
+    }
+
+    /// 非 granted 席位的现成命令（按 `PermissionKind.allCases` 的稳定顺序）。
+    public static func remedies(
+        statuses: [PermissionKind: PermissionStatus],
+        daemonBinaryPath: String,
+        nonce: String
+    ) -> [[String: Any]] {
+        measuredKinds.compactMap { kind -> [String: Any]? in
+            let status = statuses[kind] ?? .unverifiable
+            guard status != .granted else { return nil }
+            let command = PermissionGuide.daemonRequestCommand(
+                for: kind, daemonBinaryPath: daemonBinaryPath, nonce: nonce
+            )
+            // 逐字渲染 `PermissionGuide.daemonRequestCommand` 拼的那条 argv：固定词原样
+            // 写出，只有**来自对端自报**的那个二进制路径过 `RemedyCommand.quote`——
+            // 这条字符串是给人（和 agent）照着敲的，不是再拼一遍的第二份判据。
+            let submit = ([command.launchPath] + command.arguments.map {
+                $0 == daemonBinaryPath ? RemedyCommand.quote($0) : $0
+            }).joined(separator: " ")
+            return [
+                "seat": kind.cliValue,
+                "status": status.rawValue,
+                "pane": PermissionGuide.systemPaneURL(for: kind),
+                "request": submit,
+                "recheck": "glasspaned --permissions",
+            ]
+        }
+    }
+
+    /// 那一行 JSON。
+    public static func payload(
+        subject: PermissionSubject,
+        statuses: [PermissionKind: PermissionStatus],
+        nonce: String
+    ) -> [String: Any] {
+        let subjectValue = subject.wireValue.merging(
+            ["entryName": subject.tccEntryName], uniquingKeysWith: { _, new in new }
+        )
+        let remedies = remedies(
+            statuses: statuses, daemonBinaryPath: subject.binaryPath, nonce: nonce
+        )
+        let notGranted = remedies.map { ($0["seat"] as? String) ?? "" }.filter { !$0.isEmpty }
+        let verdict = notGranted.isEmpty ? "granted" : "not-granted"
+        let unmeasured: [[String: Any]] = unmeasuredKinds.map { kind in
+            [
+                "seat": kind.cliValue,
+                "status": (statuses[kind] ?? .unverifiable).rawValue,
+                "judgedByThisCommand": false,
+                "reason": "TCC exposes no query API for this seat, so this command never measures it; reporting it as granted or denied would be a verdict nobody read",
+                "next": "glasspaned --check-developer-tools",
+            ]
+        }
+        let next: String
+        if notGranted.isEmpty {
+            next = "all three seats this command can measure read granted; the developer-tools seat is answered by `glasspaned --check-developer-tools`, not by this one"
+        } else {
+            next = "run the request command listed for each seat under `seatsNotGranted` (it asks as the daemon's own identity through launchd), then re-read with `glasspaned --permissions` — the pane URL is there too when a person has to tick the switch"
+        }
+        return [
+            "subject": subjectValue,
+            "permissions": cliWire(statuses: statuses),
+            "verdict": verdict,
+            "verdictSeats": measuredKinds.map { $0.cliValue },
+            "verdictExcludes": unmeasured,
+            "seatsNotGranted": remedies,
+            "next": next,
+        ]
+    }
+
+    /// 退出码：测得到的席位全 granted 才 0，其余一律 1（与 `--check-developer-tools`
+    /// 那一支同一规矩：码说的是读数，不是"这条命令跑完了"）。
+    public static func exitCode(_ statuses: [PermissionKind: PermissionStatus]) -> Int32 {
+        allMeasuredSeatsGranted(statuses) ? 0 : 1
     }
 }
 

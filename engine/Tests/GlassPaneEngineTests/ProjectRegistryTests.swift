@@ -799,12 +799,31 @@ final class RecipeLoaderTests: XCTestCase {
             result.errors.description
         )
         // Every allowed kind is accepted — the enum is a set, not a guess.
+        // 2026-10-24（E2）：这一条环形的夹具不能再对四种 kind 都喂 `act` 的 params。校验现在
+        // 会把每一步的 params 对着**该方法真读的键集**（`Dispatcher.acceptedParamKeys`）判，
+        // 所以这里按 kind 给出各自的合法 params；这没有放宽任何东西——把 `observe` 换成 act 的
+        // selector/action，这一条就红，而那正是这一轮要抓的形状。
+        let paramsByKind: [String: [String: Any]] = [
+            "act": ["selector": ["role": "AXButton", "title": "Submit"], "action": "press"],
+            "observe": ["maxDepth": 3, "role": "window"],
+            "assert": ["selector": ["role": "AXButton", "title": "Submit"],
+                       "property": "enabled", "expected": true],
+            "diagnose": [:],
+        ]
         for kind in RecipeLoader.stepKinds {
+            let params = paramsByKind[kind]
+            XCTAssertNotNil(params, "'\(kind)' is in the contract but this test has no legal params for it")
             XCTAssertTrue(
-                RecipeLoader.validate(json(recipe(steps: [step(kind: kind)]))).valid,
+                RecipeLoader.validate(json(recipe(steps: [step(kind: kind, params: params ?? [:])]))).valid,
                 "'\(kind)' is in the contract and must validate"
             )
         }
+        // 反面对照：`observe` 带着 `act` 的键，必须被判红（这一条是上面那个改动唯一的证据）。
+        let mismatched = RecipeLoader.validate(
+            json(recipe(steps: [step(kind: "observe",
+                                      params: ["selector": ["role": "AXButton"], "action": "press"])]))
+        )
+        XCTAssertFalse(mismatched.valid, "params 不属于该方法却判合法：\(mismatched.errors)")
     }
 
     func testStepMissingParamsRejected() {

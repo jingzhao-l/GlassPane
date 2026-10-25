@@ -8,8 +8,9 @@ import Darwin  // open/write/close/unlink + S_IRUSR/S_IWUSR + O_EXCL/O_NOFOLLOW�
 ///  1. **结构浏览器**：以 `kernel/schemas/recipe-config.schema.json` 为只读真源。
 ///     运行时尝试读该文件（字段随真源），读不到则展示与它一致的**内置快照**
 ///     并如实标注来源（"内置快照"），绝不假装读到了盘上的文件。
-///  2. **模板**：内置两条最小合法 recipe（均能通过 daemon `--recipe-validate`），
-///     一键加载为编辑起点。
+///  2. **模板**：内置两条最小合法 recipe，一键加载为编辑起点。它们的 `params` 只写
+///     后台服务真读的那些键（见 `RecipeTemplates`），结论那一行也如实说这份构建没有
+///     运行配方的入口——"合法"永远只指形状，不指"能跑"。
 ///  3. **编辑器 + 校验**：TextEditor 编辑 JSON；先做客户端 JSON 可解析性检查，
 ///     再经 daemon `--recipe-validate` 出结论。daemon 不可达/超时/输出异常一律
 ///     显式显示，吞掉任何一步都不被允许。
@@ -108,7 +109,7 @@ struct RecipesTabView: View {
 
     private var templatesCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SectionHeader(title: "模板", subtitle: "内置最小合法配方，可加载为起点", systemImage: "square.grid.2x2")
+            SectionHeader(title: "模板", subtitle: "内置最小合法配方，可加载为编辑起点；这份构建里没有运行配方的入口，模板只保证形状", systemImage: "square.grid.2x2")
             HStack(spacing: 8) {
                 ForEach(RecipeTemplates.all) { template in
                     Button {
@@ -134,7 +135,7 @@ struct RecipesTabView: View {
         VStack(alignment: .leading, spacing: 8) {
             SectionHeader(
                 title: "Recipe JSON 编辑器",
-                subtitle: "仅校验，不持久化到项目/平台目录",
+                subtitle: "只校验结构、不执行这份配方，也不写进项目/平台目录",
                 systemImage: "square.and.pencil"
             )
             TextEditor(text: $editorText)
@@ -223,8 +224,8 @@ struct RecipesTabView: View {
         case .verdict(let valid, let recipeName, let errors):
             if valid {
                 verdictBanner(icon: "checkmark.seal.fill", tint: .green,
-                              title: recipeName.map { "合法（\($0)）" } ?? "合法",
-                              body: "daemon 校验通过。")
+                              title: recipeName.map { "形状合法（\($0)）" } ?? "形状合法",
+                              body: Self.validVerdictBody)
             } else {
                 VStack(alignment: .leading, spacing: 6) {
                     verdictBanner(icon: "xmark.circle.fill", tint: .red, title: "非法",
@@ -248,6 +249,27 @@ struct RecipesTabView: View {
                 }
             }
         }
+    }
+
+    /// 「合法」那一屏的正文（纯函数，供单测）。
+    ///
+    /// 缺陷形状：从前这里只写"daemon 校验通过。"——读者从一个"通过"里自然要问的下一句是
+    /// "那怎么跑它"，而这一页**没有任何入口能跑**：`--recipe-validate` 是 `RecipeLoader.validate`
+    /// 在本构建里唯一的调用点（`engine/Sources/glasspaned/main.swift:1195`），
+    /// 后台服务既没有执行配方的方法，也没有哪一层读这份文件并按步骤做它说过的事。
+    /// 于是那三个字把"形状合契约"说成了"这份配方能跑"——那是这一层从没测过的一件事，
+    /// 写进结论就是假话。这里把测到的与没测到的各说各的，并且不顺手编一个下一步：
+    /// 这一页给不出"运行"这个入口，这句话就得直说给不出。
+    nonisolated static var validVerdictBody: String {
+        "「校验」这一次只核对这份 JSON 的形状：版本号那一个字、配方名，以及每一步的 "
+            + "kind 与 params 写得合不合后台服务的规则——形状合法。"
+            + "它不等于这份配方能跑：这一份构建里没有任何一层会读它、按步骤做它说过的事，"
+            + "刚才那一趟也没有执行这里的任何一步，这份配方不会替你按下任何东西，也不会替你观察或断言任何东西。"
+            + "这一页上没有「运行这份配方」那枚按钮，这台机器的这份构建里也没有别的入口能运行它。"
+            + "眼下真实存在的做事方式只有一条，就是一次一次调用后台服务的单步动作"
+            + "（observe / act / assert_element，MCP 那边是 gp_observe、gp_act、gp_assert_element），"
+            + "那不需要这份配方，也不是这一页能替你做完的。"
+            + "要改的就只是形状：改完再点一次「校验」，它同样只回一个形状结论。"
     }
 
     private func verdictBanner(icon: String, tint: Color, title: String, body: String) -> some View {
@@ -413,13 +435,26 @@ struct RecipeTemplate: Identifiable {
     var id: String { key }
 }
 
-/// 内置最小合法 recipe 模板。两条都满足 recipe-config.schema.json 的约束
-/// （schemaVersion 字面量、简单步骤），能通过 daemon `--recipe-validate`。
+/// 内置最小合法 recipe 模板。
+///
+/// 两条都满足 recipe-config.schema.json 的**形状**约束（schemaVersion 字面量、
+/// `{kind, params}` 两步），能通过后台服务那一次 `--recipe-validate`。
+///
+/// `params` 里写的键跟着**后台服务真读的那几张表**走（`Dispatcher.acceptedParamKeys`，
+/// `Dispatcher.swift:117-129`；`observe` 那两个键出自它自己的 handler，`Dispatcher.swift:164-171`）：
+/// `observe` 读 `maxDepth`/`role`，`act` 读 `selector`/`action`/`degrade`，
+/// `assert`（线上叫 `assert_element`）读 `selector`/`property`/`expected`。
+///
+/// 从前 `observe` 那一步写的是 `{"selector":{"role":…,"title":…}}`：那两个键 `observe`
+/// 一个都不读。形状那一层放行，落到真正读它的地方就被判成缺陷（线上是
+/// `requireOnlyReadParamKeys`，`RecipeLoader` 现在也按同一张表把这种 params 记成错误），
+/// 于是"合法"的模板恰恰是一份任何方法都接不下的形状。模板是给人当起点用的，
+/// 它的形状必须先能被读它的那一层吃下——键名照 `Dispatcher` 那几行抄，不在这里发明键名。
 enum RecipeTemplates {
     /// 编辑器首次的占位：一个最小合法配方，而不是空文本。
     static let emptyEditorSlot: String = {
         let json = """
-        {"schemaVersion":"glasspane.recipe/0.1-draft","name":"最小配方","steps":[{"kind":"observe","params":{"selector":{"role":"window","title":"Main"}}}]}
+        {"schemaVersion":"glasspane.recipe/0.1-draft","name":"最小配方","steps":[{"kind":"observe","params":{"role":"window","maxDepth":3}}]}
         """
         return pretty(json)
     }()
@@ -434,9 +469,9 @@ enum RecipeTemplates {
     {"schemaVersion":"glasspane.recipe/0.1-draft","name":"点按按钮并断言可用","steps":[{"kind":"act","params":{"selector":{"role":"btn","title":"确认"},"action":"press"}},{"kind":"assert","params":{"selector":{"role":"btn","title":"确认"},"property":"enabled","expected":true}}]}
     """)
 
-    /// 模板二：单步观察，最小壳。
+    /// 模板二：单步观察，最小壳（`params` 用的就是 `observe` 真读的那两个键）。
     static let minStep: String = pretty("""
-    {"schemaVersion":"glasspane.recipe/0.1-draft","name":"最小单步观察","steps":[{"kind":"observe","params":{"selector":{"role":"window","title":"Main"}}}]}
+    {"schemaVersion":"glasspane.recipe/0.1-draft","name":"最小单步观察","steps":[{"kind":"observe","params":{"role":"window","maxDepth":3}}]}
     """)
 
     /// 把紧凑 JSON 排成缩进的可读文本（供编辑器起点；解析失败则原样返回）。

@@ -162,6 +162,28 @@ final class ConsoleModel: ObservableObject {
     /// 只让 `daemonBinaryPath` 悄悄停在 nil，屏幕上读到的是"没问过后台服务"，
     /// 而事实是"有人报了一个不能信的路径、被这一侧拒了"。
     @Published private(set) var refusedDaemonBinaryPath: String?
+    /// daemon 这一帧自报、而这一侧**拒收**的状态根（nil = 从没拒过）。
+    ///
+    /// 与上面那条同一族、同一形状，只是它护的是另一件事：`hello` 里的 `stateRoot` 也是
+    /// peer 自报的（engine.sock 无 peer 鉴权，同用户即全权），而这一页把采纳下来的根拿去
+    /// 当自己写入的根——`projects.json`、档案目录、台账都在它下面，`--state-dir` 那侧还会
+    /// 把根 chmod 成 0700。TS 侧对同一个值早就有闸（`mcp-shell/src/project-registry.ts`
+    /// 的 `stateRootRefusal`：非绝对、`/`、家目录本身三类一律拒），Swift 侧的判据也早就
+    /// 存在（`StateRootArgument.rejection(for:)`），只是这两处采纳点没采纳它——于是同用户
+    /// 进程在候选 socket 上回一帧 hello，就能把面板的注册表写到 `~/Library` 这类目录去。
+    /// 拒绝时**保留上一个根**（与 `refusedDaemonBinaryPath` 同一口径：一次坏帧不许把写入
+    /// 能力整个断掉），并把这一拒说给屏幕上看（`displayedStateRootCaption` 与两条写入
+    /// 动作的拒绝文案都点名它）。
+    @Published private(set) var refusedDaemonStateRoot: String?
+    /// 那一拒的原文（措辞与"程序路径被拒"那条同源：同一种事在两扇门上不许讲成两个故事）。
+    var refusedDaemonStateRootCaption: String {
+        guard let refused = refusedDaemonStateRoot else { return "" }
+        let reason = StateRootArgument.rejection(for: refused)
+            ?? "它不是这套安装自己拥有的专用目录"
+        return "后台服务自报的状态根不能被这个面板采用：\(reason)。"
+            + "这一页仍按上一个根 \(displayedStateRoot) 读数与写入，没有按它创建或收紧过任何目录。"
+            + "下一步：让后台服务带着属于这套安装的 `--state-dir <专用目录>` 重启，然后点「刷新」重连。"
+    }
     /// 拒掉那一条的原文。**措辞与提交那一条同源**（`SettingsModel:528-536` 说的是
     /// 「它不是这个账号拥有的普通文件——<路径>」）：同一件事在两扇门上不许讲成两个故事。
     var refusedDaemonBinaryPathCaption: String {
@@ -250,7 +272,12 @@ final class ConsoleModel: ObservableObject {
         case .daemonReportedEarlier: origin = "后台服务早前上报的（这一帧没再报）"
         case .panelComputed: origin = "面板自己算的（后台服务从没报过它实际在用的根）"
         }
-        return "\(origin)状态根 \(displayedStateRoot)——本页读数与「清理/删除」都按它走"
+        var text = "\(origin)状态根 \(displayedStateRoot)——本页读数与「清理/删除」都按它走"
+        if let refused = refusedDaemonStateRoot {
+            text += "；后台服务这一帧报的根 \(refused) 被这一侧拒了（见下方那句原话），"
+                + "本行说的仍是上一个被采纳的根"
+        }
+        return text
     }
 
     /// daemon 二进制路径是否已知——决定"清理/删除"这类写入动作可用与否。
@@ -263,6 +290,16 @@ final class ConsoleModel: ObservableObject {
     /// 这种情形下 `--project-prune` / `--project-remove` 动的是**哪个实例的注册表**没人知道。
     /// 读侧靠 `displayedStateRootCaption` 把出处说出来；写侧不能只靠一句话就照常动手。
     var writesLackAReportedRoot: Bool { daemonHasAnswered && stateRootSource == .panelComputed }
+
+    /// 三条写入动作（预览/清理/删除）的根这一道闸：**上一帧被拒的自报根没清掉时不动手**。
+    ///
+    /// 为什么`writesLackAReportedRoot`不够覆盖它：那一判据说的是"服务没报过根"，而这里是
+    /// "服务报了一个这一侧不敢用的根"——此刻手里那个上一个根与服务实际在写的根**已知不同**，
+    /// 比"没报过"更值得拦。文案复用同一句拒绝（它点名的就是被拒的那个值与原因）。
+    var writeRootRefusal: String? {
+        guard refusedDaemonStateRoot != nil else { return nil }
+        return refusedDaemonStateRootCaption
+    }
 
     /// 把一次 hello 的实测结局接到控制台数据上。
     ///
@@ -280,15 +317,29 @@ final class ConsoleModel: ObservableObject {
         let reportedRoot = daemonStateRoot?.trimmingCharacters(in: .whitespacesAndNewlines)
         var rootChanged = false
         if let reportedRoot, !reportedRoot.isEmpty {
-            let next = StateRoot(path: reportedRoot)
-            if next != stateRoot {
-                stateRoot = next
-                evidenceDirectory = next.evidenceDirectory
-                projectsPath = next.projectsFile
-                approvalsPath = next.approvalsFile
-                rootChanged = true
+            // 采纳之前先过引擎侧那一份判据（`StateRootArgument.rejection(for:)`——与
+            // `--state-dir` 在 daemon 参数上用的是**同一个函数**，也是 TS 侧
+            // `stateRootRefusal`  mirror 的那三条：非绝对、`/`、家目录本身）。
+            // 判据不许在这一侧重抄一遍：抄一遍就有两份会漂。
+            if let defect = StateRootArgument.rejection(for: reportedRoot) {
+                refusedDaemonStateRoot = reportedRoot
+                // 上一个根留着（"这一帧报的东西不能信"不等于"手里这个根没了"），出处
+                // 也不许升格成"这一帧报的"。
+                FileHandle.standardError.write(
+                    Data("glasspane-settings: refused self-reported state root \(reportedRoot) (\(defect))\n".utf8)
+                )
+            } else {
+                refusedDaemonStateRoot = nil
+                let next = StateRoot(path: reportedRoot)
+                if next != stateRoot {
+                    stateRoot = next
+                    evidenceDirectory = next.evidenceDirectory
+                    projectsPath = next.projectsFile
+                    approvalsPath = next.approvalsFile
+                    rootChanged = true
+                }
+                stateRootSource = .daemonReported
             }
-            stateRootSource = .daemonReported
         } else if stateRootSource == .daemonReported {
             // 报过又断了（老 daemon 不带这个键）：路径留着，但出处必须降级——
             // "上一次报的"与"这一帧报的"是两句话，写成一句就是替另一句背书。
@@ -584,6 +635,10 @@ final class ConsoleModel: ObservableObject {
             lastActionMessage = "还没连上后台服务：读不到它的程序路径，清理动作无法执行。点「刷新」恢复后重试。"
             return
         }
+        if let refusal = writeRootRefusal {
+            lastActionMessage = "预览没有执行：" + refusal
+            return
+        }
         guard !isPreparingPrunePreview else { return }
         // 一次真删可以跑上约 20 s。这一趟里再起一次 `--project-prune --dry-run`，摊出来
         // 的清单读的是**正在被改的那张表**——预览与删除用的是同一份 projects.json，
@@ -698,6 +753,11 @@ final class ConsoleModel: ObservableObject {
                 + "或把它升级到会自报状态根的版本（1.6.2 及以后会报），然后点「刷新」重来。"
             return
         }
+        if let refusal = writeRootRefusal {
+            isPruneSheetPresented = false
+            lastActionMessage = "清理没有执行：" + refusal
+            return
+        }
         isRunningPrune = true
         isPruneSheetPresented = false
         let binary = daemonBinaryPath
@@ -730,6 +790,10 @@ final class ConsoleModel: ObservableObject {
             lastActionMessage = "删除 \(projectId) 没有执行：后台服务在应门，却没有报过自己用的状态根，"
                 + "而这一页按的是面板自己算的那一个（\(displayedStateRoot)）——这一枚删的是谁的注册表说不准。"
                 + "下一步：让服务带着 `--state-dir <根>` 重启，或升级到会自报状态根的版本后点「刷新」。"
+            return
+        }
+        if let refusal = writeRootRefusal {
+            lastActionMessage = "删除 \(projectId) 没有执行：" + refusal
             return
         }
         let binary = daemonBinaryPath
