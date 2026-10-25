@@ -53,6 +53,22 @@
   `harness-rulers` 与 `mcp-shell` 两条 lane 会在推送后覆盖。
 - 未跑 `patched-deps`／`zod-bundle`：不在本轮改动面内，同由 CI 覆盖。
 
+### 重切与覆盖：被写下来的那笔账
+
+`split/gp-0-11-1`（从主干 `HEAD:harness/glasspane-harness` 重切）与发布仓 `refs/heads/main` 当前头
+**不是祖先关系**——实测 `git merge-base --is-ancestor 962b1430 split/gp-0-11-1` 失败。这是本仓的既有
+事实而不是意外：旧链里有已签名的提交，重切必然产生不同的 SHA（2026-10-18 那条纪律记过一次，代价是
+8 笔未签名）。因此推送用**具名 SHA 的 lease**，被覆盖的远端头是
+`ef704bf18bd6b90a215797f8ff9f9a6f6152eed8`（tree `962b1430…`，即 v0.11.0 的收账笔），
+它的内容是新树的**真子集**（新树 = 主干的 fork 树，逐 blob 比过），所以覆盖丢不掉任何字节：
+先量 `test "$(git rev-parse split/gp-0-11-1^{tree})" = "$(git rev-parse HEAD:harness/glasspane-harness)"`
+再推。命令：
+
+```bash
+git push --force-with-lease=refs/heads/main:ef704bf18bd6b90a215797f8ff9f9a6f6152eed8 \
+  https://github.com/jingzhao-l/glasspane-harness.git split/gp-0-11-1:refs/heads/main
+```
+
 ### 发布后（3b 与五格）
 
 `git subtree split` 之后 `split-main` 必须等于 `46e2aea8…` 之后的新树；tag `v0.11.1` 走
