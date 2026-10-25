@@ -1430,7 +1430,13 @@ test("a knob at its advertised floor is refused for every kind that advertises o
   const snapshot = await oversizedAdviceThrough("gp_snapshot", { maxDepth: 1 });
   assert.match(snapshot, /maxDepth is already at this tool's floor \(1\)/, snapshot);
   assert.ok(!/smaller maxDepth/.test(snapshot), snapshot);
-  assert.match(snapshot, /nothing left to narrow on this request/, snapshot);
+  // 2026-10-24 (B4): `snapshot` is answered by the **ring-writing** arm now, not the narrowable
+  // one, so the sentence this line used to pin ("nothing left to narrow on this request") moved to
+  // that arm's wording. The fact is unchanged and still the one under test: nothing here offers a
+  // narrowing, and the knob is named as already spent. Pinning the *arm*, not just a phrase, is
+  // what makes the next change of wording an explicit decision instead of a silent red.
+  assert.match(snapshot, /the only parameter of that kind this tool advertises is already spent/, snapshot);
+  assert.match(snapshot, /Do NOT send a second 'snapshot'/, snapshot);
 
   const recent = await oversizedAdviceThrough("gp_recent_reports", { limit: 1 }, { seedTrail: true });
   assert.match(recent, /limit is already at this tool's floor \(1\)/, recent);

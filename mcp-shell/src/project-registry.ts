@@ -365,7 +365,17 @@ const FIRMLINK_PREFIX = "/System/Volumes/Data";
 /** Escape hatch for the corrupt-registry case; see `unreadableMessage`. */
 export const FORCE_OVERWRITE_ENV = "GLASSPANE_PROJECTS_FORCE_OVERWRITE";
 
-/** Shell-only override of the projects file: the daemon never reads it (R7-14). */
+/**
+ * Shell-only override of the projects file: the daemon never reads it (R7-14).
+ *
+ * It is the one path in this module that a caller sets for *this process* rather than
+ * sending in a tool argument, and since 1.20.1 it is judged by the same gates as every
+ * other root this shell writes into — see {@link projectsPath}. The reason it could not
+ * stay an exception is the write that follows it: {@link saveProjects} creates the
+ * directory named here and brings it to 0700 before publishing the registry (bundle ids,
+ * pids and storage paths) into it, so an ungated override is a way to make this process
+ * re-permission and populate any directory its environment can name.
+ */
 export const PROJECTS_FILE_ENV = "GLASSPANE_PROJECTS_FILE";
 
 export interface ProjectEntry {
@@ -426,10 +436,114 @@ export type ProjectSetArgs = z.infer<typeof ProjectSetArgs>;
 
 // ----- File access -----
 
+/**
+ * The projects file this shell reads and writes.
+ *
+ * Two authorities, and the first one used to be unchecked: {@link PROJECTS_FILE_ENV} is
+ * this process's own override slot, and when it is set the reported root below is never
+ * consulted. Returning it as it stood was the hole — {@link saveProjects} runs
+ * `mkdirSync(dir, 0700)` + {@link tightenMode} on whatever directory the value names and
+ * publishes the registry (bundle ids, pids, storage paths) into it, so the override was a
+ * way to make this process re-permission and populate any path its environment could
+ * name, while every *reported* root and every *agent-supplied* storage root in this module
+ * passes a judge first. It now crosses the same gates: absolute, traversal-free, and not
+ * a tree this shell refuses to create or re-permission ({@link refuseOverrideDirectory}).
+ *
+ * The one shape that is allowed past {@link refuseCandidate} is the daemon's own default
+ * root, `<passwd home>/.glasspane`: its home-dot-directory rule exists to stop an *evidence
+ * archive* (which the daemon writes packs into and prunes) from being pointed at the
+ * account's key chain, and `~/.glasspane/projects.json` is precisely the file the service
+ * loads when started with no `--state-dir` — refusing it would turn a guard into a
+ * regression of the documented default.
+ */
 function projectsPath(daemonStateRoot?: string | null): string {
   const envPath = process.env[PROJECTS_FILE_ENV];
-  if (envPath) return envPath;
+  if (envPath) return overrideProjectsPath(envPath);
   return daemonProjectsPath(daemonStateRoot);
+}
+
+/** `<passwd home>/.glasspane`, the daemon's own default root, in the judged form. */
+function homeDefaultStateRoot(): string {
+  return stripFirmlink(path.posix.normalize(systemHome() + "/.glasspane"));
+}
+
+/**
+ * Judge one override value and hand back the path it is allowed to mean.
+ *
+ * The judgement runs on the *directory* the write would create, because that is the half
+ * with a side effect: the file itself is the registry, and its mode is set after the fact.
+ * Normalisation happens here rather than being handed downstream, so what was judged and
+ * what is written are the same string.
+ */
+function overrideProjectsPath(raw: string): string {
+  const trimmed = raw.trim();
+  const normalized = foldSlashTerminators(stripFirmlink(path.posix.normalize(trimmed)));
+  if (!normalized.startsWith("/")) {
+    throw refusedProjectsFileOverride(
+      trimmed,
+      `is not an absolute path (${trimmed}), so which projects file this write reaches moves with the `
+      + "working directory of whoever started this MCP server",
+    );
+  }
+  for (const component of normalized.split("/")) {
+    if (component === "." || component === "..") {
+      throw refusedProjectsFileOverride(
+        trimmed,
+        `carries a "." or ".." component (${trimmed}), so the file it names is not the file this `
+        + "call was asked to write",
+      );
+    }
+  }
+  const directory = path.dirname(normalized);
+  if (directory === homeDefaultStateRoot()) {
+    // The daemon's own default root: `ProjectRegistry.defaultProjectsPath` on the Swift
+    // side reads `<NSHomeDirectory>/.glasspane/projects.json`, and this shell's notice says
+    // as much. Nothing is created here that the service has not already claimed.
+    return normalized;
+  }
+  const shape = stateRootRefusal(directory);
+  if (shape !== null) {
+    throw refusedProjectsFileOverride(trimmed, `its directory ${shape} (${directory})`);
+  }
+  const resolved = stripFirmlink(resolveExistingAncestor(directory));
+  const refusal = strongestRefusal(resolved === directory ? [directory] : [directory, resolved], resolved);
+  if (refusal !== null) {
+    throw refusedProjectsFileOverride(trimmed, `its directory ${refusalPhrase(refusal, resolved)}`);
+  }
+  return normalized;
+}
+
+/**
+ * The refusal {@link projectsPath} raises for its own override slot.
+ *
+ * It carries its own remedy (B5) because the code-derived one would be wrong here: the
+ * `GP_E_STATE_ROOT_REFUSED` arm in `tools.ts` tells a reader to go and ask the *service*
+ * which root it resolved, and the thing in play is a variable this process was started
+ * with. `unset` it, or point it at a file both sides accept — that is the move that works,
+ * and it is the only one this sentence may claim.
+ */
+function refusedProjectsFileOverride(raw: string, defect: string): ProjectRegistryError {
+  const defaultFile = `${homeDefaultStateRoot()}/projects.json`;
+  return new ProjectRegistryError(
+    GP_E_STATE_ROOT_REFUSED,
+    `the ${PROJECTS_FILE_ENV} override this shell was started with ${defect}, so this shell refuses to use it: `
+    + `${quoteShellArg(raw)}. This is the override slot of **this process**, not a root the background service `
+    + `reported about itself — the daemon never reads ${PROJECTS_FILE_ENV} (R7-14), so the value being judged is `
+    + "one an environment, a wrapper, or an agent set for the MCP shell alone. It is not a harmless pointer either: "
+    + "`gp_project_set` would have created that directory and re-permissioned it to 0700, then written the project "
+    + "registry — bundle ids, pids and storage paths — into it, which is the same authority this module refuses a "
+    + "self-reported root over (`StateRoot.notADedicatedRoot`) and refuses an agent-named evidence archive over "
+    + "(`refuseCandidate`). Nothing was read and nothing was written by this call: no directory was created, no "
+    + "permission was changed, no projects.json was opened, listed or saved.",
+    `this shell's own override is what is configured, not your arguments and not a damaged file: `
+    + `\`unset ${PROJECTS_FILE_ENV}\` for this MCP server process and repeat gp_project_set — it then writes the `
+    + `projects file of the root the running daemon named in its hello, or the home default `
+    + `\`${quoteShellArg(defaultFile)}\` when it named none. Alternatively point the override at one of those two `
+    + "paths; do not point it at a tree this shell will not create or re-permission, and do not repair a projects "
+    + "file for this refusal — the refusal names a directory, and no path under it was touched. If the service "
+    + "really is running on a root this shell cannot accept, move the service instead: "
+    + "`glasspaned --state-dir <a directory this install owns>`, then reconnect so a fresh hello reports it",
+  );
 }
 
 /**
@@ -846,6 +960,17 @@ function saveProjects(filePath: string, entries: ProjectEntry[]): void {
         + `to them yourself (chmod 700 ${quoteShellArg(dir)}, chmod 600 ${quoteShellArg(filePath)}) and retry — a volume that ignores chmod `
         + "(read-only mount, ACL, immutable flag) needs the daemon's --state-dir moved to one that honours "
         + "permissions; until then the registry on disk and this shell disagree about who can read it",
+        // The refusal above already names the two commands that make the modes true, so the
+        // remedy transcribes them instead of sending the reader to repair a file nobody
+        // called damaged (B5). Nothing here is a judgement about the registry's contents.
+        `the mode this shell asked for did not stick, so nothing was published: bring it to the daemon's own `
+        + `modes yourself — \`chmod 700 ${quoteShellArg(dir)}\` and \`chmod 600 ${quoteShellArg(filePath)}\` — read them back with `
+        + `\`stat -f '%Sp %N' ${quoteShellArg(dir)} ${quoteShellArg(filePath)}\`, and repeat gp_project_set once they say 700 and 600. `
+        + "If chmod answers success and the mode stays loose, the volume ignores permissions: find out with "
+        + `\`ls -lO ${quoteShellArg(dir)}\` (an immutable flag) and \`diskutil info -live ${quoteShellArg(dir)}\` `
+        + "(a read-only or remote mount), and move the service onto a volume that honours them "
+        + "`glasspaned --state-dir <a directory this install owns>`). Do not repair or overwrite projects.json for "
+        + `this one, and do not set ${FORCE_OVERWRITE_ENV}: the fault is the mode, not the bytes in the file`,
       );
     }
     // A durability fault is not a permissions story, and it is not "the file is damaged":
@@ -859,6 +984,16 @@ function saveProjects(filePath: string, entries: ProjectEntry[]): void {
       + `drop is not a registration. This is the write's own failure, not a verdict about the file's contents: `
       + `check what the volume will do (\`ls -lO ${quoteShellArg(dir)}\` for an immutable flag, \`diskutil info -live ${quoteShellArg(dir)}\` `
       + `for a read-only or remote mount), fix that, then retry the same call.`,
+      // Carried by the error rather than derived from `GP_E_INTERNAL` in `tools.ts` (B5):
+      // that code's arm reads "the projects file is the problem … repair or restore the
+      // damaged entry", which is the opposite of the sentence above and would send an agent
+      // to edit a registry that this call never failed to decode.
+      `nothing was published by this call, and the file's contents are not in question: check what the volume `
+      + `will do — \`ls -lO ${quoteShellArg(dir)}\` for an immutable flag, \`diskutil info -live ${quoteShellArg(dir)}\` for a `
+      + `read-only or remote mount, \`df -h ${quoteShellArg(dir)}\` for a full one — fix that, and repeat the same `
+      + "gp_project_set once the volume commits. Do not repair or restore projects.json for this fault, and do not "
+      + `set ${FORCE_OVERWRITE_ENV}: it moves an unreadable registry aside, which is a different problem from a write `
+      + "the device refused",
     );
   }
 }
@@ -1118,7 +1253,13 @@ function rootDiscriminator(): string {
     + "/com.glasspane.daemon` prints the arguments the job was started with. "
     + "If those arguments name a --state-dir, the entry has to go into that root's projects.json (repeat gp_project_set with "
     + PROJECTS_FILE_ENV
-    + " pointed at <that root>/projects.json): no restart of the service will make it read anywhere else, so restarting again changes nothing. "
+    + " pointed at <that root>/projects.json — this shell judges that override with the same path gates it judges "
+    + "every root it writes, because writing there means creating the directory and bringing it to 0700, so a shared "
+    + "scratch tree, a directory this user does not own, or a world-writable one is refused with "
+    + GP_E_STATE_ROOT_REFUSED
+    + " and nothing is written; such a service root is not a place this surface can register "
+    + "into, and the fix is to run the service on a root both sides accept): no restart of the service will make it "
+    + "read anywhere else, so restarting again changes nothing. "
     + "If they name no --state-dir, the service is on the default root and simply predates this write, and one restart with the command in this notice is what surfaces it.";
 }
 
@@ -1469,9 +1610,21 @@ function describeError(error: unknown): string {
 /** Thrown for GP_E_PROJECT_LIMIT / GP_E_NOT_FOUND / GP_E_BAD_PARAMS / GP_E_INTERNAL. */
 export class ProjectRegistryError extends Error {
   readonly code: string;
-  constructor(code: string, message: string) {
+  /**
+   * The registry layer's own next move, when this fault has one that the code cannot
+   * state. `tools.ts` transcribes it instead of deriving a remedy from the code alone
+   * (B5): a durability fault and a damaged registry both answer `GP_E_INTERNAL`, and the
+   * sentence that is right about the second — "the projects file is the problem … repair
+   * or restore the damaged entry" — is a lie about the first, whose own message says "This
+   * is the write's own failure, not a verdict about the file's contents". Absent means
+   * "the code's arm is the honest answer here", which is what the read-side faults below
+   * rely on.
+   */
+  readonly remedy?: string;
+  constructor(code: string, message: string, remedy?: string) {
     super(message);
     this.name = "ProjectRegistryError";
     this.code = code;
+    this.remedy = remedy;
   }
 }

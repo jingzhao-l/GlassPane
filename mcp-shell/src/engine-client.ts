@@ -665,6 +665,23 @@ function clientClosingRemedy(surface: ShellSurface): string {
 }
 
 /**
+ * What the message says about a request that was still in this process's own write queue
+ * when its transport died ({@link EngineJsonRpcClient.teardown}).
+ *
+ * The lazy transport opens its socket on the first write, and a `net.Socket` that has not
+ * reached `connect` accepts the frame into memory rather than onto a wire: `write()`
+ * succeeds, `writableLength` still holds the bytes, and a `connect ECONNREFUSED` five
+ * milliseconds later means the daemon was never sent anything. The reviewed answer said the
+ * opposite — "this request had already left this shell when its transport died" — and the
+ * consequence was not cosmetic: that sentence is *why* the no-reissue bans are given, so a
+ * request nobody received was answered with the one instruction that is wrong for it (do
+ * not retry), while the retry is exactly what is safe.
+ */
+const NEVER_LEFT_TRANSPORT = "the frame this request wrote never left this process — its bytes were still in "
+  + "this client's own write queue when the transport went, so nothing reached the daemon and nothing was "
+  + "performed there";
+
+/**
  * The answer a *transport death* gives to one outstanding request, per method.
  *
  * {@link clientClosingRemedy} documents the defect this is the other face of: the
@@ -679,7 +696,13 @@ function clientClosingRemedy(surface: ShellSurface): string {
  *
  * The same three-way split the error-frame fallback ({@link noRemedyFallback}) and
  * the timeout answer ({@link slowEngineRemedy}) already make, read from the same
- * two lists so a method moving between them moves this answer with it:
+ * two lists so a method moving between them moves this answer with it, and gated
+ * on one prior question — did this request's bytes ever leave this process
+ * ({@link NEVER_LEFT_TRANSPORT})? Every arm below is written for a transport that
+ * died *after* carrying the request, and the three-way split says what a re-issue
+ * would cost. For a request that was still queued locally when the socket failed,
+ * there is nothing to re-issue a second time: this returns the plain
+ * {@link daemonUnreachableRemedy}, which is the answer for "nothing is listening".
  *  - {@link REPLAY_UNSAFE_REASONS} members: no re-issue, naming that method's own
  *    reason, plus the read route this surface really has;
  *  - {@link STATE_CHANGING_ON_RETRY_METHOD_NAMES} members (`snapshot`): nothing is
@@ -690,8 +713,16 @@ function clientClosingRemedy(surface: ShellSurface): string {
  *    refusing a retry where nothing is performed twice is its own kind of wrong
  *    advice, so this arm keeps {@link daemonUnreachableRemedy}'s bytes verbatim.
  */
-function transportDeathRemedy(method: string, surface: ShellSurface): string {
+function transportDeathRemedy(method: string, surface: ShellSurface, handedOff: boolean): string {
   const restore = daemonRestoreCommand();
+  if (!handedOff) {
+    // Nothing reached the daemon, so nothing can have been performed there and no
+    // re-issue is a second performance of anything. The existing unreachable wording is
+    // reused byte for byte rather than re-derived, because it is the answer this shell
+    // already gives when nothing is listening — and a transport that never came up is
+    // that case, seen one step earlier.
+    return daemonUnreachableRemedy();
+  }
   const unsafe = REPLAY_UNSAFE_REASONS[method];
   if (unsafe !== undefined) {
     return `${restore}. Do NOT re-issue '${method}' on the strength of this answer: this request had already left `
@@ -839,8 +870,13 @@ type Pending = {
    * trail it would otherwise be written into (R8b-高1).
    */
   correlation?: number;
-  /** The request's own params: the only honest basis for "narrow this". */
-  params?: Record<string, unknown>;
+  /**
+   * Whether this request's bytes left this process. `false` is only ever set by a
+   * transport that can measure it (one with `bufferedBytes()`), and it means the frame was
+   * still sitting in *this* process's write queue when the transport died — so the daemon
+   * never saw it, and {@link transportDeathRemedy} may not claim otherwise.
+   */
+  handedOff: boolean;
   deadlineMs: number;
   methodDeadlineMs: number;
   timer: ReturnType<typeof setTimeout> | null;
@@ -985,10 +1021,27 @@ export class EngineJsonRpcClient {
         this.failOversizedReply(error);
         return;
       }
-      this.teardown(`engine transport error: ${error.message}`, (method) => transportDeathRemedy(method, this.surface));
+      this.teardown(
+        `engine transport error: ${error.message}`,
+        (method, handedOff) => transportDeathRemedy(method, this.surface, handedOff),
+        NEVER_LEFT_TRANSPORT,
+      );
     });
-    this.io.onClose(() => this.teardown("engine transport closed", (method) => transportDeathRemedy(method, this.surface)));
-    this.io.onOpen?.(() => this.handshake());
+    this.io.onClose(() => this.teardown(
+      "engine transport closed",
+      (method, handedOff) => transportDeathRemedy(method, this.surface, handedOff),
+      NEVER_LEFT_TRANSPORT,
+    ));
+    this.io.onOpen?.(() => {
+      // Whatever was waiting in this process's write queue went out with the connection:
+      // from here the frames are the peer's to answer, and the transport-death answer may
+      // say so. Marked before the handshake so the `hello` this writes is itself counted as
+      // handed off.
+      for (const entry of this.pending.values()) {
+        entry.handedOff = true;
+      }
+      this.handshake();
+    });
   }
 
   /**
@@ -1089,7 +1142,7 @@ export class EngineJsonRpcClient {
         id,
         method,
         correlation,
-        params,
+        handedOff: true,
         deadlineMs,
         methodDeadlineMs,
         timer: null,
@@ -1124,8 +1177,21 @@ export class EngineJsonRpcClient {
 
       this.pending.set(id, entry);
 
+      const queuedBefore = this.io.bufferedBytes?.() ?? null;
       try {
-        this.io.writeLine(JSON.stringify(frame));
+        const frameText = JSON.stringify(frame);
+        this.io.writeLine(frameText);
+        if (queuedBefore !== null) {
+          // B7: the lazy transport opens its socket on the first write, and a `net.Socket`
+          // accepts that write into its own queue — `write()` returns, nothing has been
+          // delivered, and `writableLength` still holds the bytes. A transport that reports
+          // its queue therefore gets told, per request, whether the frame left this process
+          // or is still sitting in it; the answer decides what the death of that transport
+          // may claim. `null` (no `bufferedBytes()` on this transport) keeps the previous
+          // reading, which is the honest default for a transport that cannot say.
+          const queuedAfter = this.io.bufferedBytes?.() ?? 0;
+          entry.handedOff = queuedAfter < queuedBefore + frameText.length + 1;
+        }
       } catch (error) {
         // Nothing reached the daemon, so no late reply can ever land for it.
         this.pending.delete(id);
@@ -1544,7 +1610,17 @@ export class EngineJsonRpcClient {
    * and one remedy for the whole batch is how "…, then retry" reached an
    * outstanding `act` at all. See {@link transportDeathRemedy}.
    */
-  private teardown(message: string, remedyFor: (method: string) => string): void {
+  private teardown(
+    message: string,
+    remedyFor: (method: string, handedOff: boolean) => string,
+    /**
+     * What to say about a request whose bytes were still in this process when the transport
+     * went, or `null` when this teardown is not a transport outcome. Only the transport-death
+     * arms pass it: {@link clientClosingRemedy} is written for the case where a reply may
+     * still land, and a frame that never left cannot land one.
+     */
+    neverLeftNote: string | null = null,
+  ): void {
     const entries = [...this.pending.values()];
     // Read before the loop below: `reject()` marks an entry settled, and a
     // request that never got an answer is not one whose caller was promised a
@@ -1553,7 +1629,13 @@ export class EngineJsonRpcClient {
     this.pending.clear();
     for (const entry of entries) {
       if (!entry.settled) {
-        this.reject(entry, new EngineCallError(GP_E_ENGINE_UNREACHABLE, message, remedyFor(entry.method)));
+        // A request whose bytes were still in this process when the transport went is not
+        // one the daemon can have carried out, and saying so is the difference between an
+        // answer that permits a retry and one that forbids a duplicate (B7).
+        const said = entry.handedOff || neverLeftNote === null
+          ? message
+          : `${message}; ${neverLeftNote}`;
+        this.reject(entry, new EngineCallError(GP_E_ENGINE_UNREACHABLE, said, remedyFor(entry.method, entry.handedOff)));
       } else if (entry.timer !== null) {
         clearTimeout(entry.timer);
         entry.timer = null;
@@ -1603,6 +1685,25 @@ export class EngineJsonRpcClient {
     if (version !== "") {
       this.helloVersion = version;
     }
+    // `hello.stateRoot` (additive since 1.15.0) is the daemon's own answer to "which root
+    // did you resolve", and it is recorded on exactly the same terms as the version above.
+    // The project tools read it through `reportedStateRoot` instead of deriving a root from
+    // `$HOME`: a service started with `--state-dir /tmp/sandbox` loads
+    // `/tmp/sandbox/projects.json`, and writing the home default while reporting success is
+    // the incident class this module was created to refuse. An absent key is kept absent —
+    // "that daemon does not report it", never "so it must be the home default".
+    //
+    // It used to be assigned *below* the two protocol arms, both of which `return`. A daemon
+    // that reported a root and a protocol number this shell does not speak therefore left
+    // `reportedStateRoot` null, and the harm was not the missing measurement: the project
+    // tools fell back to the home default and `daemonRestartNotice` said, to the agent's
+    // face, "this daemon's hello reported no stateRoot". It reported one; this shell had
+    // simply not kept it. Storing what a frame says before deciding about it is the shape
+    // `version` already had, and the two now share it.
+    const reportedRoot = typeof report.stateRoot === "string" ? report.stateRoot.trim() : "";
+    if (reportedRoot !== "") {
+      this.helloStateRoot = reportedRoot;
+    }
     const protocol = typeof report.protocolVersion === "string" ? report.protocolVersion : null;
     if (protocol === null) {
       this.report(`engine self-report has no protocolVersion (engine=${jsonOrString(report.engine)}); expected '${expected}' — compatibility unverified`);
@@ -1613,16 +1714,6 @@ export class EngineJsonRpcClient {
       return;
     }
     const reportedVersion = version === "" ? null : version;
-    // `hello.stateRoot` (additive since 1.15.0) is the daemon's own answer to "which root
-    // did you resolve". The project tools read it through `reportedStateRoot` instead of
-    // deriving a root from `$HOME`: a service started with `--state-dir /tmp/sandbox` loads
-    // `/tmp/sandbox/projects.json`, and writing the home default while reporting success is
-    // the incident class this module was created to refuse. An absent key is kept absent —
-    // "that daemon does not report it", never "so it must be the home default".
-    const reportedRoot = typeof report.stateRoot === "string" ? report.stateRoot.trim() : "";
-    if (reportedRoot !== "") {
-      this.helloStateRoot = reportedRoot;
-    }
     const wantVersion = this.identity?.version;
     if (reportedVersion !== null && wantVersion !== undefined && reportedVersion !== wantVersion) {
       this.report(`version mismatch: engine self-reports '${reportedVersion}', this MCP shell ships '${wantVersion}' (single version line) — one side is stale`);

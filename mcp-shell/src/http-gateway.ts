@@ -32,13 +32,17 @@ import { escapeHTML, renderHTML, renderMarkdown } from "./evidence-report.js";
 import type { EvidencePackReportView } from "./evidence-report.js";
 import {
   DAEMON_FORWARDED_METHODS,
+  RING_WRITE_REASON,
+  narrowingKnobPhrase,
   oversizedReplyAdvice,
   packForReport,
   parseEvidenceFrame,
+  payloadOverflowArm,
   TOOL_BY_NAME,
   TOOL_SPECS,
   type ToolSpec,
 } from "./tools.js";
+import { MAX_FRAME_BYTES } from "./io.js";
 import { attributeCapability, providerAttributionLine } from "./providers.js";
 
 /**
@@ -773,6 +777,20 @@ async function handleEvidenceAggregate(
   const renderedIds: string[] = [];
   const skipped: string[] = [];
   const notFetched: string[] = [];
+  /**
+   * The id that ended the fan-out, with the answer that ended it.
+   *
+   * It is *recorded*, not returned, because a failure on a later id used to discard every
+   * pack this request had already rendered: the loop `return`ed straight to an error
+   * response, and the caller was left holding nothing for a read that had partly worked —
+   * while this file's own budget comment promises that what this request did not reach is
+   * "never dropped from it", and `tools.ts`'s `gp_recent_reports` (the same fan-out over
+   * the same `last_evidence` on the other doorway) had already been fixed to render what it
+   * has and name the failure (2026-10-24 review, B6). Both faces now build one shape:
+   * packs kept, failing id named, unreached ids named, and an error frame only when nothing
+   * at all could be rendered.
+   */
+  let hardFailure: { operationId: string; line: string; kind: "frame" | "engine"; error: unknown } | null = null;
   const budget = new FanOutBudget(EVIDENCE_FANOUT_BUDGET_MS);
   try {
     for (const [index, operationId] of ids.entries()) {
@@ -795,20 +813,51 @@ async function handleEvidenceAggregate(
           blocks.push(render(packForReport(pack, measuredSchemaVersion), format));
           renderedIds.push(operationId);
         } catch (error) {
-          failEvidenceFrameShape(res, error, operationId);
-          return;
+          // The daemon answered this id, and what it answered is not a pack. Say so and
+          // stop asking — but keep the packs that are already in hand.
+          hardFailure = {
+            operationId,
+            kind: "frame",
+            error,
+            line: `${GP_E_INTERNAL}: the daemon returned a last_evidence frame this gateway cannot render `
+              + `(no parseable evidencePack for ${operationId}: ${boundedCause(describeCause(error))})`,
+          };
+          notFetched.push(...ids.slice(index + 1));
+          break;
         }
       } else if (settled.kind === "missing") {
         skipped.push(operationId);
       } else {
-        // The too-large advice is the tool contract's business, so the aggregate
-        // route asks the same helper the single-fetch route uses.
-        await failEngine(res, settled.error, TOOL_BY_NAME.get("gp_last_evidence"), { operationId });
-        return;
+        // The too-large advice is the tool contract's business, so the aggregate route asks the same
+        // helper the single-fetch route uses — but only when this is the whole answer (below).
+        hardFailure = {
+          operationId,
+          kind: "engine",
+          error: settled.error,
+          line: engineFailureLine(settled.error),
+        };
+        notFetched.push(...ids.slice(index + 1));
+        break;
       }
     }
   } finally {
     budget.done();
+  }
+
+  if (blocks.length === 0 && hardFailure !== null) {
+    // Nothing could be rendered, so the answer to the one id that failed is the whole of
+    // this request's information and goes out under its own code — with the ids this
+    // request never reached named next to it, which is what keeps a stopped fan-out from
+    // reading as "the daemon refused everything".
+    const tail = notFetchedTail(notFetched);
+    if (hardFailure.kind === "frame") {
+      failEvidenceFrameShape(res, hardFailure.error, hardFailure.operationId, tail);
+      return;
+    }
+    await failEngine(res, hardFailure.error, TOOL_BY_NAME.get("gp_last_evidence"), {
+      operationId: hardFailure.operationId,
+    }, tail);
+    return;
   }
 
   if (blocks.length === 0 && notFetched.length > 0) {
@@ -859,15 +908,29 @@ async function handleEvidenceAggregate(
     : `# GlassPane evidence reports (${blocks.length})`;
   const skipNote = makeSkipNote(skipped, format);
   const unfetchedNote = makeNotFetchedNote(notFetched, format);
+  // Reaching this line with a failure recorded means the report below is **partial**: one id
+  // was answered with something this gateway cannot render, or the engine refused mid-fan-out.
+  // The packs are the useful half of the answer and are not thrown away for it (that was the
+  // defect this route shared with `gp_recent_reports`: a caller left holding nothing re-performs
+  // the action the report was opened to check on) — but a partial report that does not say so is
+  // a report that reads as complete. Name the failing id and the answer that failed it.
+  const failureNote = makeHardFailureNote(hardFailure, format);
   const separator = format === "html" ? "\n<hr>\n" : "\n\n---\n";
   const sections: string[] = [header];
-  for (const note of [skipNote, unfetchedNote]) {
+  for (const note of [skipNote, unfetchedNote, failureNote]) {
     if (note !== "") {
       sections.push(note);
     }
   }
   sections.push(blocks.join(separator));
-  ok(res, { format, renderedIds, skipped, notFetched, report: sections.join("\n") });
+  ok(res, {
+    format,
+    renderedIds,
+    skipped,
+    notFetched,
+    ...(hardFailure === null ? {} : { failed: [hardFailure.operationId] }),
+    report: sections.join("\n"),
+  });
 }
 
 async function handleToolForward(
@@ -1115,6 +1178,74 @@ function makeNotFetchedNote(notFetched: readonly string[], format: ReportFormat)
     : `> ${sentence}`;
 }
 
+/** How many characters of a failure cause a response is allowed to carry. */
+const CAUSE_MAX_CHARS = 400;
+
+/**
+ * The cause of a caught failure, as one line — never `undefined`, never a stack.
+ *
+ * `String(error)` on a plain `Error` yields "Error: message", and an empty-message error
+ * yields the bare word "Error", which tells the reader nothing about *why* the frame was
+ * refused. `message` is what this repo's own error classes fill in, so it is tried first.
+ */
+function describeCause(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message.trim() === "" ? error.name : error.message;
+  }
+  return String(error);
+}
+
+/** Cap a cause without pretending the cut bytes were shown. */
+function boundedCause(text: string): string {
+  return text.length <= CAUSE_MAX_CHARS
+    ? text
+    : `${text.slice(0, CAUSE_MAX_CHARS)}… [+${text.length - CAUSE_MAX_CHARS} chars not shown]`;
+}
+
+/**
+ * The one-line account of an engine failure for the *partial* report body.
+ *
+ * It transcribes the code and message the daemon (or `engine-client.ts`) wrote; it does not
+ * re-derive advice, because advice for the whole-request case is `failEngine`'s business and a
+ * second copy of that table is how the two doorways start answering the same code differently.
+ */
+function engineFailureLine(error: unknown): string {
+  return error instanceof EngineCallError
+    ? `${error.code}: ${boundedCause(error.message)}`
+    : `${GP_E_INTERNAL}: ${boundedCause(describeCause(error))}`;
+}
+
+/** The clause that keeps a stopped fan-out from reading as "the daemon refused everything". */
+function notFetchedTail(notFetched: readonly string[]): string {
+  if (notFetched.length === 0) {
+    return "";
+  }
+  const label = notFetched.length === 1 ? "id" : "ids";
+  return ` — and ${notFetched.length} ${label} this request never sent (${notFetched.join(", ")}), `
+    + "which is a stopped read, not an answer about them";
+}
+
+/**
+ * The note naming the id that ended a partial evidence fan-out.
+ *
+ * Same reason the MCP half has one (`tools.ts`'s `gp_recent_reports`): the packs already in
+ * hand are kept, so the failure has to appear *inside* the report — a 200 whose body silently
+ * omits the id that failed is the shape that makes a caller believe it read the whole list.
+ */
+function makeHardFailureNote(
+  failure: { operationId: string; line: string } | null,
+  format: ReportFormat,
+): string {
+  if (failure === null) {
+    return "";
+  }
+  const sentence = `incomplete: ${failure.operationId} failed with ${failure.line} — the fan-out stopped there, `
+    + 'so the packs above are what this request read, not the whole list';
+  return format === "html"
+    ? `<p class="gp-incomplete">${escapeHTML(sentence)}</p>`
+    : `> ${sentence}`;
+}
+
 /* ------------------------------------------------------------------ *
  * Response envelopes and the body reader (all JSON, capped).
  * ------------------------------------------------------------------ */
@@ -1277,9 +1408,11 @@ async function failEngine(
   error: unknown,
   spec?: ToolSpec,
   params?: Record<string, unknown>,
+  tail: string = "",
 ): Promise<void> {
   if (error instanceof EngineCallError) {
-    fail(res, httpStatusForEngineCode(error.code), error.code, error.message, engineRemedy(error, spec, params));
+    fail(res, httpStatusForEngineCode(error.code), error.code, `${error.message}${tail}`,
+      engineRemedy(error, spec, params));
     return;
   }
   // Not an engine error frame, so this is *not* a transport verdict either: every
@@ -1289,7 +1422,7 @@ async function failEngine(
   // daemon is running, then retry" — an unearned diagnosis plus a restart order
   // for a daemon that had, in every reachable case, just answered.
   fail(res, 500, GP_E_INTERNAL,
-    `this gateway could not complete the request: ${String(error)}`,
+    `this gateway could not complete the request: ${String(error)}${tail}`,
     gatewayFaultAdvice(spec));
 }
 
@@ -1319,11 +1452,41 @@ function engineRemedy(
 ): string {
   if (spec !== undefined && error.code === GP_E_PAYLOAD_TOO_LARGE) {
     const asked = params ?? {};
-    return isReplayUnsafeMethod(spec.engineMethod)
-      ? httpReplayUnsafePayloadAdvice(spec, asked)
-      : oversizedReplyAdvice(spec, asked);
+    // The branch is taken from `tools.ts`'s single gate, not from a second copy of the
+    // method lists here: the reviewed version asked only "is this replay-unsafe", which let
+    // `snapshot` — the method this surface's own timeout answer refuses to re-send, because
+    // a second accepted copy appends to the daemon's bounded ring — receive "retry with a
+    // smaller maxDepth" from the overflow path (2026-10-24 review, B4).
+    switch (payloadOverflowArm(spec.engineMethod)) {
+      case "replay-unsafe":
+        return httpReplayUnsafePayloadAdvice(spec, asked);
+      case "ring-writing":
+        return httpRingWritingPayloadAdvice(spec, asked);
+      case "narrowable":
+        return oversizedReplyAdvice(spec, asked);
+    }
   }
   return error.remedy;
+}
+
+/**
+ * A reply that overflowed on a method whose re-send writes daemon state, in this surface's
+ * nouns.
+ *
+ * `tools.ts` owns the decision ({@link payloadOverflowArm}); this is the same fact worded
+ * for a caller holding curl: no `gp_*` tool to name, no operation trail to read, and the
+ * routes below are the ones this gateway actually answers.
+ */
+function httpRingWritingPayloadAdvice(spec: ToolSpec, params: Record<string, unknown>): string {
+  return `the reply was too large for one frame (${MAX_FRAME_BYTES}-byte limit); '${spec.engineMethod}' reached the `
+    + "daemon and was answered, and only its reply was dropped — which means the baseline it captured is already "
+    + `stored. Do NOT send this request again to recover that reply: ${RING_WRITE_REASON}. `
+    + `${narrowingKnobPhrase(spec, params)}, and using it is the second send this answer refuses; the ids the daemon `
+    + "stored are only ever where a caller already has them, in the snapshot replies it has already received, and "
+    + "this gateway lists no ring. Read what is held, and see the attached app as it is now without changing it "
+    + "with POST /v1/tools/observe, POST /v1/tools/assert_element or POST /v1/tools/probe_status; an operation whose "
+    + "id is already held re-reads with GET /v1/evidence/<operationId>. Taking a fresh baseline is a decision, not "
+    + "error recovery, and the connection is intact and the daemon keeps answering other requests";
 }
 
 /**
@@ -1375,9 +1538,14 @@ function gatewayFaultAdvice(spec?: ToolSpec): string {
  * caller who was only trying to read a pack. Neither is what happened: an answer
  * arrived, and its bytes do not match the contract.
  */
-function failEvidenceFrameShape(res: ServerResponse, error: unknown, operationId?: string): void {
+function failEvidenceFrameShape(
+  res: ServerResponse,
+  error: unknown,
+  operationId?: string,
+  tail: string = "",
+): void {
   fail(res, 502, GP_E_INTERNAL,
-    `the daemon returned a last_evidence frame that does not match the engine contract (no parseable evidencePack${operationId === undefined ? "" : ` for ${operationId}`}: ${String(error)})`,
+    `the daemon returned a last_evidence frame that does not match the engine contract (no parseable evidencePack${operationId === undefined ? "" : ` for ${operationId}`}: ${String(error)})${tail}`,
     "the daemon answered this request, so the transport is up and restarting it changes nothing here; this gateway "
     + "validates a pack before rendering or forwarding it, so GET /v1/evidence/<operationId> and "
     + "POST /v1/tools/last_evidence {operationId} will both refuse this frame for the same reason. Read what the "

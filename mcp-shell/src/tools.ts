@@ -1230,6 +1230,108 @@ export function replayUnsafePayloadAdvice(
 
 
 /**
+ * The advice for a reply that overflowed on a method whose *re-send* writes daemon state
+ * — `gp_snapshot` today ({@link STATE_CHANGING_ON_RETRY_METHOD_NAMES}), which is neither a
+ * replay-unsafe press nor a free re-read.
+ *
+ * Why this is a third arm rather than a call to `oversizedReplyAdvice` (2026-10-24 review,
+ * B4): that function answers "how do I make the next reply smaller", and its answer is a
+ * command to send the request again. For `snapshot` the timeout path already refuses that
+ * — `toolAuthorsTimeoutAdvice` asks `isNarrowableByRetryMethod`, whose list is the
+ * transport's no-replay set unioned with the ring-writing methods, because a second
+ * accepted snapshot appends to the daemon's bounded ring (`EngineCore.swift`'s
+ * `storeSnapshot`, trimmed oldest-first at `snapshotHistoryLimit`) and can evict the
+ * baseline an earlier one returned, the id `gp_restore` needs later. The overflow path
+ * asked only `isReplayUnsafeMethod`, so the same method got "retry with a smaller maxDepth"
+ * from one answer and "do not re-send" from the other. Both faces are the same fact about
+ * the same request, so both now consult the same predicate.
+ *
+ * The knob is still named, because it is the truth about what would shrink a reply; what
+ * it is *not* is an instruction this frame may give.
+ */
+/**
+ * Why a second copy of a state-writing read is not a cheaper re-read — the sentence both
+ * surfaces say, so that "the same fact on both faces" is one sentence and not two.
+ */
+export const RING_WRITE_REASON = "it is not a cheaper re-read of the first: it appends another entry to the "
+  + "daemon's bounded snapshot ring, and one more entry can evict the baseline an earlier snapshot returned — "
+  + "the one a later restore needs";
+
+export function ringWritingPayloadAdvice(
+  spec: ToolSpec,
+  method: string,
+  params: Record<string, unknown>,
+): string {
+  return `the reply was too large for one frame (${MAX_FRAME_BYTES}-byte limit); `
+    + `'${spec.name}' reached the daemon and was answered, and only its reply was dropped — which means the `
+    + `baseline it captured is already stored. Do NOT send a second '${method}' to recover that reply: `
+    + `${RING_WRITE_REASON}. ${narrowingKnobPhrase(spec, params)}, and using it is the second send this answer `
+    + "refuses; the stored ids are only ever where a caller already has them, in the snapshot replies of its own "
+    + "earlier calls, and no route here enumerates the ring. Read those instead, and if a fresh baseline is "
+    + "genuinely needed, decide that as a new action rather than as error recovery; the connection is intact and "
+    + "the daemon keeps answering other requests";
+}
+
+/**
+ * What this tool advertises that would make one reply smaller, stated as a fact and never
+ * as an order.
+ *
+ * Split out because both overflow arms need it — the MCP face ({@link
+ * ringWritingPayloadAdvice}) and the HTTP gateway's curl-worded twin, which may not name a
+ * `gp_*` tool — and a knob sentence typed twice is the drift this file keeps refusing.
+ */
+export function narrowingKnobPhrase(spec: ToolSpec, params: Record<string, unknown>): string {
+  const knobs = narrowingKnobsFor(spec, params);
+  const shrinkable = replyShrinkingKnobs(knobs).filter((knob) => !atAdvertisedFloor(knob));
+  const atFloor = knobs.filter(atAdvertisedFloor);
+  if (shrinkable.length > 0) {
+    return `the parameter that would make such a reply smaller is ${shrinkable.map(describeKnob).join(" and ")}`;
+  }
+  if (atFloor.length > 0) {
+    return `the only parameter of that kind this tool advertises is already spent (${atFloor.map(describeKnob).join("; ")})`;
+  }
+  return "this tool advertises no parameter that shrinks a reply";
+}
+
+/**
+ * The one place the too-large-reply advice is chosen, from the transport's own predicates.
+ *
+ * Both doorways call this — `engineWithPayloadAdvice` here and `engineRemedy` in
+ * `http-gateway.ts` (whose wording is that surface's, but whose *branch condition* is
+ * derived from the same three predicates) — because the split below is the finding this
+ * function exists to keep: three methods, three different next moves, and a face that
+ * picks by a single `isReplayUnsafeMethod` test collapses the ring-writing one into the
+ * narrowing advice and orders a re-send the timeout answer forbids.
+ */
+export function payloadOverflowAdvice(
+  spec: ToolSpec,
+  method: string,
+  params: Record<string, unknown>,
+): string {
+  if (isReplayUnsafeMethod(method)) {
+    return replayUnsafePayloadAdvice(spec, method, params);
+  }
+  if (isNarrowableByRetryMethod(method)) {
+    return oversizedReplyAdvice(spec, params);
+  }
+  return ringWritingPayloadAdvice(spec, method, params);
+}
+
+/**
+ * Which of the three overflow arms a method gets, without the sentence.
+ *
+ * Exported for {@link payloadOverflowAdvice}'s other caller: the HTTP gateway composes the
+ * same decision in its own nouns (a curl reader has no `gp_*` tool to call and no trail to
+ * read), and a *second copy of the branch condition* there is exactly how the two faces
+ * came to disagree about `snapshot` in the first place. The arm names are this file's, so a
+ * method moving between the transport's lists moves both surfaces with it.
+ */
+export function payloadOverflowArm(method: string): "replay-unsafe" | "narrowable" | "ring-writing" {
+  if (isReplayUnsafeMethod(method)) return "replay-unsafe";
+  return isNarrowableByRetryMethod(method) ? "narrowable" : "ring-writing";
+}
+
+/**
  * The advice for a request that was never answered inside the caller's wait.
  *
  * R9-中3 moved this here on purpose. A deadline overrun is the one engine error
@@ -2263,8 +2365,15 @@ async function projectGetTool(args: Record<string, unknown>, context: ToolExecut
 function mapProjectError(error: unknown): ToolResult {
   const passed = passedThroughRegistryError(error);
   if (passed !== null) {
+    // The registry's own remedy wins when it wrote one (B5): a durability fault and a
+    // damaged registry both answer `GP_E_INTERNAL`, and the code-derived arm below is only
+    // honest about the second. Deriving one sentence per code from the *outside* is what
+    // let a frame contradict itself — a message saying "this is the write's own failure,
+    // not a verdict about the file's contents" next to a remedy ordering the reader to
+    // repair the file.
+    const remedy = passed.remedy ?? projectErrorRemedy(passed.code);
     return {
-      content: [{ type: "text", text: formatToolError(passed.code, passed.message, projectErrorRemedy(passed.code)) }],
+      content: [{ type: "text", text: formatToolError(passed.code, passed.message, remedy) }],
       isError: true,
     };
   }
@@ -2279,20 +2388,26 @@ function mapProjectError(error: unknown): ToolResult {
 }
 
 /**
- * 注册表那一层的拒绝要**原样**出去。判据是形状（带一个 `GP_E_*` 码 + 一条 message），
- * 不是 `instanceof ProjectRegistryError`：这条通道上出错的是"谁的答案"，而类身份取决于
- * 哪个模块实例先被载入（`dist/project-registry.js` 与 `src/*.ts` 混跑、或包被打包两次时，
- * instanceof 会假），一假就把一句已经点名的拒绝降级成 `GP_E_INTERNAL: internal shell error`
- * ——壳自己的缺陷码，替后台服务的自报根作了背书。`test/project-registry.test.mjs` 与
- * `test/daily-20261022-registry-trust.test.mjs` 各钉一次。
+ * 注册表那一层的拒绝要**原样**出去，包括它自己写的那条出路。判据是形状（带一个 `GP_E_*` 码
+ * + 一条 message），不是 `instanceof ProjectRegistryError`：这条通道上出错的是"谁的答案"，而
+ * 类身份取决于哪个模块实例先被载入（`dist/project-registry.js` 与 `src/*.ts` 混跑、或包被打包
+ * 两次时，instanceof 会假），一假就把一句已经点名的拒绝降级成 `GP_E_INTERNAL: internal shell
+ * error`——壳自己的缺陷码，替后台服务的自报根作了背书。`test/project-registry.test.mjs` 与
+ * `test/daily-20261022-registry-trust.test.mjs` 各钉一次，
+ * `test/qoder-20261024-shell-registry-gates.test.mjs` 钉 `remedy` 这一栏的转录。
  */
-function passedThroughRegistryError(error: unknown): { code: string; message: string } | null {
-  const candidate = error as { code?: unknown; message?: unknown } | null;
+function passedThroughRegistryError(
+  error: unknown,
+): { code: string; message: string; remedy: string | null } | null {
+  const candidate = error as { code?: unknown; message?: unknown; remedy?: unknown } | null;
   if (candidate === null || typeof candidate.code !== "string" || !candidate.code.startsWith("GP_E_")) {
     return null;
   }
   const message = typeof candidate.message === "string" ? candidate.message : "";
-  return { code: candidate.code, message };
+  const remedy = typeof candidate.remedy === "string" && candidate.remedy.trim() !== ""
+    ? candidate.remedy
+    : null;
+  return { code: candidate.code, message, remedy };
 }
 
 /**
@@ -2820,19 +2935,31 @@ async function recentReports(
   }
 
   if (packs.length === 0) {
-    // Every id this shell sent came back `GP_E_NO_EVIDENCE`. That is the daemon
-    // saying its bounded history holds no pack for the id — it is *not* a
-    // statement that the operation never ran, and the trail this report was built
-    // from is this session's own record that those calls were admitted. The
-    // sentence this branch used to carry stated a cause nothing here measures ("the
-    // engine may have restarted") and its remedy ordered "re-run gp_act", i.e. a
-    // second press of an action the trail already records as performed, which
-    // contradicts the timeout branch above and the failure note below, both of
-    // which forbid exactly that (review 2026-10-09 finding 4).
+    // Every id this shell *sent* came back `GP_E_NO_EVIDENCE`. That is the daemon saying
+    // its bounded history holds no pack for the id — it is *not* a statement that the
+    // operation never ran, and the trail this report was built from is this session's own
+    // record that those calls were admitted. The sentence this branch used to carry stated
+    // a cause nothing here measures ("the engine may have restarted") and its remedy ordered
+    // "re-run gp_act", i.e. a second press of an action the trail already records as
+    // performed, which contradicts the timeout branch above and the failure note below, both
+    // of which forbid exactly that (review 2026-10-09 finding 4).
+    //
+    // The denominator is the sendable count, not `ids.length` (2026-10-24 review, B3): the
+    // trail can carry ids this shell refused to put on the wire at all, and an answer built
+    // on `ids.length` reported a daemon reply for a request that was never made — while
+    // `rejected`, which is the only true account of those ids, vanished from this branch.
+    // The other branch of the same function (nothing fetched) already hangs the rejected
+    // clause on its own answer; this one owes the reader the same shape.
+    const asked = skipped.length;
+    const rejectClause = rejected.length === 0
+      ? ""
+      : `. ${rejectedClause(rejected.length)}${renderTrailIds(rejected, format, provenanceOf)} were never sent, so the daemon `
+        + "has no opinion about them and nothing here reports one";
     return {
       content: [{ type: "text", text: formatToolError(
         GP_E_NO_EVIDENCE,
-        `no pack is reachable in the daemon history for any of the ${ids.length} ${ids.length === 1 ? "operation" : "operations"} this shell asked about: each was answered GP_E_NO_EVIDENCE (${renderTrailIds(skipped, format, provenanceOf)})`,
+        `no pack is reachable in the daemon history for any of the ${asked} ${asked === 1 ? "operation" : "operations"} `
+        + `this shell sent: each was answered GP_E_NO_EVIDENCE (${renderTrailIds(skipped, format, provenanceOf)})${rejectClause}`,
         "these operations are recorded in this session's trail, and the daemon holding no pack for them is a fact about its bounded history, not evidence that they did not run — this call measured nothing about a restart, so no cause is claimed here. Read one of them by id with gp_last_evidence {operationId} / gp_export_evidence {operationId}, or ask again with a smaller limit (gp_recent_reports advertises 1…20). Do not re-run gp_act to regenerate what the trail already holds",
       ) }],
       isError: true,
@@ -2970,12 +3097,14 @@ export function engineWithPayloadAdvice(
         // request's own values win where both name one.
         const asked = { ...toolArgs, ...params ?? {} };
         if (error.code === GP_E_PAYLOAD_TOO_LARGE) {
+          // One gate for three kinds of request, and the same predicate the timeout rewrite
+          // uses: `snapshot` is neither replay-unsafe nor free to re-send, and answering its
+          // dropped reply with "retry with a smaller maxDepth" was an order the other half
+          // of this file refuses (2026-10-24 review, B4).
           throw new EngineCallError(
             error.code,
             error.message,
-            isReplayUnsafeMethod(method)
-              ? replayUnsafePayloadAdvice(spec, method, asked)
-              : oversizedReplyAdvice(spec, asked),
+            payloadOverflowAdvice(spec, method, asked),
           );
         }
         if (

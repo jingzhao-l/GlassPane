@@ -81,6 +81,16 @@ export const GP_E_NO_USER_RECORD = "GP_E_NO_USER_RECORD";
  * the filesystem root, the account's home directory itself, or a value that is not
  * an absolute path at all.
  *
+ * Since 1.20.1 this code also answers the *other* un-checked root in this shell: a
+ * `GLASSPANE_PROJECTS_FILE` override that names a directory `gp_project_set` would
+ * otherwise create and bring to 0700 before publishing the registry into it
+ * (`project-registry.ts`'s `overrideProjectsPath`). Same authority, same consequence, and
+ * no new vocabulary: both are "a root this process was told to write into, judged and
+ * refused before the first syscall". The two differ in who said it — one is the service's
+ * self-report, the other this process's own environment — and each frame carries its own
+ * remedy (`ProjectRegistryError.remedy`) so the reader is never told to restart the daemon
+ * for a variable it exported, or to edit a file for a refusal that names a directory.
+ *
  * The daemon refuses the same shapes for its own `--state-dir` (`StateRoot.classify`
  * → `StateRoot.notADedicatedRoot`) and then `tightenPermissions` that root to 0700,
  * so the argument parse is the only thing standing between `--state-dir ~` and a
