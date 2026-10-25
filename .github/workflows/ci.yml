@@ -466,6 +466,15 @@ jobs:
             *"assertion(s) FAILED"*)
               echo "::error::patched-deps selftest 以 exit 0 回答了「有断言失败」——它把自己的失败吞成了绿。remedy：查它末尾的 process.exit 是否还跟着 failures 计数。"
               exit 1 ;;
+            *"every case verified red, and red for the named reason"*) ;;
+            *)
+              # 过去这里只有上面那一支，于是"两条都不打印"也是一种过：一条什么都不说的自测在 CI 里
+              # 长得和一条量过的自测一模一样。正向那一支补上之后，通过句缺席就是红（2026-10-25 同一
+              # 天，MCP 那条 step 因为反过来"只搜失败子串"把一次**通过**的运行判成红——用例名里就带
+              # 被搜的字样；这里的失败子串暂时没那个问题，因为 patched-deps-selftest 只在末尾那一行
+              # 打印它，但"暂时"不是判据）。
+              echo "::error::patched-deps selftest 以 exit 0 回来却没给出它自己的通过句（「every case verified red, and red for the named reason」）——它没把自己的结果说出来。remedy：查 harness/tools/patched-deps-selftest.mjs 末尾是否还打印那句；如果它改了措辞，改的是**这里的期望**与**它自己**两处，不要在 CI 里加一条兜底的「什么都不查」。"
+              exit 1 ;;
           esac
           echo "patched-deps selftest 已测量：每条红都因为它点名的那个原因红"
 
