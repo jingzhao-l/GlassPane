@@ -50,7 +50,8 @@
   这句真话不完整：`script/build.ts` 除了 `node-gyp` 什么都捆，而 `gitlab-ai-provider` 是用字面量
   specifier import 的——捆进来就是我们的字节。探针丢掉的输入（`.gen.ts` 那个由构建自己生成的入口、
   按平台安装的 native 包）都写进读数里，因为它们决定了这条判决能主张多大范围。
-- `harness/tools/zod-bundle.mjs` + `harness/contracts/zod-bundle.json` + 一条 21 断言的自测，
+- `harness/tools/zod-bundle.mjs` + `harness/contracts/zod-bundle.json` + 一条 22 断言的自测
+  （条数按**实跑打印的 `ok`/`FAIL` 行数**量：22/28/26 分别属 zod-bundle、patched-deps、mcp-redirect 三条电池；这里先写过 21，是把一次输出数错了——文档里的数字要能复算，否则它是第二份要漂的抄件），
   接进 `ci.yml` 的 `harness-rulers` 两步。这条闸判的不是"干净"，是**"有记账"**：新拷贝没有理由记录 ⇒ 红；
   账上写"安全"而算法算出它在脆弱区间 ⇒ 红（"记录与算法不一致"）；版本排不出序 ⇒ 红（排不了序的拷贝
   不是它能原谅的拷贝）；拷贝**离开** bundle ⇒ 不红，只报"那是修复落地了，请把账改掉"——判进步的红会被
@@ -67,7 +68,7 @@
 
 - `ci.yml` 里 MCP 重定向自测那步（以及新加的这条自测）过去靠"输出里出现 `assertion(s) FAILED` 或
   `nothing was measured` 就红"来防"吞掉自己的失败"。这条判据过宽：自测的**用例名**里本来就带
-  `nothing was measured` 这种字样，本机实跑时它把一次通过的运行（rc 0、21 条断言全 ok）判成了红。
+  `nothing was measured` 这种字样，本机实跑时它把一次通过的运行（rc 0、22 条断言全 ok）判成了红。
   两步都换成正向判据——必须出现该自测自己打印的通过句
   `every case verified red, and red for the named reason`，缺席才红。判据该问"承诺在不在"，
   不该问"失败字样在不在"。
