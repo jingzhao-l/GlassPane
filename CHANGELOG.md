@@ -4,9 +4,30 @@
 
 ## [Unreleased]
 
-**此刻为空。** 判据是两条命令而不是"我数过了"：`git rev-parse v1.21.0^{commit}` 与 `git rev-parse main` 同为 `11f010b057eabda52ffd90d38c6bdf7247bd4c3a`——主干等于本次发布物那一棵树，所以不存在"在 main、还没进任何发布物"的字节。上一段 [1.21.0] 里新增的那节"切 tag 之前落进主干的正文"就是从这里搬走的原文（取号笔早于切 tag，那些字节已随 1.21.0 发布）。
+**本节不空了。** 上一段写"此刻为空"时判据是 `git rev-parse v1.21.0^{commit}` 等于 `git rev-parse main`；
+下面这一笔落进主干之后那条等式不再成立——这些字节在 main、既不在 v1.21.0 的归档里也不在 registry 上，
+取号与发布归版本线决定。复量命令仍是那两条，不是"我数过了"。
 
-**这一段的意思是"代码在 main、还没进任何发布物"**，不是待办清单。取号与发布归版本线决定；本节只保证一件事：下面这些字节此刻既不在最新那个 tag 的归档里，也不在 registry 上。
+- **README 的「与审查回路的双向集成」一节按代码改写，并给其中一句装上判据。** 全新眼界复审读的是代码
+  而不是这几句话，抓到四处与实现不符（两处是同一句在中英两版里各错一次）：① 原文"每次 `gp_*` 调用都回
+  一个证据包"——引擎里 `["evidencePack":` 的出口全仓只有一处（`engine/Sources/GlassPaneEngine/Dispatcher.swift:216`，
+  `handleLastEvidence`），其余四项工具不回包，而同节第四条自己就写着"引擎只给 `gp_last_evidence` 附证据包"，
+  中英两版在同一节里自相矛盾；② 原文把接受 `dimension` 的五项写成"fork 侧的 `gp_probe_status` 与 MCP 层的
+  `gp_attach`"——两侧其实都是同一批 `gp_act`/`gp_observe`/`gp_diagnose`/`gp_last_evidence`/`gp_attach`
+  （`fork index.ts:216` 明写 `gp_probe_status` 刻意不带该参数，`mcp-shell/src/tools.ts:314` 的
+  `ProbeStatusArgs = z.strictObject({})` 同理）；③ 原文"引擎按调用把声明回显回去"——`dimension` 在请求出网前
+  就被剥掉（`mcp-shell/src/dimension.ts:95-98` 与 fork `index.ts:63` 的 `engineBody`），回显那行是壳或 fork
+  自己追加的 content item，引擎从不看见这个词；④ 原文"回路只问那五个只读工具"——五个是**允许清单**
+  （`glasspane_reverification.py:50`），它真正构造的是每操作一条 `gp_last_evidence` 加一条 `gp_diagnose`
+  （`:178-179`），其余三项没有生产者。另外两处半真的句子也收成实测形状：③ 的"两侧都能整链验通对方那本"——
+  生产里的读者在回路那一侧（`fix_proof`），fork 的 `verifyLedger` 有同一个校验器与一条固定点测试，但
+  `src/` 里没有调用者（`kernel.ts:636`）；⑤ 收尾段"两份实现漂开就会在闸上变红"——语料字节确实按 sha256
+  钉住，而"两份实现对没写进语料的案子还一致吗"由 `scripts/diff_kernel_implementations.py` 回答，那是操作者
+  命令、不在 CI 步骤里，本机跑它回 exit 2（找不到已构建的 kernel dist），所以这句话不能写成闸。
+  顺带把"5 项工具接受 `dimension`"这条数字登记进 `scripts/check-doc-links.mjs` 的可复算主张：真源是两份源码
+  （壳侧数 `OptionalDimensionSchema`、fork 侧数 `DimensionArg`），**两面不等时返回"真源读不到"而不是拿一侧
+  当结论**——不对称正是这条集成最怕的事。四条新用例各证红一次（数量写错、两侧不等、改回旧句、判据空转），
+  `node --test updater/test/scripts-check-doc-links.test.mjs` 33 passed / 0 fail。
 
 ## [1.21.0] — 2026-10-24
 

@@ -158,6 +158,25 @@ function realToolCount(rootDir = ROOT) {
 }
 
 /**
+ * 接受 `dimension` 的工具数——两侧各数一遍，**只有两边相等才算真源**。
+ *
+ * 这句话在 README 里写的是"每一面各有 5 项，而且是同五项"，它有两半：数量，和对称。
+ * 只数一侧的判据会把"不对称"读成一个数字，而不对称正是这条集成最不该悄悄发生的事。
+ * 两边不等时返回 null，让上层报"真源读不到（形状已漂移）"——那不是"没量到"，是量到了不一致。
+ */
+function dimensionToolCount(rootDir = ROOT) {
+  const shell = path.join(rootDir, 'mcp-shell', 'src', 'tools.ts')
+  const fork = path.join(
+    rootDir,
+    'harness', 'glasspane-harness', 'packages', 'opencode', 'src', 'tool', 'glasspane', 'index.ts',
+  )
+  if (!fs.existsSync(shell) || !fs.existsSync(fork)) return null
+  const shellCount = (fs.readFileSync(shell, 'utf8').match(/dimension:\s*OptionalDimensionSchema/g) ?? []).length
+  const forkCount = (fs.readFileSync(fork, 'utf8').match(/^\s*dimension: DimensionArg,/gm) ?? []).length
+  return shellCount === forkCount ? shellCount : null
+}
+
+/**
  * 扫描文档中"\d+ (MCP|个) tools/工具"式表述，与真实数量比对。
  * `docs`/`rootDir` 可注入，是为了让这条判据的两个方向都能被测试证红（见
  * `updater/test/scripts-check-doc-links.test.mjs`）：主仓写错数必须红，fork 文档里的
@@ -368,6 +387,16 @@ export const CLAIMS = [
     zh: new RegExp(`(${NUMBER})\\s*个\\s*(?:MCP 工具|${TICK}gp_\\*${TICK})`, 'g'),
     unit: '个工具',
     truth: realToolCount,
+  },
+  {
+    id: '接受 dimension 的工具数',
+    // README 的那句话是"每一面各有 5 项工具接受可选的 `dimension`，而且是同五项"——数量与对称一起写。
+    // 两个方向各自认自己的写法；真源是两份源码，不是这句句子。
+    en: new RegExp(`(${NUMBER})\\s+${TICK}gp_\\*${TICK} tools take an optional ${TICK}dimension${TICK}`, 'gi'),
+    zh: new RegExp(`每一面各有\\s*(${NUMBER})\\s*项工具接受可选的\\s*${TICK}dimension${TICK}`, 'g'),
+    unit: '项接受 dimension 的工具',
+    truth: dimensionToolCount,
+    only: ['README.md', 'README.zh-CN.md'],
   },
   {
     id: 'CI 通道数',

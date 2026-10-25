@@ -504,3 +504,82 @@ test("check-doc-links: 带日期的历史复记不被拿今天的真源判红（
   fs.rmSync(root, { recursive: true, force: true })
   fs.rmSync(wrong, { recursive: true, force: true })
 })
+
+/* -------------------------------------------- 接受 dimension 的工具数（2026-10-25 登记的那条主张） */
+
+/**
+ * 两侧各有 `dimension` 槽的假仓库。`shellSlots` / `forkSlots` 分开给，是因为 README 那句话有两半：
+ * 数量，和"两面是同一批工具"。只数一侧的判据会把不对称读成一个数字，而不对称正是这条集成最不该
+ * 悄悄发生的事（2026-10-25 审查抓到的原文就写错在这一半上：它把 fork 的第五项写成了
+ * `gp_probe_status`，而两面真正的第五项都是 `gp_attach`）。
+ */
+function dimensionRoot({ shellSlots = 5, forkSlots = 5, en, zh } = {}) {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-dimension-claim-'))
+  fs.mkdirSync(path.join(root, 'mcp-shell', 'src'), { recursive: true })
+  fs.mkdirSync(path.join(root, 'harness/glasspane-harness/packages/opencode/src/tool/glasspane'), { recursive: true })
+  fs.writeFileSync(
+    path.join(root, 'mcp-shell', 'src', 'tools.ts'),
+    Array.from({ length: shellSlots }, () => '  dimension: ' + 'OptionalDimensionSchema,').join('\n') + '\n',
+  )
+  fs.writeFileSync(
+    path.join(root, 'harness/glasspane-harness/packages/opencode/src/tool/glasspane/index.ts'),
+    Array.from({ length: forkSlots }, () => '  dimension: ' + 'DimensionArg,').join('\n') + '\n',
+  )
+  if (en) fs.writeFileSync(path.join(root, 'README.md'), en)
+  if (zh) fs.writeFileSync(path.join(root, 'README.zh-CN.md'), zh)
+  return root
+}
+
+const BOTH_READMES = ['README.md', 'README.zh-CN.md']
+const EN_DIMENSION = 'Five `gp_*` tools take an optional `dimension` argument on each surface.\n'
+const ZH_DIMENSION = '每一面各有 5 项工具接受可选的 `dimension` 参数。\n'
+
+test('check-doc-links: dimension 那句抄错数量 → 两份文档各红一条（拼写的数字也算主张）', () => {
+  const root = dimensionRoot({
+    en: 'Four `gp_*` tools take an optional `dimension` argument on each surface.\n',
+    zh: '每一面各有 4 项工具接受可选的 `dimension` 参数。\n',
+  })
+  const problems = claimDrift({ docs: BOTH_READMES, rootDir: root })
+  assert.equal(problems.length, 2, JSON.stringify(problems))
+  assert.match(problems.join('\n'), /接受 dimension 的工具数.*写了 4.*真源是 5/, problems.join('\n'))
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('check-doc-links: 两面数量不相等时不许拿其中一侧当"真源"（不对称读成一个数字就是假绿）', () => {
+  const root = dimensionRoot({ shellSlots: 5, forkSlots: 4, en: EN_DIMENSION, zh: ZH_DIMENSION })
+  const problems = claimDrift({ docs: BOTH_READMES, rootDir: root })
+  assert.equal(problems.length, 1, JSON.stringify(problems))
+  assert.match(problems[0], /接受 dimension 的工具数.*真源读不到/, problems[0])
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('check-doc-links: 两面相等且文档写对时不报（对照，防止判据只会红）', () => {
+  const root = dimensionRoot({ en: EN_DIMENSION, zh: ZH_DIMENSION })
+  assert.deepEqual(claimDrift({ docs: BOTH_READMES, rootDir: root }), [])
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('check-doc-links: 真仓库这两句话确实被认得到，且另数一遍与判据读到的相等（判据不空转）', () => {
+  const claim = CLAIMS.find((c) => c.id === '接受 dimension 的工具数')
+  assert.ok(claim, '这条主张没登记进 CLAIMS')
+  const enText = fs.readFileSync(path.join(REPO, 'README.md'), 'utf8')
+  const zhText = fs.readFileSync(path.join(REPO, 'README.zh-CN.md'), 'utf8')
+  // /g 正则带 lastIndex，第二次 test() 会从上次结束处继续；这里用 match 取全部命中。
+  const enHits = enText.match(new RegExp(claim.en.source, claim.en.flags)) ?? []
+  const zhHits = zhText.match(new RegExp(claim.zh.source, claim.zh.flags)) ?? []
+  assert.equal(enHits.length, 1, `英文那句该被认到恰好一次，实际 ${enHits.length}`)
+  assert.equal(zhHits.length, 1, `中文那句该被认到恰好一次，实际 ${zhHits.length}`)
+  assert.equal(claim.truth(), independentlyCountedSlots(), '判据读到的数必须等于另走一条形状数出来的数')
+})
+
+/** 另走一条数法（逐行 split，不复用判据里的正则），避免"用判据证明判据"。 */
+function independentlyCountedSlots() {
+  const shell = fs.readFileSync(path.join(REPO, 'mcp-shell', 'src', 'tools.ts'), 'utf8')
+  const fork = fs.readFileSync(
+    path.join(REPO, 'harness/glasspane-harness/packages/opencode/src/tool/glasspane/index.ts'), 'utf8',
+  )
+  const a = shell.split('\n').filter((line) => line.includes('OptionalDimensionSchema,')).length
+  const b = fork.split('\n').filter((line) => line.trim().startsWith('dimension: ' + 'DimensionArg,')).length
+  assert.equal(a, b, `两面各数一遍应当相等：壳 ${a}，fork ${b}`)
+  return a
+}

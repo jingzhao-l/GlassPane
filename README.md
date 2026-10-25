@@ -422,26 +422,37 @@ GlassPane is one half of a pair. The other half is
 code an agent changed here. The two do not talk through a chat log: everything that crosses the
 boundary is written by one side as a verifiable record and read by the other.
 
-- **Evidence reaches the audit chain.** Each `gp_*` call answers with an
-  [evidence pack](#what-an-evidence-pack-contains), and the harness appends a hash-chained entry for
-  every recorded decision — `~/.local/share/glasspane-harness/decisions.jsonl`, or wherever
-  `GLASSPANE_DECISION_LOG` points. The review loop writes its own decisions to
-  `.iterate/decision-log.jsonl` in the project under review, in the same chain format, so each side
-  can verify the other's file end to end: a rewritten line is refused with the number of the line
-  where the chain stops, and the answer is never "let me read it leniently instead".
+- **Evidence reaches the audit chain.** `gp_last_evidence` is the call that answers with an
+  [evidence pack](#what-an-evidence-pack-contains) — the other four accept a `dimension` and return no
+  pack, which is why a dimension declared on them is reported as unverified — and the harness appends a
+  hash-chained entry for every decision recorded from a pack:
+  `~/.local/share/glasspane-harness/decisions.jsonl`, or wherever `GLASSPANE_DECISION_LOG` points. The
+  review loop writes its own decisions to `.iterate/decision-log.jsonl` in the project under review, in
+  the same chain format, so a claim quoted from the other side's file is verified before it is used: a
+  rewritten line is refused with the number of the line where the chain stops, and the answer is never
+  "let me read it leniently instead". The reader that runs in production today is the loop's —
+  `fix_proof` verifies GlassPane's ledger before citing it. The fork carries the same verifier, and a
+  fixed-point test pins that a chain written by the loop verifies there; its own production path writes
+  its ledger rather than reading the loop's.
   A project can name the *other* harness's ledger as its source of fix evidence once, with
   `ih iterate glasspane-ledger <absolute path>`: the link is written only after the whole chain
   verifies, and it pins the chain's first entry — a ledger that was replaced rather than extended
   stops qualifying.
-- **A review dimension travels with the call.** Five `gp_*` tools on each surface take an optional
-  `dimension` argument (`gp_act`, `gp_observe`, `gp_diagnose`, `gp_last_evidence`, plus the fork's
-  `gp_probe_status` and the MCP shell's `gp_attach`). The engine echoes the declaration back per
-  call, the loop witnesses it, and a decision that contradicts what was already witnessed for that
-  operation id is refused (`KERNEL_E_DIMENSION_CONTEST`) instead of quietly becoming a second record.
-- **A failed check sends the loop back to the app.** When a round's invariant re-check fails, the
-  loop asks the running application again — read-only, through the host's own MCP transport, and only
-  about `gp_probe_status` / `gp_observe` / `gp_diagnose` / `gp_last_evidence` / `gp_recent_reports`.
-  A call that would mutate the app is refused by name; nothing in this channel can click for you.
+- **A review dimension travels with the call.** Five `gp_*` tools take an optional `dimension` argument
+  on each surface, and they are the *same* five: `gp_act`, `gp_observe`, `gp_diagnose`,
+  `gp_last_evidence`, `gp_attach`. `gp_probe_status` takes none on either surface, on purpose: a
+  self-report produces no evidence frame, so a declaration on it could never be counted against a
+  decision. What echoes the declaration back is the surface you called — the MCP shell or the fork —
+  not the engine: `dimension` is stripped before a request leaves, the engine never sees the word, and
+  the echo line is written by that surface. The loop witnesses the echo, and a decision that
+  contradicts what was already witnessed for that operation id is refused
+  (`KERNEL_E_DIMENSION_CONTEST`) instead of quietly becoming a second record.
+- **A failed check sends the loop back to the app.** When a round's invariant re-check fails, the loop
+  asks the running application again — read-only, through the host's own MCP transport. The calls it
+  actually builds are one `gp_last_evidence` plus one `gp_diagnose` per recorded operation; the
+  allow-list that decides what may be asked at all is the five read-only tools (`gp_probe_status` /
+  `gp_observe` / `gp_diagnose` / `gp_last_evidence` / `gp_recent_reports`). A call that would mutate
+  the app is refused by name; nothing in this channel can click for you.
 - **Compaction knows what was reviewed.** When a long session is summarised, the harness re-injects
   the session's evidence anchors — operation id, outcome, ledger line, entry hash — so a summary
   cannot drop the pointer back into the chain. The run's plan (`.iterate/run-plan.json`, or
@@ -453,8 +464,10 @@ boundary is written by one side as a verifiable record and read by the other.
 - **A fix is not accepted on the agent's word.** Before the loop advances a repair recipe, it reads
   three measured things: this round's invariant verdict, the project's recipe (`recipeConfigPath`, or
   `GLASSPANE_RECIPE`), and a chain-verified ledger line recording a passing outcome against an
-  operation id. Anything absent or unmeasured is refused by name (`RECIPE_GATE_E_*`), the answer is
-  written into the same ledger line as the round that earned it, and both doors read it back:
+  operation id. Anything absent or unmeasured is refused by name (`RECIPE_GATE_E_*`). The answer is
+  recorded in the project's ledger — on the round that sends, and on a round that passed and therefore
+  sent nothing (from `iterate-harness` 2.11.1) — while a contract refusal writes no ledger bytes,
+  because a decision that was never made must not become an audit entry. Both doors read it back:
   `/iterate gate` in a session, `ih iterate gate` in a terminal.
 - **Both tool surfaces speak one provider contract.** The fork and the MCP shell each register the
   same provider id and the same prerequisites per method, and a gate that runs both registrations —
@@ -464,8 +477,12 @@ What stays where it belongs: the engine decides what the application did, and ne
 an interface on its own. The gate reports and withholds; it does not run the recipe, because neither
 product ships a recipe executor — the progress pointer is written by whoever performs the fix. Both
 halves consume the same published contract layer, [`iterate-kernel`](https://www.npmjs.com/package/iterate-kernel),
-so none of the formats above is two hand-maintained copies: a divergence between the two
-implementations shows up as a red gate on either side, not as two files that drifted apart.
+so the formats above are not two files evolving on their own: there is one source for each format, the
+Python side pins the corpus it codes against by sha256, and a change to the published contract reddens
+a hash check before it can become a silent re-generation. The boundary is worth naming: whether the two
+*implementations* still agree on a case the corpus never wrote down is answered by another command —
+`scripts/diff_kernel_implementations.py`, which drives the same corpus through both and compares
+verdict by verdict. It is an operator command, not a CI step, so it counts when someone runs it.
 
 ## Permissions and integrity design
 

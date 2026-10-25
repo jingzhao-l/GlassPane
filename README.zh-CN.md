@@ -364,22 +364,28 @@ GlassPane 是一半。另一半是
 [`iterate-harness`](https://pypi.org/project/iterate-harness/)——审查并修复代理在这里改动的代码的那个
 多轮回路。两边不靠聊天记录对接：跨越边界的东西都由一侧写成可核验的记录，另一侧读它。
 
-- **证据进入审计链。** 每次 `gp_*` 调用都回一个[证据包](#证据包里有什么)，而 harness 为每一条被记下
-  的决定追加一条哈希链账本条目——默认在 `~/.local/share/glasspane-harness/decisions.jsonl`，或由
+- **证据进入审计链。** 回[证据包](#证据包里有什么)的那项调用是 `gp_last_evidence`——其余四项工具接受
+  `dimension` 却不回包，这正是声明在它们身上的维度被一直报成"没验过"的原因——harness 为每条从包里
+  记下的决定追加一条哈希链账本条目，默认在 `~/.local/share/glasspane-harness/decisions.jsonl`，或由
   `GLASSPANE_DECISION_LOG` 指到别处。审查回路把它自己的决定写进被审项目的
-  `.iterate/decision-log.jsonl`，用的是同一种链格式，所以两侧都能整链验通对方那本：被改过的行会被
-  拒绝并说清链断在第几行，答案不会出现"那就改用宽松读法"。
+  `.iterate/decision-log.jsonl`，用的是同一种链格式，所以从对方那本引来的主张可以先整链验通再被使用：
+  被改过的行会被拒绝并说清链断在第几行，答案不会出现"那就改用宽松读法"。今天在生产里跑这个读者的是
+  回路这一侧（`fix_proof` 验通对面那本才引它）；fork 带的是同一个校验器，一条固定点测试钉住"这边写的
+  链在那边验得过"，但它自己的生产路径只写自己的账本，不读回路那本。
   一个项目可以一次性把**对面那本**账本记为自己的修复证据来源，
   `ih iterate glasspane-ledger <绝对路径>`：链接只可能在整链验通之后落笔，并钉住链的首条——被替换
   而不是被延长的账本因此不再够格。
-- **审查维度跟着调用走。** 每一面各有 5 项工具接受可选的 `dimension` 参数（`gp_act`、`gp_observe`、
-  `gp_diagnose`、`gp_last_evidence`，加上 fork 侧的 `gp_probe_status` 与 MCP 层的 `gp_attach`）。
-  引擎按调用把声明回显回去，回路把它记成见证；与同一 operationId 上已有见证矛盾的决定会被拒绝
+- **审查维度跟着调用走。** 每一面各有 5 项工具接受可选的 `dimension` 参数，而且是**同**五项：
+  `gp_act`、`gp_observe`、`gp_diagnose`、`gp_last_evidence`、`gp_attach`；`gp_probe_status` 两面都
+  刻意不带这个参数——自报不产证据帧，带了也永远不会有决定可计。把声明回显出来的是你调的那一面
+  （MCP 层或 fork），不是引擎：`dimension` 在请求出网前就被剥掉，引擎从不看见这个词，回显那行是壳
+  或 fork 自己写的。回路把回显记成见证；与同一 operationId 上已有见证矛盾的决定会被拒绝
   （`KERNEL_E_DIMENSION_CONTEST`），而不是悄悄变成第二份记录。
 - **复核不过，回路就回到应用本身。** 一轮的 invariant 复核失败时，回路会再次问那个正在跑的应用——
-  只读、走宿主自己的 MCP 通道，且只问 `gp_probe_status` / `gp_observe` / `gp_diagnose` /
-  `gp_last_evidence` / `gp_recent_reports`。会改动应用的调用被点名拒绝；这条通道里没有任何东西能替
-  你点鼠标。
+  只读、走宿主自己的 MCP 通道。它真正构造的调用，是每个已记录操作一条 `gp_last_evidence` 加一条
+  `gp_diagnose`；决定"允许问什么"的那张名单是只读五项（`gp_probe_status` /
+  `gp_observe` / `gp_diagnose` / `gp_last_evidence` / `gp_recent_reports`）。会改动应用的调用被点名
+  拒绝；这条通道里没有任何东西能替你点鼠标。
 - **压缩知道这次查了什么。** 长会话被摘要时，harness 会把这条会话的证据锚点重新注入——operationId、
   结果、台账行号与条目哈希——摘要因此不能把回到链上的指针弄丢。这次运行的计划
   （`.iterate/run-plan.json`，或 `GLASSPANE_RUN_PLAN`）决定谁先被丢：本轮从没声明过的维度历史排在声明过的
@@ -388,16 +394,21 @@ GlassPane 是一半。另一半是
   文字。
 - **修复不靠代理自称就算完成。** 回路在推进一份修复配方之前读三件实测的东西：本轮的 invariant 判定、
   项目的配方（`recipeConfigPath`，或 `GLASSPANE_RECIPE`），以及一条链可验、按 operationId 记着通过
-  结果的账本行。缺任何一件或判定是"未量到"都具名拒绝（`RECIPE_GATE_E_*`），答案随它那一轮的账本行
-  一起落盘，两扇门都读得回来：session 里 `/iterate gate`，终端里 `ih iterate gate`。
+  结果的账本行。缺任何一件或判定是"未量到"都具名拒绝（`RECIPE_GATE_E_*`）。答案落进本项目的账本——
+  发出去的那一轮落，判定通过、因此什么都没发的轮次也落（`iterate-harness` 2.11.1 起）；而契约拒绝这条
+  分支一个字节都不写，因为一个从未做成的决定不该变成一条审计记录。两扇门都读得回来：session 里
+  `/iterate gate`，终端里 `ih iterate gate`。
 - **两个工具面说的是同一份 provider 契约。** fork 与 MCP 层各自注册同一个 provider id 和每个方法相同的
   先决条件，而有一把尺子跑的是两侧的注册代码本身（不是 grep）：两边一旦说得不一致，或者"哪些方法只在
   一边"不再是一份被记下来的清单，它就红。
 
 各归各位的部分：应用做了什么由引擎判定，两个 harness 都不自行给界面下结论。那道闸只报与拦，它不执行
 配方——两个产品都没有配方执行器，进度指针得由真正动手修的那一侧写进账本。两边吃的是同一份发布出去的
-契约层 [`iterate-kernel`](https://www.npmjs.com/package/iterate-kernel)，所以上面这些格式都不是两份手抄的
-副本：两份实现真漂开，就会在一侧的闸上变红，而不是变成两个各自演化的文件。
+契约层 [`iterate-kernel`](https://www.npmjs.com/package/iterate-kernel)，所以上面这些格式不是两份各自
+演化的文件：格式本身只有一份真源，Python 侧把它吃进来的语料按 sha256 钉住，语料一变就先在哈希检查上
+红，再逼两侧的用例各自表态。要说清楚的是边界——"两份实现对**没写进语料的案子**还一致吗"由另一条命令
+回答（`scripts/diff_kernel_implementations.py`，逐案子比对两侧的答案），它是给操作者跑的，不在 CI 的
+步骤里，所以那条得有人跑才算数。
 
 ## 权限与诚实性设计
 
