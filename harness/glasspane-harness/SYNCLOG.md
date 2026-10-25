@@ -2,6 +2,97 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-25（第十九次会话）· 未取号：② 的残余不对称变成一个被打印的数，外加两笔从 CI 回来的账
+
+### 开工与隔离
+
+- 起点是本分支的 `efd192ff`（第十八次收口）。期间发布线把这条分支的前 11 笔并进了 main
+  （`ca00d5e9`），并单独发了父仓 1.21.0；本轮因此先在 `origin/main` 上 rebase，再在下面所有
+  读数上说话——**基线换了，上一批那句"闸全绿"不能搬过来当证据**。
+- 工作树仍是 `/Volumes/Eng-Dev/.worktrees/gp-bidi-20261024`，`node_modules` 与参照检出没有重新
+  复制；rebase 后 `bun install --frozen-lockfile --ignore-scripts --cafile /var/tmp/ca-with-proxy.pem`
+  rc=0（"no changes"，1496 installs / 1637 packages）。
+
+### 本批落地的内容（1 处代码，2 处它带出来的诚实性修正）
+
+1. **② 的残余不对称从注释变成数**（`src/plugin/glasspane-compaction.ts`）：
+   `collectEvidenceAnchors` 现在填 `declaredWithoutAnchor` ——声明了审查维度却没进到任何锚点的调用条数
+   （失败调用也算：声明是调用方提出过的请求，回执有没有是引擎的事），`renderAnchorBlock` 在真丢了东西时
+   把那行数打出来。它是 `withoutDecision` 的**子集**而不是同一个数：把 `dimension !== undefined` 抹掉，
+   每个 status-only 调用都会被谎报成"丢了一个维度"。字段可选而收集器恒填——"没量到"不许渲染成"量到 0"。
+2. **`bun run typecheck` 本轮第一件事就是它红**：两条 TS18048（`selection.shown.map(anchor =>
+   anchor.operationId.slice(-2))`，`operationId` 可选）是**第十八批留下的**，写在
+   `test/plugin/glasspane-compaction.test.ts` 的两条时间序断言里。当时我报的是"闸全绿"，因为我跑的名单
+   只有 `bun test`，而 fork CI（`harness/glasspane-harness/.github/workflows/ci.yml:43`）把四个包的
+   `bun run typecheck` 排在 `bun test` **前面**。现在收进 `transcriptOrder()`，它先断言
+   `ids.length === shown.length`——用 `?? ""` 或 `String(id)` 消掉类型错会留下一条"少几条也照样单调"的
+   排序断言，那是把闸改成不会红的形状。**教训照抄一遍**：固定点名单要按 CI 的步骤顺序抄，不按我记得的抄。
+3. **`docs/kernel-integration.md` 那张逐行表的 ②/③/④ 三行**跟着 iterate 侧同批的改动改了右栏
+   （② 的不对称现在有数；③ 的对面台账由 `.iterate/glasspane-ledger.json` 记为项目默认；④ 的闸落进
+   那一轮的账本行、`/iterate gate` 读得回来）。改的是文档里那句话说的是现在的事实，不是把话删短。
+
+### 闸与实跑（退出码取脚本自身；每条都在 rebase 之后重跑）
+
+- `fork-diff --check` 先红，点名的三个移动全是我这一批的文件（`CHANGELOG.md`、compaction 的 src 与
+  test），**没有我不认识的移动**；`--record` 后 `--check` rc 0：`4640/6733 byte-identical · 285 edited ·
+  101 added · 1707 deleted`。
+- `tool-surface --check` 先红：面 B `10667 → 10709 (+42)`，逐文件归因只有
+  `packages/opencode/src/plugin/glasspane-compaction.ts`；面 A `11422 LOC` 未动（22.09%）。两个面的
+  越线判定早已花掉，剩下 LOC 棘轮在挡——这句照它自己打印的说，不当作"合法"。
+- fork 固定点名单（CI 那九份文件，`bun test --timeout 30000`）：**209 pass / 0 fail / 1074 expect**；
+  rebase 之后复跑同数。`bun run typecheck`（`tsgo --noEmit`）rc=0。
+- 其余尺子 rc=0：`surface-semantics` 23 文件 0 命中（3/3 正控制各点名发火）、`brand-surface` 血缘
+  9607/3317 未变、`product-surface` 6527 条一致 0 问题（`glasspane-harness@0.10.5`）、
+  `hook-liveness --offline`（21 钩子、15 live、dead set `[permission.ask]`；不读上游那条由
+  `Harness contract` 那条 job 负责）、`kernel-pin` iterate-kernel@0.1.10 + 26 契约文件、
+  `kernel-conformance` 16 份语料逐条与金样同答案、`provider-surface` 及其四发控制（工作树干净才跑得动，
+  它拒绝在脏树上改跟踪文件——rc=2 那次就是这个拒）、`check-kernel-corpus` 26 份对上 pin、
+  `check-version` 1.21.0、`check-doc-links` 32 份文档 238 条仓内链接、
+  `check-workflows --self-test` 22 条各验其失败 + 主判据 5 份 workflow clean。
+- 没跑的照实写：fork 全量 `bun test`（只跑九份定点名单）、上游 13 条时序敏感用例、
+  `installer-selftest`、`bun run script/build.ts --single`（本批未动构建与发布面）、`mcp-shell`
+  `node --test`（本批一行未碰；但 main 上它有两条红，见下）、Swift 侧零改动故未跑。
+
+### 两条从 CI 回来的账，一条不是我的
+
+- **是我的**：`check-workflows` 在 1.21.0 那批"尺子补三条规则"之后多了一条——多行 `run:` 体第一行必须
+  声明 `set -euo pipefail`。第十八批我写的那条 `provider-surface-selftest` 步骤第一行是
+  `out="$(node … 2>&1)" || rc=$?`，于是 **main 现在正红在 `GitHub Actions workflows compile` 这一步**
+  （run 40156814139，日志逐字指到 `ci.yml:398`）。本批给它补上第一行，本地 `check-workflows` 转 clean。
+  为什么本机抓不到：这条分支从没推过、CI 从没跑过它，而那条规则当时还不存在。"在我基线上绿"不等于
+  "落到长过新规则的 main 上绿"——这条与 2026-10-16 的 kernel-pin、2026-10-23 的"判据不在本机"是同族。
+- **不是我的，也没碰**：main 另有四条红属在飞的发布线——`mcp-shell` 的
+  `daily-20261011.test.mjs#53`（丢更新的判据）与 `remedy-shell-quoting.test.mjs#449`（registry 读者那句
+  话），`glasspane-update` 的 `#327`（D6-b）与 `#343`（C11）。逐条对过文件名与本批改动面无交集。
+- **一条本轮新观测到的、属发布线的缺陷**：`patched-deps --check` rc=1——`package.json` 声明
+  `@standard-community/standard-openapi@0.2.9` 的补丁，`bun.lock` 里 `standard-community` **一字都没有**
+  （19 条声明里 1 条没被安装带走）。同一条红在**主树的 origin/main** 上原样复现，所以不是本批引入；
+  而 `git log -S standard-openapi -- harness/glasspane-harness/bun.lock` 零命中 ⇒ 这条声明从来没有被锁
+  带走。这正是 0.10.1 那次立的闸要抓的形状（"声明了却没装上"），区别是这次没人先知道。处置：不删声明、
+  不动锁、不放宽尺子——修它要重解依赖图（整棵 `bun.lock` 会动），那正是发布线此刻站的位置。
+
+### 反向验证（四发，真代码，自带备份 + sha256 逐字核回）
+
+备份 `0a5f682d71094e72d1cfcd9ae0d27aa24c22c1411bf44b259eddf2919f499671`（compaction.ts），每发跑完 `cp`
+回原文件复算 sha；脚本 `/var/tmp/gp-bidi-20261025-mut/mut-ts.sh`，锚点缺失或歧义直接 exit 3（第十八批
+那条"P8 报了个绿的失败"的教训）。四发**每发具名变红**：
+
+| 打在哪 | 结果 |
+|---|---|
+| M1 那个数不再只是"带声明的那部分"（去掉 `dimension !== undefined`） | 具名红 1 条：`a call that lost no declaration is not counted, so the number is the subset and not the total` |
+| M2 失败调用带着声明不再算丢（`if (status !== "completed") { … }` 退回裸 continue） | 具名红 1 条：`a failed call that declared a dimension is a lost declaration too` |
+| M3 数不进块（`if (false && declarationsLost > 0)`） | 具名红 1 条：`a declaration on a method that records no decision is counted` |
+| M4 收集器不再填这个字段（返回对象里删掉它） | 具名红 2 条：`a running call is not history yet`（整形状 `toEqual`）与上面那条 |
+
+### 交下一轮
+
+- ② 剩下的那条不对称，**根**仍在 Swift 侧：引擎只让 `last_evidence` 出 `evidencePack`
+  （`Dispatcher.swift:156`）。本批把"它现在有多宽"变成块里可读的数，不是把它修掉；要修得动引擎的
+  证据发射面，属主仓产品线，不是 fork 定制面。
+- `release-artifact --check` rc=1（`0 agreement(s) / 2 problem(s)`，trunk `1be98d92`）：v0.10.5 的产物树
+  不等于主干。本批把字节落进主干是它要求的第一步，剩下 re-split + 取号（0.10.6）归发布线——那条线此刻
+  正在版本线上跑，代它切号会撞。
+
 ## 2026-10-25（第十八次会话）· 未取号：场景② 的两半边（计划交接 + 按维度丢弃），以及"另一条线在发布线上时我该做什么"
 
 ### 开工与隔离

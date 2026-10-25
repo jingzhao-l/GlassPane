@@ -130,21 +130,21 @@ describe("what the hook preserves", () => {
   })
 
   test("what the production path actually reaches, so the dimension lane is not claimed twice", () => {
-    // The coverage-line tests above hand-build an `AnchorCollection` with
+    // The coverage-line tests below hand-build an `AnchorCollection` with
     // `plannedDimensions` and per-anchor `dimension`. On the real path an anchor exists only
     // where M2 recorded a decision, and a declared dimension is transcribed only onto one:
     // the engine emits an `evidencePack` on one method, `last_evidence`
     // (`Dispatcher.swift:156`), so a dimension declared on `gp_act` / `gp_observe` /
     // `gp_attach` / `gp_diagnose` sits on a call that produces no anchor at all — see the
-    // pair pinned in "only a call that recorded a decision can move the coverage counter".
-    // What is still not wired is the plan: `collectEvidenceAnchors` never fills
-    // `plannedDimensions`, and `renderAnchorBlock` with no plan and no recorded dimension
-    // has no coverage to state.
+    // pair pinned in "only a call that recorded a decision can move the coverage counter",
+    // and the count that reports it in "how many declarations the surface actually lost".
     //
-    // This test is the ratchet for that claim: wire a real plan source — the kernel's
-    // `run-plan` contract is the candidate, it has the `dimensions` field — and the
-    // assertions below go red, which is when the header comment and `FORK.md` get to say the
-    // lane is live.
+    // The collector is the half that stays plan-free by design: a plan reaches the block only
+    // through `renderAnchorBlock`'s plan argument, which the host binding fills from
+    // `readRunPlan(process.env, input.directory)`. A collection that quietly grew a plan would
+    // let one session's plan leak into another's summary, so `plannedDimensions` stays
+    // undefined here no matter what the transcript declares — that is what the first
+    // assertion below is the ratchet for.
     const collected = collectEvidenceAnchors([
       message("gp_act", { metadata: okMetadata({ method: "act", decisionLog: receipt() }) }),
       message("gp_observe", { metadata: okMetadata({ decisionLog: receipt() }) }),
@@ -154,6 +154,18 @@ describe("what the hook preserves", () => {
     expect(block).toBeDefined()
     expect(block).toContain("decisions recorded: 2")
     expect(block).not.toContain("dimension coverage:")
+    // Same transcript, plan supplied: the line now exists, and nothing else about the block
+    // changed. This is the production shape — `injectEvidenceAnchors` passes `readPlan()`.
+    // Note what the kernel says about decisions: 2 anchors recorded, 0 of them attributable to
+    // a dimension, so the line reads "0 decisions". A decision that names no dimension is real
+    // history in the chain and still zero coverage — the two numbers are not the same count and
+    // a reader who conflated them would call this session verified.
+    const planned = renderAnchorBlock(collected, {
+      ok: true,
+      plan: { path: "/var/tmp/plan.json", digest: "rp_a".repeat(8).slice(0, 67), ids: ["security"], source: "project" },
+    })
+    expect(planned).toContain("dimension coverage: 0/1 dimensions verified, 1 unverified (security), 0 decisions")
+    expect(planned).toContain("decisions recorded: 2")
   })
 
   test("only a call that recorded a decision can move the coverage counter", () => {
@@ -266,6 +278,86 @@ describe("what the hook preserves", () => {
   })
 })
 
+describe("how many declarations the surface actually lost", () => {
+  // ②'s remaining asymmetry, turned from a paragraph in the module header into a number the
+  // block prints. The engine emits an evidence pack on `last_evidence` only, so a dimension
+  // declared anywhere else has no decision to ride into the summary. Whether that happened in
+  // *this* session is measurable; a comment can only assert it forever.
+  const actReply = {
+    operationId: OP_OK,
+    actConfirmed: true,
+    latencyMs: 12,
+    evidenceId: OP_OK,
+    contaminationMonitored: true,
+    contaminationBasis: "watched",
+  }
+  const noPack = (dimension?: string) =>
+    message("gp_act", {
+      metadata: okMetadata({
+        method: "act",
+        ...(dimension === undefined ? {} : { dimension }),
+        result: actReply,
+        decisionLog: { status: "skipped", reason: "this gp_* method returns no evidence frame" },
+      }),
+    })
+
+  test("a declaration on a method that records no decision is counted", () => {
+    const collected = collectEvidenceAnchors([noPack("security"), noPack("correctness")])
+    expect(collected.calls).toBe(2)
+    expect(collected.anchors).toEqual([])
+    expect(collected.declaredWithoutAnchor).toBe(2)
+    expect(renderAnchorBlock(collected)).toContain(
+      "dimension declarations that reached no anchor: 2 — those calls recorded no decision, so the dimension they named cannot be shown as verified here",
+    )
+  })
+
+  test("a call that lost no declaration is not counted, so the number is the subset and not the total", () => {
+    // The distinction this test exists for: `withoutDecision` already counts every call with no
+    // anchor. If the new number were that same count, the block would report a lost dimension for
+    // every status-only call that never declared one, and the reader could not tell a narrow
+    // emitting surface from a session that simply did not name dimensions.
+    const collected = collectEvidenceAnchors([noPack(), noPack(), message("gp_probe_status", { metadata: { ok: true, method: "probe_status", result: { version: "0.1.0" } } })])
+    expect(collected.withoutDecision).toBe(3)
+    expect(collected.declaredWithoutAnchor).toBe(0)
+    expect(renderAnchorBlock(collected)).not.toContain("reached no anchor")
+  })
+
+  test("a declaration that did reach an anchor is not a loss", () => {
+    const collected = collectEvidenceAnchors([
+      message("gp_last_evidence", { metadata: okMetadata({ method: "last_evidence", dimension: "security", decisionLog: receipt() }) }),
+      noPack("correctness"),
+    ])
+    expect(collected.anchors.length).toBe(1)
+    expect(collected.declaredWithoutAnchor).toBe(1)
+    // Both readings in one block: what was lost, and what the kernel says about coverage.
+    const block = renderAnchorBlock(collected, {
+      ok: true,
+      plan: { path: "/var/tmp/plan.json", digest: "rp_a".repeat(8).slice(0, 67), ids: ["security", "correctness"], source: "project" },
+    })
+    expect(block).toContain("dimension declarations that reached no anchor: 1")
+    expect(block).toContain("1/2 dimensions verified, 1 unverified (correctness)")
+  })
+
+  test("a failed call that declared a dimension is a lost declaration too", () => {
+    // The shell echoes the declared dimension in the result metadata, and a rejected call still
+    // carries it — the caller asked for that dimension to be on the record and nothing got there.
+    const collected = collectEvidenceAnchors([
+      message("gp_act", { status: "error", metadata: { ok: false, method: "act", code: "GP_E_NOT_ATTACHED", dimension: "security" } }),
+    ])
+    expect(collected.calls).toBe(1)
+    expect(collected.withoutDecision).toBe(1)
+    expect(collected.declaredWithoutAnchor).toBe(1)
+  })
+
+  test("a running call is not settled, so it neither counts as a call nor as a loss", () => {
+    const collected = collectEvidenceAnchors([
+      message("gp_act", { status: "running", metadata: okMetadata({ method: "act", dimension: "security", decisionLog: receipt() }) }),
+    ])
+    expect(collected.calls).toBe(0)
+    expect(collected.declaredWithoutAnchor).toBe(0)
+  })
+})
+
 describe("what the hook refuses to invent", () => {
   test("a session with no gp_* calls gets no block and an untouched context", async () => {
     const output: { context: string[]; prompt?: string } = { context: [] }
@@ -288,7 +380,10 @@ describe("what the hook refuses to invent", () => {
     const collected = collectEvidenceAnchors([
       message("gp_observe", { status: "running", metadata: okMetadata({ decisionLog: receipt() }) }),
     ])
-    expect(collected).toEqual({ calls: 0, anchors: [], withoutDecision: 0 })
+    // The whole shape, not a field at a time: `collectEvidenceAnchors` always reports the
+    // declaration count, and a collector that stopped filling it would leave the block silent
+    // about a gap that was never measured.
+    expect(collected).toEqual({ calls: 0, anchors: [], withoutDecision: 0, declaredWithoutAnchor: 0 })
   })
 
   test("a receipt whose pack no longer parses keeps the kernel's fields and no invented operationId", () => {
@@ -578,6 +673,18 @@ describe("which anchors the cap drops (scenario 2, the compression half)", () =>
     plan: { path: "/var/tmp/run-plan.json", digest: `rp_${"a".repeat(64)}`, ids, source: "project" as const },
   })
 
+  /**
+   * Transcript order read back off the operationIds. The length check is what makes the read
+   * honest: `operationId` is optional on an anchor, so a plain `.map(id => …)` would either be a
+   * type error (the one this helper replaces) or, if written to satisfy the compiler with a
+   * default, a sorted-check over a list that silently lost the anchors without ids.
+   */
+  const transcriptOrder = (shown: readonly { operationId?: string }[]) => {
+    const ids = shown.flatMap((anchor) => (anchor.operationId === undefined ? [] : [Number(anchor.operationId.slice(-2))]))
+    expect(ids.length).toBe(shown.length)
+    return ids
+  }
+
   test("nothing is dropped below the cap, and the rule says so", () => {
     const collected = { calls: MAX_ANCHORS, anchors: many(MAX_ANCHORS, ["security"]), withoutDecision: 0 }
     const selection = selectAnchors(collected, planFor(["security"]))
@@ -620,7 +727,7 @@ describe("which anchors the cap drops (scenario 2, the compression half)", () =>
     expect(selection.unplannedDropped).toBe(5)
     expect(selection.shown.every((anchor) => anchor.dimension === "security")).toBe(true)
     // Survivors stay in transcript order; a reordered block would read as a different session.
-    const indices = selection.shown.map((anchor) => Number(anchor.operationId.slice(-2)))
+    const indices = transcriptOrder(selection.shown)
     expect(indices).toEqual([...indices].sort((a, b) => a - b))
   })
 
@@ -644,7 +751,7 @@ describe("which anchors the cap drops (scenario 2, the compression half)", () =>
     // The two ranks that survive have to be handed back in transcript order, not rank order: the
     // unattributed pair here sits at indices 24 and 29, so a rank-ordered block would open with
     // them and put the session's earliest planned calls at the end.
-    const indices = selection.shown.map((anchor) => Number(anchor.operationId.slice(-2)))
+    const indices = transcriptOrder(selection.shown)
     expect(indices).toEqual([...indices].sort((a, b) => a - b))
     expect(indices.slice(0, 2)).toEqual([0, 1])
   })
