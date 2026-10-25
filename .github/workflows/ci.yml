@@ -396,6 +396,7 @@ jobs:
 
       - name: "The provider reconciliation gate can still go red, for each rule separately"
         run: |
+          set -euo pipefail
           out="$(node harness/tools/provider-surface-selftest.mjs 2>&1)" || rc=$?
           rc="${rc:-0}"
           printf '%s\n' "$out"
