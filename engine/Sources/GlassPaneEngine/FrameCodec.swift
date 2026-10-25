@@ -95,6 +95,14 @@ extension EngineMethod {
     public static var capabilityWireNames: [String] {
         capabilityMethods.map(\.rawValue)
     }
+
+    /// `allCases` 减去 `capabilityMethods` 的那两个线名，同样**从表里算**（E1：错误
+    /// 句子里不许出现手抄的清单）。判据是 `capabilityMethods` 自己的过滤条件，所以
+    /// 这一族永远是两个、也永远不可能是"抄下来的一份表"。
+    /// `EngineCore.hello()` 发布的是上面那一份，不是这一份。
+    public static var unadvertisedMethodWireNames: [String] {
+        allCases.filter { !capabilityMethods.contains($0) }.map(\.rawValue)
+    }
 }
 
 /// A request frame that could not be parsed into a valid request. `id` is
@@ -146,9 +154,20 @@ public enum RequestParser {
                 // 句子必须自己指到真源：从前只说 "is not in the whitelist"，既不点名是
                 // 哪份清单，也不给下一步，而 `hello.capabilities` 里就是这张表（同文件的
                 // `capabilityWireNames`，由 `EngineMethod` 派生，不手抄）。
+                //
+                // E1：那句 "the methods it does answer are <capabilityWireNames>" 说的
+                // 是**代理能力清单**，而它挨着的 `Dispatcher.dispatch` 实际会执行 13 个
+                // 线名，其中包括 `hello`（承载握手的本身）与 `shutdown`（运维动作，
+                // `Dispatcher.swift:94` → `core.shutdown()`）。所以一帧错误既报了一个不
+                // 完整的"它答这些"清单，又把 `:86-92` 刚刚论证过的"清单只能派生、不许
+                // 手抄"违反在成文里：一个拼错 method 的调用方照着这句话去找 `shutdown`，
+                // 会以为这个 daemon 不能停。下面两半都是**从表里算出来的**，一个字也没抄：
+                // 能力清单 = `capabilityMethods` 的线名，另外那些 = `allCases` 减去它。
+                // 帧的字节形制（一行 JSON、`{id,error{code,message,remedy}}`）与此无关，
+                // 改的只有文案。
                 error: GPError(
                     code: .methodNotFound,
-                    message: "method '\(String(describing: dict["method"]))' is not one the engine implements; the methods it does answer are \(EngineMethod.capabilityWireNames.joined(separator: ", ")) (also listed in the `capabilities` field of the hello response — call hello to read them from the running daemon rather than from this message)"
+                    message: "method '\(String(describing: dict["method"]))' is not one the engine implements. The agent-facing capabilities it answers — and the set `hello` publishes in its `capabilities` field — are \(EngineMethod.capabilityWireNames.joined(separator: ", ")). Beyond that list this daemon also answers \(EngineMethod.unadvertisedMethodWireNames.joined(separator: " and ")), which are the handshake itself and an operational action rather than capabilities, so `hello` does not advertise them; call hello to read the advertised set from the running daemon instead of from this message"
                 )
             ))
         }

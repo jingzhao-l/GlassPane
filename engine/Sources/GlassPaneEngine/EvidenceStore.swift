@@ -112,10 +112,15 @@ public final class EvidenceStore {
         OperationID.prefix.utf16.count + OperationID.totalLength + fileExtension.utf16.count + 1
 
     /// Whether `name` is the file name this store writes for an evidence pack.
+    ///
+    /// A3 的同源要求：判定本身不在这里写第二遍，走 `ParamValidation.matchesWhole`——
+    /// 与 `requireOperationId` 校验"能被拼成这个名字"的那个函数是同一个。此前这里是
+    /// "先比长度、再 `firstMatch`"，而参数侧是"裸 `range(of:…)`"，同一个字面量两套
+    /// 判据：参数侧放过 `"op_…\n"`（`$` 也匹配结尾换行之前），这个名字写进档案后
+    /// `isEntryName` 又认不出它，于是 `clear()`、两种 prune 与 `stats()` 一起跳过它，
+    /// 一次落盘、永不清理。共用一个判据才是"要么整条是 id，要么不算"。
     static func isEntryName(_ name: String) -> Bool {
-        guard name.utf16.count == entryNameLength else { return false }
-        let range = NSRange(name.startIndex..., in: name)
-        return entryNameRegex.firstMatch(in: name, range: range) != nil
+        ParamValidation.matchesWhole(name, regex: entryNameRegex, utf16Length: entryNameLength)
     }
 
     /// Deletion identity for every destructive pass: an entry this store owns
@@ -460,13 +465,24 @@ public final class EvidenceStore {
             // `evidencePersisted: false` + `lastEvidencePersistenceFailure`。
             return false
         } catch {
-            // Fallback: direct write (see ProjectRegistry.save). Reached when the
-            // temporary name cannot be used at all — which is what a full,
-            // wedged or partially read-only volume looks like from here — so the
-            // pack goes straight to its final name.
+            // A4/A11：走到这里的是**非持久性**的落盘失败（`open` 抢不到名字、`write`
+            // 回 ENOSPC/EDQUOT/EIO……），fallback 直写最终名是既有设计。但从前这条路
+            // 两件事都没做：
+            //   1. 没撤 `<op>.json.tmp-<pid>-<uuid>`。`stage()` 的 `open(O_CREAT|O_EXCL)`
+            //      已经把那个名字创建了，`write` 才失败——于是盘上留下一件本进程写的、
+            //      没人认领的半份字节。而 `.tmp-*` 过不了 `isEntryName`，所以 `clear()`、
+            //      两种 prune 与 `stats()` 全部跳过它：一块满盘每写一次多一件，永远堆积。
+            //   2. 没留主失败原因。调用方最后拿到的 `false` 背后是什么（盘满？名字被
+            //      占？），没人知道——同形状的 `ApprovalGate.persist()` 一直留了那句
+            //      "falling back"（ApprovalGate.swift:396-398），这里补上同一条口径。
+            // 撤 tmp 的写法照 `ApprovalGate.swift:404-410`：删不掉要说出来，不许吞。
+            let primary = error
+            log.error("evidence pack staging via \(tmpPath) failed: \(primary) — falling back to an atomic write of \(filePath)")
+            discardStagedTemp(tmpPath)
             do {
                 try data.write(to: URL(fileURLWithPath: filePath), options: .atomic)
             } catch {
+                log.error("evidence pack \(filePath) failed both routes (staged: \(primary); direct: \(error)) — nothing was published by the fallback, and this write is reported as failed rather than as saved")
                 return false
             }
             if let defect = isolationCheck(filePath) {
@@ -493,6 +509,28 @@ public final class EvidenceStore {
             }
             reportRetention(capRemoved: pruneIfNeeded(), ttlRemoved: pruneExpiredIfNeeded())
             return true
+        }
+    }
+
+    /// 撤掉**本进程这一趟**写在临时名上的那份字节（A4/A11）。
+    ///
+    /// 只碰普通文件、不碰符号链接，也不碰目录——判据与 `isDeletableEntry` 同一条：
+    /// `stage()` 用 `O_CREAT|O_EXCL` 独占创建，所以"这个名字归我"的唯一证据就是它是一
+    /// 个普通文件。这个名字上如果蹲着别人的东西（`StatePermissionTests
+    /// .testFallbackWriteRefusesAPackItCannotIsolate` 的夹具就是一个蹲在临时名上的目录，
+    /// 它存在的意义正是让 rename 失败），一次"顺手清理"会把别人的数据整棵树带走，而本
+    /// 类型对外声明的半径是"只动自己的 `op_<26>.json`"。删不掉要说出来，不许吞。
+    private func discardStagedTemp(_ path: String) {
+        var info = stat()
+        guard lstat(path, &info) == 0 else { return }   // 名字已经不在了：没什么要撤的
+        guard (info.st_mode & S_IFMT) == S_IFREG else {
+            log.error("the staging name \(path) is not a regular file this process created, so nothing was removed — the fallback below writes only \(path)")
+            return
+        }
+        do {
+            try FileManager.default.removeItem(atPath: path)
+        } catch {
+            log.error("the staged evidence temp file \(path) could not be removed (\(error)) — nothing will ever reclaim it: a `.tmp-*` name is not an archive entry, so `clear()`, both prunes and `stats()` skip it. Delete that one file by name.")
         }
     }
 

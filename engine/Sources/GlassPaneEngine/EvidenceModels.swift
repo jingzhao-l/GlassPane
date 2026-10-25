@@ -568,17 +568,24 @@ public extension EvidencePack {
 
     /// Validates the pattern/const invariants the JSON Schema enforces on
     /// the TS side. Call after any decode of untrusted JSON.
+    ///
+    /// A3 的同一族：`NSRegularExpression` 的 `$` 也匹配"结尾换行之前"，所以从前这两条
+    /// `firstMatch` 会放过 `"<op id>\n"` 与 `"<timestamp>\n"`。这里判的是**读入不信任的
+    /// JSON 之后**的不变量（`decodeAndValidate`），而那份 operationId 接下来就是档案的
+    /// 文件名与 `last_evidence` 的键——所以判据与参数侧必须是同一个函数，不是同一套文案：
+    /// 统一走 `ParamValidation.matchesWhole`。
     func validateInvariants() throws {
         guard schemaVersion == Self.schemaVersionConst
             || Self.legacySchemaVersions.contains(schemaVersion) else {
             throw EvidencePackError.badSchemaVersion(schemaVersion)
         }
-        let opRange = NSRange(operationId.startIndex..., in: operationId)
-        guard Self.operationIdRegex.firstMatch(in: operationId, range: opRange) != nil else {
+        guard ParamValidation.matchesWhole(
+            operationId, regex: Self.operationIdRegex,
+            utf16Length: ParamValidation.operationIdUTF16Length
+        ) else {
             throw EvidencePackError.badOperationId(operationId)
         }
-        let createdRange = NSRange(createdAt.startIndex..., in: createdAt)
-        guard Self.createdAtRegex.firstMatch(in: createdAt, range: createdRange) != nil else {
+        guard ParamValidation.matchesWhole(createdAt, regex: Self.createdAtRegex) else {
             throw EvidencePackError.badCreatedAt(createdAt)
         }
     }
@@ -798,6 +805,17 @@ public extension DecisionLogEntry {
             }
         }
         if let dimension {
+            // A12 的复核结论：这一条**不是**缺陷，而证据是它前面那条模式，不是运气。
+            // `dimension.count` 数的是字素簇，内核的 `DIMENSION_ID_MAX_LENGTH` 数的是
+            // UTF-16 码元，两个单位只在非 ASCII 上分开——而 `^[a-z0-9]+(?:-[a-z0-9]+)*$`
+            // 的字符类只有 ASCII 小写字母、数字与连字符，任何**过得了这条模式**的值都
+            // 满足 `count == utf16.count == unicodeScalars.count`。长度判据永远只作用在
+            // 已经过了模式判定的串上（两条 guard 在同一个 `&&` 里，短路顺序就是理由），
+            // 所以这里没有可分裂的输入。`kind`/`entryId`/`operationId`/`createdAt`/
+            // `prevEntryHash` 同一形状。真正需要统一单位的是**能装非 ASCII** 的那几个：
+            // `summary`（下面按 UTF-16 判）与 `ProjectRegistry` 的 `displayName`
+            // （A12 修的那一处，读者是 `z.string().max(256)`）。
+            // 钉在 `Qoder20261024EngineStorageTests` 的 dimension 那条测试上。
             guard Self.matches(Self.dimensionRegex, dimension), dimension.count <= Self.dimensionMaxLength else {
                 throw DecisionLogEntryError.badDimension(dimension)
             }
@@ -814,9 +832,14 @@ public extension DecisionLogEntry {
         }
     }
 
+    /// 这一族的每个模式都必须**整条**命中（A3）。`NSRegularExpression` 的 `$` 也匹配
+    /// "结尾换行之前"，`firstMatch` 又是"找得到一段就行"，所以从前 `"<entry id>\n"`、
+    /// `"<64 hex>\n"`、`"<iso>\n"` 都能过这一关——而这一关是"读入不信任的 JSON 之后"
+    /// 唯一的门，过了门的字节又进哈希链。判据与参数侧、档案侧同源：同一个
+    /// `ParamValidation.matchesWhole`。
+    /// 空串特例照旧成立：`^([0-9a-f]{64})?$` 在 `""` 上命中长度 0，等于全长 0。
     private static func matches(_ regex: NSRegularExpression, _ value: String) -> Bool {
-        let range = NSRange(value.startIndex..., in: value)
-        return regex.firstMatch(in: value, range: range) != nil
+        ParamValidation.matchesWhole(value, regex: regex)
     }
 
     static func decodeAndValidate(_ data: Data) throws -> DecisionLogEntry {

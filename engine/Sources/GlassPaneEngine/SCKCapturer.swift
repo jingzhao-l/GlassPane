@@ -292,6 +292,44 @@ public enum SCKCapturer {
         return .finished(value: snapshot.value, error: snapshot.thrown)
     }
 
+    /// 首帧**没拿到**的两种"没有"，以及它们各自对外说的那句话（A7）。
+    ///
+    /// 为什么要有这一层：判定的两个输入（帧到没到、流有没有自己报原因）都在一个
+    /// `private final class StreamFrameBridge` 里，而这个桥要走通就得有一个真
+    /// `SCStream`、真屏幕采集席位、真 `didStopWithError` 回调——非 root、无权限的单测
+    /// 一样都造不出来。于是"把流停掉的原因折进超时"这条折叠从来没有夹具执行过，
+    /// 也就没有人能把它改红。抽成不带 SDK 类型的纯函数之后，夹具只是两个值，
+    /// 形状与同文件的 `resolveWait`/`WaitOutcome` 一致（那里也是"判定留在纯函数里"）。
+    enum FirstFrameAbsence: Equatable {
+        case frameArrived
+        case stopped(errorDescription: String)
+        case timedOut
+    }
+
+    /// 已知原因优先于计时结论：流自己报了停止，那**就是**这一趟的结局，
+    /// 不用等 `captureTimeoutSeconds` 烧完再去猜是不是慢。
+    static func classifyFirstFrame(arrived: Bool, stopErrorDescription: String?) -> FirstFrameAbsence {
+        if arrived { return .frameArrived }
+        if let stopErrorDescription { return .stopped(errorDescription: stopErrorDescription) }
+        return .timedOut
+    }
+
+    /// 两种"没有"分别成文，且各自的句子只说自己那件事。
+    static func firstFrameAbsenceReason(
+        _ absence: FirstFrameAbsence, timeoutSeconds: TimeInterval
+    ) -> String {
+        switch absence {
+        case .frameArrived:
+            return "SCStream delivered a frame; nothing is missing"
+        case .timedOut:
+            // 从前这句尾巴上挂着 " or stream stopped"。那一半现在有自己的一条分支，
+            // 所以这句话必须只说它量到的那一件：到点了、且流没有报任何原因。
+            return "SCStream first frame timed out after \(timeoutSeconds)s with no stop error reported by the stream — this is a timing measurement, not a known fault: the stream neither delivered a frame nor said why it stopped, so nothing was captured on this candidate and no pixel diff may be read from it"
+        case .stopped(let errorDescription):
+            return "SCStream stopped before its first frame: \(errorDescription) — the stream reported its own end, so this is a known cause and not a timeout: no timing measurement was completed and raising the \(timeoutSeconds)s budget would only wait longer for the same answer. Nothing was captured on this candidate"
+        }
+    }
+
     /// 三种结局逐条成文，互不折叠（超时不是"查无内容"，抛错不是"取到空值"）。
     static func resolveWait<Value>(
         _ outcome: WaitOutcome<Value>,
@@ -755,7 +793,20 @@ public enum SCKCapturer {
                 return image
             case .timedOut:
                 throw ChannelError.pixelCaptureDenied(
-                    reason: "SCStream first frame timed out after \(captureTimeoutSeconds)s or stream stopped"
+                    reason: Self.firstFrameAbsenceReason(.timedOut, timeoutSeconds: captureTimeoutSeconds)
+                )
+            case .stopped(let errorDescription):
+                // A7：这条从前不存在。`didStopWithError` 把 error 对象**丢掉**，结局
+                // 折进 `.timedOut`，成文是 "first frame timed out after 5s or stream
+                // stopped"——一句同时说两件事、且把已知原因伪装成计时抖动的话。本文件
+                // :296-315 的口径是"三种结局逐条成文，互不折叠"（超时不是"查无内容"，
+                // 抛错不是"取到空值"），流自己报了原因就更不许折。读这句的人会去加
+                // 超时——那是往错的方向修。
+                throw ChannelError.pixelCaptureDenied(
+                    reason: Self.firstFrameAbsenceReason(
+                        .stopped(errorDescription: errorDescription),
+                        timeoutSeconds: captureTimeoutSeconds
+                    )
                 )
             case .unexpectedFormat(let fourCC):
                 // 一个非 BGRA 的缓冲**不能**悄悄按 BGRA 抄一遍：那会得到一张绿色/噪声图，
@@ -836,7 +887,9 @@ public enum SCKCapturer {
         private let lock = NSLock()
         private let timeout: DispatchTime
         private var frame: CVPixelBuffer?
-        private var didStop = false
+        /// 流自己报的停止原因（A7）。从前这里是一个 `didStop: Bool`，error 对象被丢掉，
+        /// 而那个位**没有任何读者**——所以"停了"这个事实到不了成文层，只能被折进超时。
+        private var stopErrorDescription: String?
 
         init(timeout: DispatchTime) {
             self.timeout = timeout
@@ -854,17 +907,21 @@ public enum SCKCapturer {
 
         func stream(_ stream: SCStream, didStopWithError error: Error) {
             lock.lock()
-            didStop = true
+            // A7：这个 error 对象从前被扔掉，只留一个 `didStop` 位（而那个位没有任何读者），
+            // 于是调用方只能把"流自己停了并报了一个原因"说成"超时"。现在把原因留住。
+            stopErrorDescription = "\(type(of: error)): \(error.localizedDescription)"
             lock.unlock()
             signal.signal()
         }
 
-        /// 首帧的三种结局。**"没等到"与"等到了但这条路转不了"必须分开说**：把后者报成
-        /// 一次超时，就是拿一个已知原因去伪装计时抖动，而读的人会去加超时——那是往错的
-        /// 方向修。三种都在这里判，调用方没有机会把格式问题读成慢。
+        /// 首帧的结局。**"没等到"与"等到了但这条路转不了"必须分开说**（:296-315 的口径），
+        /// 而 A7 补上第三种"没等到"的区别：**流自己带着原因停了**不是一次超时——
+        /// 把已知原因报成计时抖动，读的人会去加超时，那是往错的方向修。四种都在这里判，
+        /// 调用方没有机会把格式问题或停止原因读成慢。
         enum FirstFrame {
             case image(CGImage)
             case timedOut
+            case stopped(errorDescription: String)
             case unexpectedFormat(fourCC: String)
             case conversionFailed(fourCC: String)
         }
@@ -873,6 +930,17 @@ public enum SCKCapturer {
             _ = signal.wait(timeout: timeout)
             lock.lock()
             defer { lock.unlock() }
+            // 已知原因优先：帧没到而流报过自己的结束，就不是超时（A7）。
+            switch SCKCapturer.classifyFirstFrame(
+                arrived: frame != nil, stopErrorDescription: stopErrorDescription
+            ) {
+            case .frameArrived:
+                break
+            case .stopped(let errorDescription):
+                return .stopped(errorDescription: errorDescription)
+            case .timedOut:
+                return .timedOut
+            }
             guard let buffer = frame else { return .timedOut }
             let fourCC = Self.fourCC(CVPixelBufferGetPixelFormatType(buffer))
             guard CVPixelBufferGetPixelFormatType(buffer) == FourCharCode(kCVPixelFormatType_32BGRA) else {

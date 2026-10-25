@@ -88,9 +88,19 @@ public struct GPError: Error {
         case .assertTargetNotFound:
             return "verify the selector or run observe first to inspect the tree"
         case .noOperation:
-            return "run act or assert_element first"
+            // A5：从前这句是 "run act or assert_element first"。`assert_element` 自己
+            // 就要先有一份 pack（`EngineCore.assertElement` 在 `resolvedPack(operationId: nil)`
+            // 为空时抛的正是这个码），所以照着 remedy 走第二步会再拿到同一句 remedy——
+            // 一个自指死循环的指引，`EngineCore.swift:1588-1605` 已经为 assert_element
+            // 那一路把这句改掉，漏的是这张**默认表**：`diagnose` 走的就是默认 remedy。
+            // 老实的下一步只有 `act`：十条方法里只有它从零记下一条操作。
+            return "run act first — of the methods this daemon answers, only `act` records an operation without reading a previous one, so `diagnose`, `assert_element` and `last_evidence` all need an act before them (they cannot bootstrap themselves). If nothing is attached yet, `attach` (bundleId or pid) comes before that. Nothing was deleted and no id is missing: there is genuinely no recorded operation to read in this process and archive yet."
         case .noEvidence:
-            return "produce evidence first (act/assert_element/diagnose), or check the operationId matches a recorded operation"
+            // A5 的同一形状：从前是 "produce evidence first (act/assert_element/diagnose)"，
+            // 括号里后两个都是"读一份已有 pack"的方法。点名 `--evidence-stats` 是因为
+            // 它是这条二进制里真存在、且真能回答"档案里到底有没有东西"的命令
+            // （`HumanInterventionAuditTests` 会核对 remedy 点名的每个 flag）。
+            return "run act first — it is the only method here that writes an evidence pack from nothing (`assert_element` and `diagnose` both reuse a recorded operation, so neither can be the first step). If the refusal names an operationId: that id is not in this daemon's in-memory history nor in the archive, so check it against what is stored — `glasspaned --evidence-stats` counts and lists the archive this daemon writes, `glasspaned --prune-evidence --dry-run` walks the same entries without deleting. A typo'd id must not be 'fixed' by dropping the field: `last_evidence` with no operationId answers the NEWEST pack, which is a different operation."
         case .noSnapshot:
             return "run gp_snapshot first, then restore with that snapshotId"
         case .restoreUnsupported:

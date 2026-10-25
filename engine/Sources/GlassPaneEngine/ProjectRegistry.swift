@@ -43,6 +43,32 @@ public final class ProjectRegistry {
     /// fsync 换成失败，检验 `create()` 抛的是拒绝而不是成功。
     var durableWriteOperations = DurableFileWrite.Operations.live
 
+    /// 隔离判定面，默认是真判定。
+    ///
+    /// 从前 `save()` 直接调 `StateRoot.isolateFile`，于是**发布之后**那一条拒绝
+    /// （`ProjectRegistry.save` 末尾对最终名的 mode 判定，A1 的现场）在任何测试里都
+    /// 执行不到：`EvidenceStore.isolationCheck` 的注释把候选空间量过一遍（目录、
+    /// `uchg`、FIFO、悬空符号链接、继承来的 `deny writeattr` ACL……），结论是非 root
+    /// 环境里没有一种能在"rename 成功"的同时"chmod 失败"的夹具——而 A1 要的正是这条
+    /// 分支。注入点与那两个 seam 同一性质：只替换**判定**，不替换顺序，也不替换字节。
+    var isolationCheck: (String) -> String? = StateRoot.isolateFile(at:)
+
+    /// 本次 `save()` 的字节是否已经**发布并被读回**（`verifySaved` 通过）。
+    ///
+    /// A1 的判据。`create`/`update`/`remove` 的 catch 从前无条件把内存表倒回去，
+    /// 那只对"发布之前失败"成立。发布之后（`replaceItemAt` + `syncPublished` +
+    /// `verifySaved` 都成功）还能失败的只剩末尾那一条最终名的 mode 判定，而它的
+    /// 成文自己就写着"盘上已经是新表，只是不够私密"——于是内存回滚、盘不回滚，
+    /// 两边分叉。更糟的是 `loadedIdentity` 在 :459 已经推进到新字节，所以下一次
+    /// `create()` 的 `requireUnchangedSinceLoad` 看不出任何异常，把**少了那条真落过盘
+    /// 的注册**的整表 rename 上去，还报"saved + verified"。一条被报成"写失败"的成功
+    /// 写，加一次静默删除，是两个缺陷。
+    ///
+    /// 修法取"两侧都保留新表"那一支：发布后的拒绝照旧抛（调用方听得见"不够私密"），
+    /// 但内存不再回滚，因为盘上就是这一份。`update`/`remove` 同理——它们回滚的是
+    /// `previous`，那会把已发布的表换成未发布的表。
+    private var publishedThisWrite = false
+
     /// The cheap identity of the bytes this process last read: modification time
     /// (to the nanosecond) plus size. nil when there was no file at load.    ///
     /// `save()` serialises the *whole* table and `verifySaved` can only compare
@@ -169,10 +195,18 @@ public final class ProjectRegistry {
         guard !displayName.isEmpty else {
             throw GPError(code: .badParams, message: "displayName must not be empty")
         }
-        guard displayName.count <= ProjectEntry.maxDisplayNameLength else {
+        // A12：单位是 **UTF-16 码元**，不是字素簇。跨语言读者是真的，而且两边都数单位：
+        // `mcp-shell/src/project-registry.ts:413` 用 `z.string().min(1).max(
+        // MAX_DISPLAY_NAME_LENGTH)`（JavaScript 的 `.length` 数码元），`mcp-shell/src/
+        // tools.ts:694` 把同一条以 JSON Schema `maxLength: 256` 发布出去（按码元数）。
+        // `displayName.count` 数簇，于是 256 个组合序列（"e"+U+0301 ×256 = 512 码元）
+        // 在 daemon 这边算 256、在壳与发布面那边算 512：一份契约两个判决，而 daemon
+        // 是最松的那一个——它收下之后写进 projects.json，壳下一次读表就拒整条记录。
+        // 与 `ParamValidation.length` 同源（同一个函数，不是同一条理由）。
+        guard ParamValidation.length(displayName) <= ProjectEntry.maxDisplayNameLength else {
             throw GPError(
                 code: .badParams,
-                message: "displayName exceeds \(ProjectEntry.maxDisplayNameLength) characters"
+                message: "displayName exceeds \(ProjectEntry.maxDisplayNameLength) characters (measured in UTF-16 code units, the unit mcp-shell's z.string().max and the published maxLength count; this value is \(ParamValidation.length(displayName)))"
             )
         }
         guard (bundleId == nil) != (pid == nil) else {
@@ -195,7 +229,8 @@ public final class ProjectRegistry {
         do {
             try save()
         } catch {
-            projects.removeLast()
+            // A1：字节已经发布并被读回时不回滚——盘上就是这一份。
+            if shouldRollBackAfterFailedWrite() { projects.removeLast() }
             throw error
         }
         return entry
@@ -226,10 +261,11 @@ public final class ProjectRegistry {
             guard !displayName.isEmpty else {
                 throw GPError(code: .badParams, message: "displayName must not be empty")
             }
-            guard displayName.count <= ProjectEntry.maxDisplayNameLength else {
+            // A12：与 `create` 同一个单位、同一个判据来源（见那里面的注释）。
+            guard ParamValidation.length(displayName) <= ProjectEntry.maxDisplayNameLength else {
                 throw GPError(
                     code: .badParams,
-                    message: "displayName exceeds \(ProjectEntry.maxDisplayNameLength) characters"
+                    message: "displayName exceeds \(ProjectEntry.maxDisplayNameLength) characters (measured in UTF-16 code units, the unit mcp-shell's z.string().max and the published maxLength count; this value is \(ParamValidation.length(displayName)))"
                 )
             }
             projects[index].displayName = displayName
@@ -243,7 +279,7 @@ public final class ProjectRegistry {
         do {
             try save()
         } catch {
-            projects = previous
+            if shouldRollBackAfterFailedWrite() { projects = previous }
             throw error
         }
         return entry
@@ -264,7 +300,7 @@ public final class ProjectRegistry {
         do {
             try save()
         } catch {
-            projects = previous
+            if shouldRollBackAfterFailedWrite() { projects = previous }
             throw error
         }
         return true
@@ -426,6 +462,12 @@ public final class ProjectRegistry {
         // into place.
         let tmpPath = "\(filePath).tmp-\(getpid())-\(UUID().uuidString)"
         let tmpURL = URL(fileURLWithPath: tmpPath)
+        // 每一趟写都重新回答"这一趟发布了吗"，所以这条判据不许带上一次的结论。
+        publishedThisWrite = false
+        // "改名发生过吗"是**局部**的：通用 catch 那句"the file on disk is unchanged"
+        // 只对改名之前的失败成立。`verifySaved` 读不回来时改名已经完成，那句话就成了
+        // 谎话（同一个文件里 :510 的 durability 分支已经为这件事改过口径，这条漏了）。
+        var renamed = false
         do {
             // 共享的落盘原语：独占创建 → 写全 → **fsync** → close。`Data.write` 把
             // 字节交给内核缓冲就算成功，而这份表是 daemon 之外所有进程（一次性 CLI、
@@ -439,7 +481,7 @@ public final class ProjectRegistry {
             // temp file, so the name that is *created* is never world-readable —
             // and the published name is judged again after the rename below,
             // because a replacement keeps the mode of what it replaced.
-            if let defect = StateRoot.isolateFile(at: tmpPath) {
+            if let defect = isolationCheck(tmpPath) {
                 throw GPError(
                     code: .internalError,
                     message: "the project registry temp file \(tmpPath) could not be made owner-only: \(defect); nothing was published to \(filePath)",
@@ -453,6 +495,7 @@ public final class ProjectRegistry {
             // registry/approval-ledger writes: it moves the temp item into
             // place and hands back the previous contents as a backup URL.
             let backup = try FileManager.default.replaceItemAt(destination, withItemAt: tmpURL)
+            renamed = true
             // The table on disk is now *this* process's bytes, so the baseline
             // moves with them — otherwise the next legitimate write would refuse
             // against a change this registry itself made.
@@ -474,6 +517,10 @@ public final class ProjectRegistry {
             // hears "saved" — an in-memory-only registry is invisible to the next
             // process and evaporates on restart.
             try verifySaved(destination, expecting: projects.count)
+            // A1 的分界点：走到这里，**盘上已经是这一份表**，而且本进程刚把它读回来
+            // 数过。此后的任何拒绝都发生在"已经发布"这一边，调用方因此不许回滚内存
+            // （见 `publishedThisWrite`）。
+            publishedThisWrite = true
         } catch let fault as DurableFileWrite.Failure where fault.isDurabilityFault {
             // 系统调用回答了"这些字节没有落"。这既不是并发写者的拒绝，也不是一条
             // "the file on disk is unchanged"——那种说法在这里会说谎：改名可能已经
@@ -501,10 +548,21 @@ public final class ProjectRegistry {
             // No silent fallback write: the caller hears that the registry did
             // not reach disk, and our own half-written temp file is removed (or
             // the removal failure is reported inline rather than swallowed).
+            //
+            // A1 的相邻半边：那句 "the file on disk is unchanged" 只在**改名之前**失败
+            // 时成立。`verifySaved` 读不回来（或读回来的条数不对）时改名已经完成，
+            // 于是这一条 catch 会一边把内存回滚、一边宣称盘没动——正是 :510 durability
+            // 分支已经承认会说谎的那个形状。所以按 `renamed` 分开成文，两种都如实。
+            let landed = renamed
+            let cleanup = discardStagedCopy(tmpPath)
             throw GPError(
                 code: .internalError,
-                message: "project registry write to \(filePath) failed (\(error)); the file on disk is unchanged and the change was rolled back in memory\(discardStagedCopy(tmpPath))",
-                remedy: "check that the directory is writable and has free space (`ls -ld \(RemedyCommand.quote(destination.deletingLastPathComponent().path))`, `df -k \(RemedyCommand.quote(destination.deletingLastPathComponent().path))`), fix it, then repeat the call — until then the registry in the running daemon and the file disagree"
+                message: (landed
+                    ? "project registry write to \(filePath) failed after the rename (\(error)) — the name on disk already holds this process's table, so the file is NOT unchanged; this write is reported as failed and the in-memory table was rolled back, which means the running daemon and the file now disagree and neither is a copy of the other"
+                    : "project registry write to \(filePath) failed (\(error)); the file on disk is unchanged and the change was rolled back in memory") + cleanup,
+                remedy: landed
+                    ? "re-read what actually landed before anything else writes (`glasspaned --list-projects`), then restart the background service so the daemon's table is the file's (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`); do not repeat the create until the read-back agrees — a second write publishes the whole table from memory, which is one entry short of what is on disk"
+                    : "check that the directory is writable and has free space (`ls -ld \(RemedyCommand.quote(destination.deletingLastPathComponent().path))`, `df -k \(RemedyCommand.quote(destination.deletingLastPathComponent().path))`), fix it, then repeat the call — until then the registry in the running daemon and the file disagree"
             )
         }
         // The table is on disk and reads back; the last thing that can still be
@@ -517,7 +575,7 @@ public final class ProjectRegistry {
         // published name: the normal volume answers by tightening it, and a
         // volume that will not is refused out loud instead of silently keeping a
         // world-readable project list.
-        if let defect = StateRoot.isolateFile(at: filePath) {
+        if let defect = isolationCheck(filePath) {
             throw GPError(
                 code: .internalError,
                 message: "the project registry at \(filePath) landed but is not owner-only: \(defect) — every local account can read the project list this daemon acts on, and the write is reported as failed rather than as saved",
@@ -525,6 +583,17 @@ public final class ProjectRegistry {
             )
         }
     }
+
+    /// 一次失败的写要不要把内存表倒回去？**只在字节没有发布的时候倒**（A1）。
+    ///
+    /// 三个调用点（`create` 丢掉尾巴、`update`/`remove` 恢复快照）从前一律倒回，
+    /// 那只对发布之前的失败成立。发布之后倒回的后果不是"两边不一致"这么轻：
+    /// `loadedIdentity` 已经跟着字节推进到新表（:487），所以下一次写的
+    /// `requireUnchangedSinceLoad` 看不出异常，于是把**少了那条已经真落盘的注册**的
+    /// 整表 rename 上去，并且一路通过 `verifySaved`——调用方先收到"写失败"，再收到
+    /// 一次"写成功"，而那份成功里悄悄没有第一条。盘上已经是新表时保留内存里的新表，
+    /// 拒绝照旧抛出：内存与盘一致，读者听得见"不够私密"。
+    private func shouldRollBackAfterFailedWrite() -> Bool { !publishedThisWrite }
 
     /// Read the live file back and refuse to claim success when it does not hold
     /// what was just written. An in-memory-only table is invisible to the next

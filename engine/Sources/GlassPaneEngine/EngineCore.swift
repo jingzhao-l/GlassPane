@@ -1650,11 +1650,24 @@ public final class EngineCore {
         // uses (memory ring + disk archive); only the error code stays
         // diagnose's own.
         guard let resolved = resolvedPack(operationId: operationId) else {
+            // A5: this arm used to fall back on the table's default remedy, and
+            // that default told the caller to "run act or assert_element first"
+            // — `assert_element` needs a pack to exist, so following it got you
+            // this same sentence back. The advice is now per-arm, because the
+            // two refusals need different next steps: an unknown id means
+            // *something* is recorded, just not this one; no id at all means
+            // this attachment has never had an operation to diagnose.
+            let refusal = archiveFallbackRefusal
             throw GPError(
                 code: .noOperation,
                 message: operationId.map { "unknown operationId \($0)" }
                     ?? (archiveFallbackRefusal.map { "no operation of this attachment to diagnose: \($0)" }
-                        ?? "no operation to diagnose")
+                        ?? "no operation to diagnose"),
+                remedy: operationId != nil
+                    ? "the operationId you named is not in this daemon's in-memory history or in the archive, so nothing was diagnosed. Check it against what is actually stored — `glasspaned --evidence-stats` counts and lists the entries in the archive this daemon writes — and re-issue diagnose with one of those ids. Do not 'fix' this by dropping the operationId: with no id diagnose answers the NEWEST recorded operation, which is a different operation than the one you asked about"
+                    : (refusal != nil
+                        ? "run act against the app that is attached now — diagnose reads a recorded operation, and the newest pack in the archive belongs to a different attachment, so it is not this app's evidence to diagnose"
+                        : "run act first — diagnose classifies a recorded operation, and no operation has been recorded in this process or archive yet. Of the methods this daemon answers, only `act` records one from nothing: assert_element and diagnose both need a pack to exist, so neither can be this step")
             )
         }
         var target = resolved
@@ -1821,14 +1834,26 @@ public final class EngineCore {
         // history" — a distinct code from "no operation to diagnose".
         switch operationId {
         case .some(let id):
-            throw GPError(code: .noEvidence, message: "unknown operationId \(id)")
+            // A5: 这条从前吃默认 remedy。默认现在（ProtocolErrors）已经不再自指，但
+            // "produce evidence first" 对**点名的 id 查无此档**仍然是错的下一步——
+            // 档案里有东西，只是没有这一条，而照"先产一份证据"做出来的新 pack 挂的
+            // 是另一个 id，调用方还是在找它原本点名的那一条。
+            throw GPError(
+                code: .noEvidence,
+                message: "unknown operationId \(id)",
+                remedy: "this id is not in the daemon's in-memory history nor in the archive it writes, so nothing was returned. Compare it against what is stored — `glasspaned --evidence-stats` counts and lists the entries of that archive (add --state-dir if this daemon was started with one) — then re-issue last_evidence with an id from that list, or with no operationId at all to read the newest pack this attachment has. An id that came from another machine or another state root is genuinely not here; do not copy bytes until the id you were given is the id you read back"
+            )
         case .none:
             // Defect 6: "no evidence recorded yet" is only true when the archive
             // said nothing. When it said *something* and the resolver refused it
             // for belonging to another attachment, the caller has to hear that
             // instead — the evidence exists, it is just not this app's.
             if let refusal = archiveFallbackRefusal {
-                throw GPError(code: .noEvidence, message: "no evidence of this attachment: \(refusal)")
+                throw GPError(
+                    code: .noEvidence,
+                    message: "no evidence of this attachment: \(refusal)",
+                    remedy: "run act against the app that is attached now. The archive does hold packs, but the newest one belongs to a previous attachment, so answering with it would put another app's evidence under this request; there is no method that re-scopes an existing pack to a different app"
+                )
             }
             throw GPError(code: .noEvidence, message: "no evidence recorded yet")
         }
