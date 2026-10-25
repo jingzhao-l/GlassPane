@@ -34,7 +34,8 @@ import type { ProviderAttribution } from "./providers"
  * "spec-compliance" means, so `engineBody()` strips it before anything leaves the
  * process. What it buys is the *label* on a recorded decision — and only one engine
  * method produces one to label. `last_evidence` is the single reply that carries an
- * `evidencePack` (measured against the engine: one emitter, `Dispatcher.swift:156`);
+ * `evidencePack` (measured against the engine: one emitter, `Dispatcher.swift:216` — the line
+ * that returns it, inside `handleLastEvidence`; `:156` is `handleAct`);
  * `act` answers with the flat operation dict (`EngineCore.swift:1275-1300`) and
  * `attach`/`observe`/`diagnose`/`probe_status` carry no pack either. So a dimension
  * declared on `gp_act`, `gp_observe`, `gp_attach` or `gp_diagnose` cannot move the

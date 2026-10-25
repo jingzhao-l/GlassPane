@@ -177,10 +177,20 @@ for any R40 scenario; every one of them was blocked on kernel API work first.
   `product-surface.mjs`. At the 2026-10-08 switch it was `0.1.3` (0.1.1 → 0.1.2 added the
   contract corpus to the tarball; 0.1.2 → 0.1.3 added `evidence-decision.ok-01.json`, the
   transcription contract the Python half of iterate-harness is written against).
-- **Behaviour parity: measured across two implementations.** The sixteen fixtures that
-  `contracts/kernel-conformance.json` records answers for produce identical output through
-  the installed `dist` and through a canonical kernel checkout
-  (`kernel-conformance --impl`), with the zod-major error-prose difference reported as a note.
+- **Behaviour parity: what runs unattended is one implementation; the second is an operator
+  command.** `bun script/kernel-conformance.mjs` without `--impl` answers
+  `16 fixture(s) through 1 implementation(s)` (measured 2026-10-25, rc=0): every shipped fixture is
+  checked against the golden recorded in `contracts/kernel-conformance.json`, which is a real guard —
+  against *this* implementation drifting. Comparing the installed `dist` with a canonical kernel
+  checkout (where the zod-major error-prose difference is reported as a note) needs `--impl` pointed at
+  that checkout, and no CI step does that. The Python side is the same shape:
+  `scripts/diff_kernel_implementations.py` exists, is an operator command, and measured rc=2 on the
+  2026-10-25 machine because no built `iterate-kernel` dist was reachable. So what is unattended
+  between the two implementations is the sha256-pinned corpus (`tests/kernel_fixtures/manifest.json`,
+  whose own comment says it is deliberately NOT generated from the kernel but a copy pinned by sha256),
+  not a run of both. One more reading to keep honest: `contracts/kernel-conformance.json` carries
+  `"version": "0.1.9"` while the dependency pin is `0.1.10` — that field is a provenance stamp of
+  where the fixtures came from, not a version judgment; the judgment is the per-fixture digest.
 - **Both former API blockers are gone.** `dimensionContext` is in the dependency and the fork
   consumes it (`kernel.ts` → `dimensionCoverage` → `src/plugin/glasspane-compaction.ts`), so
   the sentence this page used to carry — "`dimensionContext` does not exist at the pinned
@@ -252,8 +262,8 @@ point.
    |---|---|---|
    | ① invariant → re-verification | the loop's publish site sends through the host's awaited MCP transport (`reverify_trigger`), and the request is the kernel's own frame | recipe steps stay out of that request on purpose: the contract builds a request only from a *failing* report, so no send can also carry ④'s permission — naming a step there would ask the engine to move the app while its own re-check is failing |
    | ② dimension-aware compaction | 面 B reads the plan from `GLASSPANE_RUN_PLAN` **or** the project's own `.iterate/run-plan.json`; `selectAnchors` ranks the drop by the kernel's own `dimensionContext` accounting and the block names which rule it used | a dimension declared on a method that emits no evidence pack still reaches no anchor — `last_evidence` is the engine's only emitting method. That gap is now a number the block prints (`declaredWithoutAnchor`) instead of a paragraph in this file: the count is what makes it comparable between runs, and it falls toward zero on its own if the engine widens its emitting surface |
-   | ③ evidence → decision log | each harness now verifies the chain the *other* one wrote: same three drafts, byte-identical ledgers (sha256 `eaa9dc7d…`), pinned samples in both test suites, and `fix_proof` reading a foreign ledger through the kernel's verifier — recorded once per project in `.iterate/glasspane-ledger.json` (`/iterate glasspane-ledger <path>`), which pins the genesis entry so a replaced chain refuses with `LEDGER_LINK_E_STALE` | the two default ledger paths are still different files; the link makes the other harness's ledger this project's recorded default, and `GLASSPANE_DECISION_LOG` stays the one-shot override that outranks it |
-   | ④ repair → invariant re-check → re-verify | the recipe hand-off (`glasspane_recipe.py`) plus the gate that reads only measured things — the round's invariant verdict, a held recipe, a chain-verifiable ledger line — refusing by name on every path the round can publish; the answer is written into that round's ledger line and `/iterate gate` reads it back | the gate reports and withholds; nothing in-process enforces it on the agent that drives the recipe, and neither product has a step executor, so it answers "may the recipe proceed", not "which step is next" — a progress pointer would have to be written by whoever performs the fix |
+   | ③ evidence → decision log | the reader that runs in production today is the **loop's**: `fix_proof` verifies GlassPane's ledger through the kernel's verifier before citing it, and a project can name that ledger as its source once (`.iterate/glasspane-ledger.json`, `/iterate glasspane-ledger <path>`), which pins the genesis entry so a replaced chain refuses with `LEDGER_LINK_E_STALE`. The fork carries the *same* verifier (`kernel.ts:verifyLedger`) and a fixed-point test proves a chain written by the loop verifies there — but its own production path writes its ledger rather than reading the loop's. So two writers agree byte-for-byte (sha256 `eaa9dc7d…`, three drafts, samples pinned in both suites) and only one of the two directions has a production reader | the two default ledger paths are still different files; the link makes the other harness's ledger this project's recorded default, and `GLASSPANE_DECISION_LOG` stays the one-shot override that outranks it |
+   | ④ repair → invariant re-check → re-verify | the recipe hand-off (`glasspane_recipe.py`) plus the gate that reads only measured things — the round's invariant verdict, a held recipe, a chain-verifiable ledger line — refusing by name on every path the round can publish; the answer is written into that round's ledger line — including the round that passed and therefore sent nothing (iterate-harness 2.11.1) — and both doors read it back, `/iterate gate` in a session and `ih iterate gate` in a terminal, while a contract refusal writes no ledger bytes | the gate reports and withholds; nothing in-process enforces it on the agent that drives the recipe, and neither product has a step executor, so it answers "may the recipe proceed", not "which step is next" — a progress pointer would have to be written by whoever performs the fix |
    | ⑤ provider contract | both surfaces register through the kernel and both consume their registry on the live path; `harness/tools/provider-surface.mjs` reconciles the two tables by *running* them (identity, overlap agreement, the asymmetry ledger) | the asymmetry (面 B forwards `diagnose-pixel`/`diagnose-probed`, 面 A does not) is deliberate and recorded, not eliminated |
 
 So the honest sentence is: *the harness consumes the shared kernel as a pinned dependency, and
