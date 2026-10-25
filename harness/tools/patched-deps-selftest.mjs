@@ -110,7 +110,19 @@ function build(name, want = {}) {
     lockEntries.push(`    ${JSON.stringify("other@1.0.0")}: ${JSON.stringify("patches/other@1.0.0.patch")},`)
   }
   const lockLines = [`  "patchedDependencies": {`, ...lockEntries.filter(Boolean), "  },"]
-  writeFileSync(path.join(dir, "bun.lock"), `{\n  "lockfileVersion": 1,\n${lockLines.join("\n")}\n}\n`)
+  // `want.packages` writes the lock's own package graph. Left undefined the fixture has no
+  // `packages` block at all — which is what the first 11 cases ran on, and what the gate reads as
+  // "this lock's layout I cannot interpret", falling back to the disk judgement. Cases 12–13 write
+  // a real block, because that is the difference between a stale store directory and a patch key
+  // that did not follow the dependency.
+  const packageLines = (want.packages ?? []).map((token) => {
+    const alias = token.slice(0, token.lastIndexOf("@"))
+    return `    ${JSON.stringify(alias)}: [${JSON.stringify(token)}, "", {}, "sha512-placeholder"],`
+  })
+  const blocks = packageLines.length === 0
+    ? lockLines
+    : [`  "packages": {`, ...packageLines, "  },", ...lockLines]
+  writeFileSync(path.join(dir, "bun.lock"), `{\n  "lockfileVersion": 1,\n${blocks.join("\n")}\n}\n`)
   writeFileSync(
     path.join(dir, "package.json"),
     `${JSON.stringify({ name: "fork-root", patchedDependencies: declarations }, null, 2)}\n`,
@@ -234,6 +246,46 @@ function run(built, ...args) {
   const b = build("bad-mode")
   const r = run(b, "--verify")
   check("an unknown mode exits 2 and names what it expected", r.rc === 2 && r.out.includes("expected --check"), `rc=${r.rc} ${r.out.slice(0, 300)}`)
+}
+
+// 12 — the machine-dependent verdict this gate had: the declared version sits in the store, and the
+// lock's own graph does not resolve that package at all. Nothing links those bytes, so this is a
+// `△` finding about a leftover, not a red about the install. Real shape: 2026-10-25, a store
+// directory from 2026-09-25 for a package absent from bun.lock — same commit, red here and `△` on CI.
+{
+  const b = build("stale-store", { withOther: true, packages: ["other@1.0.0", "unrelated@1.0.0"] })
+  const r = run(b, "--check")
+  check("bytes the lock does not resolve are a note, not a red", r.rc === 0, `rc=${r.rc} ${r.out.slice(0, 400)}`)
+  check("and the note says the lock, not the disk, is what decided", r.out.includes("not in bun.lock's package graph"), r.out.slice(0, 400))
+  check("and names the leftover directory it refuses to believe", r.out.includes(path.join("example@1.0.0", "node_modules", "example")), r.out.slice(0, 400))
+  check("while the declaration the lock does resolve still gets read", r.out.includes("1/2 declared patch(es)"), r.out.slice(0, 400))
+}
+
+// 13 — the other half, and the reason 12 is safe: the lock DOES resolve this package, just not at the
+// version the patch keys. That is the original accident (dependency moved, key stayed) and it has to
+// stay red even with a matching old copy still sitting in the store.
+{
+  const b = build("moved-on", {
+    installed: "1.0.0",
+    keyVersion: "1.0.0",
+    packages: ["example@2.0.0", "other@1.0.0"],
+    withOther: true,
+  })
+  const r = run(b, "--check")
+  check("a lock that resolves the package at another version goes red", r.rc === 1, `rc=${r.rc} ${r.out.slice(0, 400)}`)
+  check("and quotes the version the lock actually resolves", r.out.includes("bun.lock resolves example only at 2.0.0"), r.out.slice(0, 400))
+  check("and says which half moved", r.out.includes("a dependency that moved while this patch key stayed"), r.out.slice(0, 400))
+}
+
+// 14 — the gate's own kill switch: deleting the manifest's patchedDependencies block used to make it
+// answer 0/0 and exit 0, which is a pass bought by asking nothing.
+{
+  const b = build("no-declarations")
+  writeFileSync(path.join(b.dir, "package.json"), `${JSON.stringify({ name: "fork-root", patchedDependencies: {} }, null, 2)}\n`)
+  const r = run(b, "--check")
+  check("a manifest with no patch declarations left exits 2", r.rc === 2, `rc=${r.rc} ${r.out.slice(0, 300)}`)
+  check("and names the block it found empty", r.out.includes("no patchedDependencies declaration is left"), r.out.slice(0, 300))
+  check("and does not report a clean tree", !r.out.includes("declared patch(es) checked against installed bytes"), r.out.slice(0, 300))
 }
 
 console.log(

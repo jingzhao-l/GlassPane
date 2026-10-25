@@ -205,6 +205,49 @@ function lockedKeys() {
 }
 
 /**
+ * What `bun.lock` itself resolves: package name → the set of versions this install has to hold.
+ *
+ * `installCandidates` reads the filesystem, and the filesystem is not the graph. A store directory an
+ * older install left behind still has bytes, yet nothing links them, so judging "is this in the
+ * install" from disk alone gives one committed tree two verdicts: red on a machine holding a stale
+ * copy, `△` on a clean CI without one. Measured on 2026-10-25 against
+ * `@standard-community/standard-openapi@0.2.9` — absent from this lock (the whole package, every
+ * version), present in `node_modules/.bun` from a 2026-09-25 install — where the gate answered
+ * "the install was not told to apply it", a claim about an install that does not contain it.
+ *
+ * Returning `null` when there is no `packages` block is deliberate: that is a layout this reader does
+ * not understand, and then the honest answer is the weaker disk judgement plus the note the caller
+ * prints, not a confident "not in graph" built from a block it never parsed.
+ */
+function lockedGraph() {
+  const lockFile = path.join(productRoot, "bun.lock")
+  if (!existsSync(lockFile)) return null
+  const lines = readFileSync(lockFile, "utf8").split("\n")
+  const start = lines.findIndex((line) => /^\s*"packages":\s*\{/.test(line))
+  if (start === -1) return null
+  const versions = new Map()
+  let depth = 0
+  for (const line of lines.slice(start)) {
+    for (const ch of line) {
+      if (ch === "{") depth++
+      else if (ch === "}") depth--
+    }
+    const token = line.match(/:\s*\[\s*"([^"]+)"/)
+    if (token) {
+      const bare = token[1].split("+")[0]
+      const at = bare.lastIndexOf("@")
+      if (at > 0) {
+        const name = bare.slice(0, at)
+        if (!versions.has(name)) versions.set(name, new Set())
+        versions.get(name).add(bare.slice(at + 1))
+      }
+    }
+    if (depth <= 0) break
+  }
+  return versions
+}
+
+/**
  * Every place the install holds this package, de-duplicated by real path.
  *
  * Three sources, because the linker is not one thing. The isolated install puts every package under
@@ -258,11 +301,32 @@ export function measure() {
   let located = 0
   const declaredEntries = declared()
   const lock = lockedKeys()
+  const graph = lockedGraph()
   for (const entry of declaredEntries) {
     const patchFile = path.join(productRoot, entry.patchPath)
     const dirs = installCandidates(entry.name)
     if (dirs.length === 0) {
       notes.push(`△ ${entry.key}: not in this install graph — stale declaration, nothing to patch`)
+      continue
+    }
+    // Bytes on disk are only evidence of what this install holds when the lock cannot say. Where the
+    // lock can say, it wins: a copy of the declared version that the lock does not resolve is an
+    // artifact of some earlier install, and a copy of a package the lock resolves at another version
+    // is the original accident — the dependency moved and the patch key stayed.
+    if (graph !== null && !graph.get(entry.name)?.has(entry.version)) {
+      if (!graph.has(entry.name)) {
+        notes.push(
+          `△ ${entry.key}: not in bun.lock's package graph — ${dirs[0]} is bytes an older install left ` +
+            `behind, which nothing links, so there is no loaded copy of this patch to look at`,
+        )
+        continue
+      }
+      located += 1
+      problems.push(
+        `${entry.key}: bun.lock resolves ${entry.name} only at ${[...graph.get(entry.name)].join(" | ")} — ` +
+          `the declared version is not in the graph, which is the shape of a dependency that moved while ` +
+          `this patch key stayed where it was`,
+      )
       continue
     }
     // "located" answers a different question than "measured": how many declarations refer to bytes
@@ -398,6 +462,12 @@ if (isMain) {
     const { problems, notes, measured, located } = measure()
     // A tree where nothing could be located is not a clean tree. Without this, an empty or half-done
     // install answers "all declared patches are present" for the reason that no patch was looked at.
+    if (measured === 0) {
+      die(2, `no patchedDependencies declaration is left in ${path.join(productRoot, "package.json")} — `
+        + `this fork's install only stays patched while those declarations exist, so an empty list is the `
+        + `block having been deleted, not a clean tree. If deleting it is really intended, remove this gate's `
+        + `CI step in the same commit: silence has to be a decision, never a side effect of a manifest edit.`)
+    }
     if (measured > 0 && located === 0) {
       die(2, `none of the ${measured} declared patch(es) is in this install — nothing was measured, so "no failures" would be a claim about bytes nobody read`)
     }

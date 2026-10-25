@@ -14,7 +14,7 @@
     "mcpShell": {
       "loc": 11973,
       "files": 16,
-      "ratio": 0.2246,
+      "ratio": 0.2243,
       "byFile": {
         "mcp-shell/src/tools.ts": 3120,
         "mcp-shell/src/engine-client.ts": 1915,
@@ -35,7 +35,7 @@
       }
     },
     "fork": {
-      "loc": 10667,
+      "loc": 10737,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -130,7 +130,7 @@
         {
           "file": "script/patched-deps.mjs",
           "kind": "added",
-          "lines": 411
+          "lines": 481
         },
         {
           "file": "scripts/install.sh",
@@ -1163,7 +1163,7 @@
           "lines": 0
         }
       ],
-      "ratio": 0.2001,
+      "ratio": 0.2012,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
@@ -1179,7 +1179,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 22640,
+  "totalToolSurfaceLoc": 22710,
   "note": null,
   "carried": null
 }
