@@ -19,7 +19,7 @@
  */
 import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
@@ -72,6 +72,20 @@ function build(name, want) {
     path.join(dir, "bun.lock"),
     lockText(dir, want.lockVersion ?? want.pinVersion, want.lockSpecifier ?? "", want.lockIntegrity),
   )
+  // A second install at the package level: `installedDirs()` reads the package copy first, and the
+  // gate refuses outright when the two disagree — which copy the product loads is not knowable from
+  // here, so a pin recorded over the wrong one would be provenance fiction. Neither half of that
+  // refusal had ever been driven with real bytes until 2026-10-25.
+  if (want.packageLevelVersion) {
+    const atPackage = path.join(dir, "packages", "opencode", "node_modules", PACKAGE)
+    mkdirSync(path.join(atPackage, "fixtures"), { recursive: true })
+    mkdirSync(path.join(atPackage, "schemas"), { recursive: true })
+    writeFileSync(path.join(atPackage, "package.json"), `${JSON.stringify({ name: PACKAGE, version: want.packageLevelVersion }, null, 2)}\n`)
+    writeFileSync(path.join(atPackage, "fixtures", "a.ok-01.json"), '{"fixture":"a"}\n')
+    writeFileSync(path.join(atPackage, "fixtures", "b.ok-01.json"), want.packageCorpusB ?? '{"fixture":"b"}\n')
+    writeFileSync(path.join(atPackage, "schemas", "a.schema.json"), '{"schema":"a"}\n')
+    writeFileSync(path.join(atPackage, "schemas", "b.schema.json"), want.schemaBytes ?? '{"schema":"b"}\n')
+  }
   if (want.golden !== false) {
     writeFileSync(
       path.join(dir, "contracts", "kernel-pin.json"),
@@ -104,6 +118,29 @@ function lockText(dir, version, specifier, integrity) {
 
 function run(dir, ...args) {
   const r = spawnSync(process.execPath, [path.join(dir, "script", "kernel-pin.mjs"), ...args], { encoding: "utf8" })
+  return { rc: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` }
+}
+
+/**
+ * `--probe` spawns `npm` off PATH, so a probe case has to control PATH rather than the script.
+ * `npmStub` is the answer the fake registry gives; `null` means put no npm on PATH at all.
+ */
+function runProbe(dir, name, answer) {
+  const bin = path.join(root, `${name}-bin`)
+  mkdirSync(bin, { recursive: true })
+  if (answer !== null) {
+    writeFileSync(path.join(bin, "npm"), `#!/bin/sh\nprintf '%s\\n' ${JSON.stringify(answer)}\n`)
+    chmodSync(path.join(bin, "npm"), 0o755)
+  } else {
+    rmSync(path.join(bin, "npm"), { force: true })
+  }
+  const r = spawnSync(process.execPath, [path.join(dir, "script", "kernel-pin.mjs"), "--probe"], {
+    encoding: "utf8",
+    // With no stub the point of the case is that npm cannot be found, so PATH has to be only the
+    // empty bin directory — inheriting the real PATH leaves the real npm in reach and the probe
+    // answers (measured: it reported `DRIFTED — publishes 0.1.10`, exit 0, for want of a PATH).
+    env: { ...process.env, PATH: answer === null ? bin : `${bin}:${process.env.PATH}` },
+  })
   return { rc: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` }
 }
 
@@ -177,6 +214,49 @@ function run(dir, ...args) {
   writeFileSync(path.join(dir, "bun.lock"), lockText(dir, "0.1.7", "../kernel", INTEG))
   const r = run(dir, "--check")
   check("a non-registry resolution goes red", r.rc === 1 && r.out.includes("not the registry"), `rc=${r.rc} ${r.out.slice(0, 200)}`)
+}
+
+// 8 — two installs that disagree: the gate refuses instead of picking a winner. Nothing drove this
+// branch before 2026-10-25, so `installedDirs()`'s ordering and this refusal were both claims on paper.
+{
+  const dir = build("two-copies-disagree", { installedVersion: "0.1.5", pinVersion: "0.1.5", lockIntegrity: INTEG, packageLevelVersion: "0.1.7" })
+  const r = run(dir, "--check")
+  check("two disagreeing installs exit 2, not whichever order happens to suit", r.rc === 2, `rc=${r.rc} ${r.out.slice(0, 300)}`)
+  check("and name both paths", r.out.includes("two different iterate-kernel installs") && r.out.includes(path.join("packages", "opencode", "node_modules")), r.out.slice(0, 400))
+  check("and tell the operator what resolves it", r.out.includes("until they agree"), r.out.slice(0, 400))
+}
+
+// 9 — two installs that agree are fine, and the copy that gets hashed is the package-level one the
+// product resolves first. Proven by making only that copy's bytes differ: a root-only reading would
+// stay green here, which is exactly the false clearance the refusal in case 8 exists to prevent.
+{
+  const dir = build("two-copies-agree", { installedVersion: "0.1.7", pinVersion: "0.1.7", lockIntegrity: INTEG, packageLevelVersion: "0.1.7" })
+  check("agreeing installs pass", run(dir, "--check").rc === 0, run(dir, "--check").out.slice(0, 300))
+  writeFileSync(path.join(dir, "packages", "opencode", "node_modules", PACKAGE, "fixtures", "b.ok-01.json"), '{"fixture":"B-DIFFERENT"}\n')
+  const r = run(dir, "--check")
+  check("and the package-level corpus is the one being measured", r.rc === 1 && r.out.includes("fixtures/b.ok-01.json"), r.out.slice(0, 400))
+}
+
+// 10-12 — `--probe`'s exit code IS its consumer's verdict (the weekly kernel-drift job reads nothing
+// else). The 2026-10-16 fix that made "cannot ask" an exit 2 had no case driving it: the only probe
+// battery in the tree, probe-lane-selftest.sh, stubs hook-liveness.
+{
+  const dir = build("probe-same", { installedVersion: "0.1.7", pinVersion: "0.1.7", lockIntegrity: INTEG })
+  const same = runProbe(dir, "probe-same", "0.1.7")
+  check("a probe the registry answers is exit 0", same.rc === 0, `rc=${same.rc} ${same.out.slice(0, 300)}`)
+  check("and says the pin is the published latest", same.out.includes("is the published latest"), same.out.slice(0, 300))
+
+  const drift = runProbe(dir, "probe-drift", "0.2.0")
+  check("a newer published kernel is a finding, not a CI red (exit 0)", drift.rc === 0, `rc=${drift.rc} ${drift.out.slice(0, 300)}`)
+  check("and names both versions", drift.out.includes("DRIFTED") && drift.out.includes("publishes 0.2.0") && drift.out.includes("we pin 0.1.7"), drift.out.slice(0, 400))
+
+  const silent = runProbe(dir, "probe-silent", "")
+  check("a registry that answers nothing exits 2", silent.rc === 2, `rc=${silent.rc} ${silent.out.slice(0, 300)}`)
+  check("and says drift cannot be judged", silent.out.includes("answered nothing"), silent.out.slice(0, 300))
+
+  const missing = runProbe(dir, "probe-missing", null)
+  check("no npm on PATH exits 2 rather than reading as green", missing.rc === 2, `rc=${missing.rc} ${missing.out.slice(0, 300)}`)
+  check("and states that the question was NOT answered", missing.out.includes("the drift question was NOT answered"), missing.out.slice(0, 400))
 }
 
 console.log(failures === 0 ? "kernel-pin-selftest: every case verified red, and red for the named reason" : `kernel-pin-selftest: ${failures} assertion(s) FAILED`)
