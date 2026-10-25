@@ -35,6 +35,7 @@ GlassPane 补的就是这半个闭环。它把 macOS 应用的界面通过 MCP �
 - [接入 MCP 客户端](#接入-mcp-客户端)
 - [工具清单](#工具清单)
 - [证据包里有什么](#证据包里有什么)
+- [与审查回路的双向集成](#与审查回路的双向集成)
 - [权限与诚实性设计](#权限与诚实性设计)
 - [故障排查与 FAQ](#故障排查与-faq)
 - [安全](#安全)
@@ -356,6 +357,47 @@ node installer/cli.js --restore-launchd
   操作窗口内量到人手介入时才降为 `weak`；
 - 操作期间有其他输入进来时的**污染标记**；
 - `gp_restore` 需要重放的**检查点步骤**。
+
+## 与审查回路的双向集成
+
+GlassPane 是一半。另一半是
+[`iterate-harness`](https://pypi.org/project/iterate-harness/)——审查并修复代理在这里改动的代码的那个
+多轮回路。两边不靠聊天记录对接：跨越边界的东西都由一侧写成可核验的记录，另一侧读它。
+
+- **证据进入审计链。** 每次 `gp_*` 调用都回一个[证据包](#证据包里有什么)，而 harness 为每一条被记下
+  的决定追加一条哈希链账本条目——默认在 `~/.local/share/glasspane-harness/decisions.jsonl`，或由
+  `GLASSPANE_DECISION_LOG` 指到别处。审查回路把它自己的决定写进被审项目的
+  `.iterate/decision-log.jsonl`，用的是同一种链格式，所以两侧都能整链验通对方那本：被改过的行会被
+  拒绝并说清链断在第几行，答案不会出现"那就改用宽松读法"。
+  一个项目可以一次性把**对面那本**账本记为自己的修复证据来源，
+  `ih iterate glasspane-ledger <绝对路径>`：链接只可能在整链验通之后落笔，并钉住链的首条——被替换
+  而不是被延长的账本因此不再够格。
+- **审查维度跟着调用走。** 每一面各有 5 项工具接受可选的 `dimension` 参数（`gp_act`、`gp_observe`、
+  `gp_diagnose`、`gp_last_evidence`，加上 fork 侧的 `gp_probe_status` 与 MCP 层的 `gp_attach`）。
+  引擎按调用把声明回显回去，回路把它记成见证；与同一 operationId 上已有见证矛盾的决定会被拒绝
+  （`KERNEL_E_DIMENSION_CONTEST`），而不是悄悄变成第二份记录。
+- **复核不过，回路就回到应用本身。** 一轮的 invariant 复核失败时，回路会再次问那个正在跑的应用——
+  只读、走宿主自己的 MCP 通道，且只问 `gp_probe_status` / `gp_observe` / `gp_diagnose` /
+  `gp_last_evidence` / `gp_recent_reports`。会改动应用的调用被点名拒绝；这条通道里没有任何东西能替
+  你点鼠标。
+- **压缩知道这次查了什么。** 长会话被摘要时，harness 会把这条会话的证据锚点重新注入——operationId、
+  结果、台账行号与条目哈希——摘要因此不能把回到链上的指针弄丢。这次运行的计划
+  （`.iterate/run-plan.json`，或 `GLASSPANE_RUN_PLAN`）决定谁先被丢：本轮从没声明过的维度历史排在声明过的
+  之前，而且注入的块会说出它用的是哪条规则。声明了维度却进不了锚点的那些调用（引擎只给
+  `gp_last_evidence` 附证据包）也会被数出来打印，所以这条缺口是一个读数，不是某段希望仍然成立的
+  文字。
+- **修复不靠代理自称就算完成。** 回路在推进一份修复配方之前读三件实测的东西：本轮的 invariant 判定、
+  项目的配方（`recipeConfigPath`，或 `GLASSPANE_RECIPE`），以及一条链可验、按 operationId 记着通过
+  结果的账本行。缺任何一件或判定是"未量到"都具名拒绝（`RECIPE_GATE_E_*`），答案随它那一轮的账本行
+  一起落盘，两扇门都读得回来：session 里 `/iterate gate`，终端里 `ih iterate gate`。
+- **两个工具面说的是同一份 provider 契约。** fork 与 MCP 层各自注册同一个 provider id 和每个方法相同的
+  先决条件，而有一把尺子跑的是两侧的注册代码本身（不是 grep）：两边一旦说得不一致，或者"哪些方法只在
+  一边"不再是一份被记下来的清单，它就红。
+
+各归各位的部分：应用做了什么由引擎判定，两个 harness 都不自行给界面下结论。那道闸只报与拦，它不执行
+配方——两个产品都没有配方执行器，进度指针得由真正动手修的那一侧写进账本。两边吃的是同一份发布出去的
+契约层 [`iterate-kernel`](https://www.npmjs.com/package/iterate-kernel)，所以上面这些格式都不是两份手抄的
+副本：两份实现真漂开，就会在一侧的闸上变红，而不是变成两个各自演化的文件。
 
 ## 权限与诚实性设计
 
