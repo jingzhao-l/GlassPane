@@ -21,15 +21,24 @@
   压缩不再把"已经查过的维度"的记录当成"无关历史"扔掉，也不会把没查的当成"已查"。
   同一场景剩下的那条不对称也从注释变成了数：块里会打印"声明了维度、却没进到任何锚点"的调用条数
   （`declaredWithoutAnchor`），引擎的证据发射面哪天加宽，这个数自己会掉下去。
-- **场景③④ 的跨仓部分**在另一条分支上（`iterate-skill`），本段的账只记父仓/harness 这一侧；
+- **场景③④ 的跨仓部分已落 `iterate-skill` 的 main**（那边 `origin/main = 829fda39`），本段的账仍只记
+  父仓/harness 这一侧。这一批在那边补的是两件"能做但没人配置 / 能答但没人问"的事：③ 的对面台账可以
+  被项目记为默认（`.iterate/glasspane-ledger.json`，链接前先整链验通、钉 `genesisEntryId`，被替换的链
+  回 `LEDGER_LINK_E_STALE`），④ 的判定闸随它那一轮的账本行落盘，并有**两扇门**能读回来——session 内
+  `/iterate gate` 与终端 `ih iterate gate`（`ih iterate glasspane-ledger [<绝对路径>]` 同理）。
   两侧的字节级互认证据（同一条链、两个 writer 逐字节相同）记在
-  `harness/glasspane-harness/SYNCLOG.md` 的 2026-10-25 一条。
+  `harness/glasspane-harness/SYNCLOG.md` 的 2026-10-25 那两条。
 - **维度回显链第一次端到端有读数**：拿 registry 上的 `glasspane-mcp@1.20.2`（隔离前缀安装，
   不动 `/usr/local`）连本机活着的 daemon 调 `gp_last_evidence {operationId, dimension}`，回包是
   2 个 content item，逐 item 分类拿到 `echoed_dimension="security"`，写进见证后对矛盾的声明
   回 **`KERNEL_E_DIMENSION_CONTEST`**。同一份走查指到本机那份 1.6.2 时是
   `GP_E_BAD_PARAMS: Unrecognized key(s) in object: 'dimension'`——旧壳不是"不回显"，是**不接受这个入参**，
   失败是响的。把本机全局壳升上去属用户的决定（另一条线可能正在用它做真机走查）。
+  **用户已决定并升完**：`npm i -g glasspane-mcp@1.20.2 glasspane-install@1.20.2`（registry 的 `latest`
+  此刻就是 1.20.2——1.21.0 只打了 tag，npm 那一格还没发），同一条走查指 `/usr/local/bin/glasspane-mcp`
+  重跑：2 个 content item、`state=answered`、`echoed_dimension="security"`、见证写入、矛盾声明
+  `KERNEL_E_DIMENSION_CONTEST`。"本机那份旧壳不接受 `dimension` 入参"从此不再是本机状态。
+  `glasspane-harness@0.9.0` 那一份全局没动：它不在这条回显链上。
 - **`mcp-shell` 的一条测试腿补真**：`src/dimension.ts` 的头注一直说测试会把广告出去的 dimension
   上限跟 `kernel/schemas/*.json` 比，实测没有比。改的是测试而不是注释：遍历镜像全部 schema，
   覆盖 `dimension` / `dimensions` / `$defs/*Dimension/properties/id` 三种形状（run-plan 用的是第三种），
