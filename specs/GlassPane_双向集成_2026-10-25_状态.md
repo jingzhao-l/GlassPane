@@ -10,11 +10,10 @@
 | 仓 | 分支 / 提交 | 发布 |
 |---|---|---|
 | iterate-skill | **已并 main 并推送**：`origin/main` = `829fda39`（本会话 7 笔：④ 配方+闸、③ 链路与读者、终端那扇门、语料 pin 追到 0.1.10） | 未取号（harness 侧 Python 包随 iterate-skill 发布线走；2.10.0 由发布线在 10-24 取走） |
-| GlassPane（含 harness） | **已并 main，未推**：本地 main = `5964aed6`，其中我的部分 `c4556a9b`（merge）+ `4b44a33b`（金样）；`origin/main` 仍停在 `9acda519`（本地领先 15 笔，其中 12 笔属发布线自己） | 未取号（harness 0.10.5 / 父仓 1.21.0 已由发布线落地，本批字节不在其中） |
+| GlassPane（含 harness） | **已并 main，未推**：写入这一格时量到 main = `b1d5ac7e`、`origin/main` = `9acda519`、`ahead=18`；我的 7 笔是 `6e630b05`/`e4a312cc`/`7fb73921`/`b4c5b4cb`（分支内容）+ `c4556a9b`（合并）+ `4b44a33b`（金样）+ `e8a14300`（台账），其余 11 笔属发布线。读的时候先复量：`git -C /Volumes/Eng-Dev/GlassPane fetch origin && git -C /Volumes/Eng-Dev/GlassPane rev-list --count origin/main..main` | 未取号（harness 0.10.5 / 父仓 1.21.0 已由发布线落地，本批字节不在其中） |
 
-推不推的判据不是保守：**GlassPane 的本地 main 领先 origin 15 笔，其中 9 笔属并行那条发布线**
-（我这一批是 6 笔：`6e630b05`/`e4a312cc`/`7fb73921`/`b4c5b4cb` 四笔分支内容 + 合并笔 `c4556a9b` +
-金样笔 `4b44a33b`），替他们推出去等于代他们发布（`不可代推`是这条仓的既有纪律）。
+推不推的判据不是保守：**GlassPane 本地 main 领先 origin 的那些笔里，多数属并行那条发布线**（写入这格
+时是 11 比 7），替他们推出去等于代他们发布（`不可代推`是这条仓的既有纪律）。
 `release-artifact` 那条"发布物 == 主干"的等式此刻仍红（见下），修它的下一步是 re-split + 取 0.10.6，
 同样归发布线。
 
@@ -133,7 +132,9 @@ git -C /Volumes/Eng-Dev/GlassPane merge --no-ff gp-bidi-20261024   # = c4556a9b�
 
 仍归发布线（不是"我没时间"，是**不该由这条会话做**）：
 
-1. 推 GlassPane 的 main —— 本地领先 origin 15 笔，其中 9 笔是发布线自己的字节，代推＝代发布。
+1. 推 GlassPane 的 main —— 本地领先 origin 的那一叠笔里多数是发布线自己的字节（写入这格时 18 笔中
+   占 11），代推＝代发布。要不要连他们的一起推，由那条线自己决定；先复量
+   `git -C /Volumes/Eng-Dev/GlassPane rev-list --count origin/main..main`。
 2. `git subtree split --prefix=harness/glasspane-harness -b split/glasspane-harness` + 快进推送，
    再切 **harness 0.10.6** 补上"发布物 == 主干"。`release-artifact --check` 在合并树 `c4556a9b` 上
    量到的读数是 `0 agreement(s) / 2 problem(s)`（trunk `1be98d92` 对 v0.10.5 的 `dea2c83a`），
