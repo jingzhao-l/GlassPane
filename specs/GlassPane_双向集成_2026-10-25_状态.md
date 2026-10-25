@@ -9,7 +9,7 @@
 
 | 仓 | 分支 / 提交 | 发布 |
 |---|---|---|
-| iterate-skill | **已推**：`main` == `origin/main` == `fd8b1381`（本会话在其上的笔：`80126520` 验收脚本、`e39a33bd` README、`832171b4` **2.11.0 取号**、`161f352e`/`67f904c5` 发布账与仪表、`52c79227` 复审修复、`e97f11ec` **2.11.1 取号**、`92101c17` 操作者验收、`fd8b1381` 第三次仪表） | **2.11.1 三格齐**：独立仓 tag + GitHub Release（3 件资产、wheel 1,052,100 字节）+ PyPI + npm；三条通道的同一份 wheel 字节逐字相等（`cbfc86cc…`）。本机全局 `iterate-harness@2.11.1` |
+| iterate-skill | **已推**：`main` == `origin/main` == `e3cb801f`（本会话在其上的笔：`80126520` 验收脚本、`e39a33bd` README、`832171b4` **2.11.0 取号**、`161f352e`/`67f904c5` 发布账与仪表、`52c79227` 复审修复、`e97f11ec` **2.11.1 取号**、`92101c17` 操作者验收、`fd8b1381` 第三次仪表、`e3cb801f` 第四次（把 pytest 从日志管道上摘下来）） | **2.11.1 三格齐**：独立仓 tag + GitHub Release（3 件资产、wheel 1,052,100 字节）+ PyPI + npm；三条通道的同一份 wheel 字节逐字相等（`cbfc86cc…`）。本机全局 `iterate-harness@2.11.1` |
 | GlassPane（含 harness） | **已推**：`main` == `origin/main` == `ad2e3306`（README 改写 `6894c8c9` + 台账 `3af5dd2b`/`ee5e1b67`/`f91d8d5e`/`ad2e3306`）；fork 树本会话**一个字节未动**（`git diff --stat -- harness/` 空） | harness **0.11.0**、父仓 **1.21.0** 均在 registry（`npm view glasspane-harness version` = 0.11.0、`glasspane-mcp` = 1.21.0）。`release-artifact --check` **rc=0**：`✓ split-main == 主干树（962b1430…）` + `△ artifact 仅落后 31 行 SYNCLOG（发布自己那一笔），非台账差异 0 处` |
 
 推不推的判据不是保守，但**它的结论本会话变了**：先前那格写"本地领先 origin 的 18 笔里 11 笔属发布线，
@@ -154,19 +154,27 @@
       "bootstrap timed out… check your network access to the index and retry"，没有静默装旧的；收口把
       **digest 对上的**本地 wheel 装进包装器 venv，`ih` 随后报
       `iterate-harness 2.11.1 was installed by another process; reusing it.`（那正是并发守卫该有的读数）。
-    - **仍挂着的一格，且我先前给的原因被自己收回**：main CI 的 `Python tests (3.10/3.11)`。
-      第二次仪表（独立 `--collect-only` 一步 + `-v` + job 级 `timeout-minutes: 90`）在 run
-      40179763746 上给出的读数是：`Collect the suite` **13 秒通过**（收集期与 import 阻塞被排除），
-      `Run test suite` 09:13:44 → **09:58:45 = 45 分 01 秒**，两条 matrix 同一秒，日志照旧
-      `log not found`。于是"通道沉默触发失联"这句也站不住——`-v` 期间通道不沉默。本机再量两条把
-      剩下两条容易的解释排掉：空闲 `pytest -q tests` = **115.59s**（3089 条收集），
-      `/usr/bin/time -l` 的 maximum resident set = **286,605,312 字节 ≈ 273 MB**（7 GB 的 runner，
-      OOM 讲不通）；而 `timeout-minutes: 90` 写在自家 job 上却没生效 ⇒ 那把刀不在本工作流里。
-      第三次仪表是一根**会自己结束、因而会留下日志**的硬停（`timeout --kill-after=60 1200` 包 `-v`），
-      三种可能读数各对应下一步（summary 在末尾＝卡在进程退出；名单断在中途＝某条具名用例在 ubuntu
-      上等；仍 45:00 整断＝上限在外面，按目录拆步）。判据与禁忌写进 step 注释，并由新加的
-      `tests/test_ci_workflow_shape.py`（8 条，四条反向变异各点名变红）钉住"这一步还带着哪三件探针"。
-      **这一格落地前，本版"CI 绿"不成立**；其余四格成立。
+    - **仍挂着的一格，且我给过的原因被自己逐条收回**：main CI 的 `Python tests (3.10/3.11)`。
+      六次同死法（`40103418285`/`40167475388`/`40168346235`/`40171467085`/`40179763746`/
+      `40182760503`），两条 matrix 每次**同一秒**结束、距起跑正好 45:00-45:01，日志从不上传。
+      被量掉的解释依次是：`faulthandler_timeout=300 + exit_on_timeout`（它只在**用例进行中**才 dump，
+      带上照旧死）；收集期与 import 阻塞（`Collect the suite` **13 秒通过**）；太慢（本机空闲
+      `pytest -q tests` = **115.59s / 3089 条**）；太吃内存（`/usr/bin/time -l` 的 maximum resident
+      set = **286,605,312 字节 ≈ 273 MB**，对面 7 GB）；自家 job 的 `timeout-minutes: 90`
+      （它没生效，刀不在本工作流里）。**第三次仪表答了第四种，才把机制钉住**（run 40184095706）：
+      步骤跑到 **27 分钟仍在继续**——比它自己 1200 s 的硬停晚 7 分钟、`--kill-after=60` 早过完；
+      取消之后 `runs/{id}/logs` 归档里**仍然只有三条成功的 job**。两条事实合起来只指向 **fd**：
+      ① 组被 SIGKILL 后仍拖着步骤 ⇒ 握着不放者在组外——本套件五处以 `start_new_session=True` 起孩子
+      （`tasks/manager.py`、`tools/bash_tool.py`、`hooks/executor.py`、`services/cron_scheduler.py`、
+      `tools/remote_trigger_tool.py`），这种会话领导者**继承这一步的 stdout 且永不 EOF**；
+      ② 从来没有日志是因为 **pytest 在非 TTY 下块缓冲**（本机实测 `-v` 接管道：12 秒 0 字节、24 秒
+      才 519 字节，一次 flush 要几十条用例），2 核 runner 上 45 分钟可以一次都不 flush ⇒
+      看门狗判死 runner、缓冲一起没。**所以"沉默不触发失联"那句也收回：墙量的正是沉默，
+      只是它数的是"多久没说话"，不是"说了多少"。** 修法跟着机制走：把 pytest 从那根管道上摘下来
+      （`> pytest-ci.log 2>&1` 之后再 `cat`），硬停留着；判据由 `tests/test_ci_workflow_shape.py`
+      钉住（`timeout`／重定向＋`cat`／`-v`／faulthandler 两个 ini，抽掉任一件红在该件上，
+      四次反向变异各点名变红）。**下一问交给带这条修复的那次运行：日志到手之后，名单停在哪一行。**
+      **这一格落地前本版"CI 绿"不成立**；其余四格（tag／Release／PyPI／npm）成立。
 
 ## 第二十次补记（同日）· 两条 README 由"读代码的人"复审，判出四句假、两句半真
 
