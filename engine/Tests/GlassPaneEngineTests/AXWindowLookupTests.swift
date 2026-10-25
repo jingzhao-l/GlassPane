@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import ApplicationServices
 import CoreGraphics
 @testable import GlassPaneEngine
 
@@ -87,6 +88,42 @@ final class AXWindowLookupTests: XCTestCase {
         XCTAssertEqual(AXChannel.frontmostWindow(in: list, for: 500)?.0, 2)
     }
 
+    /// 哪些 pid 此刻真的拥有一个**标准窗口**——判据取 Accessibility（`AXSubrole`
+    /// = `AXStandardWindow`），不取 CG 层号：层区间正是本文件要验证的东西，用它的产物
+    /// 当自己的前置条件就是让产品自己出题。最小化的标准窗口不算（它不在在屏列表里，
+    /// 算进去会让断言拿一个"截不到"的结果去指控层规则）。
+    ///
+    /// 没有辅助功能席位时**跳过并说清缺的是哪一把席位**——这不是放宽判据，是本机确实
+    /// 问不到这个事实；把"问不到"报成"通道死了"或"通道好了"都是撒谎。
+    private func standardWindowOwners() throws -> Set<Int> {
+        guard AXIsProcessTrusted() else {
+            throw XCTSkip(
+                "本进程没有辅助功能席位（AXIsProcessTrusted() == false）：AX 划不出候选集，"
+                    + "本机此刻验证不了层区间；跳过不等于通过"
+            )
+        }
+        var owners: Set<Int> = []
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+            let application = AXUIElementCreateApplication(app.processIdentifier)
+            var windowsValue: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &windowsValue) == .success,
+                  let windows = windowsValue as? [AXUIElement] else { continue }
+            let hasStandard = windows.contains { window in
+                var subrole: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subrole) == .success,
+                      (subrole as? String) == (kAXStandardWindowSubrole as String) else { return false }
+                var minimized: CFTypeRef?
+                if AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimized) == .success,
+                   minimized as? Bool == true {
+                    return false
+                }
+                return true
+            }
+            if hasStandard { owners.insert(Int(app.processIdentifier)) }
+        }
+        return owners
+    }
+
     /// 对着**此刻真机**的列表跑一遍：合成夹具能钉住"键名与层规则本身对不对"，钉不住
     /// "这台机器现在真的发出这些键、且层规则没有把全部窗口滤光"。
     ///
@@ -99,8 +136,13 @@ final class AXWindowLookupTests: XCTestCase {
     /// 状态项 25×16、悬浮球 27），一个应用窗口都没有，此时"0 个能通过层规则"是**正确的
     /// 产品行为**，而断言把它报成"像素通道又死了"。一个会因为桌面状态变红的控制，最后就是
     /// 被人忽略的控制——那条让键名写错活了十天的路，正是从"失败被包装成听起来合理的解释"
-    /// 走过来的。现在改用 `NSRunningApplication.activationPolicy` 划候选集（这个判据不由
-    /// 层规则定义，也不由本文件定义），有真应用窗口才允许断言。
+    /// 走过来的。
+    ///
+    /// 2026-10-24 实测：`activationPolicy == .regular` 这一层也不够。本机当时唯一的常规应用
+    /// 在屏窗口是 TRAE CN 的一枚 60×60 悬浮球（CG 层 101，AX 子角色 `AXDialog`），它把候选集
+    /// 撑成非空，于是断言又跑了一次，并把"产品正确地拒掉了它"报成"像素通道又死了"。换成
+    /// **Accessibility 说了算**的候选集（见 {@link standardWindowOwners}）：判据来自另一个子系统、
+    /// 不由层规则定义、也不由本文件定义，而"应用的标准窗口"正是像素通道该截走的东西。
     func testLiveWindowListIsSelectableByTheCurrentKeysAndLayerRules() throws {
         guard let raw = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
                 as? [[String: Any]] else {
@@ -114,25 +156,21 @@ final class AXWindowLookupTests: XCTestCase {
             withOwnerKey.count, raw.count,
             "\(raw.count) 个在屏窗口里只有 \(withOwnerKey.count) 个带 kCGWindowOwnerPID —— 其余会被静默跳过"
         )
-        // Finder owns the desktop, which the product must refuse; an accessory
-        // process owns the chrome, which it must also refuse. Neither belongs in
-        // the set that decides whether this machine has anything to prove.
-        let appWindows = withOwnerKey.filter { window in
-            guard let owner = window["kCGWindowOwnerPID"] as? Int,
-                  let app = NSRunningApplication(processIdentifier: pid_t(owner))
-            else { return false }
-            return app.activationPolicy == .regular && app.bundleIdentifier != "com.apple.finder"
-        }
         let histogram = raw.compactMap { $0[kCGWindowLayer as String] as? Int }
             .sorted()
             .reduce(into: [Int: Int]()) { counts, layer in counts[layer, default: 0] += 1 }
             .sorted { $0.key < $1.key }
             .map { "\($0.key)×\($0.value)" }
             .joined(separator: " ")
+        let owners = try standardWindowOwners()
+        let appWindows = withOwnerKey.filter { window in
+            guard let owner = window["kCGWindowOwnerPID"] as? Int else { return false }
+            return owners.contains(owner)
+        }
         guard !appWindows.isEmpty else {
             throw XCTSkip(
-                "活列表里 \(raw.count) 个在屏窗口没有一个是常规应用拥有的（层号直方图：\(histogram)）"
-                    + " —— 本机此刻验证不了层区间；跳过不等于通过"
+                "活列表里 \(raw.count) 个在屏窗口没有一个是 Accessibility 认定为标准窗口的常规应用拥有的"
+                    + "（层号直方图：\(histogram)） —— 本机此刻验证不了层区间；跳过不等于通过"
             )
         }
         let selectable = appWindows.filter { window in

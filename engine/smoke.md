@@ -21,10 +21,17 @@
 
 ```sh
 cd engine
-SOCK=/tmp/glasspane-smoke.sock
+# 2026-10-24 更正：这一步原来写 SOCK=/tmp/glasspane-smoke.sock，而 macOS 的 /tmp 是符号链接
+# （/tmp -> private/tmp）。SocketDirectoryRule.enforce 对符号链接叶子一律先拒再谈 chmod，
+# 所以照原文跑第一条命令今天就是一条具名失败（实测：`socket directory /tmp is not isolated:
+# /tmp is a symlink … refusing to serve`，退 1）。/.signal_smoke.py 早在 2026-10-14 就迁到
+# /var/tmp，文档没跟着迁。状态根同理：--state-dir 不给就落 ~/.glasspane，那条警告会说。
+WORK="$(mktemp -d /var/tmp/glasspane-smoke-XXXXXX)"
+SOCK="$WORK/engine.sock"
 
-# 1. 启动 daemon（verbose 日志走 stderr）
-swift run glasspaned --socket-path "$SOCK" --verbose &
+# 1. 启动 daemon（verbose 日志走 stderr）；档案/审批/注册表都关进本次冒烟自己的根，
+#    不写 ~/.glasspane 里那些真档案
+swift run glasspaned --state-dir "$WORK" --socket-path "$SOCK" --verbose &
 sleep 3
 
 # 2. 完整循环：attach -> act -> observe -> assert -> diagnose -> last_evidence
@@ -37,7 +44,14 @@ printf '%s\n' \
   '{"id":6,"method":"last_evidence"}' \
   '{"id":7,"method":"shutdown"}' \
   | /usr/bin/nc -U "$SOCK"
+
+# 3. 收尾：把本次冒烟自己的根整棵删掉（里面只有这趟创建的 socket、档案与台账）
+rm -rf "$WORK"
 ```
+
+> 这条流程**必须**指着自己起的隔离 socket 与隔离状态根跑：现网
+> `~/.glasspane/engine.sock` 上服务的是这台机器装着的那份 daemon，把下面任何一条命令
+> 打到它身上（尤其是 `shutdown` 与 `--prune-evidence`）就是改用户的真状态。
 
 > selector 的 `title` 按被测 app 的实际 AX 标题替换（可先用一次 observe 查看树）。
 
