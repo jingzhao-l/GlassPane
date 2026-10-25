@@ -508,11 +508,65 @@ jobs:
             exit 1
           fi
           case "$out" in
-            *"assertion(s) FAILED"*|*"nothing was measured"*)
-              echo "::error::MCP 重定向闸的自测以 exit 0 回答了自己的失败——它把红吞成了绿。remedy：查它末尾的 process.exit 是否还跟着 failures 计数。"
+            *"every case verified red, and red for the named reason"*) ;;
+            *)
+              echo "::error::MCP 重定向闸的自测以 exit 0 回来却没给出它自己的通过句（「every case verified red, and red for the named reason」）。remedy：查 harness/tools/mcp-redirect-policy-selftest.mjs 末尾是否还打印那句并跟着 failures 计数退出。判据是「通过句在不在」而不是「FAILED 字样在不在」——用例名里本来就带「nothing was measured」这类字样，搜失败子串会把一次通过的运行判成红（同一天下面那条 step 就是这么错的）。"
               exit 1 ;;
           esac
           echo "MCP 重定向闸自测已测量：每个变异都因它点名的那个原因变红"
+
+      # 依赖升上去 ≠ 发布物里没有旧拷贝。2026-10-24 用 bun 自己的 metafile 量了一次：release bundle 里
+      # 同时有 zod@4.6.7（我们 import 的那份）、zod@4.4.3（@modelcontextprotocol/sdk 的嵌套解析）与
+      # zod@3.25.76（gitlab-ai-provider 钉死 ^3.25.76），后两份都在 GHSA-mrhx-c7xc-m3w5 的 < 4.6.6 里。
+      # 原因是 build.ts 除了 node-gyp 什么都捆，而那个 provider 是用字面量 specifier import 的——
+      # "不是我们 import 的那一份"这句真话不完整：捆进来就是我们的字节。
+      # 这条闸不替第三方决定它的 zod major（那需要 overrides，而 gitlab 那条测不到：它的 provider
+      # 测试在 CI 与本机都是网络红），它做的是把"哪些拷贝进了 bundle、各为什么"变成有名单的量：
+      # 新拷贝没记账就红，拷贝**离开** bundle 不红（那是修好了），每次并报有几份仍在脆弱区间。
+      # 跑在上面那次 bun install 之后：它问的是 bundler，需要装好的 workspace。
+      - name: "Every zod copy in the release bundle is accounted for"
+        run: |
+          set -euo pipefail
+          rc=0
+          out="$(node harness/tools/zod-bundle.mjs 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -eq 2 ]; then
+            echo "::error::bundle 归因闸回答「测不到」（上面说了为什么）。remedy：这条 step 跑在 setup-bun 与 bun install 之后，所以缺 bun / 缺 harness/contracts/zod-bundle.json / probe 建不起图都是缺陷——按上面那句修，别把它改成 exit 0。"
+            exit 1
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::release bundle 里出现了一份 harness/contracts/zod-bundle.json 没记账的 zod 拷贝（上面 FAIL 点名是哪一份）。remedy：查是谁把它带进图的（bun 的 metafile 写着模块数），要么把它从依赖图里拿掉，要么在契约里给它一条**说得清理由**的记录——写「whitespace」这类空理由不算记账。"
+            exit 1
+          fi
+          case "$out" in
+            *"zod-bundle — "*) ;;
+            *)
+              echo "::error::bundle 归因闸以 exit 0 回来却没报它的读数行「zod-bundle — …」。remedy：查 harness/tools/zod-bundle.mjs 是否在打印之前就退出。"
+              exit 1 ;;
+          esac
+          echo "bundle 归因已测量：每一份拷贝都有名字，脆弱份数已并报"
+
+      # 上面那条闸的自测：新拷贝必须具名红、记错脆弱性必须具名红、**拷贝离开 bundle 不得红**（挡进步的
+      # 闸会被关掉），外加四种「测不到」与「bun 不在 PATH」。它自己在 product-surface 的
+      # selftest-wired 名单里（那条今天从手抄名单改成扫 harness/tools/*-selftest.*，所以新自测一落地
+      # 就有接线义务，这道闸也是本轮当场逮到这条没接的）。
+      - name: "The zod bundle gate can still go red, for each reason separately"
+        run: |
+          set -euo pipefail
+          rc=0
+          out="$(node harness/tools/zod-bundle-selftest.mjs 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::bundle 归因闸的固定点测试以 exit $rc 失败（上面 FAIL 点名是哪条：某个变异没落地、还是某条红退化成了通用文本）。remedy：按它点名的那条修 harness/tools/zod-bundle.mjs 的判决分支——包括那条「拷贝离开 bundle 不许红」，把它也判红的话，这闸一周内就会被人关掉。"
+            exit 1
+          fi
+          case "$out" in
+            *"every case verified red, and red for the named reason"*) ;;
+            *)
+              echo "::error::bundle 归因闸的自测以 exit 0 回来却没给出它自己的通过句（「every case verified red, and red for the named reason」）——它把自己的结果藏起来了。remedy：查 harness/tools/zod-bundle-selftest.mjs 末尾是否还打印那句并跟着 failures 计数退出。这里刻意不搜「FAILED」这类子串：这条自测的用例名里就有「nothing was measured」这种字样，搜失败子串会把一次通过的运行判成红（本轮本机实跑正是这么错的）。"
+              exit 1 ;;
+          esac
+          echo "bundle 归因闸自测已测量：每条红都因为它点名的那个原因红"
 
       # 上面那条锚闸自己能不能红？它比的是两个远端 ref 的 tree 哈希，而"取不到远端"和"取到了但
       # 不等"这两种回答必须不同——否则一次网络抖动就会把它变成常绿的装饰。这条自测用 file:// 上的

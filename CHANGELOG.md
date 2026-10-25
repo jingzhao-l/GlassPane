@@ -35,6 +35,54 @@
   `kernel/` 无提交改动。`node --test test/*.test.mjs` 621 pass / 0 fail。
 
 
+**这一格是父仓侧的尺子，它不消耗 harness 版本号。** 三个新文件在 `harness/tools/`、一份新契约在
+`harness/contracts/`、`ci.yml` 两步、`product-surface` 的地板 8→9，fork 树一行未动，所以 harness 侧
+不取号；父仓侧这一笔和上面那条 provider-surface 同进同退——按本节自己的定义，此刻这些字节在主干、
+既不在 v1.20.2 的归档里也不在 registry 上，下一次父仓取号一起交出去。
+
+### Added — 发布物里有几份 zod，现在是有名字的量
+
+- **实测，不问 lock 也不问 Dependabot**：`harness/tools/zod-bundle-probe.ts` 用 bun 自己的 bundler 问
+  同一条图——`entrypoints` 与 `external` 都从 `script/build.ts` 里读它自己声明的那两份，不重述；
+  带 metafile 建图，然后数落进图的 `node_modules/.bun/zod@<version>` 路径。2026-10-24 的读数：
+  `zod@4.6.7`（107 个模块文件）、`zod@4.4.3`（34）、`zod@3.25.76`（10），后两份都落在
+  GHSA-mrhx-c7xc-m3w5 的 `< 4.6.6` 里。1.20.2 关掉的父仓两条告警说的是**我们 import 的那一份**，
+  这句真话不完整：`script/build.ts` 除了 `node-gyp` 什么都捆，而 `gitlab-ai-provider` 是用字面量
+  specifier import 的——捆进来就是我们的字节。探针丢掉的输入（`.gen.ts` 那个由构建自己生成的入口、
+  按平台安装的 native 包）都写进读数里，因为它们决定了这条判决能主张多大范围。
+- `harness/tools/zod-bundle.mjs` + `harness/contracts/zod-bundle.json` + 一条 21 断言的自测，
+  接进 `ci.yml` 的 `harness-rulers` 两步。这条闸判的不是"干净"，是**"有记账"**：新拷贝没有理由记录 ⇒ 红；
+  账上写"安全"而算法算出它在脆弱区间 ⇒ 红（"记录与算法不一致"）；版本排不出序 ⇒ 红（排不了序的拷贝
+  不是它能原谅的拷贝）；拷贝**离开** bundle ⇒ 不红，只报"那是修复落地了，请把账改掉"——判进步的红会被
+  关掉，所以这一条是这条闸能不能活过第一周的关键；模块数变了只打 `△`，因为这条闸拿住的是拷贝的**集合**
+  而不是图的大小。三码照旧：0 记账齐、1 判决不过、2 测不到（缺 bun / 缺契约 / 契约没写
+  `advisory.fixedIn` / 读数不是 JSON / 读数里一份 zod 都没有——"没量到"永远不等于"没有洞"）。
+- 本轮**没做**的那个决定也记进契约，并写清为什么没做：给第三方钉 zod major 需要 `overrides`。
+  `@modelcontextprotocol/sdk` 声明 `^3.25 || ^4.0`，4.6.7 本来就在它自己声明的范围内，只是锁里还留着
+  旧记录；`gitlab-ai-provider` 声明 `^3.25.76`，4.x 在范围外——覆盖它等于给别人做一次 major 升级，
+  而那个 provider 自带的测试在本机与 CI 都是网络红，改完证不了。按"不在证不了的测试路径上替别人决定
+  运行时形状"处理：记账、每次并报份数、不动。
+
+### Fixed — 两条 CI 判据会把通过的运行判成红
+
+- `ci.yml` 里 MCP 重定向自测那步（以及新加的这条自测）过去靠"输出里出现 `assertion(s) FAILED` 或
+  `nothing was measured` 就红"来防"吞掉自己的失败"。这条判据过宽：自测的**用例名**里本来就带
+  `nothing was measured` 这种字样，本机实跑时它把一次通过的运行（rc 0、21 条断言全 ok）判成了红。
+  两步都换成正向判据——必须出现该自测自己打印的通过句
+  `every case verified red, and red for the named reason`，缺席才红。判据该问"承诺在不在"，
+  不该问"失败字样在不在"。
+- `product-surface` 的 `selftests` 地板 8→9，并把 `zod-bundle-selftest.mjs` 加进必须存在的名册。
+  这条今天刚从手抄名单改成扫 `harness/tools/*-selftest.*`，而扫描那一半当场逮到这条新自测还没接线——
+  名单改成扫描的意义就在这里。
+
+### 留账
+
+- `harness/glasspane-harness/bun.lock` 第 384 行 workspace 自己的 `version` 仍是 `0.10.3`
+  （`packages/opencode/package.json` 已经是 `0.10.5`）。它是 `bun install` 派生的字段，本轮不手改锁文件，
+  留给下一次取号那一笔一起动。
+- 两份脆弱拷贝仍在 bundle 里，这是**已记账**而不是已修。真修它们的路径只有两条：刷新那个子树的解析，
+  或者用一条测得到的测试路径覆盖第三方 zod major——后者目前不存在。
+
 
 ## [1.21.0] — 2026-10-24
 

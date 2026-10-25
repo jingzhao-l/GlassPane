@@ -1,0 +1,31 @@
+{
+  "_comment": "Baseline for harness/tools/zod-bundle.mjs, recorded 2026-10-24 from harness/tools/zod-bundle-probe.ts (bun's own metafile over script/build.ts's graph). This is an ACCOUNT of what ships, not an absolution: the gate reddens a copy that arrives without a reason here, and every run restates how many bundled copies sit below the advisory's fixed version. Removing the two vulnerable ones means forcing a zod major on packages that did not declare it — `overrides` would do that mechanically, and this repository does not decide another project's runtime shape on an unverifiable test path (gitlab's provider tests are network-red on the lane machines), so it is recorded instead.",
+  "probe": "harness/tools/zod-bundle-probe.ts",
+  "advisory": {
+    "id": "GHSA-mrhx-c7xc-m3w5",
+    "summary": "zod can exhaust memory while validating oversized constrained collections",
+    "severity": "high",
+    "vulnerableRange": "< 4.6.6",
+    "fixedIn": "4.6.6"
+  },
+  "copies": [
+    {
+      "copy": "zod@4.6.7",
+      "modules": 107,
+      "vulnerable": false,
+      "why": "the fork's own catalog pin (`workspaces.catalog.zod`), i.e. the copy our code imports; it is the one the 2026-10-24 bump moved out of the range"
+    },
+    {
+      "copy": "zod@4.4.3",
+      "modules": 34,
+      "vulnerable": true,
+      "why": "declared by @modelcontextprotocol/sdk as `^3.25 || ^4.0`, so 4.6.7 is inside its own range — bun.lock simply still resolves the older record. A nested `overrides` entry of the npm shape was tried on 2026-10-24 and bun applied nothing (`Checked 1496 installs … (no changes)`), so a silent no-op is not kept in the manifest; the remaining routes are a resolver refresh of that subtree or a flat global override, and the flat form also moves gitlab-ai-provider."
+    },
+    {
+      "copy": "zod@3.25.76",
+      "modules": 10,
+      "vulnerable": true,
+      "why": "declared by gitlab-ai-provider as `^3.25.76`, so 4.x is OUTSIDE the range that package declared. Reaching the bundle is our bundling choice (`import(\"gitlab-ai-provider\")` by literal specifier, and script/build.ts bundles everything but node-gyp), so shipping it is ours to own — but overriding it is a major bump on a third party's code, and this provider's tests are network-red locally so the change could not be verified. Decided against on 2026-10-24, open to reversal with a test that can reach it."
+    }
+  ]
+}
