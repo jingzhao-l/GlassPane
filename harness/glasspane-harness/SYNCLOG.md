@@ -53,21 +53,20 @@
   `harness-rulers` 与 `mcp-shell` 两条 lane 会在推送后覆盖。
 - 未跑 `patched-deps`／`zod-bundle`：不在本轮改动面内，同由 CI 覆盖。
 
-### 重切与覆盖：被写下来的那笔账
+### 推送之前先量的那条等式（以及我一次量错的方法）
 
-`split/gp-0-11-1`（从主干 `HEAD:harness/glasspane-harness` 重切）与发布仓 `refs/heads/main` 当前头
-**不是祖先关系**——实测 `git merge-base --is-ancestor 962b1430 split/gp-0-11-1` 失败。这是本仓的既有
-事实而不是意外：旧链里有已签名的提交，重切必然产生不同的 SHA（2026-10-18 那条纪律记过一次，代价是
-8 笔未签名）。因此推送用**具名 SHA 的 lease**，被覆盖的远端头是
-`ef704bf18bd6b90a215797f8ff9f9a6f6152eed8`（tree `962b1430…`，即 v0.11.0 的收账笔），
-它的内容是新树的**真子集**（新树 = 主干的 fork 树，逐 blob 比过），所以覆盖丢不掉任何字节：
-先量 `test "$(git rev-parse split/gp-0-11-1^{tree})" = "$(git rev-parse HEAD:harness/glasspane-harness)"`
-再推。命令：
+推送**是快进**，实测：`git merge-base --is-ancestor ef704bf1… e96d92c6…` 成功，
+`git push … split/gp-0111-final:refs/heads/main` 回 `ef704bf1..e96d92c6`。
 
-```bash
-git push --force-with-lease=refs/heads/main:ef704bf18bd6b90a215797f8ff9f9a6f6152eed8 \
-  https://github.com/jingzhao-l/glasspane-harness.git split/gp-0-11-1:refs/heads/main
-```
+这句话先前写的是反的，原因值得留下来：我先跑
+`git merge-base --is-ancestor 962b1430… <split>` 并见它失败，就下了"不是祖先、要带 lease"的结论——
+而 `962b1430…` 是 `release-artifact` 打印的**发布仓 main 的 tree**，不是 commit。把 tree 喂给
+`merge-base` 恒失败，那次"实测"量的其实是我自己的用词错误。分辨方法也是现成的：
+`git cat-file -t 962b1430…` 回 `tree`，`git cat-file -t ef704bf1…` 回 `commit`。
+本笔仍带着 `--force-with-lease=<ref>:ef704bf1…` 推送（在真快进上它是空操作），
+但**它不是必要的**，理由也不是"重切必然换 SHA"——那只在旧链含已签名提交时成立（2026-10-18 记过）。
+
+树等式照旧先量再推：`test "$(git rev-parse <split>^{tree})" = "$(git rev-parse HEAD:harness/glasspane-harness)"`。
 
 ### 发布后（3b 与五格）
 
