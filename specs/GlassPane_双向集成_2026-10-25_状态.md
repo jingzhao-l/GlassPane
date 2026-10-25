@@ -302,7 +302,12 @@ git -C /Volumes/Eng-Dev/GlassPane merge --no-ff gp-bidi-20261024   # = c4556a9b�
 3. **步骤内部结束不了它**，五种仪器全部实测不能：`timeout --kill-after=60 1200`；把 pytest 从
    Actions 管道上摘下来（`> file`）；`setsid` 完全脱离 + 有界轮询 + `kill -9 -- -$pid` 打整个新会话组；
    `gh run cancel`；以及 `pytest-timeout` 的 240 s 逐条表。最后那条是新信息——那张表覆盖
-   setup/call/teardown，**它从没响过**，所以等待不在任何一条用例里，而在最后一条之后
+   setup/call/teardown，**它从没响过**——当时我据此写"等待在最后一条之后"，这句已被本会话自己的
+   记录器推翻：`diagnostics/40244447182-3.11-06` 里那份 `pytest-ci.log` 停在 `collecting ...`
+   （605 字节，之后 11 分钟零字节）⇒ 范围收到**收集阶段**。这句按字面读：pytest 的进度行走 `\r` 覆写
+   的文本缓冲，不满 8 KB 或不换行不落盘，所以它界定的是"可见输出停在哪"，不是"进程在哪"；
+   能确认的是收集阶段没有条目可计时，所以两张逐条表不响是同一件事，而那把守护线程表给出的 dump
+   才说得出到底是哪一种
    （session teardown 或解释器退出）。唯一能结束那两条腿的是 GitHub 的 job 超时，
    而它不上传 artifact、日志端点持续 HTTP 404（实测：`timeout-minutes: 30` 的 job 起于 13:58:00、
    cut 于 14:33:00 ＝ 30 分钟 + 约 5 分钟宽限；`artifacts.total_count` 恒 11）。
