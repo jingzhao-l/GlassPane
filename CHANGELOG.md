@@ -37,6 +37,82 @@
   `kernel/` 无提交改动。`node --test test/*.test.mjs` 621 pass / 0 fail。
 
 
+**这一格是父仓侧的尺子，它不消耗 harness 版本号。** 三个新文件在 `harness/tools/`、一份新契约在
+`harness/contracts/`、`ci.yml` 两步、`product-surface` 的地板 8→9，fork 树一行未动，所以 harness 侧
+不取号；父仓侧这一笔和上面那条 provider-surface 同进同退——按本节自己的定义，此刻这些字节在主干、
+既不在 v1.20.2 的归档里也不在 registry 上，下一次父仓取号一起交出去。
+
+### Added — 发布物里有几份 zod，现在是有名字的量
+
+- **实测，不问 lock 也不问 Dependabot**：`harness/tools/zod-bundle-probe.ts` 用 bun 自己的 bundler 问
+  同一条图——`entrypoints` 与 `external` 都从 `script/build.ts` 里读它自己声明的那两份，不重述；
+  带 metafile 建图，然后数落进图的 `node_modules/.bun/zod@<version>` 路径。2026-10-24 的读数：
+  `zod@4.6.7`（107 个模块文件）、`zod@4.4.3`（34）、`zod@3.25.76`（10），后两份都落在
+  GHSA-mrhx-c7xc-m3w5 的 `< 4.6.6` 里。1.20.2 关掉的父仓两条告警说的是**我们 import 的那一份**，
+  这句真话不完整：`script/build.ts` 除了 `node-gyp` 什么都捆，而 `gitlab-ai-provider` 是用字面量
+  specifier import 的——捆进来就是我们的字节。探针丢掉的输入（`.gen.ts` 那个由构建自己生成的入口、
+  按平台安装的 native 包）都写进读数里，因为它们决定了这条判决能主张多大范围。
+- `harness/tools/zod-bundle.mjs` + `harness/contracts/zod-bundle.json` + 一条 22 断言的自测
+  （条数按**实跑打印的 `ok`/`FAIL` 行数**量：22/28/26 分别属 zod-bundle、patched-deps、mcp-redirect 三条电池；这里先写过 21，是把一次输出数错了——文档里的数字要能复算，否则它是第二份要漂的抄件），
+  接进 `ci.yml` 的 `harness-rulers` 两步。这条闸判的不是"干净"，是**"有记账"**：新拷贝没有理由记录 ⇒ 红；
+  账上写"安全"而算法算出它在脆弱区间 ⇒ 红（"记录与算法不一致"）；版本排不出序 ⇒ 红（排不了序的拷贝
+  不是它能原谅的拷贝）；拷贝**离开** bundle ⇒ 不红，只报"那是修复落地了，请把账改掉"——判进步的红会被
+  关掉，所以这一条是这条闸能不能活过第一周的关键；模块数变了只打 `△`，因为这条闸拿住的是拷贝的**集合**
+  而不是图的大小。三码照旧：0 记账齐、1 判决不过、2 测不到（缺 bun / 缺契约 / 契约没写
+  `advisory.fixedIn` / 读数不是 JSON / 读数里一份 zod 都没有——"没量到"永远不等于"没有洞"）。
+- 本轮**没做**的那个决定也记进契约，并写清为什么没做：给第三方钉 zod major 需要 `overrides`。
+  `@modelcontextprotocol/sdk` 声明 `^3.25 || ^4.0`，4.6.7 本来就在它自己声明的范围内，只是锁里还留着
+  旧记录；`gitlab-ai-provider` 声明 `^3.25.76`，4.x 在范围外——覆盖它等于给别人做一次 major 升级，
+  而那个 provider 自带的测试在本机与 CI 都是网络红，改完证不了。按"不在证不了的测试路径上替别人决定
+  运行时形状"处理：记账、每次并报份数、不动。
+
+### Fixed — CI 里三种「没把判决说出来」的形状
+
+- `ci.yml` 里 MCP 重定向自测那步（以及新加的这条自测）过去靠"输出里出现 `assertion(s) FAILED` 或
+  `nothing was measured` 就红"来防"吞掉自己的失败"。这条判据过宽：自测的**用例名**里本来就带
+  `nothing was measured` 这种字样，本机实跑时它把一次通过的运行（rc 0、22 条断言全 ok）判成了红。
+  两步都换成正向判据——必须出现该自测自己打印的通过句
+  `every case verified red, and red for the named reason`，缺席才红。判据该问"承诺在不在"，
+  不该问"失败字样在不在"。
+- `provider-surface` 那步（场景⑤ 的读者，随 `gp-bidi-20261024` 并进主干）的 body **没有** `set -euo pipefail`，
+  中间命令死了、`rc` 没设、管道断在半路都可能读成成功；`check-workflows` 拦下了它——这正是
+  `GitHub Actions workflows compile` 那条 job 在 CI run 40156814139 上红的根因。补齐 shell 三件套，并把它的
+  正文判据也改成正向那句（通过句 `every rule named its own reason; …` 必须在场；那句实测由
+  `provider-surface-selftest.mjs` 在有依赖的树上打印、rc=0）。这条不在本轮「只改自己那条闸」的范围内，
+  但它是同一棵树上的同一类洞，而它挡住的是别人能不能信这条 lane 的绿。
+- `product-surface` 的 `selftests` 地板 8→9，并把 `zod-bundle-selftest.mjs` 加进必须存在的名册。
+  这条今天刚从手抄名单改成扫 `harness/tools/*-selftest.*`，而扫描那一半当场逮到这条新自测还没接线——
+  名单改成扫描的意义就在这里。
+- 同一类判据在 `patched-deps` 那步也补齐了：它过去只搜自测自己的失败汇总行，于是"两条都不打印"也是一种过
+  ——一条什么都不说的自测在 CI 日志里长得和一条量过的自测一模一样。现在要求它的通过句在场，失败句仍算红。
+  （另外三步 `ref-batch` / `release-artifact` / `verify-published` 搜的是被量工具自己那句"没测量"的拒绝，
+  而这三处如今都已经把那种回答改成 exit 2，所以那三条是余量的余量，本轮不动它们——"暂时不会误报"不是判据，
+  但一次改四条会让这条工线在合并期同时踩四条别人的 step。）
+
+### 对照 — 合并把一段旧判断变成了历史
+
+`## [1.21.0]` 那节的「依赖告警的判定」写着"本版不升 zod 4——内核 0.1.9 的 `.d.ts` 是 zod 3 形状，
+升它是一次跨仓契约升级，不该为这条告警做"。那句话在它的分支上写下的时候是真的；合并之后它描述的是
+**已经过去的两个版本**：主干上的 `mcp-shell/package.json` 现在声明 `zod: 4.6.7` 与
+`iterate-kernel: 0.1.10`（1.20.2 那一笔带来的，两条 Dependabot 告警已 `fixed`），而内核 0.1.10 的
+契约是 zod 4 形状。本节不改写那段的原文——它是那条发布线当时的判断凭据——只把"它现在读起来是历史不是
+决定"记在这里，并加上今天新查出来的那半句：**升到 4.6.7 也没有把洞从发布物里清出去**，bundle 里另有
+两份低于 4.6.6 的拷贝（见上面那条量测）。取号那一笔应当把这两句合起来重述一次。
+
+### 留账
+
+- **上一格写的"`bun.lock` 仍是 `0.10.3`"在合并后已经反过来了，改成实测那一格**：主干的
+  `harness/glasspane-harness/bun.lock:384` 现在写 `0.10.5`（`git show origin/main:…` 实读），留在 `0.10.3`
+  的是**发布出去的那一侧**（split main 与 v0.10.5 的树）。`release-artifact` 今天正是这样点它的：
+  CI run 40156485325 报 `bun.lock (+1 remote-only / −1 trunk-only)` 与
+  `contracts/engine-methods.json (+2 / −2)`（`swiftBlob`：主干 `ef489160…` 是 1.21.0 重推 FrameCodec 之后的值，
+  发布侧 `372e556d…` 是 v0.10.5 出厂时的），外加 `SYNCLOG.md (−19 trunk-only)`。这三条不是"发布物里有主干
+  没接住的活"，是**主干已经走过去、发布物停在原地**；处置是下一次 harness 取号时重记 + 重切（`docs/release.md`
+  步骤 3–4），而不是把旧值抄回主干。本轮不切那个号：origin/main 在二十分钟里走了 `f928e2c6 → ca00d5e9 →
+  9acda519` 三格，现在切出来的号下一笔就作废——这条账归发布 lane，不归这条交接。
+- 两份脆弱拷贝仍在 bundle 里，这是**已记账**而不是已修。真修它们的路径只有两条：刷新那个子树的解析，
+  或者用一条测得到的测试路径覆盖第三方 zod major——后者目前不存在。
+
 
 ## [1.21.0] — 2026-10-24
 

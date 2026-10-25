@@ -134,7 +134,7 @@ const SCAN_SET_FLOORS = {
   envDiscovery: 67, // those CLI files + the shipped launcher
   foreignPublishers: 4, // per-package publishers that must stay dead ends
   workflows: 7, // 3 root + 2 fork workflow files, plus the 2 package.json manifests the wiring corpus reads
-  selftests: 8, // fixed-point tests under harness/tools the scan must keep reading (floor is READ since 2026-10-24; before that nothing consulted it)
+  selftests: 9, // fixed-point tests under harness/tools the scan must keep reading (floor is READ since 2026-10-24; before that nothing consulted it)
   catalogProviders: 200, // providers in the committed model catalog
 }
 
@@ -951,6 +951,7 @@ const SELFTESTS = [
   "harness/tools/rulers-selftest.mjs",
   "harness/tools/patched-deps-selftest.mjs",
   "harness/tools/mcp-redirect-policy-selftest.mjs",
+  "harness/tools/zod-bundle-selftest.mjs",
 ]
 {
   const wiringRoots = [path.join(repoRoot, ".github", "workflows"), path.join(forkRoot, ".github", "workflows")]
