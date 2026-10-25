@@ -157,23 +157,21 @@
     - **仍挂着的一格，且我给过的原因被自己逐条收回**：main CI 的 `Python tests (3.10/3.11)`。
       六次同死法（`40103418285`/`40167475388`/`40168346235`/`40171467085`/`40179763746`/
       `40182760503`），两条 matrix 每次**同一秒**结束、距起跑正好 45:00-45:01，日志从不上传。
-      被量掉的解释依次是：`faulthandler_timeout=300 + exit_on_timeout`（它只在**用例进行中**才 dump，
+      被量掉的解释依次是：`faulthandler_timeout=300 + exit_on_timeout`（只在**用例进行中**才 dump，
       带上照旧死）；收集期与 import 阻塞（`Collect the suite` **13 秒通过**）；太慢（本机空闲
-      `pytest -q tests` = **115.59s / 3089 条**）；太吃内存（`/usr/bin/time -l` 的 maximum resident
-      set = **286,605,312 字节 ≈ 273 MB**，对面 7 GB）；自家 job 的 `timeout-minutes: 90`
-      （它没生效，刀不在本工作流里）。**第三次仪表答了第四种，才把机制钉住**（run 40184095706）：
-      步骤跑到 **27 分钟仍在继续**——比它自己 1200 s 的硬停晚 7 分钟、`--kill-after=60` 早过完；
-      取消之后 `runs/{id}/logs` 归档里**仍然只有三条成功的 job**。两条事实合起来只指向 **fd**：
-      ① 组被 SIGKILL 后仍拖着步骤 ⇒ 握着不放者在组外——本套件五处以 `start_new_session=True` 起孩子
-      （`tasks/manager.py`、`tools/bash_tool.py`、`hooks/executor.py`、`services/cron_scheduler.py`、
-      `tools/remote_trigger_tool.py`），这种会话领导者**继承这一步的 stdout 且永不 EOF**；
-      ② 从来没有日志是因为 **pytest 在非 TTY 下块缓冲**（本机实测 `-v` 接管道：12 秒 0 字节、24 秒
-      才 519 字节，一次 flush 要几十条用例），2 核 runner 上 45 分钟可以一次都不 flush ⇒
-      看门狗判死 runner、缓冲一起没。**所以"沉默不触发失联"那句也收回：墙量的正是沉默，
-      只是它数的是"多久没说话"，不是"说了多少"。** 修法跟着机制走：把 pytest 从那根管道上摘下来
-      （`> pytest-ci.log 2>&1` 之后再 `cat`），硬停留着；判据由 `tests/test_ci_workflow_shape.py`
-      钉住（`timeout`／重定向＋`cat`／`-v`／faulthandler 两个 ini，抽掉任一件红在该件上，
-      四次反向变异各点名变红）。**下一问交给带这条修复的那次运行：日志到手之后，名单停在哪一行。**
+      `pytest -q tests` = **115.59s / 3089 条**）；太吃内存（maximum resident set
+      **286,605,312 字节 ≈ 273 MB** 对 7 GB runner）；自家 job 的 `timeout-minutes: 90`（没生效 ⇒
+      刀不在本工作流里）。**第四次尝试改的是"输出别占着管道"（run 40187109237），它也没把机制定
+      下来**：步骤 27 分钟仍报 `in_progress`，比自身 1200 s 上限晚 7 分钟。老实讲，这与两种状态都
+      相容——(i) 有东西活过了信号（本套件五处以 `start_new_session=True` 起孩子），或 (ii) runner
+      早已不报、API 在放陈旧状态直到 45 分钟那一刀（我提 cancel 之后 28 分钟它仍 `in_progress`，
+      这条偏向 (ii)）。**外面没有任何可观测量能分开这两者**，而两者都把日志带走（取消后
+      `runs/{id}/logs` 里仍然只有三条成功 job）。于是 flag 层面的理论到此用尽，这一格留下的不是
+      第五个猜测，而是一件**能离开机器**的仪器：`actions/upload-artifact` + `if: always()` 把
+      `pytest-ci.log` 传出来——它是这个 job 里唯一"输出比 runner 活得久"的通道，它的第一行就是至今
+      没人拿到的那次观测。判据在 `tests/test_ci_workflow_shape.py`（9 条：`timeout`／重定向＋`cat`／
+      `-v`／faulthandler 两个 ini／artifact 必须在且挂 `always()`），抽掉任一件红在该件上。
+      **下一问：那份 artifact 到手之后，名单停在哪一行。**
       **这一格落地前本版"CI 绿"不成立**；其余四格（tag／Release／PyPI／npm）成立。
 
 ## 第二十次补记（同日）· 两条 README 由"读代码的人"复审，判出四句假、两句半真
