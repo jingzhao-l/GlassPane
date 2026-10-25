@@ -1849,11 +1849,7 @@ function GlassPaneTool(props: ToolProps) {
     }),
   )
 
-  const permission = createMemo(() => {
-    const callID = sync.data.permission[ctx.sessionID]?.at(0)?.tool?.callID
-    if (!callID) return false
-    return callID === props.part.callID
-  })
+  const permission = createMemo(() => awaitsPermission(sync.data.permission[ctx.sessionID], props.part.callID))
 
   // The look itself is computed by the exported pure `glasspaneRowLook` (fixed-point tested
   // without mounting a Session); this component only resolves its role names against the
@@ -2820,6 +2816,22 @@ export type GlassPaneRowLook = {
  * that only exists inside a component needing theme/sync providers cannot be the only place
  * that claim is checkable. Same reasoning as {@link glasspaneRow} above it.
  */
+/**
+ * Does THIS part have a permission request sitting in this session's queue?
+ *
+ * Written against the whole queue rather than `queue.at(0)` because two `gp_*` calls can be waiting
+ * at once: reading only the head highlighted the first row and drew the second — genuinely awaiting
+ * a human — with the ordinary in-progress look. "引擎拒绝与真实结果视觉可分" is this product's own
+ * claim, and a row that hides that it is blocked is the same false green in the other direction.
+ */
+export function awaitsPermission(
+  entries: readonly { tool?: { callID?: string } }[] | undefined,
+  callID: string | undefined,
+): boolean {
+  if (!callID) return false
+  return (entries ?? []).some((entry) => entry.tool?.callID === callID)
+}
+
 export function glasspaneRowLook(row: GlassPaneRow, toolName: string, permissionPending = false): GlassPaneRowLook {
   const failed = row.state === "engine-failure" || row.state === "call-error"
   const denied = row.state === "denied"

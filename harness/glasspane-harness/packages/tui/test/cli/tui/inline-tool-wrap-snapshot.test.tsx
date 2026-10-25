@@ -20,6 +20,7 @@ import {
   toolDisplay,
   glasspaneRow,
   glasspaneRowLook,
+  awaitsPermission,
   toolPartShouldHide,
 } from "../../../src/routes/session"
 import { errorMessage } from "../../../src/util/error"
@@ -770,5 +771,29 @@ describe("TUI inline tool wrapping", () => {
     await testSetup.renderOnce()
     expect(scroll?.scrollHeight).toBe(3)
     expect(scroll?.scrollTop).toBe(Math.max(0, scroll!.scrollHeight - scroll!.viewport.height))
+  })
+})
+
+describe("a blocked gp_* row says it is blocked, whoever is in the queue", () => {
+  const entry = (callID: string) => ({ tool: { callID } })
+
+  test("the head of the queue highlights, as it always did", () => {
+    expect(awaitsPermission([entry("call_a"), entry("call_b")], "call_a")).toBe(true)
+  })
+
+  test("and the second request awaiting permission is not drawn as unblocked", () => {
+    // Reading only queue.at(0) meant the first blocked row lit and the second one — equally
+    // waiting on a human — took the ordinary in-progress look.
+    expect(awaitsPermission([entry("call_a"), entry("call_b")], "call_b")).toBe(true)
+  })
+
+  test("an entry that is not this call does not highlight it", () => {
+    expect(awaitsPermission([entry("call_a"), entry("call_b")], "call_c")).toBe(false)
+  })
+
+  test("no queue, no call id, no highlight", () => {
+    expect(awaitsPermission(undefined, "call_a")).toBe(false)
+    expect(awaitsPermission([entry("call_a")], undefined)).toBe(false)
+    expect(awaitsPermission([{ tool: undefined }], "call_a")).toBe(false)
   })
 })

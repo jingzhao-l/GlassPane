@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # glasspane-harness one-click installer
 #
-#   curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.10.5/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.11.0/scripts/install.sh | bash
 #   bash scripts/install.sh                 # install (npm first, GitHub release asset as fallback)
 #   bash scripts/install.sh --dry-run       # print the plan, touch nothing
 #   bash scripts/install.sh --version 0.1.0 # pin a version
@@ -313,6 +313,10 @@ PGPKEY
 
 GPG_STATE="not-run"
 SHA_STATE="not-run"
+# Set when the install proceeded on bytes this run could not fully verify. The prose line already
+# said so; this is the machine-visible half, because an agent scripting the install branches on the
+# exit code and cannot re-read a warning without being told which channel to trust.
+UNVERIFIED_INSTALL=""
 
 remedy_unverified() {
   # Print the ONE command that carries the override to the shell that actually reads this
@@ -614,7 +618,10 @@ if [ -z "$INSTALLED_VIA" ]; then
   INSTALLED_VIA="release asset ($ASSET; sha256: $SHA_STATE; GPG: $GPG_STATE)"
   case "$SHA_STATE/$GPG_STATE" in
     verified*/*verified*) ;;
-    *) warn "the installed bytes were not fully verified — see the two states in the line above" ;;
+    *)
+      UNVERIFIED_INSTALL=1
+      warn "the installed bytes were not fully verified — see the two states in the line above"
+      ;;
   esac
   case ":$PATH:" in
     *":$INSTALL_ROOT/bin:"*) ;;
@@ -705,3 +712,14 @@ EOF
 echo ""
 success "done. Docs: https://github.com/$REPO#readme"
 
+
+# ------------------------------------------------------------------ the machine-visible verdict
+# Exit 3 means "the command is installed, and this run did not verify what it installed": either
+# GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 was set, or a check had nothing to check against. Returning 0
+# here made a fully-verified install and a wholly-unverified one indistinguishable to anything that
+# does not read prose, which is every caller except a human watching the terminal.
+if [ "$UNVERIFIED_INSTALL" = "1" ]; then
+  error "exit 3: installed WITHOUT full verification — sha256: $SHA_STATE; GPG: $GPG_STATE"
+  error "  to install verified bytes instead: install gnupg, and do not set GLASSPANE_HARNESS_ALLOW_UNVERIFIED"
+  exit 3
+fi
