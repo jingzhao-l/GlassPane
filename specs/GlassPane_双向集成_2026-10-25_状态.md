@@ -151,11 +151,19 @@
       "bootstrap timed out… check your network access to the index and retry"，没有静默装旧的；收口把
       **digest 对上的**本地 wheel 装进包装器 venv，`ih` 随后报
       `iterate-harness 2.11.1 was installed by another process; reusing it.`（那正是并发守卫该有的读数）。
-    - **仍挂着的一格**：main CI 的 `Python tests (3.10/3.11)`。第二次仪表（独立 `--collect-only` 一步 +
-      跑测试改 `-v` + job 级 `timeout-minutes: 90`）之后，run 40179763746 里 `Collect the suite`
-      **13 秒通过**（⇒ 卡住的不是收集期也不是 import 阻塞），`Run test suite` 到 09:45 已推进 31 分钟
-      仍未死——**此前四次都在第 45 分钟整因"无输出"被判 runner 失联，并把日志一起带走**。这一格的最终
-      判决以这条 run 为准，写进 `RELEASE.md` 的 2.11.1 记录。
+    - **仍挂着的一格，且我先前给的原因被自己收回**：main CI 的 `Python tests (3.10/3.11)`。
+      第二次仪表（独立 `--collect-only` 一步 + `-v` + job 级 `timeout-minutes: 90`）在 run
+      40179763746 上给出的读数是：`Collect the suite` **13 秒通过**（收集期与 import 阻塞被排除），
+      `Run test suite` 09:13:44 → **09:58:45 = 45 分 01 秒**，两条 matrix 同一秒，日志照旧
+      `log not found`。于是"通道沉默触发失联"这句也站不住——`-v` 期间通道不沉默。本机再量两条把
+      剩下两条容易的解释排掉：空闲 `pytest -q tests` = **115.59s**（3089 条收集），
+      `/usr/bin/time -l` 的 maximum resident set = **286,605,312 字节 ≈ 273 MB**（7 GB 的 runner，
+      OOM 讲不通）；而 `timeout-minutes: 90` 写在自家 job 上却没生效 ⇒ 那把刀不在本工作流里。
+      第三次仪表是一根**会自己结束、因而会留下日志**的硬停（`timeout --kill-after=60 1200` 包 `-v`），
+      三种可能读数各对应下一步（summary 在末尾＝卡在进程退出；名单断在中途＝某条具名用例在 ubuntu
+      上等；仍 45:00 整断＝上限在外面，按目录拆步）。判据与禁忌写进 step 注释，并由新加的
+      `tests/test_ci_workflow_shape.py`（8 条，四条反向变异各点名变红）钉住"这一步还带着哪三件探针"。
+      **这一格落地前，本版"CI 绿"不成立**；其余四格成立。
 
 ## 第二十次补记（同日）· 两条 README 由"读代码的人"复审，判出四句假、两句半真
 
