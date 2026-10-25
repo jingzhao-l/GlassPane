@@ -29,7 +29,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { quoteShellArg } from "../dist/errors.js";
@@ -40,6 +39,7 @@ import { TOOL_BY_NAME, executeTool } from "../dist/tools.js";
 import { EvidenceAuditSession } from "../dist/audit-session.js";
 import { makeEngine } from "./helpers.mjs";
 import { executableSource } from "./support/source.mjs";
+import { privateSandbox } from "./support/sandbox.mjs";
 
 const SRC = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "src");
 const UPDATER = path.resolve(SRC, "..", "..", "updater");
@@ -242,7 +242,10 @@ test("the checker bites: the same paths unquoted are not one inert command", () 
 
 /** A scratch root whose name is the payload; returns the update-state path under it. */
 function hostileRootDir(payload) {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), "gp-shellquote-"));
+  // 不在 `os.tmpdir()` 下铺：CI 那台 Linux 上那是 world-writable 的 `/tmp`，
+  // `projectSet` 的守卫会先把它拒了，这条测试就再也走不到它要量的那一句。
+  const sandbox = privateSandbox("gp-shellquote-");
+  const base = sandbox.dir;
   const root = path.join(base, payload);
   fs.mkdirSync(root, { recursive: true });
   return { base, root };

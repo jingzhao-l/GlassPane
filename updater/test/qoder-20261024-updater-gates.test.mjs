@@ -48,6 +48,17 @@ const BLOCK = 512
 const HAS_PLUTIL = fs.existsSync('/usr/bin/plutil')
 const HAS_TAR = fs.existsSync('/usr/bin/tar')
 const HAS_LAUNCHCTL = fs.existsSync('/bin/launchctl')
+/**
+ * `plutil`/`tar`/`launchctl` 用"在不在"判就够：Linux 上没有这两个名字。`stat` 不一样——
+ * GNU stat 坐在同一个 `/usr/bin/stat` 上，却不认 BSD 的 `-f %Lp`（真 CI 上退 1 并报
+ * `cannot read file system information for '%Lp'`）。这条量的是那个读数，所以判据只能问它
+ * 一次看它答不答，不能问文件在不在：在不在，两个平台上都是真。
+ */
+const HAS_STAT_LP = (() => {
+  if (!fs.existsSync('/usr/bin/stat')) return false
+  const probe = spawnSync('/usr/bin/stat', ['-f', '%Lp', '/etc/hosts'], { encoding: 'utf8' })
+  return probe.status === 0 && /^\d{3,4}$/.test(probe.stdout.trim())
+})()
 const NOW = new Date('2026-10-24T09:00:00.000Z')
 
 /* --------------------------------------------------------------- fixtures */
@@ -420,7 +431,7 @@ test('C6 只有被问到的那条 argv 才答话：读回来的作业认得出�
 /* ------------------------------------------------------------------ C11 */
 
 test('C11 拒绝里那个数与真 stat -f %Lp 一字不差；chmod 真留住时走成功那一支', (t) => {
-  if (!fs.existsSync('/usr/bin/stat')) return t.skip('这一条拿真 stat 的读数当基准')
+  if (!HAS_STAT_LP) return t.skip('这台机器的 /usr/bin/stat 不认 BSD 的 -f %Lp：GNU stat 同名同位却没有这个格式，而这条要对的正是那个读数')
   // REVERSE: `lib/launchd.js:505` 的 `${formatMode(mode)}` 换回 `${(mode & 0o777).toString(8)}`，
   // 并把 211 行的 `padStart(3, '0')` 去掉 → 0o040 那一档红（旧写法给 "40"，机器给 "040"），
   // 那句 `still 0644` 也红。

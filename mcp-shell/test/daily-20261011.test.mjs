@@ -17,6 +17,7 @@ import { TOOL_BY_NAME, DAEMON_FORWARDED_METHODS } from "../dist/tools.js";
 import { projectSet, registryDriftReason, PROJECTS_FILE_ENV } from "../dist/project-registry.js";
 import { readUpdateState } from "../dist/update-state.js";
 import { DrainAwareWriter, STDIO_WRITE_BACKLOG_BYTES } from "../dist/io.js";
+import { privateSandbox } from "./support/sandbox.mjs";
 
 /* ---------------------------------------------- 1. 丢更新拒绝的代号与 remedy */
 
@@ -32,7 +33,10 @@ test("丢更新的判据能红，抛出点用的是词表里的代号（remedy �
     assert.match(reason, /Repeat gp_project_set/, "并给出可执行的下一步：再读一次盘再来一遍");
   }
 
-  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "gp-drift-"));
+  // 夹具落在私有沙箱而不是 `os.tmpdir()`：`projectSet` 的守卫把 `/tmp` 整棵子树列为保护区，
+  // 而 CI 那台 Linux 上 `os.tmpdir()` 就是 `/tmp`——同一份测试本地绿、CI 红，红的是对的。
+  const sandbox = privateSandbox("gp-drift-");
+  const dir = sandbox.dir;
   const file = path.join(dir, "projects.json");
   const existing = "prj_00000000000000000000000000";
   process.env[PROJECTS_FILE_ENV] = file;
@@ -54,7 +58,7 @@ test("丢更新的判据能红，抛出点用的是词表里的代号（remedy �
       "这一码必须有自己的一句 remedy，否则落到 \"check the tool's input schema\" 那条兜底——而参数早已过了 zod 校验");
   } finally {
     delete process.env[PROJECTS_FILE_ENV];
-    fs.rmSync(dir, { recursive: true, force: true });
+    sandbox.dispose();
   }
 });
 
