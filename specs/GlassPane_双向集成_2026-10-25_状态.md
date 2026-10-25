@@ -119,6 +119,60 @@
     `genesis pinned: dl_AAAA…`；`gate` 答"那是缺席，不是通过"；改过一个字段的链拒绝并**退 1**、
     点名 `LEDGER_LINK_E_LEDGER_CHAIN`、报断在第 2 行，`.iterate/` 零写入；链接文件 `0600`、父目录 `0700`。
 
+## 第二十次补记（同日）· 两条 README 由"读代码的人"复审，判出四句假、两句半真
+
+复审的做法：两条全新眼界泳道，各自**只读代码**，把两边 README 的集成小节逐句对着实现核。它们抓到的
+东西不是错别字，而是"能力被写成已经在跑"。逐条判决（判据都是文件:行号，不是提交信息）：
+
+1. **"每次 `gp_*` 调用都回一个证据包" — 被代码否证。** `["evidencePack":` 的出口全仓一处：
+   `engine/Sources/GlassPaneEngine/Dispatcher.swift:216`（`handleLastEvidence`）；其余方法在
+   `packages/opencode/src/plugin/glasspane-decision-log.ts:90-100` 一律 `skipped`。同节第四条自己
+   就写着"引擎只给 `gp_last_evidence` 附证据包"——**同一节内自相矛盾**，中英两版都是。
+2. **接受 `dimension` 的五项写错了一半 — 被代码否证。** 两面其实是同一批
+   `gp_act`/`gp_observe`/`gp_diagnose`/`gp_last_evidence`/`gp_attach`（fork `index.ts` 的五个
+   `dimension: DimensionArg` 落在 236/277/319/366/415，对应 Attach/Observe/Act/Diagnose/LastEvidence；
+   壳侧 `tools.ts` 的五个 `OptionalDimensionSchema` 落在 238/255/278/291/297，同一批）。原文把第五项
+   写成"fork 的 `gp_probe_status` 与 MCP 层的 `gp_attach`"——`gp_probe_status` **两面都刻意不带**：
+   fork `index.ts:216-218` 的注释直说"没有证据帧就不会有可计的决定，没人读的参数是工具面开始撒谎的
+   方式"，壳侧 `tools.ts:314` 是 `ProbeStatusArgs = z.strictObject({})`。
+3. **"引擎按调用把声明回显回去" — 被代码否证。** `dimension` 在出网前就被剥掉
+   （`mcp-shell/src/dimension.ts:95-98` 的 `engineBody`，fork `index.ts:63` 同形），回显那行是**壳或
+   fork 自己追加的 content item**（`tools.ts:1751-1759`）。写成"引擎回显"＝给一个不存在的能力作背书。
+4. **"回路只问那五个只读工具" — 夸大。** 五个是**允许清单**（`glasspane_reverification.py:50`，
+   `glasspane_host_transport.py:133` 强制），而 `plan_calls` 真正构造的是每操作一条 `gp_last_evidence`
+   加一条 `gp_diagnose`（`:178-179`）；其余三项在这一半没有生产者。
+5. **"两侧都能整链验通对方那本" — 只对一半。** Python→GlassPane 方向在生产里跑（
+   `glasspane_recipe.py:633-675` 先验链再落笔、`fix_proof:838` 消费）；反方向 fork 的
+   `verifyLedger`（`kernel.ts:636`）**在 `src/` 里没有调用者**，只在测试与一条离线脚本里被驱动。
+6. **"这些格式都不是两份手抄的副本／两份实现漂开就会在闸上变红" — 夸大。** Python 半是手写实现 +
+   一份按 sha256 钉住的 vendored 语料（`tests/kernel_fixtures/manifest.json` 原话"deliberately NOT
+   generated from the kernel: they are a copy pinned by sha256"）；字节漂移有闸，**"对没写进语料的案子
+   还一致吗"没有闸**：那是 `scripts/diff_kernel_implementations.py`，操作者命令、不在 CI 里。
+   本机跑它回 **exit 2**（找不到已构建的 `iterate-kernel` dist，候选路径全落空）——这句本轮实测过。
+7. **`kernel-conformance` 的"两个实现"读数。** 不带 `--impl` 时它打
+   `16 fixture(s) through 1 implementation(s)`（本机 rc=0 实测）；两侧比对要靠人把 canonical checkout
+   喂进 `--impl`。同理 `contracts/kernel-conformance.json` 头部写 `0.1.9` 而 pin 是 `0.1.10`——那是
+   **出处戳记不是判据**（判据是逐条 digest），文档必须这样写才不会读成版本冲突。
+
+处置：第 1-7 条全部改写成实测形状（GlassPane README 双语 + 本仓父 README 双语 +
+`iterate-harness` README 双语 + `harness/iterate-harness/CHANGELOG.md`），fork 树一个字节未动
+（`git diff --stat -- harness/` 空），所以不需要重切发布物。三条新闸落进去，各带自己的控制：
+
+- `scripts/check-doc-links.mjs` 新增可复算主张"接受 dimension 的工具数"，真源是**两份源码**，
+  两面不等时返回"真源读不到"而不是拿一侧当结论；四条新用例分别证红（数量写错／两侧不等／
+  改回旧句／判据空转），`node --test updater/test/scripts-check-doc-links.test.mjs` **33 passed / 0 fail**。
+- `tests/test_iterate/test_iterate_slash_surface.py`：README 那份 16 项清单与 handler 的分支条件
+  逐字相等，两个入口各跑一次真 handler（裸命令＝status，不认识的子命令＝清单）。
+- `test_every_name_the_lazy_export_map_advertises_actually_resolves`：逐条 import `_EXPORTS` 指向的
+  模块并要求符号存在。它**当场抓出两条我自己留下的死名**（`MAX_REQUESTED_RECIPE_STEPS` 改名后没跟、
+  `recipe_steps_not_requested` 实现已删而表与 `__all__` 没跟），两者实测 `AttributeError`。
+
+第 5 条的读者缺口之外，还有一条同族的 P0 被这次复审挖出来并**改的是代码不是文案**：④ 的闸每条分支都
+算，但只有"发出去了"那一支落账，而两扇门读的是台账——通过轮的答案随轮次蒸发，`ih iterate gate` 对
+跑过十轮通过的项目永远回"no recipe gate recorded yet"。修法与判据见 `iterate-harness` 2.11.1 的
+`record_gate_without_send`（契约拒绝分支照旧零字节，Requirement C 有测试钉着；这行也不是修复证据，
+缺 `fix_proof` 要的两样，用例把形状钉住）。
+
 ## 交给发布线的下一步（本会话不执行的那两格已经做完，剩的是取号）
 
 已执行（本会话）：
@@ -129,6 +183,21 @@ git -C /Volumes/Eng-Dev/iterate-skill merge --ff-only it-bidi-20261024 && git -C
 # GlassPane：分支以合并笔进 main（本地），金样随后在同一棵树上重记
 git -C /Volumes/Eng-Dev/GlassPane merge --no-ff gp-bidi-20261024   # = c4556a9b，金样 = 4b44a33b
 ```
+
+上面那三条"仍归发布线"的，到第二十次补记时**已被发布线做掉**，读数如下（不是推测，是当场跑的）：
+
+1. GlassPane `main` 已推：`git rev-list --left-right --count origin/main...main` = `0 0`，
+   `main` == `origin/main` == `6894c8c9`（本轮 README 改写那一笔）。
+2. harness 线取号到了 **0.11.0**，`node harness/tools/release-artifact.mjs --check` 退出 0：
+   `1 agreement(s) held, 1 tolerated lag(s), 0 problem(s)`，`split-main` 等于主干的
+   `harness/glasspane-harness` 树（`962b1430…`），唯一的 `△` 是 v0.11.0 落后主干 **31 行、1 个文件，
+   且那个文件就是 SYNCLOG.md 本身**（发布那一笔不可能描述还没切 tag 的树），下一个 tag 会带上它。
+3. 父仓的号取到了 **v1.21.0**（tag/Release/npm 三格由发布线落）。本轮父仓又长了
+   README/判据那两笔，`[Unreleased]` 已按"本节不空了 + 复量命令是哪两条"改写，
+   下一次取号归发布线判断。
+4. **iterate-harness 这一侧的取号本会话自己发了**（用户 2026-10-25 授权到发版）：
+   ②③④ 的代码在 2.11.0 里，复审挖出的那条"闸答没有读者"的修复与四句文案改正在 **2.11.1**。
+   五格读数见下一节。
 
 仍归发布线（不是"我没时间"，是**不该由这条会话做**）：
 
