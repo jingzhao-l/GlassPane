@@ -47,6 +47,37 @@
 4. **`gp-zod-bundle-land-20261025`**（并行线交出来的四笔，明确"不占 main"）：`5964aed6` 并进来——
    `zod-bundle` 归因闸 + 它的电池 + 那条 CI `rc=0` 缺失的修复（本线那次 CI 红的根因）。
 
+### 三格读数（0.11.0 发布完成后当场量）
+
+- 主干：`c1d99c63`（本笔台账的前一笔），origin/main 已同步；CI 十条 lane 里九条绿，唯一红的是
+  `harness rulers` 的 `release-artifact` 第 12 步——它在 04:07:22Z 跑，而 tag 是 04:09:32Z 推的，
+  量的是"发布物 == 主干"，那个时刻发布物还不存在。这是**时序红**，不是判据红：台账落地后重跑即转
+  （10-23 那批"旧 sha 转不了绿"的反例就在这）。
+- split 仓：`main` == tag `v0.11.0` == `e9ee68a6`，`git subtree split` 的 tree 哈希
+  `f4aaaf10dbc41ef0ab2a90f3cf9b0ac7aed28a1a` 与 `git rev-parse main:harness/glasspane-harness`
+  **逐字相等**（先试普通 push 即快进：`3e775d9d..e9ee68a6`，无需 `--force-with-lease`）。
+  远端 main 被仓库规则拒绝过一次 HTTPS 推（`GH013`，同一个 workflow-scope 缺口），改 SSH 推成。
+- Release：`isDraft=false`，`targetCommitish` 是**那个 commit**（不是分支名——v0.6.4 那格的可复现性
+  缺陷今天不复现），资产 6 件：两份 `.zip`、两份 `.zip.asc`、`SHA256SUMS.txt` 与其 `.asc`。
+  GitHub 为资产算的 `digest` 与 `SHA256SUMS.txt` 声明的两条逐字相等：
+  arm64 `a39abb9b…b2b22e7`、x64 `c78e9206…3ac27c8`（大小 46,453,452 / 48,635,257 字节）。
+  签名身份 `0929EA31DF4F7429F63FC53189D88B1D043A1298`。
+- registry（`--prefer-online`，按版本号点名）：`glasspane-harness@0.11.0` /
+  `glasspane-harness-darwin-arm64@0.11.0` / `glasspane-harness-darwin-x64@0.11.0` 三条实测等于新号，
+  `dist-tags.latest = 0.11.0`；`npm publish` 由 `--ref v0.11.0` 派发（run `40161304398`，三个 npm job 全绿）。
+- 发布专有那条端到端 `bun run script/verify-published.ts 0.11.0`：**rc=0**。关键读数
+  （不是"publish 退 0"的复述）：`the registry can read this published version — answered after 1 look(s), 3s`；
+  两个平台包各 1 眼 3–4 秒；**os/cpu/version 三个 gate 读的是已安装那份清单**
+  （`os=["darwin"] cpu=["arm64","x64"] version="0.11.0"`）；`integrity` 有值；
+  产物级补丁核对 `all 8 artifact-checkable item(s) present in glasspane-harness.exe (145,741,922 bytes read)`；
+  内嵌 web 真被那份二进制供出来（`content-type=text/html doctype=true`）；两个命令都印自己的号。
+- 三条安装通道本机真跑：`npm install -g --prefix $HOME/.local` ⇒ 两个命令都 `0.11.0`；
+  `bun add -g` ⇒ `~/.bun/bin/glasspane-harness --version` = `0.11.0`；
+  把 npm 从 PATH 里拿掉走 **release-asset 兜底通道** ⇒ rc=0 且
+  `sha256: verified (SHA256SUMS.txt); GPG: verified (signing key 0929EA31…1298)`——
+  这条通道这一次**真验了**，不是 `GLASSPANE_HARNESS_ALLOW_UNVERIFIED`。
+  （npm 通道自己那一句 `sha256/GPG: not checked on this channel` 是它该说的话，本轮没有替它化妆。）
+
 ### 本轮修掉的缺陷（发现即修完；每条有固定点用例，且都跑过"把被修点弄回去必须具名变红"）
 
 1. `patched-deps` 用磁盘判"在不在安装图里" ⇒ 同一棵提交树两个判决（本机 FAIL / CI `△`），
