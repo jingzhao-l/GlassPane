@@ -12,6 +12,118 @@ contract does not).
 
 （空。本轮收口后没有未归号的条目。）
 
+## [0.12.0] — 2026-10-26
+
+**版本判断：minor。** 本产品的 pre-1.0 口径是"产品面/CLI 形状变动 = minor，纯修复 = patch"。本版有三处
+用户与 agent 读得到的形状变化，所以不是 patch：**工具面多了一个新错误码** `GP_E_SOCKET_TRUST`（`gp_*`
+在写出第一个字节之前先验引擎 socket 的身份，不合格就回三字段拒绝帧）；**安装器两条通道的成功行各自重写**
+（npm 支现在说明它建立了什么证据、没建立什么，而不是只说"没查"）；**kernel-pin 的 `--probe` 从"能被
+环境里的镜像牵走"改成钉在 `product.registry` 上、问不出就 exit 2**。其余是尺子与发布闸的修复。
+
+### Fixed — 判定面（工具面不再相信它没验过的通道）
+
+- **引擎 socket 的身份闸**（`daemon.ts`，审查定级 MEDIUM）：`resolveSocket` 回答"引擎在哪"，那是字符串
+  操作，答不出"那个文件是谁放的"；`GLASSPANE_SOCKET` 可指任何绝对路径，默认路径也可被替换，而这条线把
+  回包当事实转给模型。新增 `trustSocket()`：inode 必须是 socket、必须属于本 uid、socket 与其目录都不许
+  给 group/other **写**位。生产形状实测（`~/.glasspane` = drwx------、`engine.sock` = srw-------），
+  判据取写位而非"非 0600 即拒"是因为 node 自 bind 的 socket 是 0755——写 0600 会把本仓自己的夹具与
+  CI 全打红，而那条红看起来像代码缺陷。`ENOENT` 仍然**不是**信任判决：那是"守护进程没在跑"，由
+  transport 用 `GP_E_ENGINE_UNREACHABLE` + 重启命令回答。`geteuid` 答不出的运行时也是拒绝，不是放行。
+- **`timeoutFor` 的原型查找漏洞**：方括号读表会让 `constructor`/`toString`/`valueOf` 返回**函数**，
+  `setTimeout(fn, fn)` 把延迟 coerce 成 NaN（≈1ms 打断），一次正常应答会被报成"引擎超时"；`?? default`
+  抓不到，函数不是 nullish。改为 own-property 查找。
+- **`DAEMON_ORIGIN` 的文档与代码对齐**：注释写"由 `present`/`refused` 两处设置"，实测只有 `present`
+  设。按实测改写并写明拒绝为何不打标（半数拒绝根本没穿过 socket）。
+
+### Fixed — 交付面（安装器说清每条通道查了什么）
+
+- `scripts/install.sh` 的 npm 支此前一边印"sha256/GPG: not checked on this channel"一边退 0，而收尾的
+  exit-3 契约自称覆盖"什么都没验成"的那一次——对大多数用户实际走的那一支不成立。**决定：不把 3 扩到
+  npm 支**（它从钉死的 registry 安装，npm 按 `dist.integrity` 校 tarball，那是证据；把成功路径改成非零
+  退出只会训练调用者写 `|| true`）。改的是说法与判据：成功行写"建立了什么 + 没建立什么"，收尾注释写成
+  它真正覆盖的范围。`installer-selftest.sh` 新增第 23 节把契约钉成断言（npm 支必须 0、必须印出它依赖的
+  完整性证据、不许再出现裸的"not checked"、不许印 exit-3 判决），计数 165 → **175**，脚本自己数。
+  三发反向控制各自具名变红，其中"让 npm 支也置 `UNVERIFIED_INSTALL=1`"这一发证明契约是**双向**钉的。
+
+### Added — 搬运仓自己给它的工作流立闸
+
+- 新闸 `script/check-workflows.mjs`（在 fork 树里，理由同 `patched-deps.mjs`：split 出的独立仓必须自证）
+  与固定点测试 `test/script/workflow-gates.test.ts`（21 条 / 41 断言，全走 `--dir` 接缝读合成工作流）。
+  存在的理由是**一条没有收件人的移交**：父仓对本子树的 D5/D6-b 只打 `△` 并写明"交给该 root 自己的闸
+  执行"，而那个 root 从来没有闸——于是真正持有发布凭据的仓发出去 12 个无上限 job 与 4 个未自声明
+  `-e/-u/-pipefail` 的多语句 run 体。
+- 本轮它量出的 20 条全部修掉：12 个 `timeout-minutes`（逐个按证据取，version-check 45 高于它自己
+  `assert-ci-green --budget 1800000` 的 30 分钟等待，verify-published 45 高于 registry-readiness 的
+  20 分钟预算，两个 build job 60，installer-selftest 20 基于本机实测 15.4s/175 条）、4 个 run 体补门、
+  `Upgrade npm` 三步改成读 workflow 级 `env.NPM_PUBLISH_VERSION` 并在实装不等于钉的值时 `::error::` +
+  exit 1（此前注释承诺"漂移不得被读成成功发布"，代码只 `echo` 版本号——断言回显状态而非指令；且
+  `12.2.0` 在同一文件里抄了三份）。
+- `release.yml` 头部一句反着写的注释收回：它说 one-click `install.curl`"仍指名移动的分支"，而
+  product.json 与 `installer-curl-pinned` 早已把它钉在版本 tag 上。
+
+### Fixed — 尺子层：三条结构上不会红的判据
+
+- `product-surface.mjs`：六文件守卫的第二个析取式恒真（六个 want 每一个都以列出的目录开头），"走查必须
+  找到它们否则红"永不为红；且收集器按扩展名过滤，**npm 实际 exec 的无扩展名 launcher
+  `packages/opencode/bin/glasspane-harness` 从来不在扫描集里**，而守卫恰好点它的名（与 1.12.x 那起
+  "符号链接入口点测不到"同一形状）。守卫改成只认 `includes(want)`，收集规则加上"可执行即算"。实测扫描集
+  900 → 904、断言 6537 → 6565，下限按实测抬到 904（绝不降低）。因果：在 launcher 里种上游安装 URL →
+  具名红；把它 `chmod -x` 踢出发现集 → 两条具名红（这一发正是旧析取式恒真的反证）。
+- `brand-surface.mjs`：注入每个会话的内置 skill 那条规则**不打模式、计数写死 1**，于是每文件棘轮
+  `count > prior.count` 对它恒假（同文件对 shipped-code 早已改成全局计数，这一支被漏掉）；更糟的是它
+  凭空指控——实测 `customize-harness.md` 对该模式命中 **0** 次，金样却记着 `×1`。改为共享同一份模式
+  定义、markdown 不剥注释、并把发现的 skill 文档集作为覆盖判据写进契约（文档不再被读到必须红）。
+  实测：种一个 gateway 串 → `×1`（数从文本得来）；种第二个 → `grew 1 → 2` 红；重命名唯一文档 / 删目录
+  → exit 2。
+- `tool-surface.mjs`：上游快照写在 `tmpdir()/tool-surface-<rel>.before` 这个**每文件确定性的共享路径**
+  并在 `finally` unlink ⇒ 并发跑互删，`diff` 读到对方刚删的文件 → exit 2 "refusing to bill"。实测（修复
+  前的字节拷贝，两轮并发 ×8）**8/8 轮每轮恰有一条死在 rc=2**。改成启动时 `mkdtempSync` 私有目录 +
+  `process.on("exit")` 清理；"diff 失败就拒收、不许猜"的原判据一字未动。修复后 8/8 轮都走到正常判决，
+  tmp 零残留。
+- `hook-liveness.mjs`：`BOUND_HOOKS` 的 binding site 只被拼进失败文案，没人验它存在或仍点名该钩子——
+  而"这些不可能是同义反复"那句话正靠它撑着。两条模式现在都验（文件在、钩子仍被点名），fork 树不在 →
+  exit 2 "CANNOT OBSERVE"。实测更正并记录：这些是 **fork 侧**文件、且 `BOUND_HOOKS` 此前只在 `--offline`
+  被读、`--check` 根本没读它。`STRUCTURAL` 的理由字段是散文不是路径，**没有为它发明语法去"验"**——
+  记在这里以免下轮当成漏修。
+
+### Fixed — 发布专有的三条判据从读数改成判决
+
+- `verify-published.ts`：`registry serves every platform package` 此前对**格式化日志串**做
+  `line.includes("@" + version)` ⇒ `0.11.14` 含 `@0.11.1`，一个永远装不上的 optionalDependency 被判健康
+  ——而这条 lane 的存在理由正是抓 v0.7.6 那种"印了 `+ …@0.7.6`、退 0、registry 上没这个版本"；另一半
+  `pulls.length === served.length` 在那个位置恒真。比较抽到新模块 `pull-exactness.ts`（同
+  `registry-readiness.ts` 的理由：`verify-published.ts` 一被 import 就跑检查），逐包严格等值；读码确认
+  `publish.ts` 只产精确版本，因此**没有**为它发明 range-satisfies 逻辑。测试含那条对抗对，并在同一测试里
+  断言旧写法对它返回 true。
+- provenance：`reportProvenance()` 用 `/\bprovenance\b/` 扫 metadata 全文再印一句 note——`provenance`
+  是 npm 的**键名**（文档形状对了就能命中），而 note 永远不可能让 lane 变红。改成读字段
+  （`dist.attestations.provenance.predicateType`，今天实测 `glasspane-harness@0.11.1` 就是这个形状）并
+  三结局分流：attested → 绿并打 predicate；absent → **FAIL**（产品 publishPolicy 要求带 provenance）；
+  问不出/非 JSON → `cannotObserve()`，不许当"没问题"。
+- `build.ts`：`gh release upload … --clobber` 在草稿期是必需的（重跑要能换掉自己那半个 asset），但对一个
+  已公开的 release 再派发一次会把"这个版本号所指的字节"换掉，而 npm 拒发同版本、tarball 保持旧的 ⇒ 一个
+  版本号指向两套字节、只有一套对得上 registry，`SHA256SUMS.txt` 还会对新的重签。上传前先读
+  `gh release view --json isDraft`：published 或**问不出**都拒（"不知道"不等于"是草稿"），remedy 是取
+  下一个号。新增 `release-assets.ts` + 6 条测试，含两条源码钉（全文只许出现一次 `gh release upload`，
+  且必须在守卫之后）。
+- `kernel-pin.mjs --probe`：本产品里唯一一条不钉 registry 的 npm 通道（其余四条都钉且被 product-surface
+  看着）。裸 `npm view` 会被 `~/.npmrc`/`npm_config_registry` 牵到镜像上，那条"漂移警报"就在回答别人的
+  账。改为读 `product.registry`（与 verify-published 同一个真源字段），读不到 exit 2。实测四发证明环境
+  镜像再也替不了答案。
+- `kernel-conformance.mjs`：oracle 抛错会在 drive 成功后**再 push 一条同实现答案**，于是打印"装进来的内核
+  与装进来的内核不一致"，把一次崩溃伪装成分叉。按病分流：drive 抛仍是一条可记录的 `rejected` 判决（那是
+  契约的牙齿），oracle 抛 → 具名失败点名 fixture 与阶段，并加"每实现至多一份答案"不变量（违反 exit 3）。
+  实测更正：单实现也会犯，且 `convergence` 那次不可能先抛（drive 用同一输入调同一纯函数）。
+
+### 已知维持现状（判据与实测，不是"下一轮再看"）
+
+- `packages/{ui,http-recorder}` 与根 `package.json` 的 `repository.url` 仍指向上游。实测发布物不携带它：
+  `npm view glasspane-harness@0.11.1 repository.url` 回
+  `git+https://github.com/jingzhao-l/glasspane-harness.git`（wrapper 的 manifest 由 `publish.ts` 按
+  `product.repo` 生成），这三个是 `private` 工作区包、从不发布；血缘名按 `brand-surface` 的口径只减不增。
+  把它们改掉会扩大 fork 面而交付物一个字节都不变，因此判为不动，并把量法写在这里。
+
+
 
 ## [0.11.1] — 2026-10-25
 
