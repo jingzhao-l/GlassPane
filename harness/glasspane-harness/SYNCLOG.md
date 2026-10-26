@@ -269,6 +269,44 @@ SYNCLOG/CHANGELOG 在落后方向差异并打 `△`——本轮台账只进主�
    `git merge-base --is-ancestor f324afa0 af690459` 成功（搬运仓 main 的旧头是新链的祖先），
    覆盖不需要发生。旧教训（10-25）记的就是我把 tree 哈希当 commit 喂给 `merge-base` 的那次误判，
    这次先 `git cat-file -t` 分辨了类型再下结论。
+### 收尾补记（同一会话，最后四笔与全绿读数）
+
+台账那一节写"本轮 12 笔"是在 `814bcea7` 上量的，收尾时实数是 **16 笔**（`git rev-list --count bae15812..main`
+= 16，`--grep '^\[gp\]'` 同数——每一笔都带前缀）。中间那四笔是台账写完之后又长出来的，都在本节之上：
+
+- `ee32dfcc` 把 `installer-selftest` 上限的依据从 15.42s 改成**跑完之后**重测的 17.01s（15.42 那次有 2 条
+  断言正失败，早退当然快）；这笔动了 fork 树内的 `ci.yml`，于是 `fork-diff` 在 CI 里点名
+  `our own file moved (28721a36 → 55546033)` 并把 `814bcea7` 之外那条 lane 打红——**它抓住的是我自己的
+  顺序错**，不是别人。
+- `a9dbd4b7` 修父仓 `harness-contract.yml` 的上游探查：匿名 `curl | node JSON.parse` 在共享 runner 出口 IP
+  上被 403 打回后留下一段 Node 堆栈，与"上游换了插件地板"同色。改成先 `gh api`（带 `GH_TOKEN`）、
+  再匿名兜底并**先读 HTTP 状态**，问不出就打 `NOT OBSERVED` 且点名"这不等于漂移"。八形状电池里
+  **C 用例当场抓出我自己写的一版 bug**：`${body##*$(printf '\n')}` 里命令替换把结尾换行剥掉、模式退化成
+  `##*`、`status` 恒空——本该走通的匿名兜底被读成"问不出"。
+- `40afb04b` 记"搬运分支怎么删才不违反禁 `-D`"（给搬运远端起具名 remote，让 `-d` 自己检查上游）。
+- `63e242f2` 是本轮最后一条真缺陷，而且是**我自己上一笔造的**：`--probe` 改成读 `product.registry` 之后，
+  `kernel-pin-selftest.mjs` 里所有 probe 夹具的 `product.json` 都没有这个字段，CI 的
+  `harness-rulers` lane 红在"kernel-pin 的自测还能变红吗"——5 条断言一起变成 `cannot read the registry`。
+  这不是"测试老了"：**改判决的人必须同时改判决的输入形状**，夹具不带真实在生产的字段就等于只交了一半。
+  同笔把新行为本身钉进电池（未具名 registry → exit 2 且点名原因；环境里 `npm_config_registry` 指向
+  `mirror.invalid` 时**被调用的 argv 里必须仍带钉住的主机**——桩从此把 argv 落盘，否则"探针钉住了"
+  这句只能靠读代码相信）。断言 36 → 40 条，rc=0；两发可编译变异各自打出具名的红，恢复后 sha256
+  回到 `f2e8bed7…`（第一发我删参数留下悬空逗号把脚本弄崩，FAIL 落在无关用例上——那不算因果证据）。
+
+**最后一次的收口读数**（全在 `63e242f2` 之后的同一棵树上跑）：
+
+- 主仓 `git status --porcelain` = 0 行；`origin/main...main` = `0 0`；CI run 40269580299
+  **completed success，10 个 job 全绿**（含之前红过的 `harness-rulers` 与 `Harness contract`）。
+- 六把尺子各 rc=0；`release-artifact` `1 agreement held, 1 tolerated lag, 0 problems`
+  （第一次尝试是本机代理把那条深取掐成 exit 2，它拒答而不是假绿；第二次过），
+  并且独立复算一次：`git rev-parse HEAD:harness/glasspane-harness` == `harness/main`(67060821) 的树
+  == `6b4d6ee5…`。
+- `rulers-selftest`（闸的闸）rc=0，收尾一条 `closure: no tracked file left modified`；
+  `kernel-pin-selftest` 40 条 rc=0；`check-workflows --self-test` 22 例各自验红；父仓
+  `check-workflows` 5 份文件干净且**对本子树不再打印任何 `△`**（开工基线是 4 条 `△`）。
+- 磁盘从 19.9 GiB 起、收尾 17.6 GiB（装了三轮端到端产物），临时件目录只剩环境件 `ca-bundle.pem`。
+- 3b 重切再推一次（`harness/main` 前进到含本节的树），tag `v0.12.0` **不动**：已发布的字节与版本号
+  从此锁死在一起，`△ artifact` 那一格只允许台账在落后方向存在，由下一个 tag 吸收。
 ## 2026-10-25（第二十一次会话）· 取号 0.11.1：把四处"两侧都量过／都能读"按实测降级，顺手把 release-artifact 拉回等式
 
 ### 为什么这一笔要发版
