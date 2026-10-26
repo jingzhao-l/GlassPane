@@ -28,6 +28,11 @@ jobs:
   verify:
     name: install, typecheck, fixed points
     runs-on: ubuntu-latest
+    # Ceiling, not a guess: the slowest thing here is `bun install` (4,671 packages) followed by
+    # four per-package typechecks and the fixed-point suites. 40 is above the worst measured run;
+    # the point of naming one at all is that GitHub's default is 360, so a hung runner holds the
+    # `ci-${{ github.ref }}` concurrency slot for six hours before anything reports it.
+    timeout-minutes: 40
     steps:
       # Every `actions/*` ref in this subtree's workflows is pinned to a 40-hex SHA, and
       # `scripts/check-workflows.mjs` now enforces pins for this root too (it used to exempt the
@@ -37,11 +42,21 @@ jobs:
 
       - uses: ./.github/actions/setup-bun
 
+      # This repository's own two workflows, checked by a rule that lives in this tree. The parent
+      # repository scans them too but answers with a `△` advisory — "reported to that root's own
+      # gate, not enforced from here" — and until this step existed, that root had no gate: the
+      # advisory was addressed to nobody, and the split repo that actually runs these jobs (and
+      # holds the publishing credentials) never asked. Cheapest lane in the job, so it runs first:
+      # a workflow defect should cost seconds, not a `bun install` of 4,671 packages.
+      - name: This repository's workflows meet its own rules
+        run: node script/check-workflows.mjs
+
       - name: Install workspace
         run: bun install --frozen-lockfile
 
       - name: Typecheck the shipped packages
         run: |
+          set -euo pipefail
           for pkg in opencode tui sdk/js plugin; do
             echo "::group::$pkg"
             (cd "packages/$pkg" && bun run typecheck)
@@ -140,7 +155,9 @@ jobs:
           '
 
   # installer-selftest.sh 是 scripts/install.sh 回退通道（GitHub release asset + sha256/GPG）
-  # 的离线行为测试：stub curl/uname/npm/gpg，165 条具名断言（2026-10-19 实测；2026-10-14 记的是 80）。在此之前
+  # 的离线行为测试：stub curl/uname/npm/gpg，175 条具名断言（2026-10-26 实测，脚本自己打数——
+  # 收尾行是 `installer-selftest: all 175 checks held`；2026-10-19 记的是 165，2026-10-14 是 80）。
+  # 数在这里是为了让"某一段静默不跑了"看得见；真源是脚本自己数的那条，不是这句注释。在此之前
   # 没有任何 lane 运行它——grep 全仓只能找到 README/CHANGELOG/contracts，这正是本文件
   # 存在要防的失败形态（测试写而无人跑）。
   # 为什么单独成 job 而不是 verify 的一步：selftest 有意把 `uname -s` 留给真机（macOS-only
@@ -149,8 +166,13 @@ jobs:
   installer-selftest:
     name: install.sh fallback channel (offline, stubbed)
     runs-on: macos-14
+    # The lane is stubbed and offline: measured 15.4s wall for 175 named checks on this machine
+    # (`/usr/bin/time -p bash packages/opencode/script/installer-selftest.sh`). 20 minutes is that
+    # number with room for a loaded runner — and naming any ceiling at all is the point, because
+    # the default is 360 and this job runs on a macOS runner, the scarcest label here.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Installer selftest (165 named checks against stubbed curl/npm/gpg)
+      - name: Installer selftest (stubbed curl/npm/gpg; the script prints its own check count)
         run: bash packages/opencode/script/installer-selftest.sh

@@ -10,9 +10,14 @@ name: Release
 #      checked statement rather than an aspiration: every installer URL `scripts/install.sh` prints
 #      back to a user names the tag of the version it resolved — given as `--version` or resolved from
 #      the releases API before any download — and `installer-selftest.sh` section 22 fails the lane if
-#      a `/main/` installer URL is ever printed with a version in hand. What is NOT pinned here is the
-#      documented one-click entry point (`product.json` → `install.curl`, the READMEs and
-#      `docs/install.md`), which still names the moving branch; that string belongs to its owner.
+#      a `/main/` installer URL is ever printed with a version in hand. The documented one-click
+#      entry point (`product.json` → `install.curl`, the two READMEs and `docs/install.md`) is pinned
+#      to the version's own tag, not to the moving branch: `product-surface.mjs`'s
+#      `installer-curl-pinned` rule holds all four sites to the same string, refuses a `/main/` in
+#      that line, and the four must be byte-identical. That is a change from this note's earlier
+#      wording, which said the documented line "still names the moving branch" after the pin had
+#      already landed — a comment describing the guarantee backwards is how the next sync re-breaks
+#      it.
 #   2) npm publish — manual workflow_dispatch, dry by default: the platform
 #      packages (one per runner) and then the `glasspane-harness` wrapper
 #      (postinstall picks the right platform package). Provenance on; the
@@ -57,11 +62,26 @@ on:
 permissions:
   contents: read
 
+# One definition for the npm that the three publish lanes install. It used to be the literal
+# `12.2.0` written three times in this file, which meant the lanes could disagree and nothing could
+# notice — and each step then printed `npm --version` as if printing were the same as checking,
+# while its own comment claimed "a drift between the pin and reality must not be readable as a
+# successful publish". The steps now read this value and fail if the runner answers with anything
+# else. `script/check-workflows.mjs` counts the definitions and the literals in this file.
+env:
+  # Evidence for the number: the registry metadata for the published 0.7.0 wrapper records
+  # `_npmVersion: 12.2.0` — the npm that actually produced the provenance-attested publish from
+  # this lane. Not `npm@latest`: that would be third-party code pulled without a pin onto the
+  # machine holding the OIDC token, minutes before an irreversible publish.
+  NPM_PUBLISH_VERSION: 12.2.0
+
 jobs:
   version-check:
     name: tag, manifests and CI all agree on this commit
     if: success() && github.event_name == 'push'
     runs-on: ubuntu-latest
+    # Ceiling, not ceremony: GitHub's default is 360 minutes, and this job runs on a runner from the hosted pool. It waits for the tag's own CI run with `assert-ci-green --budget 1800000` — 30 minutes of waiting is the step's own published budget, so the ceiling has to sit above it or the ceiling becomes the thing people widen. (45m.)
+    timeout-minutes: 45
     # A job-level `permissions:` block REPLACES the workflow-level one, so `contents: read` has to be
     # named again here even though the workflow already names it — without it this job has no readable
     # repository, which is the rule `scripts/check-workflows.mjs` enforces. `actions: read` is the new
@@ -187,6 +207,8 @@ jobs:
     if: success() && github.event_name == 'push'
     needs: version-check
     runs-on: ubuntu-latest
+    # Ceiling, not ceremony: GitHub's default is 360 minutes, and this job runs on a runner from the hosted pool. Three `gh` calls against one repository. (15m.)
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -264,6 +286,8 @@ jobs:
     if: success() && github.event_name == 'push'
     needs: [version-check, create-release]
     runs-on: ${{ matrix.runner }}
+    # Ceiling, not ceremony: GitHub's default is 360 minutes, and this job runs on a matrix of macOS runners. `bun run build --single` on a macOS runner: the embedded web app's Vite phase alone was measured at 3m11s here, and the compile follows it. Deliberately the same ceiling as publish-platform, which builds the same artifact. (60m.)
+    timeout-minutes: 60
     permissions:
       contents: write
     strategy:
@@ -351,6 +375,8 @@ jobs:
     if: success() && github.event_name == 'push'
     needs: binaries
     runs-on: ubuntu-latest
+    # Ceiling, not ceremony: GitHub's default is 360 minutes, and this job runs on a runner from the hosted pool. Downloads the two assets, hashes them, signs one manifest. (20m.)
+    timeout-minutes: 20
     # The signing secrets are environment-scoped, so this job has to declare the
     # same environment the publish jobs use. Without it `GPG_INPUT_KEY` arrives
     # empty and the signing step fails on purpose — which is the correct outcome,
@@ -569,6 +595,8 @@ jobs:
     if: success() && github.event_name == 'push'
     needs: checksums
     runs-on: ubuntu-latest
+    # Ceiling, not ceremony: GitHub's default is 360 minutes, and this job runs on a runner from the hosted pool. One `gh release edit` plus a read-back. (15m.)
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -598,6 +626,8 @@ jobs:
     # assertions after that incident (its `SYNCLOG.md` records it); this lane had nothing.
     if: github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && inputs.confirm == true
     runs-on: ubuntu-latest
+    # Ceiling, not ceremony: GitHub's default is 360 minutes, and this job runs on a runner from the hosted pool. Reads the release and the registry, decides, prints. (15m.)
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -639,6 +669,8 @@ jobs:
     if: success() && github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && inputs.confirm == true
     needs: publish-gate
     runs-on: ${{ matrix.runner }}
+    # Ceiling, not ceremony: GitHub's default is 360 minutes, and this job runs on a matrix of macOS runners. Builds this platform and publishes it; see `binaries` for the measured build phase. (60m.)
+    timeout-minutes: 60
     environment: release
     permissions:
       id-token: write
@@ -664,16 +696,19 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Upgrade npm (staged publishing needs >= 11.15)
-        # Pinned, with the evidence for the number: the registry metadata for the published
-        # 0.7.0 wrapper records `_npmVersion: 12.2.0` and
-        # `_npmUser: GitHub Actions <npm-oidc-no-reply@github.com>` — that is the npm that
-        # actually produced the provenance-attested publish from this lane. `npm@latest`
-        # here would be third-party code pulled without a pin onto the machine holding the
-        # OIDC token, minutes before an irreversible publish. Print the version anyway: a
-        # drift between the pin and reality must not be readable as a successful publish.
+        # The pin and the evidence for it live in this file's top-level `env:`. Three copies of a
+        # literal were three chances for the lanes to disagree, and the step only PRINTED
+        # `npm --version` while its own comment promised drift could not read as success. Ask for
+        # the pin, then stop the lane if the runner answered with anything else.
         run: |
-          npm install -g npm@12.2.0
-          echo "npm in this publish lane: $(npm --version)"
+          set -euo pipefail
+          npm install -g "npm@$NPM_PUBLISH_VERSION"
+          installed="$(npm --version)"
+          if [ "$installed" != "$NPM_PUBLISH_VERSION" ]; then
+            echo "::error::this lane asked for npm $NPM_PUBLISH_VERSION and the runner answered $installed — a publish run by a version this file did not choose is not the provenance record the pin exists to be"
+            exit 1
+          fi
+          echo "npm in this publish lane: $installed (env.NPM_PUBLISH_VERSION)"
 
       - name: Build this platform
         # `build` lives in packages/opencode; the workspace-root package.json has
@@ -799,6 +834,8 @@ jobs:
     if: success() && github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && inputs.confirm == true
     needs: publish-platform
     runs-on: ubuntu-latest
+    # Ceiling, not ceremony: GitHub's default is 360 minutes, and this job runs on a runner from the hosted pool. No build: it generates the wrapper manifest, packs, and publishes. (30m.)
+    timeout-minutes: 30
     environment: release
     permissions:
       id-token: write
@@ -812,16 +849,19 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Upgrade npm (staged publishing needs >= 11.15)
-        # Pinned, with the evidence for the number: the registry metadata for the published
-        # 0.7.0 wrapper records `_npmVersion: 12.2.0` and
-        # `_npmUser: GitHub Actions <npm-oidc-no-reply@github.com>` — that is the npm that
-        # actually produced the provenance-attested publish from this lane. `npm@latest`
-        # here would be third-party code pulled without a pin onto the machine holding the
-        # OIDC token, minutes before an irreversible publish. Print the version anyway: a
-        # drift between the pin and reality must not be readable as a successful publish.
+        # The pin and the evidence for it live in this file's top-level `env:`. Three copies of a
+        # literal were three chances for the lanes to disagree, and the step only PRINTED
+        # `npm --version` while its own comment promised drift could not read as success. Ask for
+        # the pin, then stop the lane if the runner answered with anything else.
         run: |
-          npm install -g npm@12.2.0
-          echo "npm in this publish lane: $(npm --version)"
+          set -euo pipefail
+          npm install -g "npm@$NPM_PUBLISH_VERSION"
+          installed="$(npm --version)"
+          if [ "$installed" != "$NPM_PUBLISH_VERSION" ]; then
+            echo "::error::this lane asked for npm $NPM_PUBLISH_VERSION and the runner answered $installed — a publish run by a version this file did not choose is not the provenance record the pin exists to be"
+            exit 1
+          fi
+          echo "npm in this publish lane: $installed (env.NPM_PUBLISH_VERSION)"
 
       - name: Every platform package the wrapper names must already be live
         working-directory: packages/opencode
@@ -911,6 +951,8 @@ jobs:
     if: success() && github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && inputs.confirm == true
     needs: publish-wrapper
     runs-on: macos-14
+    # Ceiling, not ceremony: GitHub's default is 360 minutes, and this job runs on a runner from the hosted pool. The registry-readiness wait inside verify-published.ts carries its own 20-minute budget (REGISTRY_READINESS_BUDGET_MS), and this job then installs the published tarball on a macOS runner and runs it. (45m.)
+    timeout-minutes: 45
     environment: release
     permissions:
       contents: read
@@ -938,6 +980,8 @@ jobs:
     name: verify npm trusted publisher (OIDC)
     if: github.event_name == 'workflow_dispatch' && inputs.verify_oidc == true
     runs-on: ubuntu-latest
+    # Ceiling, not ceremony: GitHub's default is 360 minutes, and this job runs on a runner from the hosted pool. Stages a probe version through OIDC and rejects it; two npm round trips plus the checks. (30m.)
+    timeout-minutes: 30
     environment: release
     permissions:
       id-token: write
@@ -951,16 +995,19 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Upgrade npm (staged publishing needs >= 11.15)
-        # Pinned, with the evidence for the number: the registry metadata for the published
-        # 0.7.0 wrapper records `_npmVersion: 12.2.0` and
-        # `_npmUser: GitHub Actions <npm-oidc-no-reply@github.com>` — that is the npm that
-        # actually produced the provenance-attested publish from this lane. `npm@latest`
-        # here would be third-party code pulled without a pin onto the machine holding the
-        # OIDC token, minutes before an irreversible publish. Print the version anyway: a
-        # drift between the pin and reality must not be readable as a successful publish.
+        # The pin and the evidence for it live in this file's top-level `env:`. Three copies of a
+        # literal were three chances for the lanes to disagree, and the step only PRINTED
+        # `npm --version` while its own comment promised drift could not read as success. Ask for
+        # the pin, then stop the lane if the runner answered with anything else.
         run: |
-          npm install -g npm@12.2.0
-          echo "npm in this publish lane: $(npm --version)"
+          set -euo pipefail
+          npm install -g "npm@$NPM_PUBLISH_VERSION"
+          installed="$(npm --version)"
+          if [ "$installed" != "$NPM_PUBLISH_VERSION" ]; then
+            echo "::error::this lane asked for npm $NPM_PUBLISH_VERSION and the runner answered $installed — a publish run by a version this file did not choose is not the provenance record the pin exists to be"
+            exit 1
+          fi
+          echo "npm in this publish lane: $installed (env.NPM_PUBLISH_VERSION)"
 
       - name: Stage the wrapper through OIDC, then reject it
         working-directory: packages/opencode
