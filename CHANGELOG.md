@@ -4,6 +4,64 @@
 
 ## [Unreleased]
 
+（空。1.22.0 收口后没有未归号的条目。)
+
+## [1.22.0] — 2026-10-26
+
+**版本判断：minor。** 判据是 1.21.0 那条自己写下的：patch 要求"状态文件的字段没动、退出码集合没动、
+CLI 参数没动、npm 包的 `bin` 声明没动"。本版动了其中三项——`glasspane-install` 多交付一条命令、
+`glasspane` 新增三个子命令、以及一条路径的退出码档位从 `deferred`/3 变成 `applied`/0 带
+`npm-not-refreshed`（机器确实变了，那一档本来就该是 0）。状态文件的字段一个没加：新增的是一个 code 值，
+而 code 在 schema 里不是封闭枚举（`status` 才是，也没动）。
+
+- **updater：读回在册作业改按 `launchctl print` 的真报文，并给"在册钟点"加第二个来源。**
+  两个读取器此前吃的是本仓发明的形状，CI 因此常绿而真机常红：`parseLaunchctlEnvironment` 在 `=` 处切行，
+  而 launchd 写的是 `KEY => value`——箭头的 `>` 被当成值的开头，于是每一项读数都比本次渲染的多一个前缀，
+  `updater enable` 在环境与字节逐字一致的机器上恒答"环境仍不一致"（本机 2026-10-26 21:47 用**已装的
+  1.21.0** 复现：rc=3，面板那颗更新按钮走的就是这一条）；`parseLaunchctlSchedule` 找的
+  `start calendar interval = { … }` 块 launchd 根本不打印（每天的钟点住在
+  `event triggers → <label> → descriptor → "Hour" => 12`），它永远答 null——2026-10-19 加上的那格钟点
+  比较从未在任何真机器上跑过一次。改成行导向的深度扫描（只在以 `{` 结尾的行上进深度、只认独占一行的 `}`），
+  `environment` 按整名匹配（`default/inherited environment` 不是作业被交给的那一份），钟点只认 stream
+  是日历流的那个触发器。真机同时暴露第二格：盘上那份 plist 读不出 StartCalendarInterval 时，一次不带
+  `--hour` 的 enable 把文档默认 12:00 渲染进定义并注册——这台机器每天的检查时间被一次"读失败的读数"
+  改掉了；现在在册作业是第二个来源，两本账都答不了才落到默认，且两句失败都要出现在同一句话里。
+  夹具换成逐字截自本机的报文（`updater/test/fixtures/launchd-print-agent.mjs`，两个套件共读），
+  `printJobBody` 改吐 `=>` 与嵌套 descriptor，三条既有拒绝控制这才真的问过东西。
+- **updater：npm 全局层刷不动不再取消整次更新（`npm-not-refreshed`）。** §3.5 的预检照旧在任何东西动
+  之前问一次，但它的答案不再是整场拒绝：够不着 npm、前缀写不进去、npm 答不出前缀，现在都只挡住全局层
+  这一格——两个 `.app` 照换、daemon 照重启并读回版本，结论里带着能照抄运行的一行
+  （`npm install -g glasspane-mcp@<版本> glasspane-install@<版本>`，并写明它取 registry 的发布物而不是
+  本轮核验过的暂存树）。这是用户 2026-10-26 定的契约（部分成功＋精确补救），换掉的是"面板连着几天说
+  更新失败、而它的应用那一半本来装得上去"。两条不松：预检说够不着就不许再碰全局层（`npm` 与
+  `preflightNpmCommands` 都是绊线）；被留下的旧转发层如果**装着却答不出 `tools/list`**，照旧整场回滚，
+  而"这台机器本来没有那一半"按 §3.3 在 2026-10-01 认下的那条只读 daemon 这一半并在结论里写明。
+  中途**安装失败**仍回滚：那时全局层可能既不记得旧版本也不是新版本。`npm-prefix-unwritable` 作为结论
+  退休（常量留着，机器上早就写下的状态文件还带着它）。
+- **installer：安装目录里那棵既有 clone 干净就被前进到钉住的 tag，脏就点名挡路的文件并拒绝。**
+  用户报的第二条：`npx` 对 `~/glasspane` 跑 `git clone` 被 git 以"already exists and is not an empty
+  directory"拒掉，提示是"换个目录"——下次还落在同一个地方；`install.sh` 那一侧只打印"不会被自动切到
+  v1.21.0"然后照用那棵树构建，而这台机器上那是 v1.5.0。判据收成一份（`existingCloneDecision`）：
+  `git status --porcelain` 空 ⇒ fetch + `checkout --detach`；不空 ⇒ 拒绝 + 点名前 10 个路径 + 给一条
+  换目录的走法；HEAD 或该 tag 指向的 commit 读不出 ⇒ 也拒绝（"判不出来"不许变成"那就照用"）。只有
+  status/rev-parse（读）、fetch（只往 .git 加对象）、`checkout --detach`（树干净才执行）三种动作，
+  没有 `-f`、`stash`、`clean`、`reset --hard`；切完按事实复判，不看命令退出码。shell 与 JS 两份过程由
+  `install-sh.test.mjs` 用同一份事实对照（形状取自 `updater/lib/launchd.js` 的 formatMode：抄一份就
+  得逐值比对）。
+- **installer：交付 `glasspane` 这条命令（doctor / update / status），文档改成 npm 优先。** 回答的是
+  "面板按钮失败了，而我不知道自己装到了哪里"。`doctor` 六格只读、每格答 available / absent /
+  unverified——"没有"与"我没看成"是两种事实，本产品修过的几处误归因（把 ENOENT 说成前缀权限、把没观察
+  到说成未装载）都是把它们合并成一种造成的；`update` 先 check 再 apply，检查停住就不进安装。一切都按
+  `~/.glasspane/update-install.json` 解析，不 sudo、不删东西。真机跑它抓到两处自己的形状错：
+  `npm ls -g --json` 是美化过的多行文档，而 `status --json` 把状态整体放在 `state` 里——读错字段的
+  结果都是"对着有内容的机器答不知道"。规格 §3.5 的 4a、两份 README 与本包 README 同步改了口径。
+- **量测。** `node --test updater/test/` 688 passed / 0 fail；`node --test installer/test/` 237 passed /
+  0 fail；`node scripts/check-doc-links.mjs` 32 份文档 262 条内链无死链。反向变异 26 笔（#24 的 11 笔
+  含在内，逐笔要求具名用例变红，两把跨文件尺子按 sha 逐字核回）。本机端到端：修之前已装的 1.21.0 跑
+  `enable` rc=3 并给出那句假不一致，修之后 rc=0 且句子里看得见读回来的钟点；`glasspane update` 在这台
+  机器上跑通并把状态里的 `current` 从 1.6.2 刷新到盘上真实的 1.21.0（两枚 bundle 的
+  `CFBundleShortVersionString` 实测均为 1.21.0）。
+
 **本节不空了。** 上一段写"此刻为空"时判据是 `git rev-parse v1.21.0^{commit}` 等于 `git rev-parse main`；
 下面这一笔落进主干之后那条等式不再成立——这些字节在 main、既不在 v1.21.0 的归档里也不在 registry 上，
 取号与发布归版本线决定。复量命令仍是那两条，不是"我数过了"。
