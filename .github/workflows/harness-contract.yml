@@ -49,6 +49,9 @@ jobs:
         env:
           PURPOSE: ${{ matrix.purpose }}
           PROBE_TAG: ${{ github.event.inputs.probe_tag }}
+          # `gh` 在这条 step 里读的是**别人的**公开仓，但用的仍是本 job 的凭据；D6-c 的规矩是
+          # "调 gh 的 step 必须自己声明 GH_TOKEN"，而不是靠镜像里恰好有哪个环境变量。
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           pinned="$(node -p "require('./harness/upstream.json').tag")"
@@ -61,7 +64,44 @@ jobs:
           if [ -n "${PROBE_TAG:-}" ]; then
             resolved="$PROBE_TAG"
           else
-            resolved="$(curl -fsSL https://api.github.com/repos/anomalyco/opencode/releases/latest | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{console.log(JSON.parse(s).tag_name)})')"
+            # 这一问必须先问得出**为什么问不出**。原先它是一条不分用户的
+            # `curl -fsSL … | node -e 'JSON.parse(s).tag_name'`：共享 runner 的出口 IP 上匿名限额
+            # 60 req/hr 常被别的仓打满，`curl -f` 遇到 403 什么也不写，于是 node 死在
+            # "Unexpected end of JSON input" 的堆栈上（实测于 2026-10-26 的一次 push，
+            # run 40264853002：`curl: (22) … error: 403` 紧跟一段 Node 栈）。那条红与
+            # "上游换了插件地板"长得一模一样，而这条 lane 的红的**唯一含义**就是后者——
+            # 与 verify-published.ts 里 `cannotObserve` 记过的同一种失效：会喊狼的闸最后被人关掉。
+            #
+            # 顺序：先认证（`gh api` 用 job 自带的 GITHUB_TOKEN，跨公开仓读 release 够用），
+            # 再匿名兜底，且兜底那条**先取 HTTP 状态**，绝不再把空串喂给 JSON 解析器。
+            if answer="$(gh api repos/anomalyco/opencode/releases/latest --jq .tag_name 2>/dev/null || true)" && [ -n "$answer" ]; then
+              resolved="$answer"
+              echo "resolved from api.github.com with the job credential: $resolved"
+            else
+              # 状态码取最后一行。**注意**为什么不用 `${body##*$(printf '\n')}`：命令替换会把结尾的
+              # 换行剥掉，于是那个"换行"是空串，模式变成 `##*` ——整个 body 被吃掉、status 恒空，
+              # 每一次"问不出"都会说成 `HTTP none`，而真正该区分的是 403 与 200-but-empty。
+              # 第一版就是这么写的，被电池的 C 用例（匿名 curl 回 200 + 合法 body）当场抓出来：
+              # 本该走通的兜底路径被判成了"问不出"。
+              body="$(curl -sS -w '\n%{http_code}' https://api.github.com/repos/anomalyco/opencode/releases/latest || true)"
+              status="$(printf '%s' "$body" | tail -n 1)"
+              payload="$(printf '%s' "$body" | sed '$d')"
+              if [ "$status" = "200" ]; then
+                resolved="$(printf '%s' "$payload" | node -e 'let s="";process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{const j=JSON.parse(s);process.stdout.write(j.tag_name??"")})' || true)"
+              fi
+              if [ -z "${resolved:-}" ]; then
+                echo "::error title=上游最新 tag 问不出（这不等于漂移）::api.github.com 回 HTTP ${status:-none}，两条通道都没给出 tag_name（匿名限额按出口 IP 计，共享 runner 上 403 是常态）。这条 lane 的唯一职责是回答"上游有没有换插件地板"；这一跑没问到 tag，所以既不构成漂移、也不构成「没有漂移」。"
+                {
+                  echo "### 上游探查：未观测（NOT OBSERVED）"
+                  echo ""
+                  echo "HTTP \`${status:-none}\`（\`gh api\` 与匿名 curl 都没给出 tag_name）。**漂移问题没有被回答**，这条红的含义是"测量失败"，不是"上游坏了"。"
+                  echo ""
+                  echo "补救：确认 job 能读到 \`secrets.GITHUB_TOKEN\`（或给这条 step 一个对公开 API 有配额的 fine-grained token），再用 \`workflow_dispatch\` 带上 \`probe_tag\` 重跑一次。"
+                } >> "$GITHUB_STEP_SUMMARY"
+                exit 1
+              fi
+              echo "resolved from the anonymous fallback: $resolved"
+            fi
           fi
           # 手动输入的 tag 会进 curl URL 与摘要文本：先钳成 release tag 的形状，
           # 不给它任何成为 shell 片段或 ref 注入的机会。
