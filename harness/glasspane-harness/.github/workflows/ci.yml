@@ -166,7 +166,7 @@ jobs:
   installer-selftest:
     name: install.sh fallback channel (offline, stubbed)
     runs-on: macos-14
-    # The lane is stubbed and offline: measured 15.4s wall for 175 named checks on this machine
+    # The lane is stubbed and offline: measured 17.01s wall for 175 named checks on this machine (re-timed after the lane was final; an earlier 15.42s reading was taken while two checks were failing, i.e. before the work finished — a fast selftest is not automatically a correct one)
     # (`/usr/bin/time -p bash packages/opencode/script/installer-selftest.sh`). 20 minutes is that
     # number with room for a loaded runner — and naming any ceiling at all is the point, because
     # the default is 360 and this job runs on a macOS runner, the scarcest label here.
