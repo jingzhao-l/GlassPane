@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# installer-selftest.sh — the release-asset fallback path, exercised offline.
+# installer-selftest.sh — the release-asset fallback path and the npm channel's
+# exit-code contract, exercised offline.
 #
 #   bash packages/opencode/script/installer-selftest.sh
 #
@@ -31,9 +32,11 @@ FIX="$SCRATCH/fixture"
 mkdir -p "$STUB" "$FIX"
 
 FAILURES=0
-pass() { echo "PASS  $*"; }
+CHECKS=0
+pass() { CHECKS=$((CHECKS + 1)); echo "PASS  $*"; }
 fail() {
   echo "FAIL  $*"
+  CHECKS=$((CHECKS + 1))
   FAILURES=$((FAILURES + 1))
 }
 # check <label> <haystack-file> <needle>: a named string must be present. Grep is only
@@ -168,8 +171,34 @@ esac
 STUBUNAME
 chmod +x "$STUB/uname"
 
-# npm: present but failing, which is the state the fallback exists for.
-printf '#!/bin/sh\necho "stub npm: refusing (simulated EACCES)" >&2\nexit 1\n' > "$STUB/npm"
+# npm: default is present-but-failing, which is the state the fallback exists for.
+# STUB_NPM=ok (section 23) flips it to the npm channel's success shape: `install -g`
+# places the fixture binary under a scratch prefix — the plain form AND the
+# --allow-scripts retry, so both success strings are reachable — and `prefix -g`
+# answers with that prefix, which is where install.sh's verify step looks for the
+# bytes this channel wrote. Nothing about the script under test is mocked: it runs
+# its real npm branch against this stub the same way every other scenario runs its
+# real asset branch against the stub curl.
+cat > "$STUB/npm" <<'STUBNPM'
+#!/usr/bin/env bash
+if [ "${STUB_NPM:-}" = "ok" ]; then
+  case "${1:-}" in
+    install)
+      mkdir -p "$STUB_NPM_PREFIX/bin"
+      cp "$STUB_NPM_BIN" "$STUB_NPM_PREFIX/bin/glasspane-harness"
+      echo "added 1 package in 1s"
+      exit 0
+      ;;
+    prefix)
+      echo "$STUB_NPM_PREFIX"
+      exit 0
+      ;;
+  esac
+  exit 1
+fi
+echo "stub npm: refusing (simulated EACCES)" >&2
+exit 1
+STUBNPM
 chmod +x "$STUB/npm"
 
 # sysctl: only section 21 reads it. The npm-lane launchers probe hw.optional.avx2_0 to decide
@@ -270,6 +299,9 @@ installer_env() {
     export STUB_CURL_ASSET_FAIL="${SCENARIO_CURL_ASSET_FAIL:-}"
     export STUB_GPG_IMPORT_FAILS="${SCENARIO_GPG_IMPORT_FAILS:-}"
     export STUB_AVX2="${SCENARIO_AVX2:-}"
+    export STUB_NPM="${SCENARIO_NPM:-}"
+    export STUB_NPM_PREFIX="$SCRATCH/npm-prefix-$(basename "$log")"
+    export STUB_NPM_BIN="$ASSET_DIR/glasspane-harness"
     export GLASSPANE_HARNESS_ALLOW_UNVERIFIED="${SCENARIO_ALLOW_UNVERIFIED:-}"
     export TMPDIR="${SCENARIO_TMPDIR:-/tmp}"
     mkdir -p "$TMPDIR"
@@ -817,10 +849,36 @@ run_install "$SCRATCH/latest-restored.log"
 assert_code "the same lane is green again once the endpoint names a tag" "$?" "0"
 rm -f "$FIX/latest"
 
+# ---------------------------------------------------------------- 23: the npm channel's exit-code contract
+# `scripts/install.sh` ends with a machine-visible verdict: exit 3 means "installed with NO
+# integrity evidence at all", and only the release-asset path can reach it (under the
+# documented override, when the manifest or signature had nothing to check against). The npm
+# channel is evidence-bearing — npm checks the tarball against the pinned registry's
+# dist.integrity — so it exits 0, and its success line must *name* that evidence instead of
+# only the absence ("sha256/GPG: not checked") that reads like the exit-3 state. These cases
+# drive the real script through run_install with the npm stub answering successfully (the
+# same stub-harness shape as sections 3..22, switched on with SCENARIO_NPM=ok), so both
+# halves of the contract — 0 exits 0, 3-stays-for-the-asset-path — are pinned in code, not
+# in the comment block. If somebody widens 3 to the npm path, assertion 1 goes red; if
+# somebody blurs the npm line back to a bare "not checked", assertions 4 and 5 go red.
+SCENARIO_NPM=ok run_install "$SCRATCH/npm-ok.log" --version 9.9.9
+assert_code "the npm channel installs evidence-bearing and exits 0, never 3" "$?" "0"
+assert_has "the npm success line names the registry it was pinned to" "$SCRATCH/npm-ok.log" "npm (glasspane-harness@9.9.9 from https://registry.npmjs.org"
+assert_has "and it names the integrity evidence that stands behind this channel" "$SCRATCH/npm-ok.log" "integrity: npm dist.integrity"
+assert_has "and it says plainly what was NOT checked here" "$SCRATCH/npm-ok.log" "product signature: not checked on this channel"
+assert_not_has "the npm success line no longer carries the bare 'not checked' wording" "$SCRATCH/npm-ok.log" "sha256/GPG: not checked"
+assert_not_has "the npm run never prints the exit-3 unverified verdict" "$SCRATCH/npm-ok.log" "exit 3: installed WITHOUT full verification"
+assert_has "and the verify step checks the binary this channel actually wrote" "$SCRATCH/npm-ok.log" "glasspane-harness --version -> 9.9.9"
+# The --allow-scripts retry is the second success string and is not reachable from this
+# scenario (the plain install already returned 0), so it is pinned against the script's own
+# bytes: same evidence wording, no bare "not checked" left anywhere in the file.
+assert_has "the --allow-scripts retry string carries the same evidence wording" "$INSTALL_SH" ", scripts allowed; integrity: npm dist.integrity vs the pinned registry; product signature: not checked on this channel)"
+assert_not_has "install.sh keeps no bare 'sha256/GPG: not checked' string" "$INSTALL_SH" "sha256/GPG: not checked"
+
 echo ""
 if [ "$FAILURES" -gt 0 ]; then
-  echo "installer-selftest: $FAILURES check(s) failed"
+  echo "installer-selftest: $FAILURES of $CHECKS checks failed"
   exit 1
 fi
-echo "installer-selftest: all checks held"
+echo "installer-selftest: all $CHECKS checks held"
 exit 0

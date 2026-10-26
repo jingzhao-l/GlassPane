@@ -7,7 +7,7 @@ All channels are macOS-only (see [Platform support](index.md#platform-support)).
 ```bash
 npm install -g glasspane-harness     # recommended; installs the wrapper + your Mac's package
 bun add -g glasspane-harness
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.11.1/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.0/scripts/install.sh | bash
 ```
 
 Both commands are available afterwards: `glasspane-harness` and `gp-harness`.
@@ -63,9 +63,10 @@ the tool surface emits points back at that call, so it is the first thing to rea
 something is off. The set of seats is the engine's to decide — this page deliberately does
 not count them, because a documented number is how a renamed seat turns into a lie.
 
-A version that prints is not evidence the bytes are the bytes that were published, so the
-two delivery channels each have their own check. Neither one runs on your behalf unless
-you ask:
+A version that prints is not evidence the bytes are the bytes that were published, so each
+delivery channel has an integrity story of its own. The two commands below are checks on what
+you already installed — the installer runs neither of them against your installed tree, so if
+you want that answer, ask for it:
 
 ```bash
 # npm channel — does the registry vouch for these bytes, and is there an attestation?
@@ -76,7 +77,8 @@ shasum -a 256 -c SHA256SUMS.txt
 gpg --verify glasspane-harness-darwin-arm64.zip.asc glasspane-harness-darwin-arm64.zip
 ```
 
-The `curl` channel runs both of those itself, and it stops when either one cannot be done.
+The installer's release-asset path runs both of those itself, and it stops when either one cannot
+be done.
 A release that publishes no `SHA256SUMS.txt` or no `.asc` is refused rather than warned about:
 this product's release lane writes a manifest covering every target and signs each asset, and it
 fails the run if either is missing — so their absence describes a broken or replaced release, not
@@ -86,10 +88,20 @@ than the fingerprint the installer carries, is refused for the same reason. The 
 that re-signs TLS, a 403, an HTTP 200 carrying HTML) is reported as a fetch failure, never as an
 unpublished release.
 
+The npm path is the other shape, and it is the one `scripts/install.sh` takes first when `npm` is
+on `PATH`: it installs from the registry named on the command line, so the integrity evidence is
+npm's own `dist.integrity` check against that registry, and the product's signature is not checked
+on that channel. The summary line says exactly that, because a line that named only the missing half
+would accuse the channel of doing less than it does. The two exit codes carry the difference: **0**
+means installed with the evidence this channel can produce, and **3** means installed with nothing
+checked at all — which the asset path reaches only under the override below. Widening 3 to cover the
+npm path would make the documented one-liner exit nonzero on success, and the first thing a script
+does with a nonzero success is add `|| true`, which is how an honest signal becomes noise.
+
 Only you can decide to install anyway, and saying so is an explicit act:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.11.1/scripts/install.sh | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.0/scripts/install.sh | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash
 ```
 
 The override has to be set for the shell that reads the script, not for `curl`: a leading

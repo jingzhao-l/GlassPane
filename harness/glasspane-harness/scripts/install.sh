@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # glasspane-harness one-click installer
 #
-#   curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.11.1/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.0/scripts/install.sh | bash
 #   bash scripts/install.sh                 # install (npm first, GitHub release asset as fallback)
 #   bash scripts/install.sh --dry-run       # print the plan, touch nothing
 #   bash scripts/install.sh --version 0.1.0 # pin a version
@@ -212,9 +212,9 @@ if command -v npm >/dev/null 2>&1; then
   # further down proves the command runs, not where the bytes came from. Saying
   # "installed via npm" alone manufactured confidence this installer did not earn.
   if npm install -g --registry "$NPM_REGISTRY" "$NPM_SPEC"; then
-    INSTALLED_VIA="npm ($NPM_SPEC from $NPM_REGISTRY; sha256/GPG: not checked on this channel)"
+    INSTALLED_VIA="npm ($NPM_SPEC from $NPM_REGISTRY; integrity: npm dist.integrity vs the pinned registry; product signature: not checked on this channel)"
   elif npm install -g --registry "$NPM_REGISTRY" --allow-scripts="$NPM_PACKAGE" "$NPM_SPEC" 2>/dev/null; then
-    INSTALLED_VIA="npm ($NPM_SPEC from $NPM_REGISTRY, scripts allowed; sha256/GPG: not checked on this channel)"
+    INSTALLED_VIA="npm ($NPM_SPEC from $NPM_REGISTRY, scripts allowed; integrity: npm dist.integrity vs the pinned registry; product signature: not checked on this channel)"
   else
     warn "npm install failed (global prefix not writable? try: npm install -g --prefix \"\$HOME/.local\" $NPM_SPEC)"
     INSTALLED_VIA=""
@@ -714,10 +714,24 @@ success "done. Docs: https://github.com/$REPO#readme"
 
 
 # ------------------------------------------------------------------ the machine-visible verdict
-# Exit 3 means "the command is installed, and this run did not verify what it installed": either
-# GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 was set, or a check had nothing to check against. Returning 0
-# here made a fully-verified install and a wholly-unverified one indistinguishable to anything that
-# does not read prose, which is every caller except a human watching the terminal.
+# The exit-code contract, stated narrowly because that is all the evidence supports.
+# Exit 0 = installed, with the integrity evidence this channel can produce. Two paths
+# end here. The release asset: sha256 against SHA256SUMS.txt and GPG against the .asc,
+# both verified. The npm channel: npm checked the tarball against the pinned registry's
+# dist.integrity, so these bytes are vouched for by the registry named on the command
+# line. No product signature was checked on that channel, and the success line says so
+# — "evidence-bearing", not "fully verified", is what 0 claims here.
+# Exit 3 = installed with NO integrity evidence at all. Only the release-asset path can
+# reach it: it installs past a skipped check only when GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1
+# was set (no SHA256SUMS.txt or no .asc published, or no gpg on PATH — without the
+# override, each of those refuses at exit 1). The npm path is not one of them, and never
+# sets UNVERIFIED_INSTALL: it has dist.integrity, which is an integrity check, done,
+# against a named pin.
+# Why the npm path must not join 3: the documented one-liner's success path would then be
+# a nonzero exit, callers would learn to write `|| true`, and the one code that still
+# means "this install was verified against nothing" would stop meaning anything.
+# Why this block exists at all: returning 0 for a wholly-unverified asset install made it
+# indistinguishable from a verified one to anything that does not read prose.
 if [ "$UNVERIFIED_INSTALL" = "1" ]; then
   error "exit 3: installed WITHOUT full verification — sha256: $SHA_STATE; GPG: $GPG_STATE"
   error "  to install verified bytes instead: install gnupg, and do not set GLASSPANE_HARNESS_ALLOW_UNVERIFIED"
