@@ -1896,9 +1896,13 @@ export async function applyUpdate({
     if (!handshake.ok) {
       const restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn })
       const npmBack = restoreNpm(npmResult ?? {})
-      const npmBackLine = npmBack.length === 0
-        ? 'no global package was recorded before this install, so the npm layer was left empty'
-        : `the npm packages were ${npmUndoLine(npmBack, { failureTail: ' — run "npm install -g" for those by hand' })}`
+      const npmBackLine = npmBlocked !== null
+        // Nothing was installed here, so nothing can be taken back — and saying "the npm layer was left
+        // empty" about a machine that has an old global package in it would be a invented state.
+        ? 'the global npm layer was never touched by this run, so there was nothing to undo in it'
+        : npmBack.length === 0
+          ? 'no global package was recorded before this install, so the npm layer was left empty'
+          : `the npm packages were ${npmUndoLine(npmBack, { failureTail: ' — run "npm install -g" for those by hand' })}`
       const sides = `installed ${wantVersion}, running daemon reports ${JSON.stringify(handshake.seen?.hello ?? null)}`
       if (!restored.ok) {
         const message = `${handshake.message}; ${npmBackLine}; and the backup could not be restored (${restored.message}): re-run the GlassPane installer to put ${appsDir} back`
