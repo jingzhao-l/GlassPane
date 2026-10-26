@@ -28,6 +28,8 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import product from "../../../product.json"
+import { provenanceFromMetadata, parseRegistryMetadata } from "./provenance-verdict"
+import { pullExactnessProblems, type PullResolution } from "./pull-exactness"
 import { REGISTRY_READINESS_BUDGET_MS, servedProbe, waitForRegistryVersion } from "./registry-readiness"
 
 // `--prefix` is a flag with a value, so it must not be read as the version. Everything
@@ -111,8 +113,16 @@ if (process.platform !== "darwin") {
   process.exit(2)
 }
 
-/** Reported, never asserted: whether the registry can show a provenance attestation. */
-async function reportProvenance() {
+/**
+ * Asserted, never merely reported: does the registry show a provenance attestation for this version?
+ *
+ * This used to print a note decided by `/\bprovenance\b/` over the whole metadata blob. Both halves
+ * were wrong the same way: `provenance` is a KEY NAME npm writes whether or not an attestation is
+ * behind it, so the probe could fire on the shape of the document; and as a note it could never fail
+ * the lane, while `product.json`'s own publishPolicy says a release ships with provenance. A version
+ * published without an attestation was reported and then passed.
+ */
+async function assertProvenance() {
   // `.quiet(true)`: a release log that buries its own verdict under the registry's whole
   // metadata blob is a log nobody reviews. The value is still read from stdout. (This bun's
   // typings take a boolean here, not the `"ignore"` string; `bun run typecheck` caught the
@@ -120,15 +130,27 @@ async function reportProvenance() {
   const meta = await $`npm view ${product.name}@${version} --registry ${registry} --json`
     .nothrow()
     .quiet(true)
-  if (meta.exitCode !== 0) {
-    console.log("note: could not read registry metadata — provenance NOT checked here")
+  const label = "the published wrapper carries a provenance attestation"
+  const read = npmAnswer(meta.exitCode, meta.stdout.toString(), meta.stderr.toString())
+  if (read.state === "unaskable") {
+    cannotObserve(label, `the question could not be asked: ${read.value}`)
     return
   }
-  console.log(
-    /\bprovenance\b/.test(meta.stdout.toString())
-      ? "note: the registry lists a provenance attestation for this version (the attestation's own content is not checked by this lane)"
-      : "note: the registry lists NO provenance attestation for this version",
-  )
+  if (read.state === "absent") {
+    check(label, false, `the registry says ${product.name}@${version} is not there (${read.value}) — nothing can be attested about bytes the registry does not have`)
+    return
+  }
+  const parsed = parseRegistryMetadata(read.value)
+  if (parsed === null) {
+    cannotObserve(label, `the registry answered with something that is not JSON (${read.value.slice(0, 120)}…) — a proxy re-signing the response is the usual cause, and it is not evidence about the artifact`)
+    return
+  }
+  const answer = provenanceFromMetadata(parsed)
+  if (answer.state === "attested") {
+    check(label, true, `${answer.predicateType}${answer.others.length ? `; other attestation keys: ${answer.others.join(", ")}` : ""}`)
+    return
+  }
+  check(label, false, `${answer.seen} — product.json's publishPolicy says a release without provenance is not a release`)
 }
 
 const prefix = givenPrefix === undefined ? mkdtempSync(path.join(tmpdir(), "gp-verify-")) : path.resolve(givenPrefix)
@@ -241,6 +263,7 @@ try {
       )
     }
     const served: string[] = []
+    const resolved: PullResolution[] = []
     for (const [name, want] of pulls) {
       const one = await serveWait(name, want)
       if (!one.ok) {
@@ -249,12 +272,21 @@ try {
           `${name}@${want} was still not served by ${registry} after ${one.attempts} look(s), ${Math.round(one.waitedMs / 1000)}s (${served.join("; ") || "none of the others had to wait"})${one.lastTransportError ? `; the last look failed to ask: ${one.lastTransportError}` : ""} — the wrapper alone installing is not the artifact`,
         )
       }
+      resolved.push({ name, want, seen: one.seen })
       served.push(`${name}@${one.seen} in ${one.attempts} look(s), ${Math.round(one.waitedMs / 1000)}s`)
     }
+    // The verdict compares the registry's actual answers, not their rendering into `served` — that
+    // log array stays for the human-readable detail line only. The replaced predicate substring-matched
+    // `@${version}` over the formatted lines, so a registry answering `0.11.14` looked like the tagged
+    // `0.11.1` (a prefix satisfies `includes`), and `pulls.length === served.length` was always true
+    // because every loop iteration either pushes or exits through `notServed`. `pull-exactness.ts`
+    // explains why exact equality is the whole contract: `publish.ts` declares every platform package
+    // at the plain product version, so there is no range to satisfy and no newer answer to accept.
+    const exact = pullExactnessProblems(version, resolved)
     check(
       "the registry serves every platform package this install will pull",
-      pulls.length === served.length && served.every((line) => line.includes(`@${version}`)),
-      `${pulls.length} package(s): ${served.join("; ")}`,
+      exact.length === 0,
+      `${pulls.length} package(s): ${served.join("; ")}${exact.length > 0 ? ` — ${exact.join("; ")}` : ""}`,
     )
     // `-g --prefix`, not a bare `--prefix`: a local install creates **no** bin links,
     // so "is the command there?" would fail for a reason that has nothing to do with the
@@ -387,7 +419,7 @@ try {
         distAnswer.value || `npm view exit ${dist.exitCode}`,
       )
     }
-    await reportProvenance()
+    await assertProvenance()
 
     // The tree that built this artifact and the artifact itself are different witnesses.
     // `script/patched-deps.mjs --check` reads the *install* — it is what caught, on 2026-10-23, that

@@ -15,6 +15,7 @@ const generated = await import("./generate.ts")
 
 import { Script } from "@opencode-ai/script"
 import pkg from "../package.json"
+import { assetUploadDecision, visibilityFromGhOutput } from "./release-assets"
 
 const singleFlag = process.argv.includes("--single")
 const baselineFlag = process.argv.includes("--baseline")
@@ -270,7 +271,20 @@ if (Script.release) {
     }
   }
   if (archives.length === 0) throw new Error("no binaries were built, so there is nothing to upload")
-  await $`gh release upload v${Script.version} ${archives} --clobber --repo ${process.env.GH_REPO}`
+  // Ask what the release is before overwriting anything in it. `--clobber` exists so a re-run of this
+  // job can replace its own unfinished asset while the release is still the draft `create-release`
+  // made; onto a PUBLIC release the same flag replaces the bytes a published version number names,
+  // and npm — the channel most users install from — refuses that version and keeps its old tarballs.
+  // One version, two byte sets, only one of them the registry's. `release-assets.ts` carries the
+  // reasoning; the answer here is a refusal the operator can act on, not a warning to scroll past.
+  const tag = `v${Script.version}`
+  const visibility = await $`gh release view ${tag} --json isDraft --repo ${process.env.GH_REPO}`
+    .nothrow()
+    .quiet(true)
+  const decision = assetUploadDecision(visibilityFromGhOutput(visibility.stdout.toString(), visibility.exitCode), tag)
+  if (!decision.ok) throw new Error(`refusing to upload ${tag}: ${decision.message}\n  remedy: ${decision.remedy}`)
+  console.log(`build: ${decision.why} — uploading ${archives.length} asset(s)`)
+  await $`gh release upload ${tag} ${archives} --clobber --repo ${process.env.GH_REPO}`
 }
 
 export { binaries }
