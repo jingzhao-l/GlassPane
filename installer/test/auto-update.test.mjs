@@ -182,14 +182,17 @@ test('自动更新接线：指针落进状态根，文件 0600 / 目录 0700，�
     assert.equal(readBack.ok, true, `读回必须成功：${readBack.message ?? ''}`)
     assert.equal(readBack.pointer.updaterCli, UPDATER_CLI)
 
-    // 注册走的是 updater 自己的 launchd 面：先 bootout 再 bootstrap，装载之后把在册作业读回来核对
-    // "跑的是不是这次渲染的那一份"。plist 落在临时 HOME。
+    // 注册走的是 updater 自己的 launchd 面：先把在册作业读一次（这份读数是"每天几点"的第二个来源——
+    // 盘上那份 plist 读不出钟点时，宁可用 launchd 挂着的那个，也不许悄悄换成默认值，2026-10-26 本机
+    // 实测被这一条救回来），然后 bootout、bootstrap，装载之后再把作业读回来核对"跑的是不是这次渲染的
+    // 那一份"。plist 落在临时 HOME。
     const plistPath = launchd.agentPlistPath({ homeDir: home })
     assert.deepEqual(launchctl.calls, [
+      ['launchctl', 'print', `gui/501/${launchd.AGENT_LABEL}`],
       ['launchctl', 'bootout', `gui/501/${launchd.AGENT_LABEL}`],
       ['launchctl', 'bootstrap', 'gui/501', plistPath],
       ['launchctl', 'print', `gui/501/${launchd.AGENT_LABEL}`],
-    ], 'bootout 先于 bootstrap：launchd 缓存 bootstrap 时读到的定义；print 是那句"已注册"的证据')
+    ], '问钟点排在拆作业之前；bootout 先于 bootstrap：launchd 缓存 bootstrap 时读到的定义；末尾那次 print 是那句"已注册"的证据')
     assert.equal(mode(plistPath), 0o600)
     const plist = fs.readFileSync(plistPath, 'utf8')
     // §7 的一处实现 + 方案 A 的边界：作业跑的是那个**不随版本变**的入口，入口每次运行读指针。
@@ -446,7 +449,10 @@ test('重跑安装幂等：LaunchAgents 里只有一份 plist，指针与作业�
     const plistPath = launchd.agentPlistPath({ homeDir: home })
     assert.deepEqual(fs.readdirSync(agentsDir), [`${launchd.AGENT_LABEL}.plist`],
       '重跑不许留下第二个作业（append/换名落盘都会在这里红）')
-    assert.deepEqual(launchctl.verbs(), ['bootout', 'bootstrap', 'print', 'bootout', 'bootstrap', 'print'],
+    // 第一轮：盘上还没有定义可读，所以先 print 一次问在册作业几点跑（那是"在册钟点"的第二个来源），
+    // 再 bootout/bootstrap/读回。第二轮：盘上已经有可读的定义，那一次前置 print 就不该发生——
+    // 两条一起把"读优先、且只在读不出时才多问一次"钉住。
+    assert.deepEqual(launchctl.verbs(), ['print', 'bootout', 'bootstrap', 'print', 'bootout', 'bootstrap', 'print'],
       '每轮都是 bootout 再 bootstrap，然后把在册作业读回来：已加载的定义不换掉，新 plist 就不生效')
     assert.equal(fs.readdirSync(second.stateRoot).filter((f) => f.startsWith('update-install.json')).length, 1,
       '临时文件必须已被 rename 收掉，不留 .tmp- 残骸')
@@ -533,8 +539,10 @@ test('先开后关：重跑安装带 --no-auto-update 会把已注册的代理�
       runLaunchctl: launchctl.run, now: NOW, say: () => {},
     })
     assert.equal(off.registered, false)
-    assert.deepEqual(launchctl.verbs(), ['bootout', 'bootstrap', 'print', 'bootout'],
-      '卸载轮只 bootout 已加载的作业，不再 bootstrap 回来（print 是装载那一轮读回在册作业）')
+    // 装载那一轮：print（问在册作业几点跑——那是"在册钟点"的第二个来源，必须排在 bootout 之前，
+    // 不然要问的那一份已经被自己拆掉）→ bootout → bootstrap → print（读回核对）。
+    assert.deepEqual(launchctl.verbs(), ['print', 'bootout', 'bootstrap', 'print', 'bootout'],
+      '卸载轮只 bootout 已加载的作业，不再 bootstrap 回来（开头与中间那两次 print：一次问钟点、一次读回在册作业）')
     assert.equal(fs.existsSync(plistPath), false, '定义文件必须一并删掉：只 bootout 不删 plist，下次登录又被 launchd 读回去')
     assert.deepEqual(fs.readdirSync(path.join(home, 'Library', 'LaunchAgents')), [],
       'LaunchAgents 里不能再有第二个同名文件（换个名字落盘就查不出来）')

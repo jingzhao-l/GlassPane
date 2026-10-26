@@ -15,6 +15,7 @@ import {
   validateGitRef,
   validateGitRepoUrl,
   cloneFailureText,
+  existingCloneDecision,
   safeGitCloneArgs,
   REPO_URL,
   INSTALL_SH_URL,
@@ -584,4 +585,133 @@ test('install.sh: 头里声明的职责条数与实际列出的条目一一对�
   assert.match(INSTALL_SH_SRC, /-ge 18/, '头里说有 Node 预检，脚本里就必须真有那次比较')
   assert.match(duties, /委托 installer/, '职责清单里必须写明委托 installer')
   assert.match(INSTALL_SH_SRC, /^exec node "\$REPO\/installer\/cli\.js" "\$@"$/m, '委托那一行必须真在脚本末尾')
+})
+
+/* ===========================================================================
+ * 2026-10-26 · 既有 clone：干净就前进，脏就拒＋给命令
+ *
+ * 这一格是用户报上来的第二条：`npx` 对已存在的 `~/glasspane` 跑 `git clone` 被拒，而 `install.sh`
+ * 只打印一句"既有 clone 不会被自动切到 v1.21.0"然后**照用那棵 v1.5.0 的树**去构建。两条入口当时
+ * 都没问那棵树脏不脏。`advance_existing_clone` 是这个问题在 shell 这一侧的答案，判据与
+ * `installer/cli.js` 的 `existingCloneDecision` 同源；下面两条分别钉"前进成立"与"脏必须拒"，
+ * 第三条把两侧的动作口径对照（同一份事实，两处不许给出不同结论——本轮修的就是这种不对称）。
+ *
+ * REVERSE MUTATION：把 `advance_existing_clone` 的脏分支删掉 → 第二条红（别人的未提交工作被切走）；
+ * 把切后复判删掉 → 第一条的 HEAD 断言红（只看 rc 的话，一条什么都不做的分支也能绿）。
+ */
+
+/** 一棵能过 `looks_like_repo` 的源仓库，带两个 tag：旧的与要装的。 */
+function makeTaggedRepo(label) {
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), `glasspane-${label}-`))
+  const src = path.join(work, 'src')
+  fs.mkdirSync(path.join(src, 'engine'), { recursive: true })
+  fs.mkdirSync(path.join(src, 'mcp-shell'), { recursive: true })
+  fs.writeFileSync(path.join(src, 'engine', 'Package.swift'), '// swift-tools-version:5.9\n')
+  fs.writeFileSync(path.join(src, 'mcp-shell', 'package.json'), '{}\n')
+  const git = (...args) => execFileSync('git', args, { cwd: src, encoding: 'utf8' })
+  git('init', '-q', '-b', 'main')
+  git('config', 'user.email', 'test@example.test')
+  git('config', 'user.name', 'test')
+  git('add', '-A')
+  git('commit', '-q', '-m', 'old release')
+  git('tag', 'v0.0.1-old')
+  fs.writeFileSync(path.join(src, 'engine', 'Package.swift'), '// swift-tools-version:5.10\n')
+  git('add', '-A')
+  git('commit', '-q', '-m', 'new release')
+  git('tag', 'v9.9.9-new')
+  const cloneDir = path.join(work, 'clone')
+  execFileSync('git', ['clone', '--quiet', '--branch', 'v0.0.1-old', '--depth', '1', `file://${src}`, cloneDir], { encoding: 'utf8' })
+  const headIn = () => execFileSync('git', ['-C', cloneDir, 'rev-parse', '--verify', 'HEAD'], { encoding: 'utf8' }).trim()
+  const tagCommit = (tag) => execFileSync('git', ['-C', src, 'rev-parse', '--verify', `${tag}^{commit}`], { encoding: 'utf8' }).trim()
+  return { work, src, cloneDir, headIn, tagCommit, cleanup: () => fs.rmSync(work, { recursive: true, force: true }) }
+}
+
+/** 一把只记录不干活的 node/uname：委托行不许真跑 installer，平台闸要按 macOS 走。 */
+function makeStubBin(dir) {
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'uname'), '#!/bin/sh\n[ "$1" = "-s" ] && echo Darwin || echo stub\n', { mode: 0o755 })
+  fs.writeFileSync(path.join(dir, 'node'), [
+    '#!/bin/sh',
+    'if [ "$1" = "-p" ]; then echo 22; exit 0; fi',
+    `printf '%s\\n' "$*" >> "${dir}/calls.txt"`,
+    'exit 0',
+    '',
+  ].join('\n'), { mode: 0o755 })
+  return dir
+}
+
+const STUB_ENV = (bin, repo, extra = {}) => ({
+  GLASSPANE_REPO: '',
+  GLASSPANE_INSTALL_DIR: repo.cloneDir,
+  GLASSPANE_REPO_URL: `file://${repo.src}`,
+  GLASSPANE_REF: 'v9.9.9-new',
+  GLASSPANE_INSTALL_DRY_RUN: '0',
+  PATH: `${bin}:/usr/bin:/bin:/usr/sbin:/sbin`,
+  ...extra,
+})
+
+test('install.sh: 既有 clone 干净时被前进到钉住的 tag，委托行用的是切完的那一棵', () => {
+  const repo = makeTaggedRepo('sh-advance')
+  const bin = makeStubBin(path.join(repo.work, 'bin'))
+  const calls = path.join(bin, 'calls.txt')
+  const before = repo.headIn()
+  try {
+    const result = runInstallSh({ cwd: repo.work, env: STUB_ENV(bin, repo) })
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+    assert.match(result.stdout, /该目录干净而在/, `要看得见"为什么切"：${result.stdout}`)
+    assert.match(result.stdout, /已前进到 v9\.9\.9-new/, result.stdout)
+    const after = repo.headIn()
+    assert.notEqual(after, before, 'HEAD 真的动了——只看 rc 的话，一条什么都不做的分支也能绿')
+    assert.equal(after, repo.tagCommit('v9.9.9-new'), '切到的必须正是钉住的那个 tag 指向的 commit')
+    const delegated = fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8') : ''
+    assert.match(delegated, /installer\/cli\.js/, `委托行必须落到切完的那一棵：${delegated}`)
+    assert.ok(delegated.includes(repo.cloneDir), `GLASSPANE_REPO 要指向前进后的目录：${delegated}`)
+  } finally {
+    repo.cleanup()
+  }
+})
+
+test('install.sh: 既有 clone 是脏的时候拒绝，点名挡路的文件，且一个字都不切', () => {
+  const repo = makeTaggedRepo('sh-dirty')
+  const bin = makeStubBin(path.join(repo.work, 'bin'))
+  const before = repo.headIn()
+  fs.writeFileSync(path.join(repo.cloneDir, 'engine', 'Package.swift'), '// 别人正在改的一行\n')
+  try {
+    const result = runInstallSh({ cwd: repo.work, env: STUB_ENV(bin, repo) })
+    assert.equal(result.status, 1, `脏树必须停下：${result.stdout}\n${result.stderr}`)
+    assert.match(result.stdout, /有 1 处未提交改动/, result.stdout)
+    assert.match(result.stdout, /engine\/Package\.swift/, '要点名是哪一个文件挡的路')
+    assert.match(result.stdout, /GLASSPANE_INSTALL_DIR=/, '要给一条做得动的路')
+    assert.doesNotMatch(result.stdout, /git (stash|clean)|checkout -f/, '补救里不许出现销毁性的 git 动作')
+    assert.equal(repo.headIn(), before, '拒绝这一支必须一个字都没切')
+    assert.equal(fs.existsSync(callsPath(bin)), false, '停了就不该再委托：那棵树还是别人的旧版本')
+  } finally {
+    repo.cleanup()
+  }
+})
+
+function callsPath(bin) {
+  return path.join(bin, 'calls.txt')
+}
+
+test('install.sh 与 installer/cli.js 对同一份既有 clone 事实给出同一种动作（两处不许各说各话）', () => {
+  // 本轮被修掉的正是这一类不对称：一条入口照用旧树、另一条被 git 拒掉。判据既然同源，就要被
+  // 同一份事实问一次——形状取自 `updater/lib/launchd.js` 的 formatMode：两处各写一份，测试逐值比对。
+  const A = 'a'.repeat(40)
+  const B = 'b'.repeat(40)
+  const cases = [
+    { name: '已经在钉住的 tag 上', state: { head: A, tagCommit: A, blocking: [] }, want: 'use' },
+    { name: '干净而在别处', state: { head: B, tagCommit: A, blocking: [] }, want: 'advance' },
+    { name: '脏', state: { head: B, tagCommit: A, blocking: [' M engine/Package.swift'] }, want: 'refuse' },
+    { name: '读不出', state: { head: null, tagCommit: null, blocking: [] }, want: 'refuse' },
+  ]
+  for (const one of cases) {
+    const decided = existingCloneDecision({ targetDir: '/Users/x/glasspane', ref: 'v9.9.9', ...one.state }).action
+    assert.equal(decided, one.want, `JS 那一侧的判据在「${one.name}」上回的是 ${decided}`)
+  }
+  // shell 那一侧不许有第二种"什么算脏"：它只可能问 `git status --porcelain`，且只可能用
+  // detach 形态去切（没有 -f / stash / clean 的口子）。
+  assert.match(INSTALL_SH_SRC, /git -C "\$_dir" status --porcelain/, 'shell 侧的"脏"必须来自同一把尺子')
+  assert.match(INSTALL_SH_SRC, /git -C "\$_dir" checkout --detach "\$_ref"/, '切只能是 detach 那一形')
+  assert.doesNotMatch(INSTALL_SH_SRC, /git[^\n]*(stash|clean|checkout -f|reset --hard)/, '安装脚本里不许出现销毁性的 git 动作')
 })

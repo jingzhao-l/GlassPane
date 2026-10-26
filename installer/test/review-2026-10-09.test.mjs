@@ -774,12 +774,14 @@ test('finding9: “already exists and is not an empty directory” 不再被说�
   assert.match(silent, /没有留下 stderr/, '读不到原话就明说读不到，不编一个成因')
 })
 
-test('finding9: bootstrap 目标已存在时，cli.js 把 git 那句原话交出来而不是怪网络', (t) => {
+test('finding9: bootstrap 目标已存在时，cli.js 说出真正的原因而不是怪网络', (t) => {
   const home = tempDir('v9-home')
   const cwd = tempDir('v9-cwd')
   try {
     // 目标目录本身就是一个 GlassPane 形状的仓库：bootstrapPlan 的"存在但不是仓库"检查放它过去
-    // （resolveProjectRoot 会往上找到它），于是 git 才是真正说不通的那一个。
+    // （resolveProjectRoot 会往上找到它）。2026-10-26 之前这里往下走 `git clone`，于是读者拿到的是
+    // git 的 "already exists and is not an empty directory"——本轮用户报的第二条就是它。现在这一支
+    // 先问那棵树的事实：这个目录有文件却没有 git 历史，所以答案是"判不出来 ⇒ 拒"，仍然不是网络。
     const target = path.join(home, 'glasspane')
     fs.mkdirSync(path.join(target, 'engine'), { recursive: true })
     fs.mkdirSync(path.join(target, 'mcp-shell'), { recursive: true })
@@ -790,15 +792,18 @@ test('finding9: bootstrap 目标已存在时，cli.js 把 git 那句原话交出
     })
     const blocked = refusedBeforeInstall(r)
     if (blocked) {
-      // 文案本身由上面那条纯函数用例在所有平台量过；这一条端到端要的是"真 git 那句原话淌到
-      // stderr 上"，而那一步在本机被前置拒绝挡住，所以如实声明是谁挡的，不许静默通过。
-      t.skip(`这台机器走不到 clone 分支（${blocked} 排在它之前）`)
+      // 文案本身由上面那条纯函数用例在所有平台量过；这一条端到端要的是"真原因淌到 stderr 上"，
+      // 而那一步在本机被前置拒绝挡住，所以如实声明是谁挡的，不许静默通过。
+      t.skip(`这台机器走不到 bootstrap 分支（${blocked} 排在它之前）`)
       return
     }
     assert.equal(r.status, 1, `stdout:${r.stdout}\nstderr:${r.stderr}`)
-    assert.match(r.stderr, /already exists and is not an empty directory/, r.stderr)
-    assert.match(r.stderr, /原因不是网络/, r.stderr)
+    assert.match(r.stderr, /读不出 HEAD|不是 git 仓库/, `该说的是这棵树判不出来：${r.stderr}`)
+    assert.match(r.stderr, /GLASSPANE_INSTALL_DIR=/, '拒了也要给一条做得动的路')
     assert.ok(!/网络不可达或该发布 tag 不存在/.test(r.stderr), '旧文案把任何非零都算成网络问题')
+    assert.ok(!/already exists and is not an empty directory/.test(r.stderr),
+      `这一支不再把 git clone 的的原话当结论——那条路已经在前面被换掉：${r.stderr}`)
+    assert.equal(fs.readFileSync(path.join(target, 'engine', 'Package.swift'), 'utf8'), '//', '拒绝这一支一个字都不改')
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
     fs.rmSync(cwd, { recursive: true, force: true })

@@ -13,6 +13,8 @@ import {
   launchdPlistString,
   LAUNCHD_LABEL,
   bootstrapPlan,
+  existingCloneDecision,
+  advanceExistingClone,
   repoMissingText,
   RELEASE_VERSION,
   REPO_URL,
@@ -296,16 +298,104 @@ test('bootstrapPlan: 目标已存在且不是仓库 → 拒绝，绝不覆盖用
   assert.equal(fs.existsSync(path.join(busy, 'keep-me.txt')), true)
 })
 
-test('bootstrapPlan: 目标已是 GlassPane 结构 → 复用，不重复 clone', () => {
+test('bootstrapPlan: 目标已是 GlassPane 结构 → 按那棵树的事实决定，不再往它身上跑 git clone', () => {
+  // 这一支以前只回一个 clone 计划，于是"复用"这个名字是空的：真跑下去是 git 的
+  // "destination path … already exists and is not an empty directory"，读者被告知"换个目录"，
+  // 而换到的目录下次还会是同一个。现在三种事实三种结论，且三种都不产生 `gitArgs`。
   const outer = fs.mkdtempSync(path.join(os.tmpdir(), 'glasspane-bootstrap-'))
   const repo = path.join(outer, 'glasspane')
   fs.mkdirSync(path.join(repo, 'engine'), { recursive: true })
   fs.mkdirSync(path.join(repo, 'mcp-shell'), { recursive: true })
   fs.writeFileSync(path.join(repo, 'engine', 'Package.swift'), '//')
   fs.writeFileSync(path.join(repo, 'mcp-shell', 'package.json'), '{}')
-  const plan = bootstrapPlan({ homeDir: outer, installDir: repo })
-  assert.equal(plan.error, undefined)
-  assert.equal(plan.targetDir, repo)
+  const shapes = {
+    same: { head: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', tagCommit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', blocking: [] },
+    older: { head: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', tagCommit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', blocking: [] },
+    dirty: { head: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', tagCommit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', blocking: [' M engine/Package.swift'] },
+    unreadable: { head: null, tagCommit: null, blocking: [] },
+  }
+  for (const [name, state] of Object.entries(shapes)) {
+    const plan = bootstrapPlan({ homeDir: outer, installDir: repo, ref: 'v9.9.9', readCloneState: () => state })
+    assert.equal(plan.gitArgs, undefined, `${name} 这一支不许产生 clone 参数`)
+    assert.equal(plan.error, undefined, `${name}：${plan.error}`)
+  }
+  const use = bootstrapPlan({ homeDir: outer, installDir: repo, ref: 'v9.9.9', readCloneState: () => shapes.same })
+  assert.equal(use.use, true, JSON.stringify(use))
+  assert.equal(use.targetDir, repo)
+  const advance = bootstrapPlan({ homeDir: outer, installDir: repo, ref: 'v9.9.9', readCloneState: () => shapes.older })
+  assert.equal(advance.advance.ref, 'v9.9.9', JSON.stringify(advance))
+  assert.equal(advance.advance.targetDir, repo)
+  const dirty = bootstrapPlan({ homeDir: outer, installDir: repo, ref: 'v9.9.9', readCloneState: () => shapes.dirty })
+  assert.equal(dirty.refuse?.blocking.length, 1, JSON.stringify(dirty))
+  assert.match(dirty.refuse.text, /engine\/Package\.swift/, '拒绝要点名挡路的那个文件')
+  assert.match(dirty.refuse.text, /GLASSPANE_INSTALL_DIR=/, '也要给一条做得动的路')
+  assert.doesNotMatch(dirty.refuse.text, /git (stash|checkout -f|clean)/, '不许把销毁性的 git 动作写成补救')
+  // 没注入探针的调用方（旧的 main 之外的一切）仍走 clone 计划：这条计划的存在是这个函数的手感。
+  const blind = bootstrapPlan({ homeDir: outer, installDir: repo })
+  assert.ok(Array.isArray(blind.gitArgs), '不报状态时仍按 clone 计划返回')
+})
+
+test('existingCloneDecision: 判不出来永远是拒，不是"那就照用"也不是"那就切过去"', () => {
+  const base = { targetDir: '/Users/x/glasspane', ref: 'v9.9.9' }
+  assert.equal(existingCloneDecision({ ...base, head: 'a', tagCommit: 'a', blocking: [] }).action, 'use')
+  assert.equal(existingCloneDecision({ ...base, head: 'b', tagCommit: 'a', blocking: [] }).action, 'advance')
+  assert.equal(existingCloneDecision({ ...base, head: 'b', tagCommit: 'a', blocking: ['?? scratch/'] }).action, 'refuse')
+  assert.equal(existingCloneDecision({ ...base, head: 'b', tagCommit: null, blocking: [] }).action, 'refuse')
+  assert.equal(existingCloneDecision({ ...base, head: null, tagCommit: 'a', blocking: [] }).action, 'refuse')
+  // 挡路文件超过 10 个时只点前 10 个，但**计数**要说全：一句"有 47 处"加 10 行样本，读者知道规模。
+  const many = Array.from({ length: 47 }, (_, i) => ` M file-${i}.swift`)
+  const refused = existingCloneDecision({ ...base, head: 'b', tagCommit: 'a', blocking: many })
+  assert.match(refused.text, /有 47 处未提交改动/, refused.text.slice(0, 200))
+  assert.match(refused.text, /另有 37 处/, refused.text)
+  assert.equal(refused.blocking.length, 47, '数据要留全：文本是给人读的，字段是给机器读的')
+  assert.equal(refused.text.split('\n').filter((l) => /file-\d+\.swift/.test(l)).length, 10, '屏幕上只点十个')
+})
+
+test('advanceExistingClone: 只走读、fetch、detach 三步，且切完按事实复判', () => {
+  const calls = []
+  const A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  const B = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+  let head = B
+  let checkedOut = false
+  const spawn = (bin, args) => {
+    calls.push(args.slice(2))
+    const join = args.join(' ')
+    if (/status --porcelain/.test(join)) return { status: 0, stdout: checkedOut ? '' : '', stderr: '' }
+    if (/rev-parse --verify HEAD/.test(join)) return { status: 0, stdout: `${head}\n`, stderr: '' }
+    if (/rev-parse --verify v9\.9\.9\^\{commit\}/.test(join)) return { status: 0, stdout: `${A}\n`, stderr: '' }
+    if (/checkout --detach v9\.9\.9/.test(join)) { checkedOut = true; head = A; return { status: 0, stdout: '', stderr: '' } }
+    if (/fetch/.test(join)) return { status: 0, stdout: '', stderr: '' }
+    return { status: 128, stdout: '', stderr: `unexpected: ${join}` }
+  }
+  const out = advanceExistingClone({ repoDir: '/Users/x/glasspane', ref: 'v9.9.9', spawn })
+  assert.equal(out.action, 'use', out.text ?? JSON.stringify(out))
+  assert.equal(out.advanced, true)
+  assert.equal(out.from, B, '句子要说从哪个 commit 前进过来的')
+  for (const args of calls) {
+    assert.doesNotMatch(args.join(' '), /(?:^|\s)-f(?:\s|$)|--force|stash|clean|reset/, `安装器不许动别人的工作：${args.join(' ')}`)
+  }
+  assert.ok(calls.some((args) => args.join(' ') === 'checkout --detach v9.9.9'), '该切的那一步要真的切了')
+
+  // 切完复判不成立 ⇒ 拒。这一条是"判据落在切换之后的事实上"这条规矩的读者：把复判删掉，
+  // 上面那段 detach-fails-open 的代码就会把一棵切坏了的树交去构建。
+  let checkoutRan = false
+  const lying = advanceExistingClone({
+    repoDir: '/Users/x/glasspane',
+    ref: 'v9.9.9',
+    spawn: (bin, args) => {
+      const join = args.join(' ')
+      // 切之前：干净、HEAD 在 B、tag 在 A ⇒ 判成"前进"。切之后：HEAD 到了 A 却冒出一处改动，
+      // 复判必须把它拦下来——这一支不许把"命令退出了 0"当成"这棵树可用"。
+      if (/status --porcelain/.test(join)) return { status: 0, stdout: checkoutRan ? ' M 被切坏了的文件\n' : '', stderr: '' }
+      if (/rev-parse --verify HEAD/.test(join)) return { status: 0, stdout: `${checkoutRan ? A : B}\n`, stderr: '' }
+      if (/rev-parse --verify v9\.9\.9\^\{commit\}/.test(join)) return { status: 0, stdout: `${A}\n`, stderr: '' }
+      if (/checkout --detach/.test(join)) { checkoutRan = true; return { status: 0, stdout: '', stderr: '' } }
+      return { status: 128, stdout: '', stderr: join }
+    },
+  })
+  assert.equal(lying.action, 'refuse', JSON.stringify(lying))
+  assert.match(lying.text, /切完之后/, lying.text)
+  assert.equal(lying.blocking.length, 1, '复判拒的时候也要把冒出来的改动带在数据里')
 })
 
 test('parseArgs: bootstrap 默认开，--no-bootstrap 关闭', () => {

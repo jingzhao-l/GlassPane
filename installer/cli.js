@@ -2304,6 +2304,8 @@ export function bootstrapPlan({
   repoUrl = REPO_URL,
   ref = REPO_REF,
   installDir = null,
+  // 只读探针：注入它，这条纯函数才能被"目录已经存在且是一棵 GlassPane 仓库"这一支单测覆盖。
+  readCloneState = null,
 } = {}) {
   if (!homeDir) {
     return { error: '无法确定用户主目录（HOME 为空），不知道把源码 clone 到哪里' }
@@ -2314,6 +2316,18 @@ export function bootstrapPlan({
       error: `目标目录已存在且不是 GlassPane 仓库：${targetDir}（用 --repo 指定仓库，或清理该目录后重试）`,
     }
   }
+  // 目录存在**且是一棵 GlassPane 仓库**：这一支从前直接往下走 `git clone`，于是产品自己的安装位置
+  // （`~/glasspane`）里那份旧 clone 换来的是 git 的 "destination path … already exists and is not an
+  // empty directory"——读者按提示"换个目录"重跑，下一次又落在同一个地方。现在它前进那棵树，或说清
+  // 为什么不动它（判据见 `existingCloneDecision`）。
+  if (fs.existsSync(targetDir) && typeof readCloneState === 'function') {
+    const state = readCloneState({ targetDir, ref })
+    const decision = existingCloneDecision({ targetDir, ref, ...state })
+    if (decision.action !== 'advance') {
+      return { use: decision.action === 'use', targetDir, refuse: decision.action === 'refuse' ? decision : null, decision }
+    }
+    return { advance: { targetDir, ref, decision } }
+  }
   // 三个值都会进 git argv：ref 来自 GLASSPANE_REF、目录来自 GLASSPANE_INSTALL_DIR，
   // 都是文档里写明的覆盖口子。判据与 install.sh 的 assert_ref/assert_repo_url 同源。
   const clone = safeGitCloneArgs({ repoUrl, ref, targetDir })
@@ -2322,6 +2336,140 @@ export function bootstrapPlan({
     targetDir,
     ref: clone.ref,
     gitArgs: clone.args,
+  }
+}
+
+/**
+ * 既有 clone 的结论（纯判定，可单测）。
+ *
+ * 为什么这一格不能像以前那样"提示一句就照用"：`~/glasspane` 是产品自己的安装位置，`install.sh` 与
+ * `npx glasspane-install` 都往那里 clone。上一版在这里只打印"既有 clone 不会被自动切到 v1.21.0"，
+ * 然后**照用那棵树**去构建——2026-10-26 这台机器上那是 v1.5.0 的 clone，于是"一键安装"把一个 1.5.0
+ * 的产物当成新装交出去，而 `npx` 那条路更糟：它直接对已存在目录跑 `git clone`，被 git 以
+ * "destination path … already exists and is not an empty directory" 拒掉，读者只剩"换目录"这一条死路。
+ *
+ * 判据按那个人 2026-10-26 选的形状：
+ *   · 干净（`git status --porcelain` 空）且 HEAD 已经是那个 tag ⇒ 就用；
+ *   · 干净但不是那个 tag ⇒ 前进（fetch + detached checkout —— 这是移动**产品自己的 clone**，
+ *     不是移动任何人的工作树）；
+ *   · 脏 ⇒ 拒绝，点名前 10 个挡路的路径，并给一条不销毁任何东西的出路（换一个空目录）；
+ *   · 读不出 HEAD 或 tag ⇒ 也拒绝。"判不出来"永远不许变成"那就照用/那就切过去"。
+ */
+export function existingCloneDecision({ targetDir, ref, head = null, tagCommit = null, blocking = [] }) {
+  const dirty = blocking.map((line) => String(line).trim()).filter((line) => line !== '')
+  if (dirty.length > 0) {
+    const shown = dirty.slice(0, 10)
+    return {
+      action: 'refuse',
+      blocking: dirty,
+      text: `${targetDir} 有 ${dirty.length} 处未提交改动，安装器不会切走它（切走会把别人的工作当成构建源码）：\n`
+        + shown.map((line) => `    ${line}`).join('\n')
+        + (dirty.length > shown.length ? `\n    …另有 ${dirty.length - shown.length} 处` : '')
+        + `\n下一步（不销毁任何东西，两条都做得动）：`
+        + `\n  a) 换一处干净的家再跑一键安装：GLASSPANE_INSTALL_DIR=~/glasspane-${String(ref).replace(/[^A-Za-z0-9._+-]/g, '_')} `
+        + `sh install.sh（或 npx glasspane-install）；`
+        + `\n  b) 自己收着这些改动：在 ${targetDir} 里把它们提交或转移到别处，再重跑本命令——`
+        + '安装器不替你决定这些文件去哪。',
+    }
+  }
+  if (!head || !tagCommit) {
+    return {
+      action: 'refuse',
+      blocking: [],
+      text: `${targetDir} 读不出 HEAD 或 ${ref} 指向的 commit（不是 git 仓库、浅历史里没有这个 tag，或 git 本身答不了）：`
+        + '判不出"这棵树是不是被签的那一份"就不动它，也不装它。'
+        + `\n下一步：git -C "${targetDir}" fetch --tags --depth 1 后重跑；要一份全新的 clone 就 `
+        + 'GLASSPANE_INSTALL_DIR=<空目录> 重跑一键安装。',
+    }
+  }
+  if (head === tagCommit) {
+    return { action: 'use', blocking: [], head, text: `${targetDir} 已经在 ${ref}（${String(head).slice(0, 7)}），直接用它构建。` }
+  }
+  return {
+    action: 'advance',
+    blocking: [],
+    head,
+    tagCommit,
+    text: `${targetDir} 是干净的 clone，HEAD 在 ${String(head).slice(0, 7)} 而要装的是 ${ref}（${String(tagCommit).slice(0, 7)}）——`
+      + '把它前进到那一个 tag 再构建。',
+  }
+}
+
+/**
+ * 一棵既有 clone 的三份事实（IO 读，不判定）：HEAD 指向的 commit、`ref^{commit}`、以及
+ * `git status --porcelain` 的行。判据一律在 `existingCloneDecision`，两处调用（bootstrap 的纯计划、
+ * 前进这一步的复判）共用同一份读数，避免出现第二个"什么算脏"的说法。
+ */
+export function readCloneFacts({ targetDir, ref, spawn = spawnSync } = {}) {
+  const read = (args) => spawn('git', ['-C', targetDir, ...args], { encoding: 'utf8' })
+  const sha = (what) => {
+    const res = read(['rev-parse', '--verify', what])
+    return res.status === 0 ? String(res.stdout ?? '').trim() : null
+  }
+  const status = read(['status', '--porcelain'])
+  return {
+    head: sha('HEAD'),
+    tagCommit: sha(`${ref}^{commit}`),
+    // `git status` 答非零时这里得到空数组，读起来是"干净"——那棵树随后会因为 `head` 读不出而被拒，
+    // 所以"判不出来"走的是拒绝那一支，不是"那就切过去"。
+    blocking: status.status === 0 ? String(status.stdout ?? '').split('\n').filter((line) => line !== '') : [],
+  }
+}
+
+/**
+ * 把既有 clone 前进到钉住的 ref（IO 步；判据全在 `existingCloneDecision` 里）。
+ *
+ * 只有三条 git 动作：`status --porcelain` 与两次 `rev-parse`（读）、`fetch --tags --depth 1`（只往
+ * .git 里加对象）、`checkout --detach <ref>`（只在树干净时执行）。没有 `-f`、没有 `stash`、没有
+ * `clean`：一个 installer 不该有能把别人的未提交工作抹掉的那一格。
+ */
+export function advanceExistingClone({ repoDir, ref, spawn = spawnSync } = {}) {
+  const read = (args) => spawn('git', ['-C', repoDir, ...args], { encoding: 'utf8' })
+  let facts = readCloneFacts({ targetDir: repoDir, ref, spawn })
+  if (facts.blocking.length === 0 && facts.head && !facts.tagCommit) {
+    // tag 不在这份浅历史里：先把它取回来，再判。fetch 失败不改任何东西。
+    const fetched = read(['fetch', '--tags', '--depth', '1', 'origin', ref])
+    if (fetched.status !== 0) {
+      return {
+        action: 'refuse',
+        blocking: [],
+        text: `${repoDir} 里没有 ${ref} 这个 tag，而 `
+          + `git -C "${repoDir}" fetch --tags --depth 1 origin ${ref} 退出 ${String(fetched.status ?? 'null')}：`
+          + `${String(fetched.stderr ?? '').trim().split('\n')[0] || '（git 没有留下 stderr）'}。\n`
+          + '没有 clone、没有切分支、没有写入任何东西。下一步：确认网络与该 tag 存在（'
+          + `git ls-remote --tags origin ${ref}），或 GLASSPANE_INSTALL_DIR=<空目录> 换一处全新的 clone。`,
+      }
+    }
+    facts = readCloneFacts({ targetDir: repoDir, ref, spawn })
+  }
+  let decision = existingCloneDecision({ targetDir: repoDir, ref, ...facts })
+  if (decision.action !== 'advance') return decision
+  const out = read(['checkout', '--detach', ref])
+  if (out.status !== 0) {
+    return {
+      action: 'refuse',
+      blocking: readCloneFacts({ targetDir: repoDir, ref, spawn }).blocking,
+      text: `切到 ${ref} 没成（git checkout --detach 退出 ${String(out.status ?? 'null')}）：`
+        + `${String(out.stderr ?? '').trim().split('\n')[0] || '（git 没有留下 stderr）'}。\n`
+        + `${repoDir} 仍在 ${String(facts.head ?? '读不出').slice(0, 7)}，本轮没有构建任何东西。`,
+    }
+  }
+  // 切完再读一次：判据要落在**切换之后**的事实上，不是落在命令的退出码上。
+  const after = readCloneFacts({ targetDir: repoDir, ref, spawn })
+  const recheck = existingCloneDecision({ targetDir: repoDir, ref, ...after })
+  if (recheck.action !== 'use') {
+    return {
+      action: 'refuse',
+      blocking: after.blocking,
+      text: `切完之后 ${repoDir} 还不是 ${ref}（HEAD=${String(after.head ?? '读不出').slice(0, 7)}，`
+        + `tag=${String(after.tagCommit ?? '读不出').slice(0, 7)}，另有 ${after.blocking.length} 处改动）：本轮不拿它构建。`,
+    }
+  }
+  return {
+    ...recheck,
+    advanced: true,
+    from: facts.head,
+    text: `${repoDir} 从 ${String(facts.head ?? '读不出').slice(0, 7)} 前进到 ${ref}（${String(after.head).slice(0, 7)}），用它构建。`,
   }
 }
 
@@ -2531,31 +2679,50 @@ export async function install({
       installDir: env.GLASSPANE_INSTALL_DIR ?? null,
       repoUrl: env.GLASSPANE_REPO_URL ?? REPO_URL,
       ref: pinRef,
+      readCloneState: ({ targetDir, ref }) => readCloneFacts({ targetDir, ref }),
     })
     if (plan.error) {
       throw new Error(`${plan.error}\n\n${repoMissingText()}`)
     }
-    printStep(`未定位到本地仓库，引导 clone：${plan.targetDir}（ref: ${plan.ref}）……`)
-    // stderr 要留着归因（finding 9）：任何非零都算"网络不可达或 tag 不存在"会把
-    // "目标目录已存在且非空"这类本地故障说成网络问题，读者据此一直重试同一条死路。
-    const clone = spawnSync('git', plan.gitArgs, {
-      stdio: ['inherit', 'inherit', 'pipe'],
-      encoding: 'utf8',
-    })
-    if (clone.status !== 0) {
-      throw new Error(
-        `${cloneFailureText({
-          ref: plan.ref,
-          status: clone.status,
-          stderr: clone.stderr ?? clone.error?.message ?? '',
-          targetDir: plan.targetDir,
-        })}\n\n${repoMissingText()}`,
-      )
+    // 目录里已经有一棵 GlassPane 仓库：要么用它（已经在钉的那个 tag 上），要么前进它，要么说清为什么
+    // 不动它。三条都是**结论**，没有一条是"那就 clone 试试，让 git 去报错"。
+    if (plan.refuse) {
+      throw new Error(`${plan.refuse.text}\n\n${repoMissingText()}`)
     }
-    if (resolveProjectRoot(plan.targetDir) === null) {
-      throw new Error(`clone 完成但目录结构不完整：${plan.targetDir}\n\n${repoMissingText()}`)
+    if (plan.use) {
+      printStep(plan.decision.text)
+      rootDir = plan.targetDir
+    } else if (plan.advance) {
+      printStep(plan.advance.decision.text)
+      const advanced = advanceExistingClone({ repoDir: plan.advance.targetDir, ref: plan.advance.ref })
+      if (advanced.action !== 'use') {
+        throw new Error(`${advanced.text}\n\n${repoMissingText()}`)
+      }
+      printStep(advanced.text)
+      rootDir = advanced.targetDir ?? plan.advance.targetDir
+    } else {
+      printStep(`未定位到本地仓库，引导 clone：${plan.targetDir}（ref: ${plan.ref}）……`)
+      // stderr 要留着归因（finding 9）：任何非零都算"网络不可达或 tag 不存在"会把
+      // "目标目录已存在且非空"这类本地故障说成网络问题，读者据此一直重试同一条死路。
+      const clone = spawnSync('git', plan.gitArgs, {
+        stdio: ['inherit', 'inherit', 'pipe'],
+        encoding: 'utf8',
+      })
+      if (clone.status !== 0) {
+        throw new Error(
+          `${cloneFailureText({
+            ref: plan.ref,
+            status: clone.status,
+            stderr: clone.stderr ?? clone.error?.message ?? '',
+            targetDir: plan.targetDir,
+          })}\n\n${repoMissingText()}`,
+        )
+      }
+      if (resolveProjectRoot(plan.targetDir) === null) {
+        throw new Error(`clone 完成但目录结构不完整：${plan.targetDir}\n\n${repoMissingText()}`)
+      }
+      rootDir = plan.targetDir
     }
-    rootDir = plan.targetDir
   }
 
   // 发布 tag GPG 验签：先过"这次到底验不验"的门（形状/存在性），再判动作，两条判据都是纯函数。

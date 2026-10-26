@@ -8,7 +8,9 @@
 # 而没有任何一道闸读过头——第五件事就这么躲过了所有检查）。
 # 职责1：Node 硬预检（installer 本身要求 Node >= 18）。
 # 职责2：平台闸——只 macOS，排在它要挡的那笔 clone 之前（v1.18.0 加的就是这一条）。
-# 职责3：源码定位（环境变量/cwd/已有 clone/自动 clone）。
+# 职责3：源码定位（环境变量/cwd/已有 clone/自动 clone）。已有 clone 会被**前进**到钉住的那个 tag——
+#        树干净才切（fetch + checkout --detach），脏就拒绝并点名挡路的文件；"照用一个旧版本的树"
+#        与"提示一句就别想动它"都不是这一条的答案（2026-10-26 修的就是这两下）。
 # 职责4：发布 ref 决策 + 两个覆盖位的形状闸（钉 tag，不追分支；GLASSPANE_REPO_URL 与
 #        GLASSPANE_REF 先进形状闸再进 git 的 argv）。
 # 职责5：委托 installer/cli.js 走完整安装流程（swift/npm 预检、构建、launchd、GUI 授权
@@ -175,6 +177,68 @@ describe_ref() {
   git -C "$1" describe --tags --always 2>/dev/null || say "（无法判定该目录的版本）"
 }
 
+# 既有 clone 能不能被这一趟使用，由这个函数回答。判据与 installer/cli.js 的 existingCloneDecision
+# 同源（同一份"什么算脏"、同三种动作：用 / 前进 / 拒），两处过程由 install-sh.test.mjs 拿同一把
+# 假 git 各跑一遍钉住——在这里发明第二种说法，就是下一次"两条一键入口对同一件事给相反答案"的起点
+# （本轮被修掉的正是这一类：一条只打印提示、另一条直接 clone 失败）。
+# 三条 git 动作：status/rev-parse 是读，fetch 只往 .git 里加对象，checkout --detach 只在树**干净**
+# 时执行。没有 -f、没有 stash、没有 clean：安装脚本不该有能把别人的未提交工作抹掉的那一格。
+advance_existing_clone() { # $1=目录 $2=要装的 ref。回 0 = 这棵树可以用；非 0 = 本轮别用它，且没动过它
+  _dir="$1"
+  _ref="$2"
+  _dirty=$(git -C "$_dir" status --porcelain 2>/dev/null || echo "__读不出__")
+  if [ "$_dirty" = "__读不出__" ]; then
+    say "  ${_dir} 读不出 git 状态（那目录不是仓库，或 git 答不了）：判不出来的事不当成「干净」，不动它。"
+    say "  下一步：GLASSPANE_INSTALL_DIR=<空目录> 重跑本脚本，换一处全新的 clone。"
+    return 1
+  fi
+  if [ -n "$_dirty" ]; then
+    _n=$(printf '%s\n' "$_dirty" | grep -c '' || true)
+    say "  ${_dir} 有 ${_n} 处未提交改动，安装器不切走它（切走就把别人的工作当成构建源码）："
+    printf '%s\n' "$_dirty" | sed -n '1,10p' | sed 's/^/      /'
+    if [ "$_n" -gt 10 ]; then
+      say "      …另有 $(( _n - 10 )) 处"
+    fi
+    say "  下一步（两条都做得动，且不销毁任何东西）："
+    say "    a) 换一处干净的家：GLASSPANE_INSTALL_DIR=${_dir}-$(printf '%s' "$_ref" | tr -c 'A-Za-z0-9._+-' '_') 重跑一键安装"
+    say "    b) 自己收着这些改动：在 ${_dir} 里提交或转移到别处，再重跑本命令——这些文件去哪由你决定，不由安装器决定。"
+    return 1
+  fi
+  _head=$(git -C "$_dir" rev-parse --verify HEAD 2>/dev/null) || {
+    say "  ${_dir} 读不出 HEAD：判不出来就不动它。"
+    return 1
+  }
+  _tag=$(git -C "$_dir" rev-parse --verify "${_ref}^{commit}" 2>/dev/null || true)
+  if [ -z "$_tag" ]; then
+    say "  ${_dir} 里没有 ${_ref} 这个 tag（浅历史常见）：先 fetch 它——只往 .git 里加对象，不动工作树。"
+    if ! git -C "$_dir" fetch --tags --depth 1 origin "$_ref" >/dev/null 2>&1; then
+      say "    git fetch 非零退出：确认网络与该 tag 存在（git ls-remote --tags origin ${_ref}），"
+      say "    或 GLASSPANE_INSTALL_DIR=<空目录> 换一处全新的 clone。本轮没有 clone、没有切分支。"
+      return 1
+    fi
+    _tag=$(git -C "$_dir" rev-parse --verify "${_ref}^{commit}" 2>/dev/null || true)
+    [ -n "$_tag" ] || { say "    fetch 之后仍读不出 ${_ref} 指向的 commit：不动它。"; return 1; }
+  fi
+  if [ "$_head" = "$_tag" ]; then
+    say "  该目录已经在 ${_ref}（$(printf '%.7s' "$_head")），直接用它构建。"
+    return 0
+  fi
+  say "  该目录干净而在 $(printf '%.7s' "$_head")，要装的是 ${_ref}（$(printf '%.7s' "$_tag")）：前进它。"
+  if ! git -C "$_dir" checkout --detach "$_ref" >/dev/null 2>&1; then
+    say "    git checkout --detach ${_ref} 失败：${_dir} 仍在 $(printf '%.7s' "$_head")，本轮没有构建任何东西。"
+    return 1
+  fi
+  # 切完再读一次：判据要落在切换之后的事实上，不是落在命令的退出码上。
+  _now=$(git -C "$_dir" rev-parse --verify HEAD 2>/dev/null || true)
+  _still=$(git -C "$_dir" status --porcelain 2>/dev/null || echo "__读不出__")
+  if [ "$_now" != "$_tag" ] || [ -n "$_still" ]; then
+    say "    切完之后判据不再成立（HEAD=${_now:-读不出}，仍有改动）：本轮不拿它构建。"
+    return 1
+  fi
+  say "  已前进到 ${_ref}（$(printf '%.7s' "$_now")），用它构建。"
+  return 0
+}
+
 # --- 1) 平台与 Node 硬预检（installer 是 Node ESM，缺它无从委托；其余依赖交给 installer） ---
 # **排在任何 clone 之前**。从前这一段写在 clone 后面，于是"这台机器压根跑不动 installer"
 # 这种情形要先付一次 5600 个文件的深 1 clone（慢、占盘、还可能被网络打断），然后才在
@@ -215,7 +279,18 @@ elif looks_like_repo "$PWD"; then
 elif looks_like_repo "$CLONE_DIR"; then
   REPO="$CLONE_DIR"
   say "使用既有 clone: ${REPO}（该目录实际版本: $(describe_ref "$REPO")）"
-  say "  提示：既有 clone 不会被自动切到 ${REF}；要装发布版请清理该目录或指定 GLASSPANE_INSTALL_DIR。"
+  # 从前这一支只打印一句"既有 clone 不会被自动切到 ${REF}"，然后**照用那棵树**去委托 installer——
+  # 2026-10-26 这台机器上那是 v1.5.0 的 clone，于是"一键安装"交出去的是三年前的产物，而另一条一键
+  # 入口（npx）对同一个目录跑 `git clone`，被 git 以 "already exists and is not an empty directory"
+  # 拒掉。现在这里问三件事：那棵树脏不脏、HEAD 是不是钉住的那个 tag、需不需要切。
+  # 判据与 installer/cli.js 的 existingCloneDecision 同源（同一份"什么算脏"、同一组动作名）；
+  # 两处的**过程**由 install-sh.test.mjs 用同一把假 git 各跑一遍来钉，不在这里发明第二种说法。
+  if [ "$DRY_RUN" = "1" ]; then
+    say "[dry-run] 将检查 ${CLONE_DIR} 能否前进到 ${REF}（干净就 fetch + checkout --detach，脏就拒绝并点名挡路的文件）"
+  else
+    advance_existing_clone "$CLONE_DIR" "$REF" || fail "既有 clone 没有被前进：上面就是原因，本轮没有构建、没有覆盖 ~/Applications。"
+    REPO="$CLONE_DIR"
+  fi
 fi
 
 if [ -z "$REPO" ]; then

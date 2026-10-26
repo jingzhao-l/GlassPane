@@ -167,7 +167,10 @@ test('行为：UTF-8 locale 下"既有 clone"那两行与 clone 计划行都到�
     assert.equal(dry.status, 0, dry.out)
     assert.ok(!/unbound variable/.test(dry.out), dry.out)
     assert.match(dry.out, /使用既有 clone: /, dry.out)
-    assert.match(dry.out, /不会被自动切到 v[0-9]+\.[0-9]+\.[0-9]+；/, '那半句里的版本号与"；"必须一起到达')
+    // 这句在 2026-10-26 换过：那时"既有 clone 不会被自动切到…"这一句被删掉了（它是一句"照用旧树"的
+    // 免责声明），换成"将检查它能否前进到 v…"。这一条测的还是同一个坑——bash 3.2 在 UTF-8 locale 下
+    // 会把 `$NAME（` 吸成变量名，所以版本号与紧跟的全角括号必须一起到达。
+    assert.match(dry.out, /能否前进到 v[0-9]+\.[0-9]+\.[0-9]+（/, '那半句里的版本号与"（"必须一起到达')
     assert.match(dry.out, /\[dry-run\] 将执行: node /, dry.out)
 
     // 定位不到源码 ⇒ 真要 clone：那一行 `clone 源码到 $CLONE_DIR（ref: $REF）` 在展开里。
