@@ -28,7 +28,7 @@ import { effectiveStatus, isOverdue, loadState, nextState, readPointer, saveStat
 import { runCheck } from './lib/check.js'
 import { applyUpdate, buildStagedTree, checkNpmPrefix, DEFAULT_BUNDLES, rollbackToBackup } from './lib/apply.js'
 import { probeIdle, resolveEngineSocket } from './lib/idle.js'
-import { AGENT_LABEL, DAEMON_JOB_LABEL, DEFAULT_HOUR, DEFAULT_MINUTE, agentLogPath, agentPlistPath, readAgentSchedule, readRunningJob, registerAgent, renderAgentPlist, unregisterAgent } from './lib/launchd.js'
+import { AGENT_LABEL, DAEMON_JOB_LABEL, DEFAULT_HOUR, DEFAULT_MINUTE, agentLogPath, agentPlistPath, parseLaunchctlSchedule, readAgentSchedule, readRunningJob, registerAgent, renderAgentPlist, unregisterAgent } from './lib/launchd.js'
 import { localVersion } from './lib/version.js'
 import { CONSENT_KINDS } from './lib/policy.js'
 import { makeBytesFetcher, makeFetcher, resolveBase } from './lib/source.js'
@@ -314,6 +314,9 @@ export function defaultDeps({ stateRoot, appsDir, env, flags, exportCa = exportC
     agentPlistPath,
     ensureAgentEntry,
     readAgentSchedule,
+    // The second reader of the standing daily time is `readRunningJob` above plus this reader of the
+    // calendar interval inside it; see `standingScheduleFromJob`.
+    parseLaunchctlSchedule,
     // §9: the root bundle node needs on a TLS-intercepting machine, exported by
     // this module alone and refreshed at the two points that can do it without a
     // person in the loop — registering the agent, and finishing a swap.
@@ -560,12 +563,28 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         // The daily hour is *preserved*, not re-chosen. A bare `enable` carries no `--hour`, and this
         // branch is what §11's handover runs on every self-update — taking the constant here would move
         // a machine installed with `--hour 3` to midday without a word in any record. An existing
-        // definition that cannot be read falls back to the documented default, and says that it did.
+        // definition that cannot be read falls back to the documented default, and says that it did —
+        // after asking the loaded job first (`standingScheduleFromJob`, which is where this machine's
+        // 12:30 came back from on 2026-10-26 while its plist file answered nothing).
         const asked = { hour: flags.hour === undefined ? null : Number(flags.hour), minute: flags.minute === undefined ? null : Number(flags.minute) }
-        const standing = asked.hour === null || asked.minute === null ? standingSchedule(merged, plistPath) : null
+        let standing = asked.hour === null || asked.minute === null ? standingSchedule(merged, plistPath) : null
+        if (standing && standing.hour === null) {
+          const fromJob = standingScheduleFromJob(merged, {
+            label: AGENT_LABEL,
+            uid: merged.uid,
+            run: merged.runLaunchctl,
+            fileWhy: standing.why,
+          })
+          // Either the job supplies the standing time, or it says in the same sentence that it cannot —
+          // both books have been consulted by then, and the caller's note is the reader's only clue about
+          // which one the number came from.
+          standing = fromJob
+        }
         const hour = asked.hour ?? standing?.hour ?? DEFAULT_HOUR
         const minute = asked.minute ?? standing?.minute ?? DEFAULT_MINUTE
-        const scheduleNote = standing && standing.hour === null
+        // Said whenever the time did not come off the installed definition, whichever way it went: a
+        // default adopted after a failed read, and a job-sourced interval the person never wrote either.
+        const scheduleNote = standing && standing.why
           ? `the daily time is ${hour}:${String(minute).padStart(2, '0')} because ${standing.why}; pass --hour and --minute to choose one`
           : null
         const plistText = merged.renderAgentPlist({
@@ -668,6 +687,53 @@ export function standingSchedule(merged, plistPath) {
     return { hour: null, minute: null, why: `${plistPath} carries no readable StartCalendarInterval` }
   }
   return { hour: got.hour, minute: got.minute, why: null }
+}
+
+/**
+ * The second reader of the standing daily time: **the job launchd is holding**.
+ *
+ * Why a second reader is needed and why it was not needed before today. Measured on this machine at
+ * 21:47 on 2026-10-26: the plist on disk answered "carries no readable StartCalendarInterval" (the file
+ * `readAgentSchedule` could not parse, whatever wrote it), launchd was holding a 12:30 interval, and a
+ * bare `enable` — the one §11's handover runs on every self-update — put the documented default, 12:00,
+ * into the definition it then wrote and registered. The machine's daily time moved on the strength of a
+ * **failed read**, which is the opposite of what the fallback sentence promises. The loaded job is the
+ * other book that carries the same fact, and it only became readable at all when
+ * `parseLaunchctlSchedule` was corrected to read `event triggers → descriptor` instead of a
+ * `start calendar interval = { … }` block launchd has never printed.
+ *
+ * `hour: null` still means *not said*: when neither the file nor launchd answers, the caller keeps the
+ * documented default and the sentence names which read failed.
+ */
+export function standingScheduleFromJob(merged, { label = AGENT_LABEL, uid = null, run = null, fileWhy = null } = {}) {
+  const missed = typeof fileWhy === 'string' && fileWhy !== ''
+    ? fileWhy
+    : 'the installed definition gives no readable StartCalendarInterval'
+  if (typeof merged.readRunningJob !== 'function' || typeof merged.parseLaunchctlSchedule !== 'function') {
+    return { hour: null, minute: null, why: `${missed}, and no reader of the loaded job is wired into this build` }
+  }
+  let loaded = null
+  try {
+    loaded = merged.readRunningJob({ label, uid, run: run ?? merged.runLaunchctl })
+  } catch (error) {
+    return { hour: null, minute: null, why: `${missed}, and reading the loaded job threw (${error?.message ?? String(error)})` }
+  }
+  if (!loaded || loaded.ok !== true || typeof loaded.printText !== 'string') {
+    return {
+      hour: null,
+      minute: null,
+      why: `${missed} and the loaded job was not read back (${loaded?.reason ?? 'no answer'}), so this machine has no answer about which time was in force`,
+    }
+  }
+  const held = merged.parseLaunchctlSchedule(loaded.printText)
+  if (!held || !Number.isInteger(held.hour) || !Number.isInteger(held.minute)) {
+    return { hour: null, minute: null, why: `${missed} and the loaded job echoes no calendar interval` }
+  }
+  return {
+    hour: held.hour,
+    minute: held.minute,
+    why: `${missed}: the interval launchd is holding (${held.hour}:${String(held.minute).padStart(2, '0')}) was kept instead of the default`,
+  }
 }
 
 /** `installer-pointer-stale` / missing pointer, mapped onto the closed enum. */

@@ -22,14 +22,15 @@ import path from 'node:path'
 import { runCommand } from '../cli.js'
 import { CODES, EXIT } from '../lib/codes.js'
 import { CA_ENV_VAR } from '../lib/ca-bundle.js'
-import { AGENT_LABEL } from '../lib/launchd.js'
+import { AGENT_LABEL, DEFAULT_HOUR, DEFAULT_MINUTE } from '../lib/launchd.js'
 import { loadState } from '../lib/state.js'
 import { ensureAgentEntry as realEnsureAgentEntry } from '../lib/agent-entry.js'
+import { CAPTURED_SCHEDULE, PRINT_AGENT } from './fixtures/launchd-print-agent.mjs'
 import { TMP_PREFIX, removeDir, tempDir } from './helpers.mjs'
 
 const PEM = '-----BEGIN CERTIFICATE-----\nMIIBFAKE\n-----END CERTIFICATE-----\n'
 
-function harness({ bundle = true, record = { status: 'ok', certs: 3, path: null, exportedAt: 'now', detail: null }, register = { ok: true, message: 'agent registered', verified: true }, schedule = { hour: 12, minute: 0 }, entry = null } = {}) {
+function harness({ bundle = true, record = { status: 'ok', certs: 3, path: null, exportedAt: 'now', detail: null }, register = { ok: true, message: 'agent registered', verified: true }, schedule = { hour: 12, minute: 0 }, entry = null, print = null } = {}) {
   // `${TMP_PREFIX}…` and realpathSync: the CLI canonicalises `--state-dir` the way
   // launchd would resolve it, so `/tmp` (a symlink) must be compared as its real
   // path, and the scratch must never be created inside the repository.
@@ -65,7 +66,12 @@ function harness({ bundle = true, record = { status: 'ok', certs: 3, path: null,
   const deps = {
     homeDir: stateRoot,
     uid: '501',
-    runLaunchctl: () => ({ status: 0, stdout: '', stderr: '' }),
+    // `readRunningJob` is deliberately NOT stubbed either: the loaded job is the second reader of the
+    // standing daily time, and a stub would let a CLI that never consults it stay green. What is stubbed
+    // is `launchctl` itself, so the answer below is the bytes this machine really printed.
+    runLaunchctl: (bin, args) => (print !== null && Array.isArray(args) && args[0] === 'print'
+      ? { status: 0, stdout: print, stderr: '' }
+      : { status: 0, stdout: '', stderr: '' }),
     refreshCaBundle: () => {
       calls.push('refresh')
       return fixedRecord
@@ -258,6 +264,52 @@ test('an explicit --hour wins over the installed one, and an unreadable schedule
   } finally {
     blind.done()
   }
+})
+
+test('a definition that cannot be read does not move the machine to the default while launchd holds an interval', async () => {
+  // 2026-10-26 实测（本机，21:47）：`~/Library/LaunchAgents/com.glasspane.update.plist` 这份文件
+  // `readAgentSchedule` 读不出 StartCalendarInterval，而 launchd 手里挂着 12:30 —— 一次不带 `--hour`
+  // 的 `enable` 于是把**文档默认** 12:00 渲染进定义、写回磁盘、重新注册：这台机器每天的检查时间被
+  // 一次"读失败的读数"改掉了，代价只写在消息尾巴上。修法是给这份读数加第二个来源（在册作业），来源
+  // 仍是那台真机器的真报文。REVERSE MUTATION: 删掉 enable 分支里那次 `standingScheduleFromJob` 调用
+  // ——这一格红在 minute 0，而上面那条"两处都读不到才用默认"的控制不受影响（它没有在册作业可读）。
+  const h = harness({ schedule: null, print: PRINT_AGENT })
+  try {
+    const result = await h.run('enable')
+    assert.equal(result.ok, true, result.message)
+    assert.equal(h.rendered.length, 1, JSON.stringify(h.rendered))
+    assert.equal(h.rendered[0].hour, CAPTURED_SCHEDULE.hour, `launchd 挂着 12 点，送进渲染器的就得是 12：${h.rendered[0].hour}`)
+    assert.equal(h.rendered[0].minute, CAPTURED_SCHEDULE.minute, `分钟才是这台机器被改掉的量：送进渲染器的是 ${h.rendered[0].minute}`)
+    assert.match(result.message, /the daily time is 12:30/, '要说清这份时刻是从哪一本账读来的')
+    assert.match(result.message, /launchd is holding/, `句子里要看得见第二个来源：${result.message}`)
+    assert.ok(!result.message.includes('the daily time is 12:00'), '默认值不许在这条路上被采用')
+  } finally {
+    h.done()
+  }
+})
+
+test('when neither the definition nor the loaded job answers, the default is adopted and both failures are said', async () => {
+  // The case the rescue above must NOT swallow: a job that reads back but says nothing about its
+  // interval (a launchd that stops echoing `event triggers`) is the one shape where the documented
+  // default is allowed — with both failed reads in the sentence, not one of them. Driving it here is
+  // what keeps the rescue from turning into a silent adoption of a number nobody chose.
+  const lines = PRINT_AGENT.split('\n')
+  const open = lines.indexOf('\tevent triggers = {')
+  const close = lines.indexOf('\t}', open)
+  assert.ok(open > 0 && close > open, '夹具要能整块摘掉 event triggers，否则这条控制问的不是"没答"')
+  const blind = harness({ schedule: null, print: lines.filter((_, i) => i < open || i > close).join('\n') })
+  return blind.run('enable').then((result) => {
+    try {
+      assert.equal(result.ok, true, result.message)
+      assert.equal(blind.rendered[0].hour, DEFAULT_HOUR, '两本账都没答时按文档默认——这是这台机器今天的形状')
+      assert.equal(blind.rendered[0].minute, DEFAULT_MINUTE, JSON.stringify(blind.rendered[0]))
+      assert.match(result.message, /the daily time is 12:00/, result.message)
+      assert.match(result.message, /echoes no calendar interval/, `两句失败都要看得见：${result.message}`)
+      assert.match(result.message, /carries no readable StartCalendarInterval/, `第一本账的失败也要留着：${result.message}`)
+    } finally {
+      blind.done()
+    }
+  })
 })
 
 test('a registration launchd could not be re-read with is reported as unverified, not as registered', async () => {

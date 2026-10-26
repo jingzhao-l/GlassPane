@@ -29,7 +29,9 @@ import {
   kickstartJob,
   parseArgumentsBlock,
   parseLaunchctlArguments,
+  parseLaunchctlEnvironment,
   parseLaunchctlProgram,
+  parseLaunchctlSchedule,
   parseLaunchctlState,
   readRunningJob,
   registerAgent,
@@ -41,6 +43,15 @@ import { CA_ENV_VAR } from '../lib/ca-bundle.js'
 import { LAUNCHD_PATH } from '../lib/binaries.js'
 import { UpdaterError, modeOf } from '../lib/fsutil.js'
 import { decideSwapPermission, stateDirReadings } from '../lib/policy.js'
+import {
+  CAPTURED_CA,
+  CAPTURED_CLI,
+  CAPTURED_PATH,
+  CAPTURED_SCHEDULE,
+  PRINT_AGENT,
+  calendarTriggerBlock,
+  withTriggers,
+} from './fixtures/launchd-print-agent.mjs'
 import { removeDir, tempDir, TMP_PREFIX } from './helpers.mjs'
 
 /** A trimmed but faithful `launchctl print` excerpt for the daemon job. */
@@ -955,6 +966,65 @@ test('every substituted token keeps a `$&` in the value verbatim (replaceAll sem
   }
 })
 
+test('the daily interval is read out of launchd\'s own bytes, not out of a block this repo invented', () => {
+  assert.deepEqual(parseLaunchctlSchedule(PRINT_AGENT), CAPTURED_SCHEDULE,
+    '作业真的挂着 12:30 的日历触发器；读成 null 就是让 `enable --hour` 那格比较永远不发生')
+})
+
+test('the environment the job holds is launchd\'s merged block, arrow and all', () => {
+  const held = parseLaunchctlEnvironment(PRINT_AGENT)
+  assert.ok(held, 'launchd 答了话，这里必须是读数不是"没说"')
+  // The whole bug: splitting at `=` left the arrow's `>` glued to the head of every value, so a job
+  // holding exactly the PATH this run rendered was reported as differing in it.
+  for (const [key, value] of Object.entries(held)) {
+    assert.equal(value.startsWith('>'), false, `${key} 的值不该带 launchd 的分隔符`)
+    assert.equal(value.includes('> '), false, `${key} 的值里不该出现箭头`)
+  }
+  assert.equal(held.PATH, CAPTURED_PATH, JSON.stringify(held.PATH))
+  assert.equal(held.NODE_EXTRA_CA_CERTS, CAPTURED_CA)
+  // Three blocks in one book answer to "environment"; only the merged one is the job's own. Reading
+  // `default environment` would hand the comparison launchd's minimum PATH and refuse a correct job.
+  assert.notEqual(held.PATH, '/usr/bin:/bin:/usr/sbin:/sbin', '`default environment` 不是作业被交给的那一份')
+  assert.equal(held.ALL_PROXY, undefined, '`inherited environment` 里的是登录会话的代理，不是作业的定义')
+  assert.equal(held.OSLogRateLimit, '64', 'launchd 自己加的一项也要读成值，不是空')
+})
+
+test('a schedule read is refused when the calendar trigger cannot be identified', () => {
+  // 正例先走一遍生成形状：证明读的是结构，不是上面那段字符串本身。
+  assert.deepEqual(parseLaunchctlSchedule(withTriggers()), { hour: 12, minute: 30 }, '原样重放必须仍读到 12:30')
+  assert.deepEqual(parseLaunchctlSchedule(printJobBody({ schedule: { Hour: 3, Minute: 15 } })), { hour: 3, minute: 15 },
+    '换钟点要读得出来，否则 `enable --hour 3` 那一格永远没人核对')
+
+  assert.deepEqual(
+    parseLaunchctlSchedule(withTriggers(calendarTriggerBlock('com.glasspane.update.555', 'com.apple.launchd.timer', 4, 5))),
+    { hour: 12, minute: 30 },
+    '一个非日历触发器的钟点不是这份作业每天的钟点：要认 stream，不能抓第一个 descriptor',
+  )
+
+  const unnamed = PRINT_AGENT.replace('\t\t\tstream = com.apple.launchd.calendarinterval\n', '')
+  assert.equal(parseLaunchctlSchedule(unnamed), null, '认不出流就是认不出这份钟点，必须答"没说"而不是猜')
+
+  assert.equal(parseLaunchctlSchedule(withTriggers(calendarTriggerBlock('com.glasspane.update.666', 'com.apple.launchd.calendarinterval', 9, 15))), null,
+    '两个日历触发器时这份作业没有"那个钟点"，不许挑一个')
+
+  assert.equal(parseLaunchctlSchedule('gui/501/com.glasspane.update = {\n\truns = 0\n}'), null,
+    '没有 event triggers 的作业是没被问过钟点，不是 0:00')
+})
+
+test('an environment block that never closes is not read as an empty environment', () => {
+  // 截断点留在 `environment` 块**内部**，而外层作业块照旧闭合。这个形状不是可选的：整本账截到一半时
+  // 任何解析器都答 null，那条控制什么都没问；只有"外层完整、里层缺一个结尾"才分得出"读不全"与"读出了
+  // 一部分"。REVERSE MUTATION: let a block that never closes be pushed as a complete one — this goes red
+  // on `{ OSLogRateLimit: '6' }`, because the half-read value is a book this tool then compares against.
+  const marker = '\t\tOSLogRateLimit => 64'
+  const at = PRINT_AGENT.indexOf(marker)
+  assert.ok(at > 0, '夹具里必须找得到那一项（截断点按它定位，不按偏移猜）')
+  const half = `${PRINT_AGENT.slice(0, at + marker.length)}\n}\n`
+  assert.ok(half.includes(marker), '夹具要真的能看见第一项，否则这条控制问的是"没有项"')
+  assert.equal(parseLaunchctlEnvironment(half), null, '读到一半的块不许当成"这个作业没有环境变量"，也不许当成"读出了第一项"')
+  assert.equal(Object.keys(parseLaunchctlEnvironment(PRINT_AGENT) ?? {}).length, 4, '同一条读取在完整报文上要答出四项')
+})
+
 /**
  * The bootout-failure hole (2026-10-19 lane). `registerAgent` maps a bootstrap stderr that says
  * "already" onto the loaded branch, and that branch's read-back compared **argv only** — but the
@@ -970,8 +1040,30 @@ test('every substituted token keeps a `$&` in the value verbatim (replaceAll sem
 function printJobBody({ args, schedule = null, env = null } = {}) {
   const lines = [`gui/501/${AGENT_LABEL} = {`, '\tactive count = 1', '\ttype = LaunchAgent', '\tstate = not running', '']
   if (args) lines.push('\targuments = {', ...args.map((a) => `\t\t${a}`), '\t}', '')
-  if (env) lines.push('\tenvironment = {', ...Object.entries(env).map(([k, v]) => `\t\t${k} = "${v}";`), '}', '')
-  if (schedule) lines.push('\tstart calendar interval = {', ...Object.entries(schedule).map(([k, v]) => `\t\t${k} = ${v};`), '}', '')
+  // `launchctl print` writes `KEY => value` inside a dict, one entry per line, unquoted, and it prints
+  // a `default environment` above the job's own `environment`. The fixture used to emit plist syntax
+  // (`KEY = "value";`) — which the parser split correctly and which launchd does not produce, so the
+  // three comparisons below were green in CI while `updater enable` failed on every real machine.
+  if (env) {
+    lines.push('\tdefault environment = {', '\t\tPATH => /usr/bin:/bin:/usr/sbin:/sbin', '\t}', '')
+    lines.push('\tenvironment = {', ...Object.entries(env).map(([k, v]) => `\t\t${k} => ${v}`), '\t}', '')
+  }
+  if (schedule) {
+    lines.push(
+      '\tevent triggers = {',
+      `\t\t${AGENT_LABEL}.268435474 => {`,
+      '\t\t\tkeepalive = 0',
+      `\t\t\tservice = ${AGENT_LABEL}`,
+      '\t\t\tstream = com.apple.launchd.calendarinterval',
+      '\t\t\tdescriptor = {',
+      // launchd sorts the descriptor's keys; Minute before Hour, like the captured job above.
+      ...Object.entries(schedule).sort(([a], [b]) => (a === 'Minute' ? -1 : b === 'Minute' ? 1 : 0)).map(([k, v]) => `\t\t\t\t"${k}" => ${v}`),
+      '\t\t\t}',
+      '\t\t}',
+      '\t}',
+      '',
+    )
+  }
   lines.push('}')
   return lines.join('\n')
 }
@@ -1068,6 +1160,44 @@ test('a loaded job whose environment is not the one just rendered is not reporte
     assert.equal(outcome.ok, false, 'launchd 手里的 PATH 不是这次渲染的那一条：作业还是旧那份')
     assert.equal(outcome.verified, false)
     assert.match(outcome.message, /PATH/, '句子里要点名读不回一致的是环境里的哪一项')
+  } finally {
+    removeDir(dir)
+  }
+})
+
+test('a re-registration that matches the loaded job on all three books is verified', () => {
+  // 这条是上一批修复真正的产物：把**本机截来的**报文喂给读回，三项（argv、每天钟点、环境）都与本次渲染
+  // 的一致，就必须报 verified 并在句子里给出钟点。修之前它红在"环境仍不一致"上——因为解析器把 `=>` 的
+  // `>` 当成了值的一部分，`PATH`/`NODE_EXTRA_CA_CERTS` 永远对不上。这一格也是那两条拒绝的反向对照：
+  // 读对了要能过，读错了要能拦。
+  const dir = tempDir(`${TMP_PREFIX}launchd-verified-`)
+  try {
+    const plistText = renderAgentPlist({
+      nodePath: '/usr/local/bin/node',
+      cliPath: CAPTURED_CLI,
+      stateRoot: '/Users/ethanlin/.glasspane',
+      hour: 12,
+      minute: 30,
+      caBundle: CAPTURED_CA,
+      jobPath: CAPTURED_PATH,
+    })
+    const outcome = registerAgent({
+      label: AGENT_LABEL,
+      plistPath: path.join(dir, `${AGENT_LABEL}.plist`),
+      plistText,
+      cliPath: CAPTURED_CLI,
+      uid: '501',
+      run: (bin, args) => {
+        if (args[0] === 'bootout') return { status: 0, stdout: '', stderr: '' }
+        if (args[0] === 'bootstrap') return { status: 0, stdout: '', stderr: '' }
+        if (args[0] === 'print') return { status: 0, stdout: PRINT_AGENT, stderr: '' }
+        return { status: 0, stdout: '', stderr: '' }
+      },
+      writeFile: () => undefined,
+    })
+    assert.equal(outcome.ok, true, `launchd 手里的作业与本次渲染逐字一致，这一格不许拒绝：${outcome.message}`)
+    assert.equal(outcome.verified, true)
+    assert.match(outcome.message, /12:30/, '句子里要看得见读回来的那个钟点')
   } finally {
     removeDir(dir)
   }

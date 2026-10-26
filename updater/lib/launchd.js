@@ -118,7 +118,113 @@ export function parseLaunchctlState(printOutput) {
 }
 
 /**
- * The `StartCalendarInterval` block launchd is holding, or `null` when the book does not answer.
+ * `launchctl print` is a line-oriented tree, and reading it needs the same rule
+ * `parseArgumentsBlock` learned the hard way: the first `}` is not the end of a block.
+ *
+ * These three helpers are that rule in one place. They exist because the two readers below used to
+ * be regexes over invented shapes: `parseLaunchctlEnvironment` split on `=`, which in launchd's real
+ * output is the *left half of `=>`*, so every value it "read" came back glued to a `>` and the
+ * environment comparison could never match anything; `parseLaunchctlSchedule` looked for a
+ * `start calendar interval = { … }` block that launchd does not print at all (the daily interval
+ * reaches the printed job as `event triggers → <label> → descriptor → "Hour" => 12`), so it answered
+ * `null` forever and the comparison it was written to enable never ran. Both were green in CI because
+ * both were fed the *invented* shape; see `PRINT_AGENT` in `test/launchd.test.mjs`, now captured
+ * verbatim from this machine.
+ *
+ * Depth changes only on a line that *ends* with `{` and a line whose whole content is `}` — that is
+ * how launchd writes its delimiters, and it is what lets a scalar carrying braces (`--note={"a":1}`)
+ * stay a scalar instead of swallowing the rest of the block.
+ */
+const BLOCK_OPENER = /^\s*(?:"([^"]+)"|([^"\s][^=]*?))\s*(?:=>|=)\s*\{\s*$/
+const BLOCK_CLOSER = /^\s*\}\s*$/
+
+/** The pairs launchd prints at one level: `{ name, body }` blocks and the scalar lines between them. */
+function printChildren(lines) {
+  const blocks = []
+  const scalars = []
+  for (let i = 0; i < lines.length; i += 1) {
+    const opener = BLOCK_OPENER.exec(lines[i])
+    if (!opener) {
+      scalars.push(lines[i])
+      continue
+    }
+    const name = (opener[1] ?? opener[2]).trim()
+    // An argument token can look like an opener (`--json={`), and reading it as one would open a
+    // block that never closes — which turns the whole book into "not said" and quietly disarms the
+    // comparisons this reader exists to feed. launchd's own keys never begin with a dash.
+    if (name.startsWith('-')) {
+      scalars.push(lines[i])
+      continue
+    }
+    const body = []
+    let depth = 1
+    let closed = false
+    for (i += 1; i < lines.length; i += 1) {
+      if (BLOCK_CLOSER.test(lines[i])) {
+        depth -= 1
+        if (depth === 0) {
+          closed = true
+          break
+        }
+        body.push(lines[i])
+        continue
+      }
+      if (BLOCK_OPENER.test(lines[i])) depth += 1
+      body.push(lines[i])
+    }
+    // A block that never closes was not read completely, and a reader that returns the partial body
+    // would be reporting the *absence* of whatever sat past the cut.
+    if (!closed) return null
+    blocks.push({ name, body })
+  }
+  return { blocks, scalars }
+}
+
+/**
+ * Every block in the printed tree named exactly `name` — `default environment` and
+ * `inherited environment` are *not* that name, and the merged `environment` the job was handed is the
+ * only one either comparison below may read.
+ */
+function bodiesNamed(lines, name) {
+  const children = printChildren(lines)
+  if (children === null) return null
+  const wanted = String(name).toLowerCase()
+  const hits = children.blocks.filter((block) => block.name.toLowerCase() === wanted).map((block) => block.body)
+  for (const block of children.blocks) {
+    const deeper = bodiesNamed(block.body, name)
+    if (deeper === null) return null
+    hits.push(...deeper)
+  }
+  return hits
+}
+
+/** `key => value` / `key = value` among this level's lines; `null` when nothing at this level names it. */
+function scalarValue(lines, name) {
+  const wanted = String(name).toLowerCase()
+  const pairs = /^\s*"([^"]+)"\s*=>\s*(.*?)\s*$|^\s*([^"\s][^=]*?)\s*(?:=>|=)\s*(.*?)\s*$/
+  let value = null
+  for (const line of lines) {
+    if (BLOCK_OPENER.test(line) || BLOCK_CLOSER.test(line)) continue
+    const match = pairs.exec(line)
+    if (!match) continue
+    const key = String(match[1] ?? match[3] ?? '').trim().toLowerCase()
+    if (key !== wanted) continue
+    // A key named twice at one level is not a fact this reader picks a side about.
+    if (value !== null) return null
+    value = match[2] ?? match[4] ?? ''
+  }
+  return value === null ? null : unquoteLaunchctlValue(value)
+}
+
+/** launchd quotes a value only when it has to; either way the comparison wants the inner text. */
+function unquoteLaunchctlValue(value) {
+  const text = String(value ?? '').replace(/;$/, '').trim()
+  const quoted = /^"([\s\S]*)"$/.exec(text)
+  return quoted ? quoted[1] : text
+}
+
+/**
+ * The `StartCalendarInterval` launchd is holding, or `null` when the book does not answer.
  *
  * This exists because `registerAgent`'s read-back used to compare **only argv**, and the job's argv
  * is stable by design (`agent-entry.js` is the whole point of it, and
@@ -127,19 +233,38 @@ export function parseLaunchctlState(printOutput) {
  * yesterday's definition — the one fact `enable --hour 3` is about is invisible in the argument
  * list. Absent or unreadable here means *not said*, never *mismatched*: a launchd build that stops
  * echoing the interval must not turn a correct registration into a refusal.
+ *
+ * Read from the trigger whose `stream` is the calendar one, and only from that one: a job can hold
+ * several event triggers, and the clock of a `mach` or `com.apple.launchd.timer` trigger is not this
+ * job's daily interval. A trigger that does not name its stream is therefore not read either — "I
+ * cannot tell which trigger this is" must not become "here is the schedule".
  */
 export function parseLaunchctlSchedule(printOutput) {
-  const block = /start\s*calendar\s*interval\s*=\s*\{([\s\S]*?)\}/i.exec(String(printOutput ?? ''))
-  if (!block) return null
-  const number = (key) => {
-    const match = new RegExp(`\\b${key}\\s*=\\s*"?(-?\\d+)"?`, 'i').exec(block[1])
-    return match ? Number(match[1]) : null
+  const triggersBlocks = bodiesNamed(String(printOutput ?? '').split('\n'), 'event triggers')
+  if (triggersBlocks === null || triggersBlocks.length !== 1) return null
+  const children = printChildren(triggersBlocks[0])
+  if (children === null) return null
+  const found = []
+  for (const trigger of children.blocks) {
+    const stream = scalarValue(trigger.body, 'stream')
+    if (stream === null || !/com\.apple\.launchd\.calendarinterval/i.test(stream)) continue
+    const descriptors = bodiesNamed(trigger.body, 'descriptor')
+    if (descriptors === null || descriptors.length !== 1) continue
+    const number = (key) => {
+      const text = scalarValue(descriptors[0], key)
+      if (text === null || !/^\d+$/.test(text)) return null
+      const value = Number(text)
+      return value
+    }
+    const hour = number('Hour')
+    const minute = number('Minute')
+    if (!Number.isInteger(hour) || hour < 0 || hour > 23) continue
+    if (!Number.isInteger(minute) || minute < 0 || minute > 59) continue
+    found.push({ hour, minute })
   }
-  const hour = number('Hour')
-  const minute = number('Minute')
-  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null
-  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null
-  return { hour, minute }
+  // One interval is the question `enable --hour` asks. Two calendar triggers, or none that answers,
+  // is a book this reader does not summarise.
+  return found.length === 1 ? found[0] : null
 }
 
 /**
@@ -148,13 +273,19 @@ export function parseLaunchctlSchedule(printOutput) {
  * unreadable book is never a mismatch.
  */
 export function parseLaunchctlEnvironment(printOutput) {
-  const block = /(?:^|\n)\s*environment\s*=\s*\{([\s\S]*?)\n\s*\}/.exec(String(printOutput ?? ''))
-  if (!block) return null
+  const blocks = bodiesNamed(String(printOutput ?? '').split('\n'), 'environment')
+  if (blocks === null || blocks.length !== 1) return null
   const entries = {}
-  for (const line of block[1].split('\n')) {
-    const match = /^\s*([A-Za-z_][\w.-]*)\s*=\s*(.*?);?\s*$/.exec(line)
+  for (const line of blocks[0]) {
+    if (BLOCK_OPENER.test(line) || BLOCK_CLOSER.test(line)) continue
+    // `=>` first, and the whole arrow: cutting at `=` alone left the `>` at the head of every value,
+    // which is how a job with exactly the PATH this run rendered was reported as "still differs in
+    // PATH, NODE_EXTRA_CA_CERTS" on every `updater enable` on this machine (measured 2026-10-26).
+    const match = /^\s*"([^"]+)"\s*=>\s*(.*)$|^\s*([^"\s][^=]*?)\s*(?:=>|=)\s*(.*)$/.exec(line)
     if (!match) continue
-    entries[match[1]] = match[2].replace(/^"([\s\S]*)"]$/, '$1')
+    const key = String(match[1] ?? match[3] ?? '').trim()
+    if (!/^[A-Za-z_][\w.-]*$/.test(key)) continue
+    entries[key] = unquoteLaunchctlValue(match[2] ?? match[4] ?? '')
   }
   return entries
 }
