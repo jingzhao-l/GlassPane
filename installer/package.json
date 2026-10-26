@@ -15,10 +15,12 @@
   "keywords": ["macos", "installer", "glasspane", "cli"],
   "main": "./cli.js",
   "bin": {
-    "glasspane-install": "./cli.js"
+    "glasspane-install": "./cli.js",
+    "glasspane": "./glasspane.js"
   },
   "files": [
     "cli.js",
+    "glasspane.js",
     "LICENSE",
     "README.md"
   ],

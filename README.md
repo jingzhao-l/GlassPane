@@ -136,13 +136,23 @@ This repository also dogfoods that ecosystem: [ITERATE.md](ITERATE.md) and [iter
 
 ### 1. Install
 
-macOS 14+; fetches the pinned release tag, so the build is reproducible:
+macOS 14+. npm first — one command, and it is also what leaves `glasspane doctor` / `glasspane update`
+behind for later:
 
 ```bash
-# Fetch, then run — two steps on purpose. Piped into `sh`, a failed `curl` leaves stdin empty,
-# `sh` reaches EOF and exits 0: an install that did nothing reports success.
+npx glasspane-install
+```
+
+The same install over the script channel (fetch, then run — two steps on purpose: piped into `sh`, a
+failed `curl` leaves stdin empty, `sh` reaches EOF and exits 0, so an install that did nothing reports
+success):
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
 ```
+
+Either way it fetches the pinned release tag, so the build is reproducible; see
+[Channels](#channels) for the third path and what each one costs.
 
 ### 2. Grant permissions
 
@@ -194,16 +204,18 @@ The installer's preflight probes the rows of this table that name something it c
 
 ### Channels
 
-All three reach the same code. The two one-command channels clone the **same pinned release tag** rather than a moving branch, so two installs on the same day get the same source:
+All three reach the same code. The two one-command channels clone the **same pinned release tag** rather than a moving branch, so two installs on the same day get the same source. **npm first**: it is the shortest path, it is the one that also leaves the `glasspane` command on your PATH, and it is the same channel the updater's own remedy hands out when a machine cannot refresh its global layer.
 
 ```bash
-# 1) Fetch then run. Kept in two steps: with `curl … | sh`, a curl that fails leaves `sh` reading
+# 1) Through npm (bootstraps its own clone of the pinned tag, then builds and installs).
+#    Add `-g` if you want the `glasspane` command to stay: `npm install -g glasspane-install`,
+#    then `glasspane-install`, and afterwards `glasspane doctor` / `glasspane update`.
+npx glasspane-install
+
+# 2) Fetch then run. Kept in two steps: with `curl … | sh`, a curl that fails leaves `sh` reading
 #    an empty stdin, and the pipeline exits 0 — the exit code is exactly what an absent-minded
 #    agent or CI reads, so it has to be the real one.
 curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
-
-# 2) Through npm (bootstraps its own clone of the pinned tag)
-npx glasspane-install
 
 # 3) From a checkout you manage. `install.sh` pins one release tag (its `GLASSPANE_RELEASE` default,
 #    rewritten by `scripts/set-version.mjs` on every release) — clone that tag, not `main`, unless you
@@ -212,6 +224,29 @@ npx glasspane-install
 #    matching install.sh.
 git clone --branch v1.21.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
 ```
+
+What npm does **not** deliver: the Swift engine. Every channel above ends in the same `swift build`
+against your Command Line Tools, because `glasspane-mcp` on npm is the transport and
+`glasspane-install` is the installer, not a prebuilt app bundle. Saying it the other way round would
+send someone to install the requirements table above and then wait for a binary that never arrives.
+
+### After installing: one command, three verbs
+
+`glasspane-install` puts a second command on your PATH, and that command is the answer to "the panel's
+button failed and I do not know where my install went":
+
+```bash
+glasspane doctor    # reads the machine: install pointer, updater state, the loaded daemon job, the
+                    # socket, and the two global npm packages. One line each, and a line that cannot
+                    # be read says so — "absent" and "I could not look" are different answers
+glasspane update    # check, then install what passed; exits with the updater's own code
+glasspane status    # the updater's one-line summary, verbatim
+```
+
+It resolves everything through `~/.glasspane/update-install.json`, which is the file the installer
+writes and the panel reads, so it cannot start guessing at a checkout. It runs no `sudo`, deletes
+nothing, and where a repair needs a person it names the tool and the directories instead of handing
+out a command that escalates.
 
 `GLASSPANE_REF=<tag>` selects another release; `GLASSPANE_REF=main` tracks the trunk, which is not a fixed artifact. `--no-prompt --no-gui` is a silent install; `--help` lists every flag.
 
@@ -258,7 +293,8 @@ The installer registers a per-user job that asks the release page once a day and
 
 - **What gets updated**: the two bundles in `~/Applications` (settings panel and daemon; the daemon is restarted as part of the swap) and the two global npm packages, `glasspane-mcp` and `glasspane-install`. All of it comes out of **one** release archive whose checksum was verified — the npm packages are packed from that same verified tree instead of being fetched from the registry, so the code that was checked and the code that lands cannot be two different things.
 - **When**: one run a day at a fixed local time, 12:00 by default (`enable --hour 3 --minute 45` moves it). A swap only happens while the daemon is idle, so an update never starts in the middle of a run your agent is performing on screen; a busy daemon defers that round and the next slot retries.
-- **Do it right now, by hand**: press 「立即检查」 (check now) to fetch and verify, then 「安装更新」 (install update) to apply what passed. The card above the buttons shows current version, newest version, when it last checked, the version waiting, and its full `sha256` — copy it and compare against the release page if you want to be sure of what you are installing. `gp_diagnose` answers the same question for an agent: whether this machine is behind, and as what.
+- **Do it right now, by hand**: press 「立即检查」 (check now) to fetch and verify, then 「安装更新」 (install update) to apply what passed. The card above the buttons shows current version, newest version, when it last checked, the version waiting, and its full `sha256` — copy it and compare against the release page if you want to be sure of what you are installing. `gp_diagnose` answers the same question for an agent: whether this machine is behind, and as what. Or from a terminal, without hunting for where the install went: `glasspane update` (and `glasspane doctor` when something did not take).
+- **One half failing does not cancel the other.** The update has two layers — the two `.app` bundles, and the two global npm packages. If this run cannot reach `npm`, or cannot write where npm puts a global package, the bundles still install, the daemon still restarts and is read back, and the verdict is `applied` carrying `npm-not-refreshed`: the same sentence then names the one command that finishes the rest (`npm install -g glasspane-mcp@<version> glasspane-install@<version>`), and it keeps being shown on the page and in `gp_diagnose` until that line has been run. This replaced a whole-update refusal that had been leaving machines on an old version for days, over a global layer they had never had anyway.
 - A button that has nothing to do stays **visible and disabled, with a reason line under it** — the panel never hides a control to avoid explaining it, and never shows a failure as a success.
 - **A major version is never applied on a schedule.** It waits as an offer, with the reason on the page (跨大版本升级，可能改变对外行为), and pressing 「安装更新」 is what confirms it. Nothing is skipped silently: `--consent major` is that button's effect, and the scheduled run does not have it.
 - **A release nobody signed is not installed by the schedule either.** Every release from `v1.5.0` onward publishes a detached GPG signature over its checksum file, and signing is a step the release workflow cannot skip: if the signature is not produced and is not non-empty on disk, the Release is never created. Verified against the key shipped with this program, that is what turns "who published this" from an assumption into a checked claim (and it means exactly *matches the key we ship*). The older tags are the ones with nothing to check — `v1.4.0` shipped without its `.asc` (the signing step was silently skipped and the two files were back-signed by hand afterwards), and `v1.3.1` predates the signing job. So: if there is nothing to check — no signature published, or no `gpg` on the machine — the daily run stops and says so on the page; you may proceed once by hand with `updater check --consent unsigned-release`, and the state file and `gp_diagnose` keep reporting that release as installed **without authorship proof**. A signature that is published and does not check is refused outright: no consent overrides it. The 「安装更新」 button does not grant this one — it only ever carries `--consent major` — but you do not need a terminal for it: when that gate is the reason the check stopped, the same page offers 「信任这个发布并重新检查」, and pressing it is `updater check --consent unsigned-release`. The terminal form remains the fallback for a headless machine.

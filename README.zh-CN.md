@@ -169,13 +169,20 @@ TypeScript。
 
 ## 快速开始 / Quick Start
 
-**1. 安装**（macOS 14+；拉取钉住的发布 tag，因此可复现）：
+**1. 安装**（macOS 14+；npm 优先——它最短，而且会把 `glasspane doctor` / `glasspane update` 一起留下）：
 
 ```bash
-# 先取回脚本、再执行——刻意分两步。用管道给 `sh` 时，curl 自己失败会让 stdin 是空的，
-# `sh` 直接 EOF 退 0：一次什么都没装的运行对外报的是成功。
+npx glasspane-install
+```
+
+走脚本那条渠道是同样的一条命令（先取回脚本、再执行——刻意分两步。用管道给 `sh` 时，curl 自己失败会
+让 stdin 是空的，`sh` 直接 EOF 退 0：一次什么都没装的运行对外报的是成功）：
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
 ```
+
+两条都拉取钉住的发布 tag，因此可复现；第三条与各自的代价见[安装渠道](#安装渠道)。
 
 **2. 授权**：面板打开后，为 **`GlassPane Daemon`** 勾选辅助功能、输入监控、屏幕录制。
 macOS 禁止程序化授权，所以这是唯一的人工步骤；面板逐卡引导并在每次勾选后重新实测。
@@ -229,15 +236,17 @@ macOS 主版本由 LaunchServices 打开 bundle 时强制（`LSMinimumSystemVers
 ### 安装渠道
 
 三条渠道最终走同一份代码；两条一键渠道 clone 的是**同一个钉住的发布 tag**，不是移动的分支，
-所以同一天两次安装拿到同一份源码：
+所以同一天两次安装拿到同一份源码。**npm 排第一**：它最短，也是唯一一条会把 `glasspane` 这条命令
+一起留在 PATH 上的路，而更新器在自己够不着 npm 时给出的那句补救走的也是同一条渠道。
 
 ```bash
-# 1) 先取回脚本再执行，分两步：`curl … | sh` 那条管道里，curl 自己失败时 `sh` 读到的是空输入，
+# 1) 经 npm（自己引导 clone 钉住的 tag，然后构建、安装）。想让 `glasspane` 这条命令长期留着：
+#    npm install -g glasspane-install，然后 glasspane-install，之后 glasspane doctor / glasspane update。
+npx glasspane-install
+
+# 2) 先取回脚本再执行，分两步：`curl … | sh` 那条管道里，curl 自己失败时 `sh` 读到的是空输入，
 #    整条管道照样退 0——而读退出码的正是不在场的 agent 与 CI，它必须是真的那个。
 curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
-
-# 2) 经 npm（自己引导 clone 钉住的 tag）
-npx glasspane-install
 
 # 3) 自己管源码：`install.sh` 钉的是本次发布那一个 tag（它的 `GLASSPANE_RELEASE` 默认值，
 #    每次发版由 `scripts/set-version.mjs` 改写）——要装未发布的树才去 `main`。下面那个 tag 不靠人眼
@@ -245,6 +254,26 @@ npx glasspane-install
 #    `scripts/check-doc-links.mjs` 就把这一页判红。
 git clone --branch v1.21.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
 ```
+
+npm 不交付的东西也说清：Swift 引擎。上面三条渠道最后都要在你这台机器上跑一次 `swift build`——
+npm 上的 `glasspane-mcp` 是传输层、`glasspane-install` 是安装器，都不是预编译好的 app bundle。
+把这句话说反，就是让人先装完上面那张依赖表，然后等一个永远不会出现的二进制。
+
+### 装完之后：一条命令，三个动词
+
+`glasspane-install` 会在 PATH 上留下第二条命令。它要回答的是那句"面板按钮失败了，而我不知道自己
+装到了哪里"：
+
+```bash
+glasspane doctor    # 读这台机器：安装指针、更新器状态、在册的 daemon 作业、socket、两个全局 npm 包。
+                    # 每格一行；读不出来的那格就说读不出来——"没有"和"我没看成"是两种答案
+glasspane update    # 先检查，再装上通过校验的那一份；退出码沿用更新器自己的那一个
+glasspane status    # 把更新器自己的那一行结论原样打出来
+```
+
+它一切都按 `~/.glasspane/update-install.json` 走——那个文件是安装器写的、也是面板读的，所以它不会
+从当前目录猜一份安装出来。它不 sudo、不删任何东西；需要人做的那一步只把工具名和目录写出来，
+不会交出一条可以照着敲的升权命令。
 
 `GLASSPANE_REF=<tag>` 指定其他发布版；`GLASSPANE_REF=main` 追主干（它不是固定产物）。
 `--no-prompt --no-gui` 为静默安装；`--help` 列全部选项。
@@ -306,7 +335,14 @@ node installer/cli.js --restore-launchd
 - **现在就想查一次 / 手动装**：点「立即检查」拉取并校验，再点「安装更新」装上通过校验的那一份。
   上方状态卡会给出当前版本、最新版本、上次检查时间、待装版本，以及它的完整 `sha256`——
   想确认自己装的是什么，可以复制后与发布页核对。`gp_diagnose` 也给代理同样的答案：
-  这台机器的 GlassPane 旧不旧、现在停在哪个结论上。
+  这台机器的 GlassPane 旧不旧、现在停在哪个结论上。也可以在终端里做，不用去翻自己装到了哪：
+  `glasspane update`，事情没接上的时候先 `glasspane doctor`。
+- **一半没成不取消另一半。** 一次更新有两层：`~/Applications` 里那两个 bundle，以及两个全局 npm 包。
+  如果这一趟够不着 npm、或者写不进 npm 放全局包的那一层，bundle 照装、daemon 照重启并读回版本，
+  结论是 `applied` 带着 `npm-not-refreshed`：同一句话里给出剩下那一半唯一能照抄运行的命令
+  （`npm install -g glasspane-mcp@<版本> glasspane-install@<版本>`），并且这一句会一直挂在面板与
+  `gp_diagnose` 上，直到那行命令被跑过。它换掉的是从前那种"整场拒绝"——那台机器连着几天停在旧版本上，
+  而它本来就没有那两个全局包。
 - 没有可装之事可做的按钮**不会消失，而是灰掉并在下面写一行原因**——面板不靠藏起来回避解释，
   也不把失败显示成成功。
 - **跨大版本永不自动应用。** 它只是停在页面上等着，并写清理由（跨大版本升级，可能改变对外行为），

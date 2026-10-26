@@ -10,13 +10,14 @@ macOS 14+.
 ## Channels / 安装渠道
 
 ```bash
-# 1) Fetch, then run (recommended): install.sh clones the pinned release tag. Two steps on
+# 1) This package via npx (recommended) — also clones the pinned release tag when no local
+#    repo is found, then runs the same flow. It is also the only channel that leaves the
+#    `glasspane` command on PATH; `npm install -g glasspane-install` keeps it there permanently.
+npx glasspane-install
+
+# 2) Fetch, then run: install.sh clones the pinned release tag. Two steps on
 #    purpose — piped into `sh`, a curl that fails leaves stdin empty and the pipeline exits 0.
 curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
-
-# 2) This package via npx — also clones the pinned release tag when no local
-#    repo is found, then runs the same flow
-npx glasspane-install
 
 # 3) From an existing checkout
 node installer/cli.js
@@ -27,8 +28,38 @@ channels clone the **same pinned tag** — never a moving branch — so a fresh 
 is reproducible. Override with `GLASSPANE_REF=<tag>` (`main` is available but is not
 a fixed artifact).
 
+An existing clone at the install directory is **advanced**, not ignored and not
+clobbered: if `git status --porcelain` is empty the installer fetches the pinned tag
+and `checkout --detach`s onto it; if it is dirty it refuses, names the files in the
+way, and offers a different `GLASSPANE_INSTALL_DIR`. No `git stash`, no `checkout -f`,
+no `clean` — an installer has no business destroying somebody's uncommitted work
+(that refusal is what replaced the 2026-10-26 shape, where one channel printed "the
+existing clone will not be switched" and then built from a three-versions-old tree
+while the other channel died on git's "already exists and is not an empty directory").
+
 三条渠道最终都走同一份 `installer/cli.js`，且两条一键渠道 clone 的是同一个**钉住的发布 tag**（不是移动的分支），
 所以同一天两次安装拿到的是同一份源码。
+
+安装目录里已经有一棵 clone 时，这一趟**把它前进**到钉住的那个 tag，而不是照用旧树、也不是删掉重来：
+`git status --porcelain` 是空的就 fetch + `checkout --detach`；不空就**拒绝**，点名挡路的那些文件，
+并给出换一个 `GLASSPANE_INSTALL_DIR` 的走法。没有 `git stash`、没有 `checkout -f`、没有 `clean`——
+安装器不该有能把别人的未提交工作抹掉的那一格。
+
+## The `glasspane` command / `glasspane` 这条命令
+
+这个包同时交付 `glasspane`（`bin` 里两个名字，见 `package.json`），回答的是"面板按钮失败了，
+而我不知道自己装到了哪里"：
+
+| 命令 | 做什么 | 退出码 |
+|---|---|---|
+| `glasspane doctor` | 只读这台机器：状态根、安装指针、更新器状态、在册 daemon 作业、socket、两个全局 npm 包；每格答 available / absent / unverified | 0 全在位；3 有格子不在位或答不了 |
+| `glasspane update` | 先 `check`，再装通过校验的那一份；检查停住就不进安装 | 沿用更新器自己的那一档（0/3/4/5） |
+| `glasspane status` | 把更新器那一行结论原样打出来 | 同上 |
+
+它只按 `~/.glasspane/update-install.json` 找那份更新器（安装器写的、面板读的同一份），不从当前目录猜；
+不 sudo、不删东西，需要人做的那一步只点名工具与目录。npm 那一格的补法给的是
+`npm install -g glasspane-mcp@<版本> glasspane-install@<版本>`——那取的是 registry 的发布物，
+与更新器从已校验暂存树里现场打包的那一份是两种来源，这句话也一起说。
 
 ## Flags / 选项
 

@@ -94,8 +94,14 @@
   `npm config get prefix` + **两个目录**的 `W_OK`（包落下的 `<prefix>/lib/node_modules` 和命令软链过去的
   `<prefix>/bin`）。只查前者是不够的：照第一次给的 remedy 把 `lib/node_modules` chown 过来之后，真机仍然死在
   `EACCES: permission denied, symlink … -> '/usr/local/bin/glasspane-install'`——修完仍然失败的 remedy 比没有
-  remedy 更糟，所以现在两个目录都探、也都写进那句 remedy。写不进去就 `deferred` + `npm-prefix-unwritable`，
-  **什么都没换、daemon 一次都没重启**，并说清出路需要一个人（`sudo chown` 或把 prefix 挪进家目录后重跑安装程序）。
+  remedy 更糟，所以现在两个目录都探、也都写进那句 remedy。
+  **2026-10-26 起，这一格的答案不再取消整次更新**：写不进去照样换 `.app`、照样重启 daemon、照样读回 daemon
+  那一半的版本，结论是 `applied` + `npm-not-refreshed`，句子里带着能照抄运行的一行
+  （`npm install -g glasspane-mcp@<版本> glasspane-install@<版本>`），并写明它取 registry 的发布物而不是
+  本轮核验过的暂存树。它跟 `runtime-stale` 同格：机器确实变了，所以不动退出码，而是留一句挂在 `lastError`
+  上、面板逐字显示的话，直到那一格被补上。两条不许松：预检说够不着就不许再去碰全局层；被留下的旧转发层
+  若**装着却答不出 `tools/list`**，照旧整场回滚（"那一半没答上来"和"这台机器本来没有那一半"是两件事，
+  后者按 §3.3 只读 daemon 这一半，并在结论里写明 MCP 那一半没被问过）。规格里 4a 那段是这个契约的原文。
 - **§11 落地的形状（2026-09-30 本机实测之后补上的边界，都是实测不是推测）**：
   · *一代是什么*：封闭清单 `updater/` + `installer/` + 发布根 `package.json`。`installer/` 不是顺手带上的：
     `updater/lib/signature.js` 用 `import('../../installer/cli.js')` 取签名公钥，少它就是个跑不起来的更新器。
