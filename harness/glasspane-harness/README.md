@@ -22,6 +22,24 @@
 
 ---
 
+## Table of Contents
+
+- [About This Project](#about-this-project)
+- [The other half of the pair: GlassPane](#the-other-half-of-the-pair-glasspane)
+- [This is a complete coding agent, not a stripped one](#this-is-a-complete-coding-agent-not-a-stripped-one)
+- [Product surfaces](#product-surfaces)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [The `gp_*` tool surface](#the-gp-tool-surface)
+- [The evidence discipline](#the-evidence-discipline)
+- [Documentation](#documentation)
+- [Development](#development)
+- [License & attribution](#license-attribution)
+
+---
+
+## About This Project
+
 **The problem.** An AI agent driving a real macOS app cannot honestly say whether the UI
 did what it asked. It sees its own tool output, guesses from prose, and reports success.
 Screenshots don't help: they show *a* moment, not a *change*, and they cannot say whether
@@ -36,8 +54,37 @@ invents a verdict. Verified calls are appended to a hash-chained decision log, a
 compaction hook re-injects the session's evidence anchors so summarising can never quietly
 drop the audit chain.
 
-The engine is [GlassPane](https://github.com/jingzhao-l/GlassPane). The harness is the
-agent side of it.
+### The other half of the pair: GlassPane
+
+This repository is one half of a two-part product. The other half is
+[**GlassPane**](https://github.com/jingzhao-l/GlassPane), the macOS runtime-verification
+engine: a Swift daemon that measures an application's accessibility tree, pixel changes,
+crashes and responsiveness, and exposes those measurements over MCP through `glasspane-mcp`.
+
+The split is deliberate and asymmetric:
+
+- **GlassPane decides what the application did.** It holds the Accessibility, Input
+  Monitoring and Screen Recording grants, performs the measurement, and reports its own
+  attribution. This harness is a client of that verdict, not a second opinion.
+- **The harness transcribes.** It carries the same `gp_*` surface natively, appends verified
+  calls to a hash-chained decision log, and re-injects evidence anchors when a long session
+  is compacted. It never invents a verdict.
+- **Neither reads the other's private API.** Both consume the same published contract layer
+  (`iterate-kernel`), so the formats that cross the boundary are one definition rather than
+  two files evolving apart.
+
+Install the engine first — the harness is a client, not a substitute:
+
+```bash
+# Engine (macOS 14+). When the permission panel opens, grant Accessibility,
+# Input Monitoring and Screen Recording to `GlassPane Daemon`.
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
+```
+
+Its README is the place for install channels, permissions, the evidence-pack format and the
+update line: [jingzhao-l/GlassPane](https://github.com/jingzhao-l/GlassPane). The engine also
+serves MCP hosts that are not this harness (Claude Desktop, Cursor, any MCP client), which is
+what `glasspane-mcp` is for.
 
 ## This is a complete coding agent, not a stripped one
 

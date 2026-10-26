@@ -22,6 +22,24 @@
 
 ---
 
+## 目录
+
+- [这项目是什么](#这项目是什么)
+- [一对产品的另一半：GlassPane](#一对产品的另一半glasspane)
+- [这是一个完整的编程 harness，不是被削过头的 fork](#这是一个完整的编程-harness不是被削过头的-fork)
+- [产品面](#产品面)
+- [安装](#安装)
+- [上手](#上手)
+- [`gp_*` 工具面](#gp-工具面)
+- [证据纪律](#证据纪律)
+- [文档](#文档)
+- [开发](#开发)
+- [许可与署名](#许可与署名)
+
+---
+
+## 这项目是什么
+
 **问题。** 一个驱动真实 macOS 应用的 AI agent，没法诚实地说清界面到底有没有按它要求的动。
 它只看得见自己的工具输出，于是靠散文猜测、报成功。截图也不解决问题：截图给的是**某个瞬间**，
 不是**某次变化**，更说不清这次变化是不是那次点击造成的。
@@ -32,7 +50,32 @@
 熔断级、pass / fail / inconclusive）。harness 只转录，不自己下结论。成包的验证调用进哈希链
 决策日志；压缩钩子会把会话的证据锚点重新注入压缩提示词，摘要再长也丢不掉审计链。
 
-引擎是 [GlassPane](https://github.com/jingzhao-l/GlassPane)，harness 是它的 agent 侧。
+### 一对产品的另一半：GlassPane
+
+本仓库是一对产品里的一半。另一半是 [**GlassPane**](https://github.com/jingzhao-l/GlassPane)，
+macOS 上的运行时验证引擎：一个 Swift 后台服务，测量应用的无障碍树、像素变化、崩溃与响应性，
+并通过 `glasspane-mcp` 经 MCP 把这套测量交出去。
+
+这个分工是刻意且不对称的：
+
+- **应用做了什么由 GlassPane 判定。** 它持有辅助功能、输入监控与屏幕录制授权，做测量，
+  给出自己的归因。这个 harness 是那份判定的客户端，不是第二种意见。
+- **harness 只负责转写。** 它原生带着同一套 `gp_*` 面，把已验证的调用追加进哈希链决策账本，
+  并在长会话被压缩时重新注入证据锚点。它绝不自行发明判定。
+- **两边都不读对方的私有 API。** 它们吃的是同一份公开发布的契约层（`iterate-kernel`），
+  所以跨越边界的格式只有一份定义，而不是两份各自演化的文件。
+
+先把引擎装上——harness 是客户端，不是替代品：
+
+```bash
+# 引擎（macOS 14+）。权限面板弹出时，为 `GlassPane Daemon` 勾选辅助功能、
+# 输入监控与屏幕录制。
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
+```
+
+安装渠道、权限、证据包格式与更新线都在它的 README：[jingzhao-l/GlassPane](https://github.com/jingzhao-l/GlassPane)。
+引擎也服务不是这个 harness 的 MCP host（Claude Desktop、Cursor、任意 MCP 客户端），
+`glasspane-mcp` 就是为此存在的。
 
 ## 这是一个完整的编程 harness，不是被削过头的 fork
 

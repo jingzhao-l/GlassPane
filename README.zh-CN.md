@@ -1,52 +1,64 @@
 # GlassPane
 
-[English](./README.md) · **简体中文**
-
-[![CI](https://github.com/jingzhao-l/GlassPane/actions/workflows/ci.yml/badge.svg)](https://github.com/jingzhao-l/GlassPane/actions/workflows/ci.yml)
-[![release](https://img.shields.io/github/v/release/jingzhao-l/GlassPane)](https://github.com/jingzhao-l/GlassPane/releases)
-
-[![npm：glasspane-mcp](https://img.shields.io/npm/v/glasspane-mcp)](https://www.npmjs.com/package/glasspane-mcp)
-[![累计下载：glasspane-mcp](https://img.shields.io/npm/dt/glasspane-mcp?label=%E7%B4%AF%E8%AE%A1%E4%B8%8B%E8%BD%BD)](https://www.npmjs.com/package/glasspane-mcp)
-![license: MIT](https://img.shields.io/badge/license-MIT-green)
+> [English](./README.md) · **简体中文**
 
 <center>
   <strong>macOS 上给 AI 编程代理用的 GUI 测试与验证层。</strong><br/>
   让代理自己去操作应用、断言界面真的变了、并把证据拿出来——而不是给你发一张截图。
 </center>
 
-你的 AI 代理会写代码、跑 linter、过单元测试。但它说不出自己点的那个设置开关到底动没动——
-因为对一个 GUI 应用而言，代理没有"看"的通道。于是只有两种结局：要么未经确认就宣布成功，
-要么截个图靠猜坐标。
+<br/>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/glasspane-mcp"><img src="https://img.shields.io/npm/dt/glasspane-mcp?label=%E7%B4%AF%E8%AE%A1%E4%B8%8B%E8%BD%BD&style=for-the-badge&color=2ea44f&logo=npm&logoColor=white" alt="npm 累计下载"></a>
+  <a href="https://github.com/jingzhao-l/GlassPane/releases"><img src="https://img.shields.io/github/v/release/jingzhao-l/GlassPane?style=for-the-badge" alt="GitHub release"></a>
+  <a href="https://github.com/jingzhao-l/GlassPane/actions/workflows/ci.yml"><img src="https://github.com/jingzhao-l/GlassPane/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-yellow?style=for-the-badge" alt="License"></a>
+  <a href="https://github.com/jingzhao-l/GlassPane"><img src="https://img.shields.io/github/stars/jingzhao-l/GlassPane?style=social&label=Star" alt="GitHub stars"></a>
+</p>
+
+> 想支持这个项目？点一个 GitHub **Star** 就是最好的感谢，也能让更多人发现 GlassPane。
+
+---
+
+## 目录
+
+- [这项目是什么 / About This Project](#这项目是什么-about-this-project)
+- [能力一览 / At a Glance](#能力一览-at-a-glance)
+- [快速开始 / Quick Start](#快速开始-quick-start)
+- [安装 / Installation](#安装-installation)
+- [用法 / Usage](#用法-usage)
+- [MCP 工具参考 / MCP Tool Reference](#mcp-工具参考-mcp-tool-reference)
+- [它如何工作 / How It Works](#它如何工作-how-it-works)
+- [配置 / Configuration](#配置-configuration)
+- [常见问题 / FAQ](#常见问题-faq)
+- [安全 / Security](#安全-security)
+- [目录结构 / Directory Structure](#目录结构-directory-structure)
+- [贡献 / Contributing](#贡献-contributing)
+- [免责声明 / Disclaimer](#免责声明-disclaimer)
+- [许可证 / License](#许可证-license)
+
+---
+
+## 这项目是什么 / About This Project
+
+**GlassPane** 是 macOS 上给 AI 编程代理用的运行时验证层。你的代理会写代码、跑 linter、过单元测试。
+但它说不出自己点的那个设置开关到底动没动——因为对一个 GUI 应用而言，代理没有"看"的通道。
+于是只有两种结局：要么未经确认就宣布成功，要么截个图靠猜坐标。
 
 GlassPane 补的就是这半个闭环。它把 macOS 应用的界面通过 MCP 暴露成一个结构化、可脚本化的测试面：
 代理执行一个无障碍动作，拿回的是**这次动作造成的变更**——按元素定位的树差异加一个像素数值测量——
 而不是一张需要它盯着看的图。它可以断言控件状态、把应用回滚到检查点、导出人类可复核的证据。
 构建 → 到达状态 → 操作 → 观察 → 诊断 → 修复 → 重验，中间不必每一轮都插一个人。
 
-## 目录
+它真正跑的是一条闭环：
 
-- [它解决的问题](#它解决的问题)
-- [为什么不是截图](#为什么不是截图)
-- [能力一览](#能力一览)
-- [快速开始](#快速开始)
-- [安装](#安装)
-- [让 GlassPane 保持最新](#让-glasspane-保持最新)
-- [它做不到什么](#它做不到什么)
-- [接入 MCP 客户端](#接入-mcp-客户端)
-- [工具清单](#工具清单)
-- [证据包里有什么](#证据包里有什么)
-- [与审查回路的双向集成](#与审查回路的双向集成)
-- [权限与诚实性设计](#权限与诚实性设计)
-- [故障排查与 FAQ](#故障排查与-faq)
-- [安全](#安全)
-- [目录结构](#目录结构)
-- [开发](#开发)
-- [文档](#文档)
-- [与 iterate 生态的关系](#与-iterate-生态的关系)
-- [免责声明](#免责声明)
-- [许可证](#许可证)
+```text
+attach → observe → act → measure the change → assert → diagnose if nothing moved
+       → roll back to the checkpoint → export the evidence pack
+```
 
-## 它解决的问题
+### 它解决的问题
 
 在 macOS 上，代理的工具链把开发的**静态半场**cover 得很好：编译、类型检查、审查、跑终端里的测试。
 GUI 应用的**运行时半场**则是断崖：
@@ -70,7 +82,7 @@ GlassPane 给代理装上带账本的眼睛和手：
   而不是把你的机器留在半配置状态；
 - **证明** —— `gp_export_evidence` / `gp_recent_reports` 把这一切渲染成 HTML 或 Markdown 报告，作为文本随会话结果返回——它们不接收路径、也不写文件，要存进浏览器或跟着 commit 归档是你自己的一步；只有设置面板的「打开报告」按钮会把报告落盘。
 
-## 为什么不是截图
+### 为什么不是截图
 
 "截屏 + 问视觉模型"是一个真实存在的选项，也是大多数代理配置的默认归宿。但作为验证回路它是错的工具，
 理由与模型好坏无关：
@@ -91,7 +103,50 @@ GlassPane 给代理装上带账本的眼睛和手：
 也说清代价的另一面：视觉模型仍能判断 GlassPane 不判断的东西——视觉品味、一个设计**看起来**对不对、
 或者某个根本不暴露无障碍树的视图内容。GlassPane 负责测量，不负责审美。两者各自用于所擅长之处。
 
-## 能力一览
+### 两个 GlassPane 项目
+
+GlassPane 刻意是一对产品里的一半。另一半是 **[GlassPane Harness](https://github.com/jingzhao-l/glasspane-harness)**，
+一个在终端里干活、原生带着同一套 `gp_*` 面的编程代理：
+
+- **本仓库 —— 引擎与传输层。** Swift 后台服务负责测量应用；`glasspane-mcp` 把这套测量通过 MCP 交给
+  Claude Desktop、Cursor 或任何其他 MCP host。用下面那条一键安装命令装。
+- **[GlassPane Harness](https://github.com/jingzhao-l/glasspane-harness) —— 代理侧。** 一个 AI 编程代理
+  （上游 [opencode](https://github.com/anomalyco/opencode) 的 fork），通过原生 `gp_*` 工具调引擎，
+  把每条已验证的调用追加进哈希链决策账本，并在长会话被压缩时把这些证据锚点重新注入。它从 npm 安装；
+  它要求引擎已在运行且已授予辅助功能，条件不满足时会打印确切的补救命令。
+
+分工与上面那条闭环一致：**应用做了什么由引擎判定，harness 只负责转写，绝不自行发明一个判定。**
+两个产品都不是对方私有 API 的客户端——它们吃的是同一份公开发布出去的契约层，所以跨越边界的格式只有
+一份定义，而不是两份各自演化的文件。harness 也可以单独安装：
+
+```bash
+# 代理侧。需要先把下面这条引擎装好、跑起来并授予辅助功能。
+npm install -g glasspane-harness
+```
+
+> 本文余下部分描述的是**本仓库**：引擎、MCP 层与安装器。harness 有自己的 README——
+> [GlassPane Harness](https://github.com/jingzhao-l/glasspane-harness)（源码
+> [`harness/glasspane-harness/README.md`](harness/glasspane-harness/README.md)）。
+
+### 与 iterate 生态的关系
+
+共享 schema 契约层是作者 [iterate](https://github.com/jingzhao-l/iterate-skill) 生态的内核，
+发布为 [`iterate-kernel`](https://www.npmjs.com/package/iterate-kernel)：同一批 JSON Schema 同时被
+iterate 的多轮评审、GlassPane 服务与 MCP 层消费，双语绑定用共享 fixture 校验。两半互补——iterate 审
+"这段代码对不对"，GlassPane 验"跑起来的应用是不是真像代理所说的那样变了"。两个 TypeScript 消费者各自
+装那一份发布包：`mcp-shell` 把它捆进 `glasspane-mcp`（所以发布物里没有指回本仓库的 `file:` 依赖），
+fork 经自己的 lockfile 解析它，出处记在
+`harness/glasspane-harness/contracts/kernel-pin.json`。[kernel/](kernel/) 因此只剩那份包的**被钉语料**
+——`fixtures/` 与 `schemas/`——因为 Swift 的 C35 腿和归档的要求清单读的是这些字节，而它们读不到
+TypeScript。
+
+本仓库同时吃自己的狗粮：[ITERATE.md](ITERATE.md) 与 [iterate.config.yaml](iterate.config.yaml)
+就是本项目的 onboarding 产物，`/iterate` 在这里审查时用的门禁命令与 CI 强制的完全一致。
+2026-09-22 实测：`iterate doctor` 18 项全部通过、`iterate fingerprint` 无漂移。
+
+---
+
+## 能力一览 / At a Glance
 
 - **16 个 MCP 工具（stdio）** —— Claude Desktop、Cursor 或任意 MCP host；`tools/list` 是权威面。
 - **执行并当场确认** —— 操作直接返回它造成的变更，"我点了但没反应"成为对话里的事实而非争论。
@@ -110,7 +165,9 @@ GlassPane 给代理装上带账本的眼睛和手：
 - **按项目隔离配置** —— 每应用的存储路径、配方与校准根，走 `gp_project_*`。
 - **构造性诚实** —— 没测出来的一律"未验证"。指示灯不为了好看而点亮，权限面板与判定结论同理。
 
-## 快速开始
+---
+
+## 快速开始 / Quick Start
 
 **1. 安装**（macOS 14+；拉取钉住的发布 tag，因此可复现）：
 
@@ -144,7 +201,12 @@ macOS 禁止程序化授权，所以这是唯一的人工步骤；面板逐卡�
 
 你会拿到带前后差异的判定，以及一份由 `gp_export_evidence` 作为 HTML/Markdown 文本随会话返回的报告（它不写文件——只有面板的「打开报告」按钮才落盘）。
 
-## 安装
+如果你想要的是闭环里的代理那一侧、而不是自己接一个 host，在第二步之后装上
+[GlassPane Harness](#两个-glasspane-项目)。
+
+---
+
+## 安装 / Installation
 
 ### 前置条件
 
@@ -229,7 +291,7 @@ rm -rf ~/.glasspane
 node installer/cli.js --restore-launchd
 ```
 
-## 让 GlassPane 保持最新
+### 让 GlassPane 保持最新
 
 安装时会注册一个用户级的定时作业：每天问一次发布页有没有新版本，允许的话就把新版本换上。
 操作它的是 `GlassPane.app` 里的「更新」页。
@@ -280,26 +342,48 @@ node installer/cli.js --restore-launchd
   请先人工重新安装」——也就是重跑一次[安装器](#安装渠道)把 `~/Applications` 从源码重建出来，再回到
   这一页。如果退回是验证成功的（退出码 4），你已经在旧版本上，页面会直接这么说。
 
-## 它做不到什么
+---
 
-直说，因为这决定它是否适合你的流程：
+## 用法 / Usage
 
-- **不能无头跑。** 无障碍、事件监听与屏幕捕获需要登录的 GUI 会话。它在你登录着的 Mac 上工作
-  （包括专门的测试机，或有活动会话的自建 runner），不在没有窗口服务器的容器里。
-- **合成不出拖拽手势。** macOS 接受合成的点击，但合成不出 SwiftUI 的 `.onDrag` 会话（实测结论，
-  不是推测）。按钮/菜单/步进器路径可用；只做拖拽的功能目前驱动不了。
-- **七个无障碍动词，不是任意输入。** `gp_act` 执行 `press`、`increment`、`decrement`、`showMenu`、
-  `confirm`、`cancel`、`pick`。它不直接写控件值，也不发合成 HID 事件，所以往输入框里打自由文本
-  不在范围内。
-- **应用不配合或沉默时就受限。** 目标应用若不暴露有用的无障碍树，结构验证只能用它愿意给的那点；
-  这时候才轮到探针 SDK，或 `gp_capture_view` + 视觉模型。
-- **视觉印象不是测量。** `gp_capture_view` 就是为规则判不了的品味与整体观感准备的。但它不可重复、
-  不能被断言，还受帧上限约束（大窗口会被拒并给出建议 `scale`，而不是悄悄降采样）。问它"这看着
-  对不对"可以，问它"复选框变了没有"不行——那是 `gp_assert_element` 的活。
-- **`strong` 归因需要应用配合。** 它表示应用内嵌的探针确认了处理器执行——具体证明到什么程度，
-  见 [SECURITY.zh-CN.md](SECURITY.zh-CN.md)。
+### 在 AI 助理里
 
-## 接入 MCP 客户端
+一个测试任务是一串代理能执行、能验证的步骤，而不是一个要靠它理解的提问。四个动词直接落在工具面上：
+
+| 你想知道 | 代理要调 |
+|---|---|
+| "应用在跑、挂上了吗？" | `gp_attach`，再用 `gp_probe_status` 取引擎自报 |
+| "屏幕上是什么？" | `gp_observe` |
+| "拨一下开关，告诉我发生了什么" | `gp_act`（返回它造成的变更） |
+| "现在勾上了吗？" | `gp_assert_element`（存在 / 可用 / 值，过或不过） |
+| "为什么没动？" | `gp_diagnose`（没变 / 晚到 / 被污染） |
+| "把证据给我看" | `gp_last_evidence`、`gp_export_evidence`、`gp_recent_reports` |
+| "把它恢复回去" | `gp_snapshot`，然后 `gp_restore` |
+
+两条经验决定你拿到的是验证还是一次猜测：
+
+- **要差异，不要描述。** "拨一下并断言复选框"给出可测结果；"拨一下告诉我成没成"只会招来一段散文。
+- **把回滚写进同一个任务。** 如果这次运行会留下配置，就在指令末尾加上 `gp_restore`，
+  失败的一次尝试才不会在你的机器上越积越多。
+
+### 在终端里
+
+终端负责安装、服务存活与更新线——不负责驱动应用。驱动应用一律由 MCP host 发起。
+
+```bash
+# 安装 / 修复 / 重挂 launchd 作业
+node installer/cli.js
+node installer/cli.js --restore-launchd
+
+# 问 daemon 自己是否活着（面板不是服务）
+printf '{"id":0,"method":"hello"}\n' | nc -U ~/.glasspane/engine.sock
+
+# 检查更新器与版本线
+node "<更新器路径>" check
+node scripts/check-version.mjs
+```
+
+### 接入 MCP 客户端
 
 **给 MCP 客户端**的两种等价写法（这个包还装了第三个命令，见本节末尾）：
 
@@ -320,7 +404,28 @@ node installer/cli.js --restore-launchd
 必须自带 bearer token、以及 `act`/`attach`/`restore`/`snapshot` 都在这张面上——写在
 [SECURITY.zh-CN.md](SECURITY.zh-CN.md) §2.3。
 
-## 工具清单
+### 它做不到什么
+
+直说，因为这决定它是否适合你的流程：
+
+- **不能无头跑。** 无障碍、事件监听与屏幕捕获需要登录的 GUI 会话。它在你登录着的 Mac 上工作
+  （包括专门的测试机，或有活动会话的自建 runner），不在没有窗口服务器的容器里。
+- **合成不出拖拽手势。** macOS 接受合成的点击，但合成不出 SwiftUI 的 `.onDrag` 会话（实测结论，
+  不是推测）。按钮/菜单/步进器路径可用；只做拖拽的功能目前驱动不了。
+- **七个无障碍动词，不是任意输入。** `gp_act` 执行 `press`、`increment`、`decrement`、`showMenu`、
+  `confirm`、`cancel`、`pick`。它不直接写控件值，也不发合成 HID 事件，所以往输入框里打自由文本
+  不在范围内。
+- **应用不配合或沉默时就受限。** 目标应用若不暴露有用的无障碍树，结构验证只能用它愿意给的那点；
+  这时候才轮到探针 SDK，或 `gp_capture_view` + 视觉模型。
+- **视觉印象不是测量。** `gp_capture_view` 就是为规则判不了的品味与整体观感准备的。但它不可重复、
+  不能被断言，还受帧上限约束（大窗口会被拒并给出建议 `scale`，而不是悄悄降采样）。问它"这看着
+  对不对"可以，问它"复选框变了没有"不行——那是 `gp_assert_element` 的活。
+- **`strong` 归因需要应用配合。** 它表示应用内嵌的探针确认了处理器执行——具体证明到什么程度，
+  见 [SECURITY.zh-CN.md](SECURITY.zh-CN.md)。
+
+---
+
+## MCP 工具参考 / MCP Tool Reference
 
 权威清单以运行时 `tools/list` 为准，下表是地图。
 
@@ -345,7 +450,11 @@ node installer/cli.js --restore-launchd
 而不是装成看过了。几何被刻意挡在树的摘要之外——一次 hover、一段动画或光标移动，都不该让
 "这次操作有没有改变这个界面"回答"改变了"。
 
-## 证据包里有什么
+---
+
+## 它如何工作 / How It Works
+
+### 证据包里有什么
 
 每次操作产出一个带版本的 `glasspane.evidence` 包（JSON，schema 见
 [kernel/schemas](kernel/schemas)）：
@@ -358,7 +467,7 @@ node installer/cli.js --restore-launchd
 - 操作期间有其他输入进来时的**污染标记**；
 - `gp_restore` 需要重放的**检查点步骤**。
 
-## 与审查回路的双向集成
+### 与审查回路的双向集成
 
 GlassPane 是一半。另一半是
 [`iterate-harness`](https://pypi.org/project/iterate-harness/)——审查并修复代理在这里改动的代码的那个
@@ -410,7 +519,7 @@ GlassPane 是一半。另一半是
 回答（`scripts/diff_kernel_implementations.py`，逐案子比对两侧的答案），它是给操作者跑的，不在 CI 的
 步骤里，所以那条得有人跑才算数。
 
-## 权限与诚实性设计
+### 权限与诚实性设计
 
 - 状态由**后台服务实测自身**上报，不由界面推断；面板不代测、不猜。
 - 读不到的显示**未验证**。没有任何指示灯为了好看而点亮；开发者工具卡保留自己的实测状态，
@@ -419,14 +528,49 @@ GlassPane 是一半。另一半是
   的判定，所以面板显示的是它实际测到的主体。
 - 证据与审批记录是哈希链审计台账：记录发生了什么，不是执行拦截。
 
-## 故障排查与 FAQ
+---
+
+## 配置 / Configuration
+
+GlassPane 的配置面分两层：引擎一层，每个消费者各一层。没有需要你手改的配置文件——服务路径由安装器
+写入，MCP 配置块归你的 host 自己管，harness 读它自己的运行计划与配方。
+
+### 环境变量
+
+| 变量 | 读取方 | 作用 |
+|---|---|---|
+| `GLASSPANE_ENGINE_SOCK` | `glasspane-mcp`、`glasspane-http` | daemon socket 路径；默认 `~/.glasspane/engine.sock` |
+| `GLASSPANE_REF` | `install.sh`、安装器 | 要装的发布 tag；`main` 追主干，而主干不是固定产物 |
+| `GLASSPANE_UPDATE_DISABLE` | 更新器 | 设为 `1` 后连之后的 `enable` 都拒绝，重装也不会把定时作业带回来 |
+| `GLASSPANE_DECISION_LOG` | GlassPane Harness | 决策账本的写入位置，默认 `~/.local/share/glasspane-harness/decisions.jsonl` |
+| `GLASSPANE_RUN_PLAN` | GlassPane Harness | 运行计划，决定会话压缩时先丢哪一维的历史 |
+| `GLASSPANE_RECIPE` | GlassPane Harness | 运行计划没给 `recipeConfigPath` 时，修复闸读的配方 |
+
+### 每应用配置
+
+应用相关的设置跟着应用走，不放在全局文件里。`gp_project_set` 按 bundle id 登记一个应用；`gp_project_get`
+报出解析后的存储路径、配方与校准根；`gp_project_list` 列出已登记项。证据包与审查回路那道闸读的就是
+这些记录，所以改动它们等于改动"对这个应用而言，已验证意味着什么"。
+
+### 更新计划
+
+每日检查是一个 launchd 作业；它的时间与同意级别属于更新器，不属于面板。`enable --hour 3 --minute 45`
+移动时间窗；面板上的按钮就是同一条命令，同意语义见[让 GlassPane 保持最新](#让-glasspane-保持最新)。
+
+---
+
+## 常见问题 / FAQ
+
+### 安装
 
 **Gatekeeper 拦住应用/提示 unidentified developer。** 符合预期：产物 ad-hoc 签名且公证暂缓
-（见[安装](#安装)）。在系统设置 → 隐私与安全性里允许后重开。
+（见[安装](#安装-installation)）。在系统设置 → 隐私与安全性里允许后重开。
 
 **我勾了权限，卡片还是红的。** 多半勾错了主体——条目必须是 `GlassPane Daemon`，不是终端也不是
 `GlassPane.app`。卡片会显示它测到的主体；跑 `node installer/cli.js --restore-launchd`
 把服务挪到 launchd 下并复验。
+
+### 用法
 
 **面板开着，工具还是报错。** 面板不是服务。直接问 socket：
 `printf '{"id":0,"method":"hello"}\n' | nc -U ~/.glasspane/engine.sock` 会回正在运行的 daemon 的
@@ -438,6 +582,10 @@ GlassPane 是一半。另一半是
 **代理说改了但界面没动。** 这正是 `gp_diagnose` 存在的理由：它把"结构没变""变化晚到""输入污染"
 分开。如果你的功能只有拖拽入口，先看[它做不到什么](#它做不到什么)。
 
+**支持哪些 macOS 版本？** 14 及以后；无障碍、事件监听与屏幕录制的行为就是按这个范围实测的。
+
+### 安全
+
 **数据会离开本机吗？** 不会。本机 unix socket、本机 stdio、证据留在 `~/.glasspane/`。
 但 `gp_observe` 会把无障碍树送进**代理对话**，你的模型服务商记录什么就等于记录了那棵树——
 把会话内容按敏感处理。
@@ -446,15 +594,17 @@ GlassPane 是一半。另一半是
 `node scripts/check-version.mjs` 会打印版本号出现的每一处。它们都来自同一个数字
 （[CHANGELOG.md](CHANGELOG.md)）。
 
-**支持哪些 macOS 版本？** 14 及以后；无障碍、事件监听与屏幕录制的行为就是按这个范围实测的。
+---
 
-## 安全
+## 安全 / Security
 
 GlassPane 持有辅助功能、输入监控与屏幕录制，注册 launchd 作业，读事件流，还能附挂调试器——
 它既强，也是攻击面。报告方式与详细威胁模型见 [SECURITY.md](SECURITY.md)（英文）/
 [SECURITY.zh-CN.md](SECURITY.zh-CN.md)。不要把日志或证据包贴进公开 issue。
 
-## 目录结构
+---
+
+## 目录结构 / Directory Structure
 
 ```
 GlassPane/
@@ -466,6 +616,8 @@ GlassPane/
 ├── mcp-shell/          TypeScript MCP stdio 服务 → npm `glasspane-mcp`
 ├── kernel/             已发布 iterate-kernel 的被钉语料（schemas + fixtures）
 ├── bridge/             Python LLDB 调试桥（崩溃/运行时采集）
+├── updater/            每日更新作业与它的同意闸
+├── harness/            GlassPane Harness fork（独立仓库、独立发布线；不进本产品归档）
 ├── spike/              可行性实验与留档结果
 ├── scripts/            set-version / check-version —— 单一版本线
 ├── specs/              实施规格与验收记录（PRD、P0–P6、审查记录）
@@ -473,7 +625,9 @@ GlassPane/
 └── .github/workflows/  ci.yml（10 条 lane；发布形态守卫是其中一条里的一个步骤）、release.yml
 ```
 
-## 开发
+---
+
+## 贡献 / Contributing
 
 环境准备、各层测试命令、提交与 PR 约定，以及"测试绝不能碰开发者真实的 `~/.glasspane`"这条规则，
 都在 [CONTRIBUTING.md](CONTRIBUTING.md)（[简体中文](CONTRIBUTING.zh-CN.md)）。简版：
@@ -501,7 +655,7 @@ updater 就是按那个名字去要的）的 GitHub Release——纯源码归档
 会让 updater 在目标机上 `npm pack` 出一个没有可执行文件的包，2026-10-01 真机因此每次换版都回滚；
 npm 发布走 `release.yml` 的 provenance 通道。
 
-## 文档
+### 文档
 
 `specs/` 是设计真源与验收台账，主张在哪里被验证、哪里没有，都记在那里，因此它最接近参考手册：
 
@@ -517,30 +671,22 @@ npm 发布走 `release.yml` 的 provenance 通道。
 | [P5](specs/GlassPane_P5_实施规格_v5.0_方向候选四连批.md) | 方向候选 |
 | [P6](specs/GlassPane_P6_实施规格_v6.0_探针SDK与LLDB桥实现.md) | 探针 SDK、LLDB 桥、公开发布执行记录 |
 | [Audit 2026-09-22](specs/GlassPane_Audit_2026-09-22_全量审查与UI迭代.md) | 全量审查与 UI 迭代记录 |
+| [双向集成 2026-10-25](specs/GlassPane_双向集成_2026-10-25_状态.md) | 与审查回路的五个双向场景逐行状态、各自的证据路径，以及哪些是实测、哪些只是声明 |
 
-## 与 iterate 生态的关系
+另一半产品的文档跟着它自己走：[GlassPane Harness 文档](https://github.com/jingzhao-l/glasspane-harness/tree/main/docs)
+覆盖安装、工具面、证据纪律与发布线。
 
-共享 schema 契约层是作者 [iterate](https://github.com/jingzhao-l/iterate-skill) 生态的内核，
-发布为 [`iterate-kernel`](https://www.npmjs.com/package/iterate-kernel)：同一批 JSON Schema 同时被
-iterate 的多轮评审、GlassPane 服务与 MCP 层消费，双语绑定用共享 fixture 校验。两半互补——iterate 审
-"这段代码对不对"，GlassPane 验"跑起来的应用是不是真像代理所说的那样变了"。两个 TypeScript 消费者各自
-装那一份发布包：`mcp-shell` 把它捆进 `glasspane-mcp`（所以发布物里没有指回本仓库的 `file:` 依赖），
-fork 经自己的 lockfile 解析它，出处记在
-`harness/glasspane-harness/contracts/kernel-pin.json`。[kernel/](kernel/) 因此只剩那份包的**被钉语料**
-——`fixtures/` 与 `schemas/`——因为 Swift 的 C35 腿和归档的要求清单读的是这些字节，而它们读不到
-TypeScript。
+---
 
-本仓库同时吃自己的狗粮：[ITERATE.md](ITERATE.md) 与 [iterate.config.yaml](iterate.config.yaml)
-就是本项目的 onboarding 产物，`/iterate` 在这里审查时用的门禁命令与 CI 强制的完全一致。
-2026-09-22 实测：`iterate doctor` 18 项全部通过、`iterate fingerprint` 无漂移。
-
-## 免责声明
+## 免责声明 / Disclaimer
 
 GlassPane 在真实桌面上驱动真实应用，持有读屏与操作其他应用界面的权限。请只在你有意控制的应用上
 运行，不要把证据目录放在共享位置，并把它导出的报告视为"包含屏幕上出现过的内容"。
 归因结论是实测与推断，不是关于程序内部行为的保证——一个应用若对自己的无障碍树说谎，
 任何观测方都可能被误导，这正是探针通道存在的理由。
 
-## 许可证
+---
+
+## 许可证 / License
 
 MIT —— 见 [LICENSE](LICENSE)。
