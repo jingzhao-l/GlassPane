@@ -2,6 +2,173 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-26（第二十三次会话）· 取号 0.12.0：一条寄给不存在地址的移交，与三条"结构上不会红"的尺子判据
+
+### 开工与前置（逐项量，不沿用上一轮的读数）
+
+- 开工 HEAD `bae15812`，整树 `git status --porcelain` **0 行**；`git rev-list --left-right --count
+  origin/main...main` = `0 0`（不分叉，10-25 那起"发布留在本地"的形状本轮不存在）。
+- `df -k /Volumes/Eng-Dev` 可用 20,909,700 KB ≈ 19.9 GiB（够 `bun install` 与整包构建）。
+- `bun` = 1.3.14（`packageManager` 钉的那个）；`.external/opencode` `describe --tags` = `v1.18.32` =
+  `harness/upstream.json` 的 pin，`fsck` 无错、工作树干净。
+- `glasspane-preflight.sh` 认出本机那条 `CN=SteamTools Certificate` 拦截根并要求
+  `NODE_EXTRA_CA_CERTS=/var/tmp/glasspane-harness/ca-bundle.pem`（实测 163 张，本轮每条构建/发布类
+  命令都带着它；未使用任何跳过校验的开关）。
+- 上一轮移交的两条按**字节**复核（不用分支名、不用提交信息）：`gp-harness-orphan-20261010` 与
+  `gp-harness-sc5-fork-20261020` 都已不在两个远端的分支列表里；`verify-published.ts` 的 os/cpu 断言
+  读的是**已安装**包（`gate`/`gateSeen` 那条，`check(..., gate === "", ...)`），
+  `script/registry-readiness.ts` 与其 8 条测试都在 main 上，`providers.ts` 与
+  `test/tool/glasspane-provider-registration.test.ts` 两个 blob 与分支侧**逐字相等**
+  （`df79123d…` / `9085cfc3…`）。`git merge-base --is-ancestor f32ef8dd main` 成功——但它是
+  `11f010b0` 那笔 `merge -s ours` 记进来的祖先，所以判落地只认文件字节，这一点写在下面"我自己量错的
+  两处"第 1 条旁边当作对照。本轮**没有**发现未并的移交活。
+
+### 审查怎么做（工具缺失如实记，不当成闸红）
+
+- 提示词要求 `review-bugbot` / `review-security` 两条 skill。两个 skill 都要求起 `bugbot` /
+  `security-review` 这两个 subagent_type，**本运行时没有注册**（`Agent` 回
+  `Unknown agent type: 'bugbot'. Available types: general-purpose, Explore, Plan, …`）。按 skill 自己
+  写的兜底路径改用等价代理起两路审查（一路全量定制面 + 尺子层的正确性，一路发布与供应链），简报里逐条
+  点名要验的失效形状。**缺工具不等于闸红**：这两条 skill 的专属 subagent 没跑成，跑成的是同等简报的
+  通用审查代理，写在汇报里而不是假装过了 bugbot。
+- 树是干净的、当前分支就是 main，所以 `Diff: branch changes` 必然空集；两路都用 skill 文档里的
+  `natural language`/全量口径下发，不给它一个空 diff 去"审通过"。
+- 两条 HIGH 与三条 MEDIUM **先回代码复核再动手**，其中两条按实测更正后才修（见下），另有两条我判为
+  不该按简报改并写明理由。审查报出 14 条，本轮 14 条全部落地为"已修 + 固定点测试 + 进 main"。
+
+### 改动面数字
+
+- `fork-diff --check`：**`4640/6744 byte-identical, 285 edited, 112 added, 1707 deleted`**
+  （上一记 `4640/6736, 285 edited, 104 added`）。`added` +8 全是我们自己的文件：
+  `script/check-workflows.mjs`、`packages/opencode/script/{provenance-verdict,pull-exactness,release-assets}.ts`
+  与 `test/script/{workflow-gates,provenance-verdict,pull-exactness,release-assets}.test.ts`；
+  分母 +8 是同一批（上游侧文件数不变）。金样与代码同批重记。
+- `tool-surface --check`：engine **30,662 LOC / 63 文件**；面 A `mcp-shell/src` **11,973 LOC = 22.02%**
+  （LOC 与上一记**相同**——本轮一行没碰主仓产品面）；面 B fork ours **11,750 LOC = 21.61%**
+  （上一记 10,946 / 20.43%，**+804 行 / +4 文件**）。测试排除如实打数：**46 文件 6,199 行**（上一记
+  42 文件 5,343 行，+4 文件正是本轮新增的四个测试）。同批 `--record`，增长的全部来源就是上面那 8 个
+  新文件加 `daemon.ts`(+140)、`installer-selftest.sh`(+64)、`install.sh`(+21)、`hook-liveness`/
+  `kernel-conformance` 等尺子侧的 fork 内位点。**10% 那条限仍是既有越限**，闸只挡没记账的增长。
+- `brand-surface --check`：**26 product file(s) + 2 doc(s); 0 hit(s); lineage 9607 occurrence(s)
+  across 3328 file(s)**。两处口径变化都记进金样：那个 `×1` 从此消失（实测 `customize-harness.md`
+  对该模式命中 0 次，旧金样是在凭空指控），`skillDocs` 覆盖集第一次进契约（`[undefined] →
+  [packages/core/src/plugin/skill/customize-harness.md]`）。血缘出现次数**不变**（9607），文件数
+  3317 → 3328（+11，本轮新文件），CHANGELOG 引到的那句旧文案不含任何血缘名，因此没有触发
+  `--record --lineage-note` 那条豁免路径。
+- `surface-semantics --check`：正向对照 **3/3** 命中已知判定；mcpShell 16 文件 0 命中、fork 7 文件
+  0 命中，合计 0 命中 / 23 文件——与上一记同读数（本轮没有把判定往 shell 侧移，新文件全是发布/闸代码）。
+- `product-surface --check`：**6587 agreement(s) held, 0 problem(s)**，`glasspane-harness@0.12.0`
+  manifest/build/publish/installers/pipelines 一致。内部两条计数按实测动了：上游 registry 扫描集
+  **900 → 904**（可执行即算，launcher 第一次进扫描集）、断言 **6537 → 6565**（新进 4 文件 × 7 needle）、
+  加上新 installer 判据的一条，收口读数 6587。`SCAN_SET_FLOORS.forbiddenFiles` **896 → 904（按实测抬高，
+  没有降低任何下限）**。
+- `hook-liveness --check`：`checked 21 hooks against anomalyco/opencode@v1.18.32: no drift`，新增并
+  通过 `bound hooks: 2/2 binding sites resolve and still name their hook`。
+- `kernel-pin --check`：`iterate-kernel@0.1.10 matches its lock integrity and 26 pinned contract
+  file(s)`；`--probe`：`iterate-kernel@0.1.10 is the published latest`（现在从 `product.registry`
+  钉住的那台作答）。**pin 未升级**：内核侧本轮没有需要改语义的缺陷。
+- `kernel-conformance`：`16 fixture(s) through 1 implementation(s)`，rc=0；带
+  `--impl /Volumes/Eng-Dev/iterate-skill/kernel` 时 16/16 走 2 实现、逐字同答案（canonical 在场）。
+- `node scripts/check-workflows.mjs --self-test`：**22 case(s) each verified to fail**（15 条必须抓到
+  的变异 + 7 条必须沉默的合法形状），rc=0；`node scripts/check-workflows.mjs`：**5 workflow file(s)
+  clean**，并且**本子树的两条 `△` 全部消失**（见下"本轮最大的一条"）。
+- `node scripts/check-doc-links.mjs`：文档 32 份 / 仓内链接 243 条 / 外链 34 条不请求 / markdown 表格
+  437 张，rc=0（双语成对与可复算主张一致都过；本轮新增的 `docs/install.md` 段落没引入死链）。
+- fork 内测试：固定点 5 文件 **192 pass / 0 fail**；`test/script/` 10 文件 **89 pass / 0 fail**；
+  TUI `inline-tool-wrap-snapshot.test.tsx` **36 pass / 0 fail**（8 snapshots / 239 expects）——
+  上一记是 161 + 36，本轮 +31 条全在 `glasspane-surface.test.ts`(+8) 与四个新测试文件里。
+- 按包 typecheck：`opencode` / `tui` / `sdk/js` / `plugin` 四路 `tsgo --noEmit` 全部 **exit 0**
+  （中途抓到我自己两处真错：`let dir: Stats` 没跟着签名改、`Object.entries().filter(isRecord)` 不
+  narrow 元组元素——都改成显式类型而不是 cast）。
+- `publish.ts --dry-run`：rc=0，`ok glasspane-harness@0.12.0 packs cleanly`，wrapper tarball
+  shasum 与 dry-run 值一致（读数以 `bun run script/publish.ts --dry-run` 原样输出为准，不转述）。
+
+### 本轮最大的一条：那条 `△` 移交一直寄给一个不存在的地址
+
+父仓 `scripts/check-workflows.mjs` 对非主 root 的 D5/D6-b 只打 `△`，原话
+`reported to that root's own gate, not enforced from here`，理由写得站得住（`harness/` 由另一条线改，
+在父仓 CI 里打红是一条那条线执行不了的指令）。**那个 root 的闸从来不存在**：本树与 split 出的搬运仓
+都没问过这两个文件。于是本线量到 `12 个 job 无 timeout-minutes`（GitHub 默认 360）与 `4 个多语句 run
+体未自声明 -e/-u/-pipefail`，其中 3 个在发布链上，而 `Upgrade npm` 那一步的注释明明写着
+"a drift between the pin and reality must not be readable as a successful publish"，代码只
+`echo "$(npm --version)"`——断言回显状态而不是指令，且 `12.2.0` 在同一文件抄了三份。
+
+修法是**把闸放到真正跑这些 job 的仓里**（`script/check-workflows.mjs`，与 `patched-deps.mjs` 同一个
+理由：split 出的独立仓必须自证），四条判据 + 三码退出 + 每条都打计数，接进 `ci.yml` 第一步。父仓那条
+`△` 一句没改（它对自己 root 的判据是对的），改的是**收件人是否存在**：现在两边都绿，
+`node scripts/check-workflows.mjs` 对本子树不再打任何 `△`。
+
+### 三条"结构上不会红"的尺子判据（各自都带因果验证）
+
+1. `product-surface.mjs`：六文件守卫的第二个析取式恒真 + 收集器按扩展名过滤，于是 **npm 实际 exec 的
+   `packages/opencode/bin/glasspane-harness` 从来不在上游 registry 扫描集里**，而守卫恰好点它的名。
+   因果验证两发：种上游 URL 进 launcher → `[no-upstream-registries] packages/opencode/bin/glasspane-harness
+   references upstream's self-upgrade script URL (opencode.ai/install)`；把它 `chmod -x` 踢出发现集 →
+   `[scan-set] … is no longer inside the discovered … scan set` + `discovered 903, floor is 904`
+   两条具名红。**后一发正是旧析取式恒真的反证**（旧代码那一步是绿的）。
+2. `brand-surface.mjs`：内置 skill 那条规则不打模式、`count` 写死 1 ⇒ 每文件棘轮恒假；且金样记的
+   `×1` 在真文本上命中 0 次（既测不到新问题，又指控了一个不存在的旧问题）。同文件的 shipped-code 一支
+   早已改成全局计数并写明"Count the matches, do not note that there is one"——这是**半修留在第二个
+   循环里**的形状。实测：种一个串 → `×1`；种第二个 → `grew 1 → 2` 红；重命名唯一文档 → 覆盖判据红；
+   删 skill 目录 → exit 2。
+3. `tool-surface.mjs`：快照写在 `tmpdir()/tool-surface-<rel>.before` 这个**确定性共享路径**并在
+   `finally` unlink ⇒ 并发互删。这条是本仓反复付学费的"负载致假红"。实测（修复前的字节拷贝 ×8 轮并发）
+   **8/8 轮每轮恰有一条 rc=2 "refusing to bill"**，报错点名那个共享路径；改成 `mkdtempSync` 私有目录 +
+   `process.on("exit")` 清理后 8/8 轮都走到 rc=1 的正常判决，"diff 失败就拒收、不许猜"的原判据一字未动。
+
+### 按实测更正后才修的两条，与两条我判为不做的
+
+- `kernel-conformance`：简报说"双 push 只在 `--impl` 下发生"。实测**单实现也会**（主 oracle 抛错就够），
+  而 497 行那次 `convergenceDecision` **不可能先抛**（drive 在 237 行用同一输入调同一纯函数），真正能
+  先抛的是读 `passInput/errorInput/request` 的 invariant-report 腿。分流因此按病走：drive 抛仍是一条可
+  记录的 `rejected` 判决（那是契约的牙齿），oracle 抛 → 具名失败 + "每实现至多一份答案"不变量。
+- `hook-liveness`：简报说 binding site 指向上游文件。实测那些是 **fork 侧**文件（`glasspane-*.ts` 在
+  pin 上不存在）、且 `BOUND_HOOKS` 此前**只在 `--offline` 被读**、`--check` 根本没读它，路径也没按其他
+  判据共用的 `repoRoot` 解析。三条都按实测处理。
+- **不做**：`hook-liveness` 的 `STRUCTURAL` 理由字段（"init-time: registry.ts iterates…"）是散文不是
+  路径，给它们"验一遍"等于发明一套只有这个文件懂的语法；记在这里以免下一轮当成漏修。
+- **不做**：把 `packages/{ui,http-recorder}` 与根 `package.json` 的 `repository.url` 改掉。实测发布物不
+  携带它（`npm view glasspane-harness@0.11.1 repository.url` =
+  `git+https://github.com/jingzhao-l/glasspane-harness.git`，wrapper manifest 由 `publish.ts` 按
+  `product.repo` 生成），这三者是 `private` 工作区包、从不发布；改了只扩大 fork 面，交付物一字节不变。
+  判据与量法一并写进 `CHANGELOG.md` 的"已知维持现状"，这是**收口的第二种终态**而不是挂账。
+
+### 我自己量错的两处（写下来因为它们正是本仓反复犯的形状）
+
+1. **`tail` 截断差点让我造出一条假缺陷**：我按 `node scripts/check-workflows.mjs 2>&1 | tail -6` 读了
+   一次输出，看见本子树 ci.yml 只有"缺 shell 门"那条 `△`、没有 timeout 那条，就下了"父仓的 advisory
+   少报 2 个 job"的结论。完整输出里那条一直在（`ci.yml: 2 job(s) without "timeout-minutes" (verify,
+   installer-selftest)`）。这条纪律本仓 10 月已经写过两次（"日志禁止 tail/head 截断后再下结论"），
+   我照犯了——**复述自己写过的规矩之前先按规矩量**。
+2. **`bun run X | tail -20` 的 `$?` 是 tail 的**：第一次 typecheck 我用 `bun run typecheck 2>&1 | tail
+   -20` 看结果，看到 exit 0 就当绿；另一路审查代理随后报出 `daemon.ts` 与 surface 测试共 6 条
+   TS 错（`let dir: Stats` 没改、`Object.entries().filter(isRecord)` 不 narrow）。分开取 rc 立刻是
+   `RC_TYPECHECK=2`。**包装脚本与管道的退出码不可信**这条也在台账里写着。
+
+### 未跑与未观测（照实写，仍给补它的那一条命令）
+
+- **整包 `bun run build`**（两平台产物）未随本轮重跑：本轮改动全在尺子层、发布脚本与工作流，`src/`
+  侧只有 `daemon.ts` 的传输判定，其形状由 192 条固定点用例证明。要补：
+  `cd harness/glasspane-harness/packages/opencode && NODE_EXTRA_CA_CERTS=/var/tmp/glasspane-harness/ca-bundle.pem bun run build --single`。
+  发布链里 `binaries`/`publish-platform` 两个 job 会在真 runner 上跑它，所以本轮**交付物**由 CI 重建，
+  不由我本地这份产物背书。
+- **真模型轮次**依旧没跑（`ctx.ask` 权限卡观感、`truncate.output` 对大 evidence 包的真截断、M4 在真
+  模型下的压缩质量、真 TUI 会话里 M5 渲染的观感）：需要真实 key 与一次花钱的轮次，本机 byok 无凭据。
+  补法：`cd harness/glasspane-harness/packages/opencode && OPENCODE_…=… bun dev`（tmux 起、
+  `tmux capture-pane -pt opencode-dev` 取观感）后人工看那一屏——**这条属于物理边界**，不写"通过"。
+- **M2 `logged` 分支需要的那一次证据成包真轮次**：E7 脚本
+  （`packages/opencode/script/glasspane-e7-ledger.ts`）连真 daemon 跑过链条与跳过路径，本轮没重跑，
+  因为它依赖 daemon 正在为**另一个会话**服务；要补：`bun packages/opencode/script/glasspane-e7-ledger.ts`。
+- `musl/baseline` 那格维持现状且**判据成立**：`product.json` 的 `platformTargets` 只有 darwin
+  arm64/x64，`release.yml` 的 `binaries` 矩阵与之逐字对齐（两条 runner 标签都在），所以"声明了却没有
+  CI lane"这句话本轮不成立——没有 lane 是因为没有目标，不是漏了 lane（`platform.dropped` 记着移除理由）。
+- `packages/{app,session-ui,desktop}` 与 TUI 的取舍：**维持现状**（产品面 = CLI + TUI + 内嵌 web +
+  仓内 docs；Electron 桌面 app 属第二批，要签名/公证账号）。这是可回滚决策，真要开回来必须连同
+  `product.json`、build 默认值、brand/product 两条闸一起改。
+- 本机 daemon（1.6.2）本轮没换：换它要重启另一个会话正在用的进程，属物理边界。`gp_*` 工具面的
+  端到端仍走的是本机那颗在跑的 daemon——`trustSocket` 那条"引擎实际 bind 的形状必须过闸"的用例是
+  **对着真 socket 断言的**（`~/.glasspane/engine.sock` 存在且未被拒），不是跳过。
+
 ## 2026-10-25（第二十一次会话）· 取号 0.11.1：把四处"两侧都量过／都能读"按实测降级，顺手把 release-artifact 拉回等式
 
 ### 为什么这一笔要发版

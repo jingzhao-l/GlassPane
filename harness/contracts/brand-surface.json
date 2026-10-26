@@ -1,5 +1,5 @@
 {
-  "observedAt": "2026-10-24",
+  "observedAt": "2026-10-26",
   "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
   "rules": [
     {
@@ -28,16 +28,13 @@
     "README.md",
     "README.zh-CN.md"
   ],
-  "hits": [
-    {
-      "file": "packages/core/src/plugin/skill/customize-harness.md",
-      "rule": "first-party-gateway",
-      "count": 1
-    }
+  "hits": [],
+  "skillDocs": [
+    "packages/core/src/plugin/skill/customize-harness.md"
   ],
   "lineage": {
     "occurrences": 9607,
-    "filesScanned": 3317
+    "filesScanned": 3328
   },
   "lineageNote": "2026-10-21: fork 侧 provider 注册绑定层与其测试把产品名写进注册 id 与注释（glasspane-engine-ae / glasspane-evidence），是归属说明不是新产品面"
 }

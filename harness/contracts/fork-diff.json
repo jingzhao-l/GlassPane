@@ -2,11 +2,11 @@
   "baseTag": "v1.18.32",
   "forkPath": "harness/glasspane-harness",
   "referenceClone": ".external/opencode",
-  "observedAt": "2026-10-25",
+  "observedAt": "2026-10-26",
   "counts": {
     "identical": 4640,
     "edited": 285,
-    "added": 104,
+    "added": 112,
     "deleted": 1707
   },
   "edited": [
@@ -364,8 +364,11 @@
     "packages/opencode/script/glasspane-e8-compaction.ts",
     "packages/opencode/script/glasspane-preflight.sh",
     "packages/opencode/script/installer-selftest.sh",
+    "packages/opencode/script/provenance-verdict.ts",
     "packages/opencode/script/publish-shape.ts",
+    "packages/opencode/script/pull-exactness.ts",
     "packages/opencode/script/registry-readiness.ts",
+    "packages/opencode/script/release-assets.ts",
     "packages/opencode/script/verify-published.ts",
     "packages/opencode/src/plugin/glasspane-compaction.ts",
     "packages/opencode/src/plugin/glasspane-decision-log.ts",
@@ -386,9 +389,13 @@
     "packages/opencode/test/script/installer-unverified-exit.test.ts",
     "packages/opencode/test/script/patched-artifact.test.ts",
     "packages/opencode/test/script/postinstall-binary-version.test.ts",
+    "packages/opencode/test/script/provenance-verdict.test.ts",
     "packages/opencode/test/script/publish-shape.test.ts",
+    "packages/opencode/test/script/pull-exactness.test.ts",
     "packages/opencode/test/script/registry-readiness.test.ts",
+    "packages/opencode/test/script/release-assets.test.ts",
     "packages/opencode/test/script/release-registry-pin.test.ts",
+    "packages/opencode/test/script/workflow-gates.test.ts",
     "packages/opencode/test/tool/glasspane-kernel.test.ts",
     "packages/opencode/test/tool/glasspane-provider-registration.test.ts",
     "packages/opencode/test/tool/glasspane-surface.test.ts",
@@ -396,6 +403,7 @@
     "patches/@modelcontextprotocol%2Fsdk@1.32.0.patch",
     "product.json",
     "script/assert-ci-green.mjs",
+    "script/check-workflows.mjs",
     "script/gpg-signing.sh",
     "script/kernel-conformance.mjs",
     "script/kernel-pin.mjs",
@@ -2755,12 +2763,12 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "10317ece1fe17fab1ae0a94d617a85b06f0f024e"
+      "forkHash": "2a3195c61ee8501ee99bec352a1c742f0aee41d7"
     },
     {
       "file": "packages/opencode/script/build.ts",
       "upstreamHash": "ce45f770f04e8997161e5d746374d3af2374db71",
-      "forkHash": "733588afe7c157b7e369dc619c69e2ef5ffb6f63"
+      "forkHash": "ad7b37e4181a31dc30fe1daadf2bd3f72db1d164"
     },
     {
       "file": "packages/opencode/script/generate.ts",
@@ -3515,7 +3523,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "bab2925c10341b337d9e848e1ec74c0d5dfffba1"
+      "forkHash": "2edd4947771c0294c93b144c20c7d55a947245a4"
     },
     {
       "file": "script/publish.ts",
@@ -3541,11 +3549,11 @@
   "addedDetail": [
     {
       "file": ".github/workflows/ci.yml",
-      "forkHash": "7980880bd51f61f3b08b913ed850ab47ddbc06f9"
+      "forkHash": "28721a3678262b0cf2aa7c7298f1484d96c9b0ab"
     },
     {
       "file": ".github/workflows/release.yml",
-      "forkHash": "e12c050af9fc9b915dac0eded04d2e4d450d08a5"
+      "forkHash": "782b78e73f4170aa237166fcbe53d5f8723b42d7"
     },
     {
       "file": ".glasspane-harness/.gitignore",
@@ -3713,7 +3721,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "27a093ed41c5ebf1b769d42366f157efa62a4ee8"
+      "forkHash": "88aa4f1c96b7e0bdcfb7e987ef9b5890ba2d62bb"
     },
     {
       "file": "contracts/engine-methods.json",
@@ -3741,7 +3749,7 @@
     },
     {
       "file": "docs/install.md",
-      "forkHash": "63a556a35d37434e6405cd9c0b3e5c060f68d36b"
+      "forkHash": "653b97a96d54b47981ab665828790f896ac230d8"
     },
     {
       "file": "docs/kernel-integration.md",
@@ -3797,19 +3805,31 @@
     },
     {
       "file": "packages/opencode/script/installer-selftest.sh",
-      "forkHash": "7c9ac0908321662dc14a79ecc2ec2a3ed389c3db"
+      "forkHash": "42a67134a3d932edddbe2b7b0a97afbf71252e4b"
+    },
+    {
+      "file": "packages/opencode/script/provenance-verdict.ts",
+      "forkHash": "6ccdb8664636ddcd2bc87e9f798e8c14ffc794ba"
     },
     {
       "file": "packages/opencode/script/publish-shape.ts",
       "forkHash": "d54039b521b90dc3df1be4e92d512641f2da59b0"
     },
     {
+      "file": "packages/opencode/script/pull-exactness.ts",
+      "forkHash": "a56cc8a3b47a1be814be0ec2a1e114bf31b36283"
+    },
+    {
       "file": "packages/opencode/script/registry-readiness.ts",
       "forkHash": "62f0b6151fe74c954bb10ba36c9e728c866e5d0b"
     },
     {
+      "file": "packages/opencode/script/release-assets.ts",
+      "forkHash": "e13e3da69086928fc5188a23250a35dab1cd2df4"
+    },
+    {
       "file": "packages/opencode/script/verify-published.ts",
-      "forkHash": "ad0c3d1c026341db35e26ac3c11b53f514573a01"
+      "forkHash": "fdc8bcf34c315d08f9bd0c9d93f69e544e48df94"
     },
     {
       "file": "packages/opencode/src/plugin/glasspane-compaction.ts",
@@ -3821,7 +3841,7 @@
     },
     {
       "file": "packages/opencode/src/tool/glasspane/daemon.ts",
-      "forkHash": "058359ea6a4791bf4522734e323fb6f1fd6f9432"
+      "forkHash": "77235a48978e17a78e1a149da84ed8b656a5d4a1"
     },
     {
       "file": "packages/opencode/src/tool/glasspane/index.ts",
@@ -3888,16 +3908,32 @@
       "forkHash": "6078b7f50061adc1a61b2e2e2849a363b5be52f8"
     },
     {
+      "file": "packages/opencode/test/script/provenance-verdict.test.ts",
+      "forkHash": "584a25afcf0831812d9af2cd738035707da2411c"
+    },
+    {
       "file": "packages/opencode/test/script/publish-shape.test.ts",
       "forkHash": "73112ead414cea4a7c9f153654d73473e932375c"
+    },
+    {
+      "file": "packages/opencode/test/script/pull-exactness.test.ts",
+      "forkHash": "06840c71d709e2d2aa54e364400e2c19937100ba"
     },
     {
       "file": "packages/opencode/test/script/registry-readiness.test.ts",
       "forkHash": "144cc93d546c3ae7d37221b61930e3c52685a85d"
     },
     {
+      "file": "packages/opencode/test/script/release-assets.test.ts",
+      "forkHash": "45a55758c808d633866d60b63e48dcc426403aaa"
+    },
+    {
       "file": "packages/opencode/test/script/release-registry-pin.test.ts",
       "forkHash": "6f394bf659d25ec3c77d7a3e1f353cf94461049d"
+    },
+    {
+      "file": "packages/opencode/test/script/workflow-gates.test.ts",
+      "forkHash": "e59366382c6a86324b14d04e18b10052703b501b"
     },
     {
       "file": "packages/opencode/test/tool/glasspane-kernel.test.ts",
@@ -3909,7 +3945,7 @@
     },
     {
       "file": "packages/opencode/test/tool/glasspane-surface.test.ts",
-      "forkHash": "9126ced718cd1ccd6121c2b8d0aa02f8d1447e05"
+      "forkHash": "841e3755bada2748fbe37c0b00acbe310c338328"
     },
     {
       "file": "packages/tui/src/util/tool-denial.ts",
@@ -3921,15 +3957,19 @@
     },
     {
       "file": "product.json",
-      "forkHash": "377e5102896f8574d03a968115c3c367bc2ca849"
+      "forkHash": "b5102e4d6996908b33b38cb5828849f603f7aeb3"
     },
     {
       "file": "README.zh-CN.md",
-      "forkHash": "c0268def47ef27a8847a239b0ac3c19cc089e527"
+      "forkHash": "9f4d52f876200cd8cd2dffca615a511d1bd09b63"
     },
     {
       "file": "script/assert-ci-green.mjs",
       "forkHash": "f58f790e861cb46e1477a9f19d65687fcfe89d3b"
+    },
+    {
+      "file": "script/check-workflows.mjs",
+      "forkHash": "c5588df29e4f6fc7777adf051af6f4910e5f847c"
     },
     {
       "file": "script/gpg-signing.sh",
@@ -3937,11 +3977,11 @@
     },
     {
       "file": "script/kernel-conformance.mjs",
-      "forkHash": "53ce2754dc0bfbe2169e3eaab9627cf70139bf35"
+      "forkHash": "e52030cd8cbc9784d41d1f13748b2a241f4b4cc1"
     },
     {
       "file": "script/kernel-pin.mjs",
-      "forkHash": "fddd015a6c4ad49646049acc90bed6e14910c0b8"
+      "forkHash": "43ae5b9703a7ed55903f9e741c677018e6d9f429"
     },
     {
       "file": "script/patched-deps.mjs",
@@ -3949,7 +3989,7 @@
     },
     {
       "file": "scripts/install.sh",
-      "forkHash": "e98e3595da3fba13c237598423d36cbc2a6be59f"
+      "forkHash": "8753127a597080580fc6e3f53bd726eacb2e1bf1"
     },
     {
       "file": "SYNCLOG.md",
