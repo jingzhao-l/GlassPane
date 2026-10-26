@@ -2192,6 +2192,12 @@ test('a partial install still refuses when the global layer it left behind canno
     })
     assert.equal(result.ok, false)
     assert.equal(result.status, 'rolled-back', JSON.stringify(result))
+    // 这句是本轮写 `glasspane doctor` 时对照出来的第三种状态：这一趟**根本没碰**全局层，回滚句子里
+    // 不许说"npm 层被留空了"（对着一个装着旧 glasspane-mcp 的机器，那是一句凭空造出来的状态），也不许
+    // 说"按记录的版本装回去了"（没有记录）。反向变异 M15：把这条分支改回二分支 → 这一格红。
+    assert.match(result.message, /the global npm layer was never touched by this run/, result.message)
+    assert.doesNotMatch(result.message, /npm layer was left empty/, result.message)
+    assert.doesNotMatch(result.message, /the npm packages were/, result.message)
     assert.match(fx.installedBytes(), /installed/, '旧的 bundle 要放回原位：这一条与部分成功共用同一个备份')
     assert.equal(loadState(fx.stateRoot).state.current, '1.4.0', 'current 不许跟着一次被退回的安装走')
   } finally {

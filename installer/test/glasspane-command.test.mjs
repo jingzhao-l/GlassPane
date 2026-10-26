@@ -173,7 +173,9 @@ test('doctor：全局包缺一格要答"不在"，并给一行不带权限的补
     assert.match(npmRow.remedy, /npm install -g glasspane-mcp@/, npmRow.remedy)
     assert.doesNotMatch(npmRow.remedy, /\bsudo\b/, '补法不许交出可照抄的升权命令')
     const statusRow = readings.find((one) => one.name === '更新器状态')
-    assert.match(statusRow.remedy, /npm-not-refreshed|没刷新/, `状态里挂着的代号要能在 doctor 里看见：${statusRow.remedy}`)
+    assert.match(statusRow.detail, /装着=1\.20\.0/, `版本号只能从状态文档里取：${statusRow.detail}`)
+    assert.match(statusRow.detail, /待装=1\.21\.0/, `待装那一份住在 state 文档里，不在顶层：${statusRow.detail}`)
+    assert.match(statusRow.remedy, /npm-not-refreshed/, `状态里挂着的代号要能在 doctor 里看见：${statusRow.remedy}`)
     assert.equal(doctorReport(readings).ok, false, '有一格不在位时 doctor 必须答"不健康"')
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
