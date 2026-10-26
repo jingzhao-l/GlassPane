@@ -169,6 +169,106 @@
   端到端仍走的是本机那颗在跑的 daemon——`trustSocket` 那条"引擎实际 bind 的形状必须过闸"的用例是
   **对着真 socket 断言的**（`~/.glasspane/engine.sock` 存在且未被拒），不是跳过。
 
+### 发布后（0.12.0 的五格读数、3b、以及两条替用户做过的决定）
+
+**五格**（每格都是一条命令的读数，不是"看起来成功"）：
+
+| 格 | 读数 | 量法 |
+| --- | --- | --- |
+| 主仓 `main` | 本轮 12 笔提交，全部带 `[gp]` 前缀——`git rev-list --count bae15812..main` 与同范围的 `--grep` 计数都是 12，所以枚举得全；发布台账落笔前的头是 `814bcea7` | `git rev-list --count`、`git log --grep` 各跑一次，再 `git rev-list --left-right --count origin/main...main` 取 `0 0` |
+| split 仓 `main` | 重切后与主干子树等树 | `git rev-parse <b>^{tree}` == `git rev-parse HEAD:harness/glasspane-harness` |
+| tag | `v0.12.0` = `af690459`（签名 tag，`git verify-tag` 回"完好的签名"，密钥 `0929EA31…043A1298`） | `git ls-remote --tags` |
+| Release | `isDraft=false`、`targetCommitish=af690459`、6 件资产（2 zip + 2 `.zip.asc` + `SHA256SUMS.txt` + 其 `.asc`） | `gh release view v0.12.0 --json isDraft,targetCommitish,assets` |
+| registry | `glasspane-harness`／`-darwin-arm64`／`-darwin-x64` 三条 `@0.12.0` 都答 `0.12.0`，`latest` 同步到 `0.12.0` | `npm view <p>@0.12.0 version --prefer-online` 与 `npm view <p> version --prefer-online` 各跑一遍 |
+
+**发布链自己的读数**（run 40265768630 = tag 触发的 Release，run 40266174251 = `--ref v0.12.0` 的 npm 派发，两条都 `success`）：
+
+- `version-check` 绿：tag == `product.json` == `packages/opencode/package.json` == 0.12.0，并且它要求
+  **tag 所指 commit 的 CI 已绿**——搬运仓的 `ci.yml` 在 `af690459` 上两条 job 全绿，其中一条就是本轮新增的
+  `This repository's workflows meet its own rules`，它在**发布仓里**打印：
+  `check-workflows: 2 workflow file(s) clean — 12 job(s) every one with a ceiling, 18 action ref(s) all
+  SHA-pinned or local, 37 run bod(ies) (23 multi-statement, each declaring -e/-u/pipefail), 3 npm-upgrade
+  step(s) reading one workflow-level pin`。这条是"移交有了收件人"的实证，不是本地复跑。
+- 三条本轮新写的判决在**真发布链**上跑起来了，不只是本地夹具：
+  `npm in this publish lane: 12.2.0 (env.NPM_PUBLISH_VERSION)`（npm 单一定义 + 漂移即中止）；
+  `ok the registry serves every platform package this install will pull — 2 package(s):
+  glasspane-harness-darwin-x64@0.12.0 in 1 look(s)`（严格等值，不再是子串）；
+  `ok the published wrapper carries a provenance attestation — https://slsa.dev/provenance/v1`
+  （读字段并判决，旧代码这里只能印一句 note）。
+- 包装器发布前那条 gate 真的等了 registry：`live: glasspane-harness-darwin-x64@0.12.0 (after 14 poll(s))`。
+- CI 侧 `verify-published`：`verify-published: glasspane-harness@0.12.0 installs, every shipped command
+  reports its version, and the web app is served`。
+
+**资产与签名的逐字比对**：`SHA256SUMS.txt` 里两行
+（`deffee8c… arm64`、`4488cc89… x64`）与 `gh release view --json assets` 的 `digest` 字段逐字相等；
+本地 `gpg --verify SHA256SUMS.txt.asc` 回 `完好的签名，来自于 jingzhao-l (sign-github)`，
+签名密钥 `0929EA31DF4F7429F63FC53189D88B1D043A1298` 与 `install.sh:256` 的
+`GLASSPANE_HARNESS_SIGNING_FPR` 同一条。**没做**的事照实说：46 MB 的 zip 没有本机重下再算 sha256
+（这台机器的代理会静默截断大文件），所以比对走 API 的 `digest` 与签名清单，不走本地重算。
+
+**三条安装通道端到端**（都跑真网络、真包）：
+
+1. npm：`npm install -g --prefix "$HOME/.local" glasspane-harness@0.12.0` → rc 0，
+   `~/.local/bin/glasspane-harness --version` = `0.12.0`，`~/.local/bin/gp-harness --version` = `0.12.0`。
+   同时读到 npm 11 对新包的 `allow-scripts` 警告原文，与 README/`docs/install.md`/`install.sh` 三处文案一致。
+2. `install.sh` 全跑（npm 在场）→ rc 0，成功行是本轮改写过的那句：
+   `installed via npm (glasspane-harness from https://registry.npmjs.org; integrity: npm dist.integrity
+   vs the pinned registry; product signature: not checked on this channel)`，随后
+   `glasspane-harness --version -> 0.12.0`。**退出码 0 的语义按本轮收窄后的契约读**（见 CHANGELOG 与下面决定 1）。
+3. 发布物通道（把 npm 从 PATH 上摘掉，其余工具齐备，`gpg` 在场）：
+   `curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.0/scripts/install.sh | bash`
+   → rc 0，逐行 `[OK] sha256 verified against SHA256SUMS.txt`、
+   `[OK] GPG provenance verified: release asset signature is from the signing key`、
+   `[OK] installed via release asset (…; GPG: verified (signing key 0929EA31…043A1298))`、
+   `[OK] glasspane-harness --version -> 0.12.0`，落在默认的 `~/.glasspane-harness/bin/`，
+   该二进制 `--version` = `0.12.0`。
+4. `bun add -g glasspane-harness@0.12.0 --cafile /var/tmp/glasspane-harness/ca-bundle.pem` → rc 0，
+   `~/.bun/bin/glasspane-harness --version` = `0.12.0`（bun 不吃 macOS 钥匙串，必须喂 `--cafile`，
+   这条环境坑记在 10-08 的账上，本轮复现一次）。
+5. **交付物里的工具面**：拿装好的 0.12.0 起 `serve --port 4477`，`GET /experimental/tool/ids` 回
+   20 个 id，其中 `gp_act, gp_attach, gp_diagnose, gp_last_evidence, gp_observe, gp_probe_status` 六条
+   全在。**没有**做的是真模型轮次（byok 无凭据），所以"注册表里有这六个工具 + 传输层能起"是有读数的，
+   "`gp_*` 在真会话里被模型调用一次"仍是未观测——那一条要一次花钱的轮次。
+
+**release-artifact 在本机第一次是 exit 2，第二次才绿**：第一次 `--check` 打印
+`error: RPC failed; curl 28 Operation too slow …` → `CANNOT MEASURE — fetching refs/heads/main and
+refs/tags/v0.12.0 … did not materialize`。这条拒绝是**它该有的行为**（网络抖动不许把锚变成常绿装饰），
+不是缺陷；把它 `GP_ARTIFACT_NET_TIMEOUT_MS=180000` 重跑后拿到判决：
+`2 agreement(s) held, 0 tolerated lag(s), 0 problem(s)`，`split-main` 与 `artifact` 两格都等于
+`6b3bb50f…` == 主干的 `harness/glasspane-harness` 树。**教训不是"加超时"，是"读到的必须是判决而不是
+拒绝"**——本机代理对大 HTTP/2 传输会掐断这件事已经记过一次，这次是它在一条闸的*首次读数*上重现。
+
+**3b（写完台账再推一次搬运分支，不消耗版本号）**：本节的字进了 `SYNCLOG.md`，于是 fork 树又动了一次，
+`fork-diff` 按设计点名 `our own file moved` 并要求重记；重记后 `--check` 绿，再重切搬运分支、快进推上去。
+tag **不动**（`v0.12.0` 必须永远指向被发布的那棵树），因此 `release-artifact` 对 tag 那一格只允许
+SYNCLOG/CHANGELOG 在落后方向差异并打 `△`——本轮台账只进主干不删旧文，`△` 是唯一宽容的方向。
+
+### 本轮我替你做的决定（依据 + 回滚）
+
+1. **安装器 exit-3 的语义收窄，而不是把 npm 支也做成 3**。依据：npm 支带的证据是"npm 对钉住 registry 的
+   `dist.integrity` 校验"，把它读成"什么都没验"不真；而把成功路径改成非零退出会训练调用者写 `|| true`，
+   那才是把诚实信号变成噪声。落点：两条 npm 成功行说明建立了什么与没建立什么，收尾注释写成它真正覆盖的
+   范围，`installer-selftest.sh` 第 23 节双向钉住（既不许悄悄放宽，也不许悄悄扩）。
+   回滚：`git revert c6a536a4`（那一笔 `[gp] fix(harness): 安装器两条通道各自说清自己验了什么，exit 3 的契约收到它真正覆盖的那一支`）——
+   但注意 revert 会同时撤掉 175 条断言里的第 23 节，别只退脚本。
+2. **`repository.url` 指向上游那三个文件判为不改**。依据：实测发布物不携带它
+   （`npm view glasspane-harness@0.11.1 repository.url` 回 `git+https://github.com/jingzhao-l/glasspane-harness.git`），
+   这三个是 `private` 工作区包、从不发布，改它们只扩大分叉面。量法写在 `CHANGELOG.md` 的"已知维持现状"。
+   回滚不需要（没有改动），下轮若要改，代价是 3 个 edited 文件进 `fork-diff` 且交付物一字节不变。
+3. **取号 0.12.0（minor）**。依据：pre-1.0 口径里"产品面/CLI 形状变动 = minor"，本版有三处
+   agent 读得到的形状（`GP_E_SOCKET_TRUST` 新错误码、安装器成功行、`kernel-pin --probe` 的退出语义）。
+   回滚/改判：号已消耗，npm 版本号不可回收；要降级只能发一个更高号，不能重打这个 tag。
+4. **金样三把同批重记 + 台账写完再跟一笔**。依据：`fork-diff`/`tool-surface`/`brand-surface` 的基线就是
+   本轮自己的有意变化（面 B +804 行、skill 那条假命中归零、`skillDocs` 覆盖集入契约）。
+   回滚：`git checkout 814bcea7 -- harness/contracts/fork-diff.json harness/contracts/tool-surface.json harness/contracts/brand-surface.json`
+   之后六把尺子会红在*代码*上，这是预期——金样只是记账，不是开关。
+5. **内核 pin 不升级**（`iterate-kernel@0.1.10` 原样）。依据：本轮没有需要改内核语义的缺陷；
+   `kernel-pin --check`（26 条契约文件逐条 sha256）与 `kernel-conformance`（16 fixture 全对）都绿，
+   升 pin 反而会制造一次"版本不对的产物"读数。
+6. **`split/v0.12.0` 推送用快进、不用 `--force-with-lease`**。依据：先证明
+   `git merge-base --is-ancestor f324afa0 af690459` 成功（搬运仓 main 的旧头是新链的祖先），
+   覆盖不需要发生。旧教训（10-25）记的就是我把 tree 哈希当 commit 喂给 `merge-base` 的那次误判，
+   这次先 `git cat-file -t` 分辨了类型再下结论。
 ## 2026-10-25（第二十一次会话）· 取号 0.11.1：把四处"两侧都量过／都能读"按实测降级，顺手把 release-artifact 拉回等式
 
 ### 为什么这一笔要发版
