@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { existsSync, readFileSync, unlinkSync } from "node:fs"
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import net from "node:net"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -213,17 +213,264 @@ describe("the daemon's error frame, measured against a real dead socket", () => 
 })
 
 /**
+ * `resolveSocket` answers "where is the engine"; these are the cases for "may this process believe
+ * what answers there". Every refusal shape is produced on a real inode where a real inode is
+ * possible, and the one that is not — a socket owned by another account — is fed the numbers a real
+ * `stat` returns rather than a mocked call, because an unprivileged test cannot create another
+ * uid's file and a rule only ever exercised by the friendly input has not been exercised.
+ */
+describe("which socket this process may believe", () => {
+  /** A state root in the shape the shipped engine leaves: a fresh 0700 directory, owner = us. */
+  const stateRoot = () => mkdtempSync(path.join(tmpdir(), "gp-trust-"))
+
+  const listen = async (socket: string) => {
+    const server = net.createServer(() => {})
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject)
+      server.listen(socket, resolve)
+    })
+    return server
+  }
+
+  const close = (server: net.Server, dir: string) => {
+    server.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+
+  /** The uid this process really is. `process.geteuid` is optional in the types because Windows
+   * has no such call; this product ships macOS only, so a runtime that cannot answer here is a
+   * broken test host and must not be papered over with a plausible-looking `?? 0`. */
+  const thisEuid = (): number => {
+    const id = process.geteuid?.()
+    if (id === undefined) throw new Error("no geteuid on this runtime — the ownership cases cannot be driven here")
+    return id
+  }
+
+  test("a runtime that cannot say which account it is gets a refusal, not a pass", () => {
+    // `process.geteuid` is optional in Node's own types. Falling back to a number would have made
+    // every ownership check compare against a fiction.
+    const dir = stateRoot()
+    const socket = path.join(dir, "engine.sock")
+    const evidence = { uid: 501, mode: 0o600, isSocket: () => true }
+    try {
+      const refusal = Daemon.trustSocket(socket, () => evidence, null)
+      expect(refusal, "a runtime with no uid was trusted").not.toBeNull()
+      if (!refusal) return
+      expect(refusal.code).toBe("GP_E_SOCKET_TRUST")
+      expect(refusal.message).toContain("geteuid")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("the socket this product's engine actually binds is judged as it is found", () => {
+    const located = Daemon.resolveSocket({})
+    expect(located.ok, JSON.stringify(located)).toBe(true)
+    if (!located.ok) return
+    const verdict = Daemon.trustSocket(located.socket)
+    // Two live states on any machine running this, both asserted rather than skipped: an engine
+    // that is up must pass the rule exactly as the product leaves it (measured here: `~/.glasspane`
+    // is drwx------ and `engine.sock` is srw-------, both owned by the uid running the harness —
+    // if the rule ever refuses that, every `gp_*` tool is dead for every user), and no engine at
+    // all is the daemon-not-running answer, which belongs to the transport, not to this rule.
+    if (existsSync(located.socket)) {
+      expect(verdict, `the live engine socket ${located.socket} was refused: ${JSON.stringify(verdict)}`).toBeNull()
+      return
+    }
+    expect(verdict).toBeNull()
+  })
+
+  test("a socket that only its owner may talk to is trusted, whatever its read and execute bits", async () => {
+    // A listener created without a chmod carries `0755` here (measured), which is the shape every
+    // transport test in this file binds. The rule is about WRITE — the bit that lets another
+    // account send requests — so `0755` must pass and `0666` must not. Requiring mode 0600 would
+    // have refused this file's own fixtures, and in CI (`TMPDIR=/tmp`) it would have refused them
+    // for a reason that looks like a code defect.
+    const dir = stateRoot()
+    const socket = path.join(dir, "engine.sock")
+    const server = await listen(socket)
+    try {
+      expect(statSync(dir).mode & 0o777, "mkdtemp is 0700 by POSIX").toBe(0o700)
+      expect(statSync(socket).mode & 0o022, "no write bit for group or other").toBe(0)
+      expect(Daemon.trustSocket(socket)).toBeNull()
+    } finally {
+      close(server, dir)
+    }
+  })
+
+  test("a socket other accounts may write to is refused by its own mode", async () => {
+    const dir = stateRoot()
+    const socket = path.join(dir, "engine.sock")
+    const server = await listen(socket)
+    try {
+      chmodSync(socket, 0o666)
+      expect(statSync(socket).mode & 0o777).toBe(0o666)
+      const refusal = Daemon.trustSocket(socket)
+      expect(refusal, "a 0666 engine socket was accepted").not.toBeNull()
+      if (!refusal) return
+      expect(refusal.code).toBe("GP_E_SOCKET_TRUST")
+      expect(refusal.message).toContain("666")
+      expect(refusal.remedy.length).toBeGreaterThan(0)
+    } finally {
+      close(server, dir)
+    }
+  })
+
+  test("a socket sitting in a directory other accounts may create files in is refused", async () => {
+    // `/tmp`-shaped: the socket's own bits are perfect, the hole is the directory next to it —
+    // another account can replace the entry between one request and the next.
+    const dir = stateRoot()
+    const socket = path.join(dir, "engine.sock")
+    const server = await listen(socket)
+    try {
+      chmodSync(dir, 0o777)
+      const refusal = Daemon.trustSocket(socket)
+      expect(refusal, "a socket in a 0777 directory was accepted").not.toBeNull()
+      if (!refusal) return
+      expect(refusal.code).toBe("GP_E_SOCKET_TRUST")
+      expect(refusal.message).toContain(dir)
+      expect(refusal.message).toContain("777")
+    } finally {
+      chmodSync(dir, 0o700)
+      close(server, dir)
+    }
+  })
+
+  test("a plain file at the socket path is named as not a socket, not as an engine that is down", () => {
+    const dir = stateRoot()
+    const target = path.join(dir, "engine.sock")
+    writeFileSync(target, "not a socket\n")
+    try {
+      const refusal = Daemon.trustSocket(target)
+      expect(refusal, "a regular file was accepted as an engine socket").not.toBeNull()
+      if (!refusal) return
+      expect(refusal.message).toContain("not a socket")
+      expect(refusal.remedy).toContain("launchctl")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("nothing at the path is the daemon-not-running answer, which this rule does not own", () => {
+    // ENOENT deliberately answers "nothing to say": the transport renders it as
+    // GP_E_ENGINE_UNREACHABLE with the restart command, and the three tests above that pin that
+    // frame depend on it. Turning it into a trust refusal here would rename a known condition and
+    // bury the remedy the agent is supposed to copy.
+    const dir = stateRoot()
+    try {
+      expect(Daemon.trustSocket(path.join(dir, "absent.sock"))).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("a socket or directory owned by another account is refused even when every bit is right", () => {
+    // The one case no unprivileged process can bind, so it is handed the numbers a real `stat`
+    // returns — `uid: 0` with `0600`/`0700` is root's own socket, which is exactly what an
+    // attacker with any write path would leave behind, and what the shipped daemon never is.
+    const dir = stateRoot()
+    const socket = path.join(dir, "engine.sock")
+    const me = thisEuid()
+    const foreign = (target: string): Daemon.SocketEvidence =>
+      target === dir
+        ? { uid: 0, mode: 0o700, isSocket: () => false }
+        : { uid: 0, mode: 0o600, isSocket: () => true }
+    try {
+      const refusal = Daemon.trustSocket(socket, foreign, me)
+      expect(refusal, "a socket owned by uid 0 was accepted").not.toBeNull()
+      if (!refusal) return
+      expect(refusal.code).toBe("GP_E_SOCKET_TRUST")
+      expect(refusal.message).toContain("uid 0")
+      expect(refusal.message).toContain(`uid ${me}`)
+      // The directory being the foreign one is a separate verdict, naming the directory.
+      const dirOnly = (target: string): Daemon.SocketEvidence =>
+        target === dir
+          ? { uid: 0, mode: 0o700, isSocket: () => false }
+          : { uid: me, mode: 0o600, isSocket: () => true }
+      const byDir = Daemon.trustSocket(socket, dirOnly, me)
+      expect(byDir, "a socket in a directory owned by uid 0 was accepted").not.toBeNull()
+      if (!byDir) return
+      expect(byDir.message).toContain(dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("a stat that cannot be taken is a refusal, never a pass", () => {
+    // "Could not ask" is the shape this repository has been caught reporting as green more than
+    // once. EACCES on the socket, and EACCES on the directory holding it, both answer.
+    const dir = stateRoot()
+    const socket = path.join(dir, "engine.sock")
+    const me = thisEuid()
+    const denied = (target: string): Daemon.SocketEvidence => {
+      if (target === socket) throw Object.assign(new Error("denied"), { code: "EACCES" })
+      return { uid: me, mode: 0o700, isSocket: () => false }
+    }
+    const deniedDir = (target: string): Daemon.SocketEvidence => {
+      if (target === dir) throw Object.assign(new Error("denied"), { code: "EACCES" })
+      return { uid: me, mode: 0o600, isSocket: () => true }
+    }
+    try {
+      const socketDenied = Daemon.trustSocket(socket, denied, me)
+      expect(socketDenied, "a socket that could not be stat-ed was accepted").not.toBeNull()
+      if (!socketDenied) return
+      expect(socketDenied.message).toContain("could not be inspected")
+      const dirDenied = Daemon.trustSocket(socket, deniedDir, me)
+      expect(dirDenied, "a directory that could not be stat-ed was accepted").not.toBeNull()
+      if (!dirDenied) return
+      expect(dirDenied.message).toContain(dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("and the refusal reaches the model as the same three-field frame the engine's errors use", async () => {
+    // Driven end to end, not by calling the predicate: the wiring in `rawRequest` is the half that
+    // can rot. A real listener, its socket loosened to 0666, `Daemon.call` asked to believe it.
+    const dir = stateRoot()
+    const socket = path.join(dir, "engine.sock")
+    const server = await listen(socket)
+    chmodSync(socket, 0o666)
+    const previous = process.env.GLASSPANE_SOCKET
+    process.env.GLASSPANE_SOCKET = socket
+    try {
+      const reply = await Effect.runPromise(Daemon.call("hello", {}, 5_000))
+      expect(reply.ok).toBe(false)
+      if (reply.ok) return
+      expect(reply.error.code).toBe("GP_E_SOCKET_TRUST")
+      expect(reply.error.message.length).toBeGreaterThan(0)
+      expect(reply.error.remedy.length).toBeGreaterThan(0)
+      // No byte was written: refusing to trust is not a timeout, and the request never left.
+      expect(reply.error.message).not.toContain("within")
+    } finally {
+      if (previous === undefined) delete process.env.GLASSPANE_SOCKET
+      else process.env.GLASSPANE_SOCKET = previous
+      close(server, dir)
+    }
+  })
+})
+
+/**
  * A real unix-socket peer, because the rules below live in the client's byte loop
  * and in the call sites that read its replies: a fabricated `DaemonReply` would only
  * re-state the test's own fixture. `run` is whatever talks to the peer — a raw
  * `Daemon.call` for the transport cases, the capability gate for the refusal cases.
+ *
+ * The socket is bound inside a fresh `mkdtemp` directory rather than loose in `tmpdir()`,
+ * because `trustSocket` refuses a socket whose directory other accounts may write to — and
+ * that is the production shape, not an accommodation: the daemon's own state root is
+ * `drwx------` (measured `~/.glasspane`, mode 700, owner = the uid running the harness).
+ * On this machine `tmpdir()` happens to be 0700 so a loose socket would pass by luck; in CI
+ * `TMPDIR=/tmp` is 01777 and the same fixture would be refused for a reason that is the rule
+ * working. `mkdtempSync` is 0700 by POSIX, so the fixture carries the shape it is testing.
  */
 async function withDaemonPeer<T>(
   name: string,
   serve: (conn: net.Socket, request: string) => void,
   run: () => Promise<T>,
 ): Promise<T> {
-  const socket = path.join(tmpdir(), `gp-m1-frame-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}.sock`)
+  const dir = mkdtempSync(path.join(tmpdir(), `gp-m1-frame-${name}-`))
+  const socket = path.join(dir, "engine.sock")
   const server = net.createServer((conn) => {
     conn.once("data", (chunk) => serve(conn, chunk.toString("utf8")))
   })
@@ -243,6 +490,11 @@ async function withDaemonPeer<T>(
       unlinkSync(socket)
     } catch {
       // best effort, as above
+    }
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      // best effort: a leftover 0700 directory under tmpdir is not worth failing over
     }
   }
 }
@@ -481,7 +733,8 @@ describe("bounds the surface puts on itself", () => {
     // client's byte loop, so a fake `DaemonReply` would test nothing. The peer
     // answers with a single 5 MiB line (over MAX_FRAME_BYTES) and never a newline,
     // which is exactly what a runaway tree or a mis-chewed pack looks like.
-    const socket = path.join(tmpdir(), `gp-m1-oversize-${Date.now()}-${Math.random().toString(36).slice(2)}.sock`)
+    const oversizeDir = mkdtempSync(path.join(tmpdir(), "gp-m1-oversize-"))
+    const socket = path.join(oversizeDir, "engine.sock")
     const server = net.createServer((conn) => {
       conn.once("data", () => {
         // 5 MiB with no frame boundary in sight.
@@ -515,6 +768,11 @@ describe("bounds the surface puts on itself", () => {
         unlinkSync(socket)
       } catch {
         // best effort: a leftover socket under tmpdir is not worth failing over
+      }
+      try {
+        rmSync(oversizeDir, { recursive: true, force: true })
+      } catch {
+        // best effort, as above
       }
     }
   })
@@ -1021,5 +1279,19 @@ describe("the timeout table and the call sites that read it", () => {
     expect(engineMethodNames()).toContain("restore")
     expect(methodsSent()).not.toContain("restore")
     expect(Daemon.timeoutFor("restore")).toBe(Daemon.TIMEOUT_MS.default)
+  })
+
+  test("an inherited key is not a budget", () => {
+    // The bracket read walked the prototype, so `constructor` / `toString` / `valueOf` returned
+    // FUNCTIONS from a table of numbers, and `?? default` cannot catch that — a function is not
+    // nullish. `setTimeout(fn, fn)` coerces the delay to NaN and fires within a millisecond, so
+    // a method named after an Object key would report GP_E_ENGINE_TIMEOUT against a daemon that
+    // was answering. The declared `number` return was the part nobody could see at runtime.
+    for (const key of ["constructor", "toString", "valueOf", "__proto__"]) {
+      const budget = Daemon.timeoutFor(key)
+      expect(typeof budget, `timeoutFor("${key}") returned ${typeof budget}, not a number`).toBe("number")
+      expect(budget).toBe(Daemon.TIMEOUT_MS.default)
+      expect(Number.isInteger(budget)).toBe(true)
+    }
   })
 })

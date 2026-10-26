@@ -12,6 +12,7 @@
  * A response is either `{id, result}` or `{id, error:{code, message, remedy}}`.
  */
 import { Effect } from "effect"
+import { statSync, type Stats } from "node:fs"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
@@ -46,8 +47,13 @@ export const TIMEOUT_MS = {
 
 /** The budget for one method: its own entry if it has one, `default` if it has not. */
 export function timeoutFor(method: string): number {
-  const listed = (TIMEOUT_MS as Readonly<Record<string, number>>)[method]
-  return listed ?? TIMEOUT_MS.default
+  // Own-property lookup only. A bracket read walks the prototype, so `constructor`, `toString`
+  // and `valueOf` came back as FUNCTIONS — and `setTimeout(fn, fn)` coerces to NaN, which fires
+  // in about a millisecond: that method would have reported GP_E_ENGINE_TIMEOUT for a daemon that
+  // was answering perfectly. `?? default` cannot catch it, because a function is not nullish.
+  return Object.prototype.hasOwnProperty.call(TIMEOUT_MS, method)
+    ? (TIMEOUT_MS as Readonly<Record<string, number>>)[method]
+    : TIMEOUT_MS.default
 }
 
 export const MAX_FRAME_BYTES = 4 * 1024 * 1024
@@ -71,8 +77,12 @@ export type DaemonReply = { ok: true; result: unknown } | { ok: false; error: Da
  * returned a kernel-shaped `{ok:true, result:{evidencePack}}` minted a chain entry for a verdict
  * that never crossed the socket. Shape validation cannot see that: a forged pack and an engine pack
  * parse the same. This marker is what makes the claim mean something: it is set in exactly one
- * place (`present`/`refused` in `index.ts`, downstream of `Daemon.call`), so recording a decision
+ * place — `present` in `index.ts`, downstream of `Daemon.call` — so recording a decision
  * requires either coming through that path or importing this module's private symbol deliberately.
+ * `refused` deliberately carries nothing: a refusal mints no ledger entry, and half of them
+ * (`GP_E_ENGINE_UNREACHABLE`, the capability gate, `GP_E_SOCKET_TRUST`) are written by this file
+ * before any byte crossed the socket, so marking them would make the symbol mean "something came
+ * out of this module" instead of "this reply came off the engine".
  * It is not a signature — the daemon signs nothing — it is the difference between "any tool that
  * calls itself gp_" and "this surface's own reply".
  */
@@ -89,6 +99,14 @@ export interface LocationRejection {
   readonly message: string
   readonly remedy: string
 }
+
+/**
+ * The three facts about an inode that decide whether this client may believe it. A structural
+ * type rather than `Stats` so a test can hand over the numbers a real `stat` would have returned
+ * without forging an entire inode — the ownership branches cannot be produced by an unprivileged
+ * process, and a rule whose only exercised path is the friendly one has not been tested.
+ */
+export type SocketEvidence = Pick<Stats, "uid" | "mode" | "isSocket">
 
 export type SocketLocation =
   | { readonly ok: true; readonly socket: string; readonly stateRoot: string }
@@ -163,6 +181,116 @@ function failure(code: string, message: string, remedy: string): DaemonReply {
   return { ok: false, error: { code, message, remedy } }
 }
 
+/**
+ * Which socket this process is allowed to believe, asked before a byte is written to it.
+ *
+ * `resolveSocket` answers "where is the engine". It is a string operation, so it cannot answer
+ * "who put that file there" — and every reply this surface forwards is treated as the engine's
+ * word: window titles, AX labels, `actConfirmed`. A path that another account created, or one that
+ * anyone on the machine may talk to, is not a trust anchor; it is a channel into the model's
+ * context from wherever the socket came. `GLASSPANE_SOCKET` is therefore a trust root, not just a
+ * location, and the same rule applies to the default path: the daemon binds it, so it can be
+ * replaced by anything that can write the directory.
+ *
+ * The three facts that make an answer trustworthy, measured against the daemon this product ships
+ * (`launchctl` job `com.glasspane.daemon`, engine running as the invoking user):
+ *  - `~/.glasspane` is `drwx------` and `engine.sock` is `srw-------`, both owned by the uid that
+ *    runs the harness. A socket nobody but its owner may write to, sitting in a directory nobody
+ *    but its owner may create files in, cannot have been bound by a second account;
+ *  - the inode at the path is a socket, so a plain file planted there is named as such instead of
+ *    producing a connect error that reads like "the daemon is down";
+ *  - write bits for group or other are the disqualifier, not every permission bit: a listener that
+ *    grants `0666` is advertising itself to the machine, and this product's engine never does.
+ *
+ * `ENOENT` deliberately returns "nothing to say": no file at the path is the daemon-not-running
+ * case, which `rawRequest` already renders as `GP_E_ENGINE_UNREACHABLE` with the restart command.
+ * Turning it into a trust refusal here would rename a known condition and break the remedy the
+ * agent is supposed to copy. A stat that fails for any OTHER reason is a refusal, because
+ * "could not ask" is not evidence of trust.
+ *
+ * `read` and `euid` are seams, not abstractions: the ownership branches cannot be produced by an
+ * unprivileged test process, and a check whose only exercised path is the friendly one has not been
+ * tested. Every other case runs against a real socket on a real filesystem. `euid` is `null` when
+ * the runtime cannot answer which account it is — that is a refusal too, not a free pass.
+ */
+export function trustSocket(
+  target: string,
+  read: (p: string) => SocketEvidence = statSync,
+  euid: number | null = process.geteuid?.() ?? null,
+): LocationRejection | null {
+  if (euid === null) {
+    return {
+      code: "GP_E_SOCKET_TRUST",
+      message: `this runtime answers no geteuid(), so it cannot say whether the engine socket at ${target} belongs to the account running it`,
+      remedy: `run the harness under node or bun on macOS or Linux (the platforms this product ships on); the product's own installer checks with \`node -e 'console.log(process.geteuid())'\``,
+    }
+  }
+
+  let socket: SocketEvidence
+  try {
+    socket = read(target)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null
+    return {
+      code: "GP_E_SOCKET_TRUST",
+      message: `the engine socket at ${target} could not be inspected (${(error as NodeJS.ErrnoException).code ?? "unknown error"}), so this process cannot say whether the thing listening there is the engine`,
+      remedy: `make the path readable for a stat with \`ls -ld ${target}\`; if the background service owns it, bring it up with \`launchctl kickstart -k gui/\$(id -u)/com.glasspane.daemon\` and retry`,
+    }
+  }
+
+  if (!socket.isSocket()) {
+    return {
+      code: "GP_E_SOCKET_TRUST",
+      message: `${target} is not a socket, so nothing can answer as the engine from it`,
+      remedy: `bring the background service up with \`launchctl kickstart -k gui/\$(id -u)/com.glasspane.daemon\`, confirm what is at that path with \`ls -l ${target}\`, and point GLASSPANE_SOCKET at the socket the daemon binds if it lives elsewhere`,
+    }
+  }
+
+  const directory = path.dirname(target)
+  let dir: SocketEvidence
+  try {
+    dir = read(directory)
+  } catch (error) {
+    return {
+      code: "GP_E_SOCKET_TRUST",
+      message: `the directory holding the engine socket (${directory}) could not be inspected (${(error as NodeJS.ErrnoException).code ?? "unknown error"}), so this process cannot say who may replace ${target}`,
+      remedy: `make it readable with \`ls -ld ${directory}\`, or bring the background service up with \`launchctl kickstart -k gui/\$(id -u)/com.glasspane.daemon\` so it re-creates its state root at the default path`,
+    }
+  }
+
+  const unowned = [
+    [socket, target, "socket"],
+    [dir, directory, "directory"],
+  ] as const
+  for (const [entry, where, kind] of unowned) {
+    if (entry.uid === euid) continue
+    return {
+      code: "GP_E_SOCKET_TRUST",
+      message: `the engine ${kind} ${where} belongs to uid ${entry.uid}, not to this process (uid ${euid}), so whatever listens there was not placed there by this account`,
+      remedy: `run the harness as the account that owns \`glasspaned\`, or point GLASSPANE_SOCKET at the socket that account bound (default ${path.join(os.homedir(), ".glasspane", "engine.sock")}); check the owner with \`ls -ld ${where}\``,
+    }
+  }
+
+  // Write is the bit that matters: on a socket it grants the ability to send, on a directory the
+  // ability to create or replace the entry. Execute-only for others (`0755`, which is what a
+  // listener created by node itself carries before any chmod) lets a reader *look*, not talk.
+  if (socket.mode & 0o022) {
+    return {
+      code: "GP_E_SOCKET_TRUST",
+      message: `the engine socket ${target} carries mode ${(socket.mode & 0o7777).toString(8)}, which lets another account send requests to it — an answer from there is not evidence of what the engine said`,
+      remedy: `tighten it to owner-only with \`chmod 600 ${target}\` and restart the background service with \`launchctl kickstart -k gui/\$(id -u)/com.glasspane.daemon\` so it binds its own socket`,
+    }
+  }
+  if (dir.mode & 0o022) {
+    return {
+      code: "GP_E_SOCKET_TRUST",
+      message: `the directory holding the engine socket (${directory}) carries mode ${(dir.mode & 0o7777).toString(8)}, so another account can create or replace ${target}; this process cannot tell the engine's socket from one planted next to it`,
+      remedy: `make it owner-only with \`chmod 700 ${directory}\` and bring the background service up with \`launchctl kickstart -k gui/\$(id -u)/com.glasspane.daemon\``,
+    }
+  }
+  return null
+}
+
 function rawRequest(method: string, params: object, timeoutMs: number): Promise<DaemonReply> {
   return new Promise((resolve) => {
     const located = resolveSocket()
@@ -173,6 +301,15 @@ function rawRequest(method: string, params: object, timeoutMs: number): Promise<
       return
     }
     const target = located.socket
+    // Trust before traffic: everything below treats a reply as the engine's word, and a
+    // socket someone else created or anyone may write to cannot carry that claim. A refusal
+    // here is the same three-field frame the engine's own errors arrive in, so the agent reads
+    // it as a verdict with a remedy rather than as a crash.
+    const untrusted = trustSocket(target)
+    if (untrusted) {
+      resolve(failure(untrusted.code, untrusted.message, untrusted.remedy))
+      return
+    }
     // The socket is created unconnected on purpose: `connect` runs *after* the
     // listeners below exist (see the comment at the bottom of this function).
     const socket = new net.Socket()
