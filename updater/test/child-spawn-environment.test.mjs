@@ -345,7 +345,7 @@ test('a child whose interpreter is genuinely unavailable refuses with a named ca
   }
 })
 
-test('node genuinely unavailable still refuses through §3.5 without the retired permissions sentence', async () => {
+test('node genuinely unavailable still installs the bundles and names the runtime, not a permission', async () => {
   const fx = stagedMachine('childenv-refusal')
   const bin = path.join(fx.dir, 'offpath-bin')
   const kick = []
@@ -365,7 +365,13 @@ test('node genuinely unavailable still refuses through §3.5 without the retired
       build: () => ({ ok: true, builtDir: fx.builtDir, message: null }),
       kickstart: async (options) => { kick.push(options); return { ok: true, message: 'restarted' } },
       toolsList: async () => ({ ok: true, count: 16, tools: ['gp_probe_status'] }),
-      npm: () => assert.fail('the npm gate refused, so nothing global may be touched'),
+      npm: () => assert.fail('预检已经答"这一趟够不着 npm"，全局层就不许再被碰'),
+      // §11's handover copies the updater and may re-register the job; this test measures §3.5's answer,
+      // so that step is replaced rather than allowed to reach for the developer's machine.
+      refreshRuntimeImpl: () => ({
+        record: { status: 'refreshed', version: '1.4.1', cliPath: '/var/tmp/st/runtime/1.4.1/updater/cli.js', previousCliPath: null, agentVerified: true, at: NOW.toISOString(), code: null, detail: null },
+        restored: { attempted: false, ok: true },
+      }),
       // The real gate, with the node directory pointed at an empty one: this is the launchd job whose node
       // vanished (uninstalled, moved, a broken link) while npm's file is still on disk.
       preflightNpm: () => checkNpmPrefix({
@@ -374,13 +380,15 @@ test('node genuinely unavailable still refuses through §3.5 without the retired
         execPath: path.join(fx.empty, 'node'),
       }),
     })
-    assert.equal(result.ok, false)
-    assert.equal(result.status, 'deferred', JSON.stringify(result))
-    assert.equal(result.code, CODES.npmPrefixUnwritable, result.message)
-    assert.equal(exitCodeFor(result), EXIT.REFUSED)
-    assert.deepEqual(kick, [], '这道门仍然排在换版之前')
+    assert.equal(result.ok, true, result.message)
+    assert.equal(result.status, 'applied', JSON.stringify(result))
+    assert.equal(result.code, CODES.npmNotRefreshed, result.message)
+    assert.equal(exitCodeFor(result), EXIT.OK, '应用装了、全局层没装 ⇒ 机器确实变了')
+    assert.equal(kick.length, 1, 'daemon 重启了一次：这一格与"整场拒绝"的分别就在这个数字上')
     assert.ok(String(result.state.lastError.details).includes('npm-runtime-unavailable'), `因由要作为数据留在记录里：${result.state.lastError.details}`)
     assert.match(result.message, /could not run: '?node'? is not on the PATH this process handed to the child/, result.message)
+    assert.match(result.message, /npm install -g glasspane-mcp@1\.4\.1 glasspane-install@1\.4\.1/,
+      '够不着 npm 的那一趟也要把人手上能跑的补法交出去')
     assert.doesNotMatch(result.message, /Check `npm config get prefix` from this account/, '那一句在本轮被退休，运行时够不着也不许把它请回来：' + result.message)
     assert.doesNotMatch(result.message, /cannot write where npm would put them/, result.message)
     assert.doesNotMatch(result.message, /\bsudo\b/, 'remedy 不许交出可照抄执行的升权命令')

@@ -93,7 +93,25 @@ export const CODES = Object.freeze({
   // Measured on a real install (2026-10-01): `/usr/local/lib/node_modules` is root-owned, so
   // `npm install -g` failed *after* the bundles had been swapped and the daemon restarted, and every
   // scheduled run rolled the machine back again. Asking before the swap costs one `npm config` call.
+  //
+  // RETIRED as an outcome on 2026-10-26: the pre-flight still runs and still names the same four facts,
+  // but its answer no longer refuses the update — it produces `npm-not-refreshed` on an applied install.
+  // The constant stays because state files written before that date carry it, and a reader that maps
+  // `lastError.code` to a sentence has to keep mapping it to the same thing it meant then.
   npmPrefixUnwritable: 'npm-prefix-unwritable',
+  /**
+   * The bundles moved and the npm layer did not: one of the two packages `glasspane-mcp` /
+   * `glasspane-install` could not be refreshed — because this run could not reach npm, could not write
+   * where npm would put them, or because the install it attempted was undone again.
+   *
+   * Like `runtimeStale`, this is **not** a refusal: the machine was updated, the daemon is running the
+   * new version, and the sentence that carries the code names the one command that finishes the job
+   * (`npm install -g <package>@<version>`), so the degradation is stated until that command has been
+   * run or the next apply refreshes the layer. Chosen with the person on 2026-10-26 over "refuse the
+   * whole update": the shape this replaces was a real machine that had been told "update failed" for
+   * days while its bundles were in fact fine.
+   */
+  npmNotRefreshed: 'npm-not-refreshed',
   // `apply` refused because the staged tree is not newer than what is installed
   // at apply time (§7: `apply` = put the *staged offer* in, not "any tree on disk").
   stagedNotNewer: 'staged-version-not-newer',

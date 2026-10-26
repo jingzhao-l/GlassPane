@@ -1216,6 +1216,113 @@ export function checkNpmPrefix({
 }
 
 /**
+ * The two npm packages this product publishes, in the order `installNpmPackages` packs them (its
+ * `packageDirs` is `['mcp-shell', 'installer']`, and those directories' own `package.json` files carry
+ * these names). Named here because the partial-success sentence has to hand out a command, and a
+ * command with an invented package name is a command that fails in a different way.
+ * `test/npm-partial-success.test.mjs` pins this list against the two directories it names.
+ */
+export const NPM_PACKAGE_NAMES = Object.freeze(['glasspane-mcp', 'glasspane-install'])
+
+/**
+ * What §3.5's pre-flight said, kept as a *note* rather than a refusal since 2026-10-26 — see the comment
+ * at the call site for the contract and for why a failed install still rolls back.
+ *
+ * Three different facts arrive here, and they must not share one sentence:
+ *  · the command was not there at all (`npm-not-found`) — the shape a launchd job hits, because the job is
+ *    handed `/usr/bin:/bin:/usr/sbin:/sbin` while this machine's npm lives in `/usr/local/bin`;
+ *  · the prefix is there and this account cannot write it (`dir` named);
+ *  · npm answered, but not with a prefix.
+ * Telling the second one's story about the first is a defect in its own right: the person goes and checks
+ * `npm config get prefix` permissions on a machine where npm was never reachable by this run.
+ */
+export function npmLayerBlockedNote(npmReady) {
+  const notFound = npmReady.cause === 'npm-not-found' || npmReady.cause === 'npm-not-executable'
+  const runtimeGone = npmReady.cause === 'npm-runtime-unavailable'
+  const remedy = runtimeGone
+    // The fourth fact in this class, and the one the resolved path used to hide: the script was found and
+    // exec'd, and the `#!/usr/bin/env node` at the top of it could not find node in the environment this
+    // run handed the child. `childSpawnEnv` closes that gap for the children this program starts, so a
+    // run that still lands here has a genuinely unreachable runtime — said as that, never as a permission.
+    ? 'The fix is to put node back where this run can reach it, not to change any permission: npm is a '
+      + 'script whose first line asks for `node`, and that request could not be answered from this '
+      + 'environment. Install or restore node (brew install node, or the official installer), then run '
+      + '"updater enable" from that shell — enable renders the daily job\'s PATH from the node that is '
+      + 'running it, which is what the job needs to start the same script tomorrow. Nothing about the '
+      + 'install itself has to change, and no password is asked for.'
+    : notFound
+      // An agent can do this one by itself, which is what makes it the first half of the sentence: run the
+      // same command from a shell whose PATH reaches the directory, and the search stops being empty.
+      // The second half names what this tool *does* support: `updater enable` re-renders the job's
+      // EnvironmentVariables (including the PATH it puts there), so a hand-edit of the plist is not the
+      // remedy — it is overwritten by the next enable.
+      ? 'The fix is a PATH that reaches npm, not a permission: run the `npm install -g` line above from a '
+        + 'shell whose PATH includes the directory npm is installed in (the search in this sentence is the '
+        + 'list of directories the updater was allowed to look in), then re-register the daily job with '
+        + '"updater enable" from that same shell — enable writes the job\'s PATH from the node and npm '
+        + 'prefix bins it finds at that moment, so editing the plist by hand would only be overwritten. '
+        + 'Nothing about the install itself has to change, and no password is asked for.'
+      : npmReady.dir
+        // The two ways out are not equal, and the sentence used to lead with the dangerous one:
+        // `sudo chown -R "$(whoami)" /usr/local/lib/node_modules /usr/local/bin` — a recursive ownership
+        // sweep across every *other* global package and every binary in /usr/local/bin, printed verbatim by
+        // the panel and by `gp_diagnose` because `lastError.message` is what they show. This product's rule
+        // (test/remedy-surface.test.mjs, and the shape lib/ca-bundle.js was corrected to) is that a remedy
+        // may *name* the tool a person would use but must not hand out an executable escalation. Relocating
+        // npm's prefix needs no escalation at all and an agent can run it, so it comes first.
+        ? 'Two ways out, and the first one an agent can run by itself: move npm\'s prefix under the home '
+          + 'directory (`npm config set prefix ~/.npm-global`, put `~/.npm-global/bin` on PATH, then re-run the '
+          + 'GlassPane installer so the launcher points at the new one). The other is a person\'s call, and this '
+          + 'tool will not run it for them: hand '
+          + (npmReady.dirs ?? [npmReady.dir]).map((dir) => `"${dir}"`).join(' and ')
+          + ' to this account, which means a `chown` of those directories entered by hand with a password. '
+          + 'After either one, the line above is the thing to run.'
+        : 'Check `npm config get prefix` from this account — the updater will not ask for a password.'
+  const claim = (notFound || runtimeGone)
+    ? 'The updater never reached npm, so it has no answer about the global prefix either. This is a PATH '
+      + 'fact about the process that ran this command, not a permission of the directory npm would write into.'
+    : 'This account cannot write where npm would put a global package.'
+  return {
+    cause: npmReady.cause ?? null,
+    prefix: npmReady.prefix ?? null,
+    dir: npmReady.dir ?? null,
+    dirs: npmReady.dirs ?? null,
+    tried: npmReady.tried ?? null,
+    reason: npmReady.reason ?? 'the npm global prefix could not be checked',
+    claim,
+    remedy,
+  }
+}
+
+/**
+ * The sentence for an install that moved the machine and could not move its global npm layer — written so
+ * the reader has one thing to do, not a diagnosis. The command is `npm install -g <name>@<version>`, which
+ * takes the published bytes from the registry; that difference from what this run staged (a tarball packed
+ * out of the verified tree) is named in the same breath, because a person choosing between the two should
+ * know which chain of proof each one is on.
+ */
+export function npmLayerNotRefreshedNote(blocked, { version } = {}) {
+  const line = `npm install -g ${NPM_PACKAGE_NAMES.map((name) => `${name}@${version}`).join(' ')}`
+  // `binaryNotFoundDetail` and `interpreterMissingDetail` already end in a period; the reason for the
+  // prefix branch does not. Joining with a fixed ". " is how this sentence grew a `..`.
+  const dotted = (text) => {
+    const body = String(text ?? '').trim()
+    if (body === '') return ''
+    return /[.!?]$/.test(body) ? body : `${body}.`
+  }
+  return {
+    code: CODES.npmNotRefreshed,
+    command: line,
+    message: `the application updated, but the two global npm packages did not: ${dotted(blocked.reason)} `
+      + `${dotted(blocked.claim)} To finish this install, run \`${line}\` — that pulls the published `
+      + 'packages from the npm registry, which is the same artifact the release page publishes, while the '
+      + 'tree this run verified held the tarballs it would have installed. '
+      + dotted(blocked.remedy),
+    details: { cause: blocked.cause, prefix: blocked.prefix, dir: blocked.dir, tried: blocked.tried },
+  }
+}
+
+/**
  * `updater apply`. Everything that can be decided *before* touching the live
  * bundles comes first, so the common refusals (busy, needs consent, stale
  * pointer, missing staged tree) never reach a swap.
@@ -1495,86 +1602,40 @@ export async function applyUpdate({
   }
 
   // §3.5's pre-flight, placed here because everything below this line can change the live machine.
-  // The npm step is the last one and the only one that can need root; finding that out after the
-  // bundles were swapped buys a rollback, two daemon restarts and a version that never lands.
+  //
+  // What changed on 2026-10-26 is what its answer *costs*. It used to refuse the whole update — the
+  // 2026-10-01 finding was a machine that swapped the bundles, restarted the daemon, died at
+  // `npm install -g`, and rolled all of it back, twice a day, forever. Asking before the swap is kept;
+  // refusing the swap on the strength of that answer is not. A machine whose global npm layer this
+  // account cannot write now installs the two `.app` bundles, restarts the daemon, verifies the daemon's
+  // own version, and says in one copyable command what is left to do. The person chose that contract
+  // after this product had been answering "update failed" on real machines about an update whose
+  // application half was installable all along — and the state it lands in (new bundles, the previous
+  // global layer) is one this product already supports: it is what every checkout install has been
+  // running since §3.3's first reading was split out for exactly that reason.
+  //
+  // The npm step *failing after it started* still rolls the machine back, and that difference is
+  // deliberate: the pre-flight answers "we never touched the layer", while a failed install may leave it
+  // holding neither the recorded version nor the new one, and an unknown global layer is worth a
+  // verified undo.
   const npmReady = preflightNpm()
-  if (!npmReady.ok) {
-    // Three different facts arrive here, and they used to share one sentence.
-    //  · the command was not there at all (`npm-not-found`) — the shape this machine actually hit, because
-    //    launchd hands the job `/usr/bin:/bin:/usr/sbin:/sbin` and npm lives in `/usr/local/bin` here;
-    //  · the prefix is there and this account cannot write it (`dir` named);
-    //  · npm answered but not with a prefix.
-    // Telling the second one's story about the first is a defect in its own right: the person goes and
-    // checks `npm config get prefix` permissions on a machine where npm was never reachable by this run.
-    const notFound = npmReady.cause === 'npm-not-found' || npmReady.cause === 'npm-not-executable'
-    const runtimeGone = npmReady.cause === 'npm-runtime-unavailable'
-    const remedy = runtimeGone
-      // The fourth fact in this class, and the one the resolved path used to hide: the script was found and
-      // exec'd, and the `#!/usr/bin/env node` at the top of it could not find node in the environment this
-      // run handed the child. `childSpawnEnv` closes that gap for the children this program starts, so a
-      // run that still lands here has a genuinely unreachable runtime — said as that, never as a permission.
-      ? 'The fix is to put node back where this run can reach it, not to change any permission: npm is a '
-        + 'script whose first line asks for `node`, and that request could not be answered from this '
-        + 'environment. Install or restore node (brew install node, or the official installer), then run '
-        + '"updater apply" again from that shell and follow it with "updater enable" from the same shell — '
-        + 'enable renders the daily job\'s PATH from the node that is running it, which is what the job needs '
-        + 'to start the same script tomorrow. Nothing about the install itself has to change, and no password '
-        + 'is asked for.'
-      : notFound
-        // An agent can do this one by itself, which is what makes it the first half of the sentence: run the
-        // same command from a shell whose PATH reaches the directory, and the search stops being empty.
-        // The second half names what this tool *does* support: `updater enable` re-renders the job's
-        // EnvironmentVariables (including the PATH it puts there), so a hand-edit of the plist is not the
-        // remedy — it is overwritten by the next enable.
-        ? 'The fix is to give this run a PATH that reaches npm, not to change any permission: run '
-          + '"updater apply" again from a shell whose PATH includes the directory npm is installed in (the '
-          + 'search above is the list of directories this process was allowed to look in), and re-register '
-          + 'the daily job with "updater enable" from that same shell — enable writes the job\'s PATH from '
-          + 'the node and npm prefix bins it finds at that moment, so editing the plist by hand would only '
-          + 'be overwritten. Nothing about the install itself has to change, and no password is asked for.'
-        : npmReady.dir
-        // The two ways out are not equal, and the sentence used to lead with the dangerous one:
-        // `sudo chown -R "$(whoami)" /usr/local/lib/node_modules /usr/local/bin` — a recursive ownership
-        // sweep across every *other* global package and every binary in /usr/local/bin, printed verbatim by
-        // the panel and by `gp_diagnose` because `lastError.message` is what they show. This product's rule
-        // (test/remedy-surface.test.mjs, and the shape lib/ca-bundle.js was corrected to) is that a remedy may
-        // *name* the tool a person would use but must not hand out an executable escalation. Relocating npm's
-        // prefix needs no escalation at all and an agent can run it, so it comes first.
-        ? 'Two ways out, and the first one an agent can run by itself: move npm\'s prefix under the home '
-          + 'directory (`npm config set prefix ~/.npm-global`, put `~/.npm-global/bin` on PATH, then re-run the '
-          + 'GlassPane installer so the launcher points at the new one). The other is a person\'s call, and this '
-          + 'tool will not run it for them: hand '
-          + (npmReady.dirs ?? [npmReady.dir]).map((dir) => `"${dir}"`).join(' and ')
-          + ' to this account, which means a `chown` of those directories entered by hand with a password. '
-          + 'After either one, press "Install update" again.'
-        : 'Check `npm config get prefix` from this account — the updater will not ask for a password.'
-    const claim = (notFound || runtimeGone)
-      ? '. Nothing was replaced and the daemon was not restarted: the updater never reached npm, so it has no '
-        + 'answer about the global prefix yet, and the two packages `glasspane-mcp` and `glasspane-install` '
-        + 'are installed with `npm install -g` after the bundles swap. This is a PATH fact about the process '
-        + 'that ran this command, not a permission of the directory npm would write into.'
-      : '. Nothing was replaced and the daemon was not restarted: the two packages `glasspane-mcp` and '
-        + '`glasspane-install` are installed with `npm install -g` *after* the bundles swap, and this account '
-        + 'cannot write where npm would put them. '
-    return fail('deferred', CODES.npmPrefixUnwritable,
-      'automatic update cannot finish on this machine: '
-      + (npmReady.reason ?? 'the npm global prefix could not be checked')
-      + claim + remedy,
-      { details: { prefix: npmReady.prefix, dir: npmReady.dir, cause: npmReady.cause ?? null, tried: npmReady.tried ?? null } })
-  }
-
-  // The other half of the same question: the release may be *installable* by an account that can write its
-  // prefix and still ship a package with nothing to run. Measured on 2026-10-01 against v1.5.1, where the
-  // archive was pure source: `npm pack` produced a three-entry package, `npm install -g` exited 0, the
-  // version read back correctly, and the MCP half of the handshake died on `ENOENT` — after the swap.
-  const commandsReady = preflightNpmCommands({ stagedTree: provenTree })
-  if (!commandsReady.ok) {
-    return fail('deferred', CODES.releaseBadPayload,
-      'the staged release cannot produce a runnable npm package: '
-      + (commandsReady.reason ?? 'a declared command of one of the two packages is missing from the tree')
-      + '. Nothing was replaced and the daemon was not restarted. This is the publisher\'s artifact, not this '
-      + 'machine: ' + (commandsReady.remedy ?? 'the release archive has to carry the file the package declares.'),
-      { details: { dir: commandsReady.dir } })
+  const npmBlocked = npmReady.ok ? null : npmLayerBlockedNote(npmReady)
+  if (npmBlocked === null) {
+    // The other half of the same question: the release may be *installable* by an account that can write its
+    // prefix and still ship a package with nothing to run. Measured on 2026-10-01 against v1.5.1, where the
+    // archive was pure source: `npm pack` produced a three-entry package, `npm install -g` exited 0, the
+    // version read back correctly, and the MCP half of the handshake died on `ENOENT` — after the swap.
+    // This one stays a hard refusal: a release whose package declares a command the tree does not carry is
+    // the publisher's artifact to fix, and there is no half-install that makes it work.
+    const commandsReady = preflightNpmCommands({ stagedTree: provenTree })
+    if (!commandsReady.ok) {
+      return fail('deferred', CODES.releaseBadPayload,
+        'the staged release cannot produce a runnable npm package: '
+        + (commandsReady.reason ?? 'a declared command of one of the two packages is missing from the tree')
+        + '. Nothing was replaced and the daemon was not restarted. This is the publisher\'s artifact, not this '
+        + 'machine: ' + (commandsReady.remedy ?? 'the release archive has to carry the file the package declares.'),
+        { details: { dir: commandsReady.dir } })
+    }
   }
 
   // From here on the live bundles may change: back them up first.
@@ -1774,7 +1835,11 @@ export async function applyUpdate({
 
     // §3.4: record the original version, install from the verified tree, read the installed version back,
     // put the recorded one back if it disagrees.
-    const npmResult = await npm({ stagedTree: provenTree, copyFn })
+    //
+    // Skipped — not refused — when §3.5's pre-flight already answered that this run cannot refresh the
+    // global layer. The old shape cost the bundles for that answer too; see `npmBlocked` above for the
+    // contract the person chose on 2026-10-26 and for why an install that *started* still rolls back.
+    const npmResult = npmBlocked === null ? await npm({ stagedTree: provenTree, copyFn }) : null
     if (npmResult?.ok === false) {
       const restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn })
       const restart = await restartIfIdle()
@@ -1799,14 +1864,35 @@ export async function applyUpdate({
      * before `current` moves — a daemon on the new version with a forwarding layer that cannot answer
      * `tools/list` is the half-installed machine this section exists to refuse — but refusing it now also
      * has to undo the npm layer, which the old ordering could never reach.
+     *
+     * The one exception is the new partial path: when this run left the global layer alone, a machine that
+     * has no global `glasspane-mcp` at all is in the state §3.3 already documents as unsatisfiable (the
+     * 2026-10-01 checkout install — the half asks for a binary only this run's npm step could have put
+     * there). Asking it anyway would turn a partial success back into a rollback of a swap that works, so
+     * the MCP half is asked **once first** to tell "absent" from "present and broken": absent means the
+     * daemon half carries this verdict and the sentence says the MCP half was not asked; present-and-broken
+     * keeps the two-halves requirement, because a forwarding layer that is installed and cannot answer is
+     * damage this swap is responsible for.
      */
-    const handshake = await handshakeVerify({
-      socketPath: socketPath ?? probe.socketPath,
-      wantVersion,
-      budgetMs: probe.handshakeBudgetMs ?? HANDSHAKE_BUDGET_MS,
-      call: helloCall,
-      toolsList,
-    })
+    let mcpHalfAbsent = null
+    if (npmBlocked !== null) {
+      const globalLayer = await toolsList({})
+      if (globalLayer?.notFound === true) mcpHalfAbsent = globalLayer
+    }
+    const handshake = mcpHalfAbsent === null
+      ? await handshakeVerify({
+        socketPath: socketPath ?? probe.socketPath,
+        wantVersion,
+        budgetMs: probe.handshakeBudgetMs ?? HANDSHAKE_BUDGET_MS,
+        call: helloCall,
+        toolsList,
+      })
+      : await daemonVersionVerify({
+        socketPath: socketPath ?? probe.socketPath,
+        wantVersion,
+        budgetMs: probe.handshakeBudgetMs ?? HANDSHAKE_BUDGET_MS,
+        call: helloCall,
+      })
     if (!handshake.ok) {
       const restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn })
       const npmBack = restoreNpm(npmResult ?? {})
@@ -1932,16 +2018,29 @@ export async function applyUpdate({
           // because with the stable entry that is literally true — this is the last version that asks.
           ? 'the updater code, the pointer, and the stable entry all moved, but the registered job still names its own path, so this machine owes one migration: flip "automatic update" off and on once (or run "updater enable"); after that single step, no future version needs it'
           : null
+    // The npm layer's share of the verdict, said in the same sentence the panel prints verbatim: the
+    // machine did update, the global packages did not, and the one command that finishes the job is
+    // spelled out rather than described. A standing degradation that only lives in the state file is how
+    // §11's `runtime-stale` would have stayed invisible, so it goes in the message too.
+    const npmNote = npmBlocked === null ? null : npmLayerNotRefreshedNote(npmBlocked, { version: wantVersion })
+    const mcpHalfNote = mcpHalfAbsent === null
+      ? null
+      : 'the MCP half of the post-install proof was not asked, because this machine has no global '
+        + '`glasspane-mcp` to ask and this run installed none; the daemon half answered '
+        + `${wantVersion} over the socket`
     // The document the applied patch merges onto is re-read here and nowhere else in this function:
     // this is the one write that runs after another process (`enable`) may have written the file.
     const base = freshestBase(handoverNotes)
-    const message = [swapped + (standing ? `. ${standing.message}` : ''), runtimeNote, ...stagingNotes, ...handoverNotes].filter(Boolean).join('. ')
+    const message = [swapped + (standing ? `. ${standing.message}` : ''), runtimeNote, npmNote?.message, mcpHalfNote, ...stagingNotes, ...handoverNotes].filter(Boolean).join('. ')
     // §9: a swap replaces the very bundles the agent runs from, so the root bundle
     // node is handed has to be re-exported with it. Without this, a rotated
     // interception root turns the daily job dead under an install that just
     // succeeded, and "applied" is the last honest thing the state file says.
     const caRoots = refreshCa ? refreshCa() : base.caRoots ?? null
-    const code = standing?.code ?? (runtimeStalled ? CODES.runtimeStale : null)
+    // One code can stand in the state file, so it names the thing the reader can act on first: an
+    // unproven authorship (its own standing note), then the global npm layer with its copyable command,
+    // then the updater's own copy. Every one of them that applies is still in `message` above.
+    const code = standing?.code ?? (npmNote ? CODES.npmNotRefreshed : null) ?? (runtimeStalled ? CODES.runtimeStale : null)
     // Trust-on-first-use, said out loud: the machine that had no anchor now has one,
     // recorded from the code running here (not from the tree that just arrived), so the
     // *next* release is judged against it. The window this closes is the one the finding
@@ -1956,6 +2055,9 @@ export async function applyUpdate({
       status: 'applied',
       code,
       message: code !== null || handoverNotes.length > 0 || stagingNotes.length > 0 ? message : null,
+      // Which fact stood in the way of the global layer, as data — `gp_diagnose` reads the sentence, and
+      // a reader that wants to count how many machines are in this state reads this.
+      details: npmNote?.details ?? null,
       current: wantVersion,
       latest: base.latest,
       staged: null,

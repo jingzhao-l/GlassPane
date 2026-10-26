@@ -36,6 +36,8 @@ import {
   installNpmPackages,
   manifestTree,
   newestBackup,
+  NPM_PACKAGE_NAMES,
+  npmLayerNotRefreshedNote,
   restoreBackup,
   rollbackToBackup,
   snapshotDir,
@@ -2085,18 +2087,24 @@ test('checkNpmPrefix asks npm where global packages go and then asks the filesys
   }
 })
 
-test('a machine that cannot write npm\'s global directory is refused before a single bundle moves', async () => {
+test('a machine that cannot write npm\'s global directory still gets the bundles, and is handed the command', async () => {
   // Measured on a real install (2026-10-01): `/usr/local/lib/node_modules` belongs to root, the update
-  // account has never installed a GlassPane package, and `apply` therefore swapped the two `.app`
-  // bundles, restarted the daemon, failed at `npm install -g`, and rolled the machine back — every day,
-  // twice a day, with a version that never landed. The refusal has to come *first*, and it has to say
-  // that nothing moved.
+  // account has never installed a GlassPane package, and `apply` therefore swapped the two `.app` bundles,
+  // restarted the daemon, failed at `npm install -g`, and rolled the machine back — every day, twice a day,
+  // with a version that never landed. The fix for that was a pre-flight in front of the swap, and the
+  // pre-flight is kept. What the person chose on 2026-10-26 is that its answer no longer costs the update:
+  // a machine that cannot refresh the global layer installs the application and is handed the one command
+  // that finishes the rest.
+  //
+  // REVERSE MUTATION: put the pre-flight's `return fail('deferred', CODES.npmPrefixUnwritable, …)` back —
+  // this goes red on `status: deferred`, which is the whole contract. Delete the `npmBlocked === null`
+  // guard on the npm step and the tripwire below fires: the run would go poking a layer the pre-flight
+  // just said it cannot write.
   const fx = fixture('npm-preflight-')
   const kick = await okKick()
   const socketPath = shortSocketPath(fx.dir, 'preflight.sock')
   const daemon = await startSocketDaemon(socketPath, { behaviour: 'answer', version: '1.4.1' })
   const dir = path.join('/usr', 'local', 'lib', 'node_modules')
-  let copies = 0
   try {
     const result = await applyUpdate({
       stateRoot: fx.stateRoot,
@@ -2107,29 +2115,121 @@ test('a machine that cannot write npm\'s global directory is refused before a si
       socketPath,
       probe: { socketPath, timeoutMs: 1_000 },
       job: { ok: true, args: ['glasspaned', '--socket-path', socketPath] },
-      // Everything after the pre-flight is a tripwire: reaching any of it is the failure this test names.
-      build: () => assert.fail('预检失败之后连构建都不该起'),
-      kickstart: () => assert.fail('预检失败之后不许重启 daemon'),
+      build: okBuild(fx.builtDir),
+      kickstart: kick.fn,
       toolsList: okTools,
-      npm: () => assert.fail('预检失败之后不该跑到 npm 那一步'),
+      // The npm layer and the staged-artifact gate that reads it are both tripwires now: the pre-flight
+      // already answered that this account cannot write, so reaching either of them is the failure here.
+      npm: () => assert.fail('预检已经答"这个账号写不进去"，这一趟就不许再去碰全局层'),
+      preflightNpmCommands: () => assert.fail('全局层这一趟不装，就不该把暂存树的命令形状说成这台机器的缺陷'),
+      refreshRuntimeImpl: refreshedRuntime('1.4.1'),
       preflightNpm: () => ({ ok: false, prefix: '/usr/local', dir, reason: `${dir} is not writable by this account (EACCES)` }),
     })
-    assert.equal(result.status, 'deferred', JSON.stringify(result))
-    assert.equal(result.code, CODES.npmPrefixUnwritable, result.message)
-    assert.equal(exitCodeFor(result), EXIT.REFUSED, '什么都没换 ⇒ §7 的那一档是 3，不是 4/5')
-    assert.equal(fs.existsSync(path.join(writableRoots(fx.stateRoot).backup)), false,
-      '连备份都不该建——建了就说明已经准备换东西了')
-    assert.match(result.message, /Nothing was replaced and the daemon was not restarted/, result.message)
+    assert.equal(result.status, 'applied', result.message)
+    assert.equal(result.code, CODES.npmNotRefreshed, result.message)
+    assert.equal(exitCodeFor(result), EXIT.OK, '机器确实换了 ⇒ 这不是 §7 里"什么都没动"的那一档')
+    assert.equal(kick.calls.length, 1, 'daemon 重启了一次，这是部分成功与整场拒绝的分别所在')
+    assert.match(fx.installedBytes(), /NEW/, '~/Applications 装的是新的那一份')
+    assert.match(result.message, /the application updated, but the two global npm packages did not/, result.message)
     assert.match(result.message, new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '句子要点名写不进去的那一层')
+    assert.match(result.message, /npm install -g glasspane-mcp@1\.4\.1 glasspane-install@1\.4\.1/,
+      `要给一条能照抄运行的命令：${result.message}`)
+    assert.match(result.message, /from the npm registry/, '命令取的是发布物而不是本次核验过的暂存树，这个差别要写在同一句里')
     assert.match(result.message, /npm config set prefix/, '两条出路里必须给出 agent 自己能跑的那一条')
     assert.match(result.message, /chown/, '要人手做的那一步仍要点名工具，否则人到现场还是没有线索（只许提名，不许给可执行形状）')
     assert.doesNotMatch(result.message, /\bsudo\b/, 'remedy 不得把升权动作写成可照抄执行的命令（与 ca-bundle 同口径）')
     assert.doesNotMatch(result.message, /\bchown\s+-[a-zA-Z]*R\b/, '递归改所有权会把别人装的全局包一起端走——这条从前就写在这句 remedy 里')
-    assert.match(result.message, /Install update/, '做完之后按哪个按钮也要说')
+
     const state = loadState(fx.stateRoot).state
-    assert.equal(state.code, CODES.npmPrefixUnwritable, '面板读的是状态文件')
-    assert.equal(state.staged?.version, '1.4.1', '暂存的那一份仍然算数：这是一次"这台机器现在做不到"，不是这份发布坏了')
-    assert.match(fx.installedBytes(), /installed/, '装着的还是原来那一份：预检失败之后 ~/Applications 一个字都没动')
+    assert.equal(state.current, '1.4.1', '版本号要落进状态文件：面板按它决定按钮')
+    assert.equal(state.code, CODES.npmNotRefreshed, '面板读的是状态文件')
+    assert.match(state.lastError.message, /npm install -g/, '那句话要留在机器上，直到这一格被人补上')
+    assert.equal(state.staged, null, '这次装的就是暂存的那一份，它随成功一起退役')
+  } finally {
+    await daemon.close()
+    fx.cleanup()
+  }
+})
+
+test('the npm command handed out names the two packages this repository actually publishes', () => {
+  // `NPM_PACKAGE_NAMES` is written into a sentence a person copy-pastes, and `installNpmPackages` packs
+  // `['mcp-shell', 'installer']`. Two authors of one fact is how this repo has produced a remedy that
+  // installs nothing (`glasspane-install`'s bin symlink) and a gate that reads a stale name; the drift
+  // here is caught against the two `package.json` files themselves, not against a constant.
+  const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+  const real = ['mcp-shell', 'installer'].map((dir) => JSON.parse(fs.readFileSync(path.join(repoRoot, dir, 'package.json'), 'utf8')).name)
+  assert.deepEqual([...NPM_PACKAGE_NAMES], real, `补法里给的包名必须是这两个目录自称的名字：${real.join(', ')}`)
+  const note = npmLayerNotRefreshedNote({ reason: 'x', claim: 'y', remedy: 'z', cause: null, prefix: null, dir: null, tried: null }, { version: '9.9.9' })
+  assert.match(note.command, new RegExp(real.map((n) => `${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}@9\\.9\\.9`).join('\\s')), note.command)
+})
+
+test('a partial install still refuses when the global layer it left behind cannot answer the new daemon', async () => {
+  // The one guard the new contract must not loosen: leaving the npm layer alone is only a partial success
+  // while the old forwarding layer still serves. If it is installed and now cannot answer `tools/list`,
+  // this swap is what broke it, and the machine goes back. REVERSE MUTATION: make `mcpHalfAbsent`'s
+  // condition accept any `ok === false` (not only `notFound`) — this goes red on `status: applied`.
+  const fx = fixture('npm-partial-broken-')
+  const kick = await okKick()
+  const socketPath = shortSocketPath(fx.dir, 'partial-broken.sock')
+  const daemon = await startSocketDaemon(socketPath, { behaviour: 'answer', version: '1.4.1' })
+  try {
+    const result = await applyUpdate({
+      stateRoot: fx.stateRoot,
+      appsDir: fx.appsDir,
+      bundles: BUNDLES,
+      now: NOW,
+      currentVersion: '1.4.0',
+      socketPath,
+      probe: { socketPath, timeoutMs: 1_000, handshakeBudgetMs: 300 },
+      job: { ok: true, args: ['glasspaned', '--socket-path', socketPath] },
+      build: okBuild(fx.builtDir),
+      kickstart: kick.fn,
+      // Present, not absent: the binary is there and the tool list does not answer.
+      toolsList: async () => ({ ok: false, reason: 'the MCP server closed the connection' }),
+      npm: () => assert.fail('预检已经答"够不着"，这一趟不许再碰全局层'),
+      refreshRuntimeImpl: refreshedRuntime('1.4.1'),
+      preflightNpm: () => ({ ok: false, prefix: '/usr/local', dir: '/usr/local/lib/node_modules', reason: 'not writable' }),
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.status, 'rolled-back', JSON.stringify(result))
+    assert.match(fx.installedBytes(), /installed/, '旧的 bundle 要放回原位：这一条与部分成功共用同一个备份')
+    assert.equal(loadState(fx.stateRoot).state.current, '1.4.0', 'current 不许跟着一次被退回的安装走')
+  } finally {
+    await daemon.close()
+    fx.cleanup()
+  }
+})
+
+test('a machine with no global glasspane-mcp at all completes the partial install and says which half was not asked', async () => {
+  // §3.3's unsatisfiable pair, in its new clothes: when this run leaves the global layer alone, asking a
+  // binary that only this run's npm step could have installed is the 2026-10-01 trap again — it would
+  // roll back an application half that works. The verdict says so instead of pretending both halves spoke.
+  const fx = fixture('npm-partial-absent-')
+  const kick = await okKick()
+  const socketPath = shortSocketPath(fx.dir, 'partial-absent.sock')
+  const daemon = await startSocketDaemon(socketPath, { behaviour: 'answer', version: '1.4.1' })
+  try {
+    const result = await applyUpdate({
+      stateRoot: fx.stateRoot,
+      appsDir: fx.appsDir,
+      bundles: BUNDLES,
+      now: NOW,
+      currentVersion: '1.4.0',
+      socketPath,
+      probe: { socketPath, timeoutMs: 1_000 },
+      job: { ok: true, args: ['glasspaned', '--socket-path', socketPath] },
+      build: okBuild(fx.builtDir),
+      kickstart: kick.fn,
+      toolsList: async () => ({ ok: false, notFound: true, tried: ['/usr/local/bin/glasspane-mcp'], reason: 'glasspane-mcp could not be found on the searched paths' }),
+      npm: () => assert.fail('这一趟不装全局层'),
+      refreshRuntimeImpl: refreshedRuntime('1.4.1'),
+      preflightNpm: () => ({ ok: false, cause: 'npm-not-found', prefix: null, dir: null, reason: 'npm could not be found on the searched paths' }),
+    })
+    assert.equal(result.status, 'applied', result.message)
+    assert.equal(result.code, CODES.npmNotRefreshed, result.message)
+    assert.match(result.message, /MCP half of the post-install proof was not asked/, `哪一半没被问过要写在结论里：${result.message}`)
+    assert.match(result.message, /the daemon half answered/, '答了的那一半也要说清：否则这句读起来像什么都没查')
+    assert.equal(kick.calls.length, 1)
   } finally {
     await daemon.close()
     fx.cleanup()
@@ -2137,7 +2237,6 @@ test('a machine that cannot write npm\'s global directory is refused before a si
 })
 
 /* ------------------------------------------------------------------ §3.3 两道读回的顺序（真机测出来的） */
-
 test('a machine that has never installed glasspane-mcp still completes the update: the pair is read after the npm layer lands', async () => {
   // Real machine, 2026-10-01, first apply after `sudo chown`: the bundles swapped, the daemon restarted
   // and answered `hello` with 1.5.1 — and the run rolled back anyway, because §3.3's second reading asks a

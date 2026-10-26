@@ -268,7 +268,7 @@ function stagedFixture(label) {
   }
 }
 
-test('the §3.5 refusal for a missing npm names the search and stops blaming the prefix', async () => {
+test('a run that cannot find npm still installs the bundles, names the search, and stops blaming the prefix', async () => {
   const fx = stagedFixture('binres-refusal')
   const absent = prefixMachine('binres-refusal-absent')
   const kick = []
@@ -287,19 +287,25 @@ test('the §3.5 refusal for a missing npm names the search and stops blaming the
       build: () => ({ ok: true, builtDir: fx.builtDir, message: null }),
       kickstart: async (options) => { kick.push(options); return { ok: true, message: 'restarted' } },
       toolsList: async () => ({ ok: true, count: 16, tools: ['gp_probe_status'] }),
-      npm: () => assert.fail('npm 那道门拒了之后，不该再往全局层走'),
+      npm: () => assert.fail('预检已经答"这一趟找不到 npm"，全局层就不许再被碰'),
+      // §11's step is replaced so this test keeps measuring §3.5's answer instead of starting to copy an
+      // updater and re-register a launchd job.
+      refreshRuntimeImpl: () => ({
+        record: { status: 'refreshed', version: '1.4.1', cliPath: '/var/tmp/st/runtime/1.4.1/updater/cli.js', previousCliPath: null, agentVerified: true, at: NOW.toISOString(), code: null, detail: null },
+        restored: { attempted: false, ok: true },
+      }),
       // The real pre-flight, told to search a place with nothing in it: this is the daily job's situation,
       // and the sentence under test is what the gate builds out of the answer it gets back.
       preflightNpm: () => checkNpmPrefix({ env: { PATH: '' }, dirs: [absent.empty] }),
     }
     const result = await applyUpdate(deps)
-    assert.equal(result.ok, false)
-    assert.equal(result.status, 'deferred', JSON.stringify(result))
-    assert.equal(result.code, CODES.npmPrefixUnwritable, result.message)
-    assert.equal(exitCodeFor(result), EXIT.REFUSED, '什么都没换 ⇒ §7 的那一档是 3，不是 4/5，也没有新增退出码')
-    assert.deepEqual(kick, [], '这道门在建好、换版、重启之前')
-    assert.match(fx.installedBytes(), /installed/, '装着的还是原来那一份')
-    assert.equal(fs.existsSync(writableRoots(fx.dir).backup), false, '连备份都不该建')
+    assert.equal(result.ok, true, result.message)
+    assert.equal(result.status, 'applied', JSON.stringify(result))
+    assert.equal(result.code, CODES.npmNotRefreshed, result.message)
+    assert.equal(exitCodeFor(result), EXIT.OK, '应用换了、全局层没换 ⇒ 机器确实变了，不是 §7 的 3')
+    assert.equal(kick.length, 1, 'daemon 重启了一次：这一格正是"部分成功"与"整场拒绝"的分别')
+    assert.match(fx.installedBytes(), /NEW/, '~/Applications 上是新的那一份')
+    assert.ok(fs.existsSync(writableRoots(fx.dir).backup), '换过东西就要有备份：这条路径与成功路径共用同一套回滚')
 
     assert.match(result.message, /could not be found on the searched paths/, result.message)
     assert.ok(result.message.includes(path.join(absent.empty, 'npm')), `句子要带着搜过的那条路径：${result.message}`)
@@ -308,11 +314,14 @@ test('the §3.5 refusal for a missing npm names the search and stops blaming the
     assert.doesNotMatch(result.message, /Check `npm config get prefix` from this account/, '不许把人支去看一个还没被问到的命令：' + result.message)
     assert.doesNotMatch(result.message, /not writable/, result.message)
     assert.match(result.message, /This is a PATH fact/, `要把真正的因由说出来：${result.message}`)
-    assert.match(result.message, /updater apply.*again from a shell whose PATH includes/, `补救要是一次能执行的动作：${result.message}`)
+    assert.match(result.message, /line above from a shell whose PATH includes/, `补救要是一次能执行的动作：${result.message}`)
+    assert.match(result.message, /npm install -g glasspane-mcp@1\.4\.1 glasspane-install@1\.4\.1/,
+      '这一趟装不成的那两包，要把人手上能跑的那一行交出去')
     assert.doesNotMatch(result.message, /\bsudo\b/, 'remedy 不许交出可照抄执行的升权命令')
 
     const state = loadState(fx.dir).state
-    assert.equal(state.code, CODES.npmPrefixUnwritable, '面板读的是状态文件')
+    assert.equal(state.current, '1.4.1', '面板读的是状态文件：版本号要说这次的换版')
+    assert.equal(state.code, CODES.npmNotRefreshed, '面板读的是状态文件')
     assert.match(state.lastError.message, /could not be found on the searched paths/, '同一句话要落进记录里')
     assert.ok(String(state.lastError.details).includes('npm-not-found'), `因由要作为数据留在记录里：${state.lastError.details}`)
   } finally {
