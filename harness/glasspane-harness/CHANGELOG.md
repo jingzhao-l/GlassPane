@@ -12,6 +12,31 @@ contract does not).
 
 （空。本轮收口后没有未归号的条目。）
 
+## [0.12.1] — 2026-10-26
+
+**版本判断：patch。** 本产品的 pre-1.0 口径是"产品面/CLI 形状变动 = minor，纯修复 = patch"。本版不含任何
+行为变化：改的是两份双语 README 的骨架（按 iterate-skill 的形状重写，并让引擎与 harness 互相指回去）
+与 `SYNCLOG.md` 的账，加一次版本线统一。取这个号的理由不是"有内容想发"，而是父仓那条
+`release-artifact` 尺子的要求：**已发布的 tag 的树必须等于主干 `harness/glasspane-harness` 的子树**，
+而 v0.12.0 之后主干多出的正是上面这三份文件。旧 tag 绝不移动，所以唯一的收口方式是把主干这一侧
+重切一份、用一个新的 patch 号固定它——那条尺子的 remedy 原文就是这么写的。
+
+### Changed — 文档面（用户与 agent 读到的第一眼）
+
+- `README.md` / `README.zh-CN.md` 按 iterate-skill 的骨架重写：安装入口、产物面、与 GlassPane 引擎的
+  关系各自成节，中英两版逐节对齐；两版里那条 `curl -fsSL …/v<版本>/scripts/install.sh | bash` 仍由
+  `product-surface.mjs` 的 `installer-curl-pinned` 规则核三件事（含本版 tag、不含 `/main/`、与
+  `docs/install.md` 与 `scripts/install.sh` 头那一行逐字相同），所以"重写文档"不等于"把钉住的安装
+  入口写漂"。
+- `SYNCLOG.md` 补记本轮的测量与判断（+138 行）：账写在发布线上，而不是只写在提交信息里。
+
+### Fixed — 版本线与发布闸
+
+- 版本线 0.12.0 → 0.12.1 一次改完 6 个位点（`product.json` 的 `version` 与 `install.curl`、
+  `packages/opencode/package.json`、`scripts/install.sh` 头、`docs/install.md` 两处、两份 README）：
+  每个位点都是**同行改写**（`git diff --numstat` 每文件 added == deleted），`SYNCLOG.md` 里那句
+  v0.12.0 是历史记录，故意不改。
+
 ## [0.12.0] — 2026-10-26
 
 **版本判断：minor。** 本产品的 pre-1.0 口径是"产品面/CLI 形状变动 = minor，纯修复 = patch"。本版有三处
