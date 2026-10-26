@@ -283,16 +283,33 @@ if (mode === "--check") {
 // egress or a missing npm kept the only drift alarm permanently green — the same
 // reports-green-when-it-measured-nothing shape this file's own header (exit 2 = cannot measure)
 // says it does not have.
+// The probe must name its registry. Every other npm-facing lane in this product
+// (`postinstall.mjs`, `install.sh`, `publish.ts`, `verify-published.ts`) passes `--registry`,
+// read from `product.json`'s top-level `registry` — the same true source verify-published.ts
+// uses (its `product.registry`, not `product.npm.registry`; `product-surface.mjs` refuses if
+// the two ever disagree). A bare `npm view` lets an ambient `~/.npmrc` mirror answer with its
+// lagging `latest`, and the product's only drift alarm then reports "no drift" about some
+// other server while a real new kernel release goes unnoticed. If the value cannot be read
+// there is no honest answer to give: exit 2 — the question could not be asked — never an
+// answer about an unknown server.
+const productJson = path.join(productRoot, "product.json")
+let registry
+try {
+  registry = JSON.parse(readFileSync(productJson, "utf8")).registry
+} catch {}
+if (typeof registry !== "string" || registry === "") {
+  die(2, `cannot read the registry from ${productJson} ("registry" missing or unreadable) — the probe refuses to ask an unnamed server: the drift question was NOT answered.`)
+}
 let latest
 try {
-  latest = execFileSync("npm", ["view", PACKAGE, "version"], { encoding: "utf8" }).trim()
+  latest = execFileSync("npm", ["view", PACKAGE, "version", "--registry", registry], { encoding: "utf8" }).trim()
 } catch (error) {
   const reason = error instanceof Error && error.message ? error.message.split("\n")[0] : "unknown error"
-  die(2, `could not ask the registry for ${PACKAGE} — the drift question was NOT answered (${reason}). ` +
-    `A probe that cannot measure must not read as green: check npm on PATH and egress to the registry, then re-run.`)
+  die(2, `could not ask the registry ${registry} for ${PACKAGE} — the drift question was NOT answered (${reason}). ` +
+    `A probe that cannot measure must not read as green: check npm on PATH and egress to ${registry}, then re-run.`)
 }
 if (!latest) {
-  die(2, `the registry answered nothing for ${PACKAGE} — no version was read, so drift cannot be judged. ` +
+  die(2, `the registry ${registry} answered nothing for ${PACKAGE} — no version was read, so drift cannot be judged. ` +
     `Re-run the probe; if it repeats, ask the kernel's owner whether the package is still published.`)
 }
 if (latest === manifest.version) {

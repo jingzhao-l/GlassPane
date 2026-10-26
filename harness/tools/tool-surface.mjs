@@ -42,7 +42,7 @@
  */
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -54,6 +54,17 @@ const goldenFile = path.join(repoRoot, "harness", "contracts", "tool-surface.jso
 const forkDiffGolden = path.join(repoRoot, "harness", "contracts", "fork-diff.json")
 const pinFile = path.join(repoRoot, "harness", "upstream.json")
 const mode = process.argv.includes("--record") ? "record" : "check"
+
+// One private scratch dir per run. The `.before` snapshots used to sit at
+// `tmpdir()/tool-surface-<rel>.before` — deterministic per file, so every concurrent run of
+// this ruler wrote and unlinked the SAME paths: one run's cleanup deleted another's live
+// snapshot, its `diff` read a missing operand, exited 2, and the run died reporting
+// "refusing to bill" for a race, not a measurement (measured 2026-10-26: two parallel runs,
+// one rc=2 every round, 8/8). This project runs rulers concurrently — CI has nine
+// concurrent tool-surface runs — so the scratch must be per-run. mkdtemp gives each run its
+// own; it is removed recursively when the process exits, on every path including die(2).
+const scratchDir = mkdtempSync(path.join(tmpdir(), "tool-surface-"))
+process.on("exit", () => rmSync(scratchDir, { recursive: true, force: true }))
 
 const LIMIT = 0.1 // "<10% 代码量", one of the three architecture iron laws
 // The specs file this pointed at never existed (a decision record named in a string, never opened
@@ -379,7 +390,7 @@ function countAuthoredLines(diff) {
 function addedLinesAgainstRef(blobs, rel, forkAbs) {
   const before = blobs.get(rel)
   if (before === undefined || before === null) return NaN
-  const tmp = path.join(tmpdir(), `tool-surface-${rel.replace(/[^A-Za-z0-9]+/g, "_")}.before`)
+  const tmp = path.join(scratchDir, `tool-surface-${rel.replace(/[^A-Za-z0-9]+/g, "_")}.before`)
   writeFileSync(tmp, before.toString("utf8"))
   try {
     let diff = ""

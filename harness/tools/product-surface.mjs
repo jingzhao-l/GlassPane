@@ -47,7 +47,7 @@
  */
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { existsSync, readFileSync, readdirSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -128,7 +128,7 @@ const check = (rule, condition, detail) => {
  */
 const SCAN_SET_FLOORS = {
   bins: 2, // product.json -> bins
-  forbiddenFiles: 896, // shipped text discovered under the release, install, launcher and patch paths
+  forbiddenFiles: 904, // measured 2026-10-26 by the walk below over forbiddenScanDirs: 900 extension-matched files + 4 extension-less executables (`packages/opencode/bin/glasspane-harness`, `packages/opencode/script/run-workspace-server`, `script/hooks`, `script/release`)
   forbiddenNeedles: 7, // what they are searched for
   cliCmdFiles: 66, // packages/opencode/src/cli/cmd/**.ts, walked recursively
   envDiscovery: 67, // those CLI files + the shipped launcher
@@ -345,13 +345,28 @@ function textFilesUnder(rel) {
     if (entry.isDirectory()) {
       if (entry.name === "node_modules" || entry.name === "dist" || entry.name === "test" || entry.name === "tests" || entry.name === "fixtures") continue
       found.push(...textFilesUnder(child))
-    } else if (forbiddenScanExt.test(entry.name)) found.push(child)
+    } else if (forbiddenScanExt.test(entry.name) || isExecutable(child)) found.push(child)
   }
   return found
+}
+/**
+ * Extension is not the test for "shipped". `packages/opencode/bin/glasspane-harness` is the
+ * launcher npm installs and execs for every `glasspane-harness` command, and it has no extension,
+ * so an extension-only walk never opened the one file that runs on the user's machine — an
+ * upstream install endpoint restored into it would have shipped and this gate would have printed
+ * zero problems.
+ */
+function isExecutable(rel) {
+  const abs = path.join(forkRoot, rel)
+  if (!existsSync(abs)) return false
+  const stat = statSync(abs)
+  return stat.isFile() && (stat.mode & 0o111) !== 0
 }
 const forbiddenFiles = forbiddenScanDirs.flatMap(textFilesUnder).filter((rel) => existsSync(path.join(forkRoot, rel))).sort()
 // A discovered set can also go quiet by its roots leaving the tree, so the files that carry
 // the release and install path are named as well: the walk must find them or the lane is red.
+// Discovery only — a directory-prefix fallback made this tautological (every path here starts
+// with one of the roots), so it signed off the launcher it claimed to check while never opening it.
 for (const want of [
   "packages/opencode/script/publish.ts",
   "packages/opencode/script/postinstall.mjs",
@@ -360,7 +375,7 @@ for (const want of [
   "packages/opencode/bin/glasspane-harness",
   "scripts/install.sh",
 ]) {
-  check("scan-set", forbiddenFiles.includes(want) || forbiddenScanDirs.some((d) => want.startsWith(`${d}/`)), `${want} is no longer inside the discovered upstream-registry scan set (${forbiddenScanDirs.join(", ")}) — a distribution file the gate stopped reading`)
+  check("scan-set", forbiddenFiles.includes(want), `${want} is no longer inside the discovered upstream-registry scan set (${forbiddenScanDirs.join(", ")}) — a distribution file the gate stopped reading`)
 }
 /** Comments carry the record of what was removed; only code can still reach it. */
 function stripComments(text) {
@@ -619,11 +634,15 @@ check("installer-urls", sh.includes('npm install -g --registry "$NPM_REGISTRY" "
 // bare `npm install` lets ~/.npmrc / npm_config_registry pick the mirror whose bytes then
 // get installed (and, for postinstall, executed) — while install.sh's primary lane named
 // no registry at all. The literal here is the same product fact as postinstall's; product.json
-// is its source, hence a rule and not a coincidence. The second needle keeps the honest
-// state on the npm success line: the installer checks no sha256/GPG on that channel, and
-// the line must say so instead of printing a bare "installed via npm".
+// is its source, hence a rule and not a coincidence. The two needles below keep the honest state
+// on the npm success line: that channel runs no sha256/GPG check of its own, and the line has to
+// say BOTH what it established (npm's `dist.integrity` against the named registry) and what it did
+// not (the product's own signature). A line naming neither reads like "installed", which is the
+// shape this rule exists to refuse; a line naming only the missing half accuses the channel of
+// doing less than it does.
 check("installer-registry", sh.includes('NPM_REGISTRY="${GLASSPANE_HARNESS_REGISTRY:-' + product.registry + '}"'), `install.sh does not default its npm registry to product.json's ${product.registry}`)
-check("installer-registry", sh.includes("sha256/GPG: not checked on this channel"), "install.sh's npm success line dropped its verification state — the channel that checks nothing must not read like one that does")
+check("installer-registry", sh.includes("integrity: npm dist.integrity"), "install.sh's npm success line no longer names the integrity evidence that channel actually relies on")
+check("installer-registry", sh.includes("product signature: not checked on this channel"), "install.sh's npm success line dropped its verification state — the channel that checks no signature must not read like one that does")
 check("installer-urls", sh.includes("GlassPane engine"), "install.sh does not tell the user that gp_* needs the GlassPane engine running")
 check("installer-urls", sh.includes(`REPO=\"` + product.repo + `\"`) || sh.includes(`REPO="${product.repo}"`), "install.sh REPO is not the product's repo")
 check("installer-urls", existsSync(path.join(forkRoot, "scripts", "install.ps1")) === false, "a Windows installer exists — the product is macOS-only (owner decision); one that half-works is worse than none")

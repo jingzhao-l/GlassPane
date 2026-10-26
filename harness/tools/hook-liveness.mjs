@@ -29,9 +29,15 @@
  *              consistency and say loudly that upstream was NOT observed here.
  *              Same rule as --record: no readable version means exit 2, not "no drift".
  *
- * Exit codes: 0 ok (including the honest offline skip), 1 contract drift,
+ * `--check` and `--offline` additionally resolve every `BOUND_HOOKS` citation against the fork
+ * tree: the cited binding site must exist and still name its hook. A citation is evidence, and
+ * evidence nobody opens proves nothing — printing "bound at <path>" for a path that is gone is
+ * the same species of failure this file catches upstream.
+ *
+ * Exit codes: 0 ok (including the honest offline skip), 1 contract drift or a bound-hook
+ *   citation that no longer resolves,
  * 2 the tool could not do its job (missing config, unreadable checkout, unreadable
- *   checkout version).
+ *   checkout version, no fork tree to read the binding sites from).
  */
 import { readFileSync, writeFileSync, readdirSync, statSync, existsSync } from "node:fs"
 import { execFileSync } from "node:child_process"
@@ -67,11 +73,55 @@ const STRUCTURAL = {
  * golden records it dead/absent while our plugin files keep awaiting calls that never
  * come — the exact "looks healthy, does nothing" failure this tool exists to catch.
  * The offline lane, which never opens upstream, is where this check has to live, because
- * it is the lane CI runs when no clone is present.
+ * it is the lane CI runs when no clone is present; `--check` reads the same citations after its
+ * upstream comparison, so neither lane prints a binding site it never opened.
  */
 const BOUND_HOOKS = {
   "tool.execute.after": "packages/opencode/src/plugin/glasspane-decision-log.ts",
   "experimental.session.compacting": "packages/opencode/src/plugin/glasspane-compaction.ts",
+}
+
+/**
+ * The fork tree, which is the only root `BOUND_HOOKS`' citations resolve under. They cite
+ * OUR bindings (`glasspane-*.ts`); upstream at the pin has no such file — measured
+ * 2026-10-26, `.external/opencode/packages/opencode/src/plugin/` holds no `glasspane-*`.
+ * They do not resolve off `repoRoot` either: `packages/` exists only below the fork root, so
+ * the citation as written was a path relative to a root this file never named. Same
+ * coordinate as `brand-surface.mjs` / `product-surface.mjs`.
+ */
+const forkRoot = path.join(harnessRoot, "glasspane-harness")
+
+/**
+ * Resolve every `BOUND_HOOKS` citation: the cited file must exist, and it must still name the
+ * hook as a quoted member — the shape a binding has.
+ *
+ * WHY THIS IS A CHECK AND NOT A COMMENT. The table's claim is that these two hooks are
+ * extension points this fork binds, and the citations are supposed to be the evidence. Until
+ * now nothing opened them: both paths were only interpolated into failure text, so the ruler
+ * printed "bound at packages/opencode/src/plugin/…" for a file it had never read, and moving
+ * or renaming that file — or the hook it binds — would still have produced that sentence
+ * about a path that is gone. A citation nobody resolves cannot make anything a non-tautology.
+ */
+function boundSites() {
+  if (!existsSync(forkRoot)) {
+    fail(2, `the binding sites named in BOUND_HOOKS cannot be read: there is no fork tree at ${path.relative(repoRoot, forkRoot)}, so this lane would be asserting a citation it never opened. That is CANNOT OBSERVE, not "the bindings hold".`)
+  }
+  const problems = []
+  const resolved = []
+  for (const [name, binding] of Object.entries(BOUND_HOOKS)) {
+    const file = path.join(forkRoot, binding)
+    if (!existsSync(file)) {
+      problems.push(`${name}: its binding site ${binding} is not in the fork tree (${file}). Either the plugin moved and this table still cites the old path, or nothing binds the hook any more and our plugin awaits calls that never come — the exact failure this tool exists to catch.`)
+      continue
+    }
+    const quoted = new RegExp(`["']${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`)
+    if (!quoted.test(readFileSync(file, "utf8"))) {
+      problems.push(`${name}: ${binding} exists but no longer names "${name}" as a quoted member, so it does not bind it — the citation is stale, and the binding it claims to prove is elsewhere or nowhere.`)
+      continue
+    }
+    resolved.push(`${name} → ${binding}`)
+  }
+  return { problems, resolved }
 }
 
 const args = new Set(process.argv.slice(2))
@@ -338,12 +388,20 @@ if (mode === "offline") {
       if (typeof s?.file !== "string" || !Number.isInteger(s?.line)) fail(1, `${h.name} records a fire site without file:line: ${JSON.stringify(s)}`)
     }
   }
+  const bound = boundSites()
   for (const [name, binding] of Object.entries(BOUND_HOOKS)) {
     const recorded = golden.hooks.find((h) => h.name === name)
     if (!recorded) fail(1, `golden does not record ${name}, which this fork binds at ${binding} — a bound extension point silently dropped from the contract`)
     if (recorded.kind !== "live") fail(1, `${name} is recorded ${recorded.kind}, but ${binding} still awaits its dispatch — declared-and-dead means our plugin runs never, not late. Investigate before this lane goes green.`)
   }
-  console.log(`  bound hooks still recorded live: ${Object.keys(BOUND_HOOKS).join(", ")}`)
+  // The citations are fork-side files, so this lane can open them without reading upstream —
+  // which is the point of checking them here: an offline lane that prints a path it never
+  // resolved is claiming a binding it did not observe.
+  if (bound.problems.length > 0) {
+    for (const p of bound.problems) console.error(`  ✗ ${p}`)
+    fail(1, `${bound.problems.length} bound-hook citation(s) do not resolve. 归因：这是我们这一侧（绑定表与 fork 代码）不一致，不是上游换地板 — this lane never opened upstream. Fix the table or find the binding back; do not re-record to make it quiet.`)
+  }
+  console.log(`  bound hooks still recorded live, with their fork-side binding sites read: ${bound.resolved.join(", ")}`)
   console.log("  OK (offline). The upstream-facing lane is the scheduled `harness contract` job, not this one.")
   process.exit(0)
 }
@@ -430,3 +488,18 @@ if (drift > 0) {
   console.error("Attribution per 综述 R34: this is 上游坏 (upstream changed the plugin floor). Freeze the upgrade, do not patch around it here.")
   process.exit(1)
 }
+
+// Upstream compared clean, so what is left is the claim this file makes about US: the two
+// extension points `BOUND_HOOKS` says this fork binds are still bound where the table says so.
+// Deliberately not counted in `drift` — a citation that stopped resolving is our table pointing
+// at a path that moved, and reporting it as 上游坏 would send someone to freeze an upgrade
+// upstream never caused. Getting here needed the reference checkout, so this is the lane where
+// the citation half of the claim gets read; with no checkout the exit-2 refusal above already
+// says upstream was NOT observed. `--probe` stays exempt: its one question is what a NEW upstream
+// tag does to the dispatch sites, and a fork-side path answers nothing about that.
+const bound = boundSites()
+if (bound.problems.length > 0) {
+  for (const p of bound.problems) console.error(`  ✗ ${p}`)
+  fail(1, `${bound.problems.length} bound-hook citation(s) do not resolve against the fork tree at ${path.relative(repoRoot, forkRoot)}. 归因：这是我们这一侧（绑定表与 fork 代码）不一致，不是上游换地板 — do not freeze an upgrade over this, and do not re-record to make it quiet.`)
+}
+console.log(`  bound hooks: ${bound.resolved.length}/${Object.keys(BOUND_HOOKS).length} binding sites resolve and still name their hook — ${bound.resolved.join(", ")}`)

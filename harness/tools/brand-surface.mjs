@@ -168,6 +168,11 @@ const RULES = [
 // a line that says "opencode" is the gate's business.
 const LINEAGE_LINE = /fork|upstream|anomalyco|sst\/opencode|MIT|上游|血缘|派生|packages\/opencode|@opencode-ai\//i
 const occ = (text, re) => (text.match(re) ?? []).length
+// ONE definition of the gateway needles, consumed by the shipped-code rule loop AND the
+// skill-document loop below. Two copies is the defect class: the skill loop once kept a
+// decorative second copy that applied no pattern and hard-coded `count: 1`, so it accused
+// documents of strings they did not contain and could never go red.
+const FIRST_PARTY_GATEWAY = /["'`](?:opencode|opencode-go|opencodeZen|opencode\.ai\/zen)["'`]|dialog\.provider\.opencode|provider\.connect\.opencodeZen/g
 
 function stripComments(text) {
   return text
@@ -325,7 +330,7 @@ function scan() {
     for (const [rule, re, why] of [
       [
         "first-party-gateway",
-        /["'`](?:opencode|opencode-go|opencodeZen|opencode\.ai\/zen)["'`]|dialog\.provider\.opencode|provider\.connect\.opencodeZen/,
+        FIRST_PARTY_GATEWAY,
         "a first-party gateway surface came back (provider id, upsell copy or a link to the paid cloud)",
       ],
       [
@@ -378,7 +383,14 @@ function scan() {
     console.error(`brand-surface: ${path.relative(repoRoot, skillDir)} holds no customize-*.md — the built-in skill this rule exists to watch is not there, and "not there" is not "clean"`)
     process.exit(2)
   }
-  for (const doc of skillDocs) hits.push({ file: `packages/core/src/plugin/skill/${doc}`, rule: "first-party-gateway", count: 1 })
+  for (const doc of skillDocs) {
+    // Match the same FIRST_PARTY_GATEWAY needles used on shipped code; do NOT
+    // stripComments here: in a markdown skill doc `#` lines are headings and the prose
+    // IS the model-facing surface, so stripping it would delete what this rule reads.
+    const text = readFileSync(path.join(skillDir, doc), "utf8")
+    const matches = text.match(FIRST_PARTY_GATEWAY) ?? []
+    if (matches.length > 0) hits.push({ file: `packages/core/src/plugin/skill/${doc}`, rule: "first-party-gateway", count: matches.length })
+  }
   // The locale directory is a scan input, not a guarantee: when a batch moves it, the
   // honest answer is "this rule could not run" (exit 2, the code this file already uses
   // for an empty scan at :370). Reading the tree as "no brand drift" on an ENOENT would
@@ -448,7 +460,7 @@ function scan() {
     const text = readFileSync(abs, "utf8")
     occurrences += (text.replace(/packages\/opencode\b/gi, "packages/<fork>").match(/opencode/gi) ?? []).length
   }
-  return { hits, lineage: { occurrences, filesScanned: files.length } }
+  return { hits, skillDocs: skillDocs.map((doc) => `packages/core/src/plugin/skill/${doc}`), lineage: { occurrences, filesScanned: files.length } }
 }
 
 /** Coverage, stated every run. The lineage number is a SUM, so it only means
@@ -493,6 +505,27 @@ function coverageProblem(golden) {
       ? `lineage reads ${recordedOcc} → ${occ}; that is NOT brand progress, it is ${dropped} fewer file(s) being looked at`
       : `lineage ${recordedOcc} → ${occ}`
   return `lineage coverage shrank ${was} → ${now} file(s) (−${dropped}): ${howToReadIt}. What this rule scans is part of the caliber — restore the subtree, or re-record and say what left the tree`
+}
+
+/** Skill-doc discovery is a scan set like lineage coverage: the hit ratchet only ever
+ *  compares files this run actually opened, so a document that leaves the discovered
+ *  set takes its hits with it and the run reads green over an unchecked skill body —
+ *  the exact accident the hard-coded path was renamed around once already. A SHRINK
+ *  is red; growth is stated (a new skill doc is ordinary work, and its own hits still
+ *  meet the golden). A golden without the list cannot answer either way and is red. */
+function skillDocsProblem(golden) {
+  const was = golden?.skillDocs
+  if (!Array.isArray(was)) return `skill-doc coverage: the golden carries no \`skillDocs\` baseline (${JSON.stringify(was)}), so a skill document that stopped being read cannot be noticed — re-record so the scan set travels with the hits; "cannot compare" is not "no drift"`
+  const dropped = was.filter((doc) => !observed.skillDocs.includes(doc))
+  if (dropped.length === 0) return null
+  return `skill-doc scan set shrank: ${dropped.join(", ")} left the discovered set, so its body is no longer gateway-checked and any hits it carried simply stop being reported — restore the document or re-record and say what left the tree`
+}
+
+function reportSkillDocs(golden) {
+  const now = observed.skillDocs.join(", ") || "(none)"
+  const was = Array.isArray(golden?.skillDocs) ? golden.skillDocs.join(", ") : JSON.stringify(golden?.skillDocs)
+  const added = observed.skillDocs.filter((doc) => !golden?.skillDocs?.includes(doc))
+  console.log(`  skill-doc coverage: recorded [${was}] → now [${now}]${added.length ? ` (grew ${added.length} doc(s), stated so the caliber change is visible)` : ""}`)
 }
 
 const observed = {
@@ -554,6 +587,7 @@ if (mode === "record") {
   // the coverage move it is blessing instead of leaving it implicit.
   const prior = existsSync(goldenFile) ? JSON.parse(readFileSync(goldenFile, "utf8")) : null
   reportCoverage(prior)
+  reportSkillDocs(prior)
   // The reason a growth is allowed to become the new baseline has to survive the recording.
   // `observed` is rebuilt from scratch, so the previous `lineageNote` — the sentence naming
   // which CHANGELOG/CI text carries the literal and why it is not new product surface — was
@@ -609,6 +643,9 @@ if (golden.productFiles !== observed.productFiles) {
 if (!Array.isArray(golden.docFiles) || golden.docFiles.join("\u0000") !== DOC_FILES.join("\u0000")) {
   problems.push(`doc-file scan set moved: the golden records ${JSON.stringify(golden.docFiles)} and this run reads ${JSON.stringify(DOC_FILES)} — a README that leaves this list stops being judged line by line, and only the tree-wide bloodline count would notice, which is the backstop this file's own history says cannot replace the named rule`)
 }
+const skillDocProblem = skillDocsProblem(golden)
+if (skillDocProblem) problems.push(skillDocProblem)
+reportSkillDocs(golden)
 // The rule set is asserted, not only its hits — mirroring `surface-semantics.mjs:297-300`, which
 // compares the live RULES ids against the recorded ones. Without this, deleting an entry from the
 // RULES array above makes that rule's hits simply disappear from `observed.hits`, and the loop

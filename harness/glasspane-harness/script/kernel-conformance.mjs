@@ -707,10 +707,25 @@ for (const file of files) {
   const kind = kindOf(file)
   const answers = []
   const oracle = []
+  // The row marker asks "did this fixture's oracle crash?" — `answers.length` is read as
+  // "how many implementations answered" everywhere below, so a record pushed twice reports
+  // what did not happen.
+  let crashed = 0
   for (const entry of loaded) {
+    // `drive` and the oracle are two stages that fail with two different meanings, so they
+    // no longer share one `try`. They used to: an oracle that threw *after* `drive` had
+    // answered fell into the drive catch and pushed a SECOND answer record for the same
+    // implementation, and everything below counts records — so the run printed `[impl×2]` and
+    // "installed (iterate-kernel@0.1.10, dist) disagrees with the installed kernel" for a
+    // corpus holding one kernel. Measured 2026-10-26 on a copy of
+    // `invariant-report.ok-01.json` with `passInput.outcome` set to a value the schema
+    // refuses: `drive` never reads `passInput`, the oracle's unguarded
+    // `InvariantReportSchema.parse` does, and the single red line described a disagreement
+    // that never happened while never naming the fixture whose oracle crashed.
+    let answer = null
     try {
-      answers.push([entry.label, entry.dir, drive(entry.impl, fixture, kind), null])
-      oracle.push([entry.label, oracleFailures(entry.impl, fixture, kind)])
+      answer = drive(entry.impl, fixture, kind)
+      answers.push([entry.label, entry.dir, answer, null])
     } catch (e) {
       const message = String(e?.message ?? e)
       // A TypeError here means *this tool* called something that does not exist —
@@ -727,8 +742,33 @@ for (const file of files) {
       // change while saying nothing about the semantics.
       const verdict = `REJECTED ${e?.name ?? "Error"}` + (message.match(/^[^:]+: ((?:[A-Za-z0-9_.\[]]+: )+)/)?.[0] ?? "")
       answers.push([entry.label, entry.dir, verdict, message])
-      oracle.push([entry.label, []])
+      oracle.push([entry.label, { checked: 0, violations: [] }])
+      // A drive refusal is a verdict the golden may record (`rejected`) — fixtures are
+      // shipped to be refused and the refusals are the contract's teeth — so it is not this
+      // lane's accident, and the oracle has no answer to read.
+      continue
     }
+    try {
+      oracle.push([entry.label, oracleFailures(entry.impl, fixture, kind)])
+    } catch (e) {
+      if (e instanceof TypeError) {
+        console.error(`kernel-conformance: ${file} — the DRIVER's ORACLE stage is wrong, not the kernel: ${String(e?.message ?? e)}`)
+        process.exit(3)
+      }
+      // The oracle crashing is never a verdict about the kernel: it means the lane could not
+      // read the expectations the fixture states for itself. Keep the one `drive` record, name
+      // the fixture AND the stage, and let the tail exit nonzero on it.
+      crashed++
+      failures.push(`${file}: ${entry.label} — the ORACLE stage threw after drive had answered (${String(e?.name ?? "Error")}: ${String(e?.message ?? e).replace(/\s+/g, " ").slice(0, 160)}), so the fixture's own expectations were never read; the answer printed for it is drive's, and nothing here says any kernel disagrees with another`)
+      oracle.push([entry.label, { checked: 0, violations: [] }])
+    }
+  }
+  // The invariant every sentence below depends on: one answer record per implementation. If
+  // it breaks again it is this loop's bug, and saying so beats printing a disagreement between
+  // an implementation and itself.
+  if (answers.length !== loaded.length) {
+    console.error(`kernel-conformance: ${file} collected ${answers.length} answer record(s) for ${loaded.length} implementation(s) — a "disagrees with" line after this would be the driver's bug, not the kernel's`)
+    process.exit(3)
   }
   const [primaryLabel, primaryDir, primaryAnswer, primaryError] = answers[0]
   const digest = sha(primaryAnswer).slice(0, 12)
@@ -748,7 +788,7 @@ for (const file of files) {
   if (answers.length > 1) marks.push(`impl×${answers.length}`)
   const verdictTag = rejected ? "rejected" : "answered"
   console.log(
-    `  ${(oracles.length === 0 && basis !== "golden" ? "?!" : "  ok").padEnd(3)} ${file.padEnd(42)} ${kind.padEnd(20)} ${digest}  ${verdictTag} [${marks.join("+") || "nothing"}]`,
+    `  ${(crashed > 0 ? "!!" : oracles.length === 0 && basis !== "golden" ? "?!" : "  ok").padEnd(3)} ${file.padEnd(42)} ${kind.padEnd(20)} ${digest}  ${verdictTag} [${marks.join("+") || "nothing"}]`,
   )
   compared++
   recorded[file] = { kind, digest, verdict: rejected ? "rejected" : "answered" }
