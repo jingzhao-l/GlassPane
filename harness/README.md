@@ -268,3 +268,28 @@ KERNEL_SRC=/path/to/iterate-skill tools/sync-kernel.sh --target=repo            
   ⑦ **`kernel-pin` 的两条契约落仓之前没有输入驱动**：`--probe` 的退出码就是它唯一消费者的判决（0=问过也答了／漂移是给人看的发现，2=问不出来），10-16 那次是**手工**三态验的（见上面那条 2026-10-16 复验），而树里唯一带 probe 字样的电池 `probe-lane-selftest.sh` 桩的是 `hook-liveness`；两份内核不一致那条 `die(2)` 同样从未被任何输入打过。桩的是 `hook-liveness`；两份内核不一致那条 `die(2)` 也从未被驱动。电池 7→10 组、23→36 条断言。变异三份：`die(2, could not ask…)` → `die(0, …)` ⇒ 只有"no npm on PATH exits 2 rather than reading as green"这一条红（其余 35 条照过）；两份不一致的 refusal 改成永不成立 ⇒ 那组三条全红并退化成一句指错方向的话（正是会把操作者带去 `--record` 覆盖金样的入口）；`installedDirs()` 顺序换成根优先 ⇒ "包级语料才是被量的那一份"红。
   本轮全部变异的落地纪律：锚点 `assert count == 1` 后才替换，撤销一律用自建备份 + `shasum` 核回（不用 `git checkout`，这棵树上有别的线正在写）。第一次变异 `probe` 那支时我把整句 `die(2, …)` 换成 `console.log(...); process.exit(0)` 并留下未闭合的 `/*`，脚本语法崩、全表红——那不算因果证据，重做成只改退出码的可编译变异后才记进上面这条。
 
+
+
+## 搬运分支的生命周期：为什么收口时不该用 `-D`
+
+本线每轮都会留下 `split/*` 这类 `git subtree split` 的搬运产物。它们是**独立历史**——永远不会成为主干
+（`main`）的祖先，所以 `git branch -d` 按"是否并入 HEAD"的判据对它们**恒拒绝**，而收口又要求"用完的那条
+要删"。这个矛盾不是靠 `-D` 解决的：`-D` 恰恰是台账里禁止的那个动作（用它就等于承认落地没被证明）。
+
+办法是让 `-d` 自己去检查它需要的证据——搬运分支的内容被**发布线**承载，而发布线就在另一个远端上：
+
+    git remote add harness git@github.com:jingzhao-l/glasspane-harness.git
+    git fetch harness --prune
+    git branch --set-upstream-to=harness/main split/v0.12.0   # 内容的真收件人
+    git branch -d split/v0.12.0                              # 现在 -d 能判"已并入其上游"
+
+2026-10-26 实测：五条 `split/*`（`glasspane-harness`/`v0.11.1`/`v0.11.1-b`/`v0.12.0`/`v0.12.0-3b`）全部用
+`-d` 删除成功，判据是 `git merge-base --is-ancestor <b> harness/main` 五条都成立，且它们各自承载的树已由
+`v0.11.1`/`v0.12.0` 两个 tag 固定。加一个具名远端还顺带修掉另一件更常发生的事：不再每轮把 URL 手抄进
+`push`/`ls-remote`（抄错一次的代价是推到别人的仓）。
+
+唯一还需要 `-D` 的形状是"**内容已落地、但提交号不是祖先**"——即另一条线把这条分支的活 squash/重组进
+主干之后再落地。这一类 `git cherry` 也会误报 `+`（本仓记过：判落地只认文件字节）。做法：逐文件比 blob
+（本轮 `gp-mcp-sdk` 四个载荷文件 `889494c4/786bccca/353d4f25/f3528837` 与 main 逐字相等，另外三个
+差异文件是因为主干更新、且它们各自新增的行都在主干里逐字存在），把证明写进删除那笔的提交正文，再 `-D`。
+证明不落在正文里的那次删除，等于下一次同步无从判断。
