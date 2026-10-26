@@ -402,3 +402,123 @@ rc=0；Python 侧 `diff_kernel_implementations.py` 是操作者命令，本机�
    ⇒ 发布物与主干不一致，需要一个 patch 号。不在第 1 格落地前取它：带着已知红 lane 取号比等一格更糟。
 3. **本机 daemon 仍是 1.6.2**（壳已 1.21.0）：能力对账会预告 `attach` 一类调用被 methodNotFound 答回；
    换 daemon 要重启正在被另一个会话使用的进程，没动。
+
+## 第二十二次补记（2026-10-26 凌晨，跨夜收尾）· 挂起落成"一个模块＋一个信号对象"，CI 那一格真的绿了，2.11.2 因此能取
+
+### 分支与发布状态（本会话末尾重量）
+
+| 格 | 读数 | 量法 |
+| --- | --- | --- |
+| iterate-skill 主干 | `30b0aea3`（origin/main） | `git rev-parse origin/main`；本会话序列 `eacf3d39`（修复＋8 条用例）→ `e2bfef57`（台账修复）→ `af64d4e9`（取号）→ `b56db8d6`/`30b0aea3`（README、ci.yml 注释、RELEASE.md） |
+| iterate-harness 发布仓 main | `544f851a` | 逐 blob 比对：subtree 628 个路径与发布仓 628 个路径**两侧逐字节相等、无单边文件** |
+| tag | `v2.11.2` = tag 对象 `40522610` → commit `544f851a` | 先核 `git merge-base --is-ancestor` 可达，再打 tag（v0.8.0 那次的 403 教训） |
+| GitHub Release | 非 draft，3 件资产；wheel digest `sha256:8fce4c49…` | `gh release view v2.11.2 --json assets` |
+| PyPI | latest **2.11.2**，`8fce4c4914931205d94ced7d44ac961b13adbe4898b7a28c107a34bdd15ae048`，1,057,470 字节 | `curl pypi.org/pypi/iterate-harness/json` |
+| npm | latest **2.11.2**，`dist.shasum` = `c63f3191e62710f3bae9574e4bb8a0a0e5df6ef1` ＝ `npm publish --dry-run` 打出的值 | publish 后约 8 分钟复量（第一次读还是 2.11.1，那句话保留不删） |
+| CI | **`Python tests` 12/12 success**，`artifacts.total_count=13` | run 40252896348 与发布 head 上的 40255060841，各独立量一次 |
+| glasspane-harness | 0.11.1（上一会话已发，本会话未动） | 父仓 `release-artifact` 等式绿 |
+
+**本机 `ih`**：venv 里是 2.11.2（装的是本机 `uv build` 那份 wheel，其 sha256 与 PyPI/GitHub 两处 digest 逐字相等——
+所以它等价于发布物）；npm 全局包装器 2.11.2；`version.stamp` 与包装器版本一度不一致，导致每次 `ih` 都重跑
+bootstrap 并失败（用户配的 tuna 镜像还没索引 2.11.2，而带 `ALL_PROXY=socks5://` 的环境让 pip 直接报
+"Missing dependencies for SOCKS support"，GitHub 两条候选又被 TLS 拦 ⇒ 三条全败 ⇒ 包装器**如实 fail-closed**，
+这是该有的行为，不是我该绕过的）。修法是清掉代理变量、指官方索引重跑包装器自己的 postinstall，不手改 stamp。
+
+### CI 那一格的终态，以及被它推翻的三句我自己写过的话
+
+判据不是再加仪器，而是把可疑那一桶拆成"一个模块一条腿"：新增 `suite-bisect.yml`（只能手动派发，不进任何
+判定，矩阵由 CI 自己的 plan 现算——手抄的名单会过期，见下面第 4 条形状）。run 40249882415 的读数：
+**32 条腿里 31 条绿，唯一没结束的是 `tests/test_services/test_cron_scheduler.py`，它也是唯一没留下日志
+artifact 的那条**。根因两处，都在 `src/iterate_harness/services/cron_scheduler.py`，都在本机做了对照实验：
+
+1. `_kill_process_group()` 无条件 `os.killpg(os.getpgid(process.pid), SIGKILL)`，而 `test_timeout_job` 递给它
+   的是 AsyncMock；实测 `AsyncMock().pid.__index__()` **返回 1**，于是 Linux 上这行是
+   `kill(-1, SIGKILL)`——kill(2) 写明它是"发给调用者有权发给的每一个进程"，同 uid 的 `Runner.Worker`、步骤的
+   shell、actions 的 node 全在射程内，且打中任意一个就返回 0，所以旧代码的 `except PermissionError`
+   什么都接不到。本机（macOS）实测 `killpg(1, 0)` 回 EPERM ⇒ 被 catch 吞掉 ⇒ 同一行在两台机器上表现相反，
+   这就是"只在 ubuntu 发生、两天里从没在我眼前炸过"的理由。
+2. `read_pid()`/`stop_scheduler()` 只问"这个号活着吗"（`os.kill(pid, 0)`），从不问"是不是写凭证的那个进程"。
+   本机对照实验（`/var/tmp/prove_pid_claim.py`）：把一个从没见过这个 daemon 的活 `sleep` 子进程写进 pid 文件
+   ⇒ 修前 13.5 s 内 SIGTERM＋SIGKILL 把它打死（退出码 `-15`）、事后报"survived SIGKILL"（僵尸也答 signal 0）、
+   pid 文件还在；而对**真** daemon 也返回 False，那 daemon 其实已退 0。修后：陌生进程 0.0 s 被拒且毫发无损、
+   凭证被释放；真 daemon 0.2 s 停住并如实返回 True。
+
+被推翻的三句（都是我自己写的）：
+① **"等待在收集阶段"不成立**——同 run 的 per-bucket 收集步在完全相同的路径上 completed success
+（23:23:04→23:23:12，8 秒）。而且这条事实在 10-25 早一段记录里已经写过一次（"同一 run 里 `Collect the suite`
+13 秒通过"），我却又在 README 里把它反着写了一遍 ⇒ 错因不是笔误，是没读自己写过的记录。
+② **"job 的日志只在 job 结束之后才存在"要说得更狠**：由服务端超时结束的那种结束**根本没有日志**——两条被
+取消的 bucket-06 腿 `gh run view --log` 都回 `log not found`。所以超时那一刀不是最后的仪器，是证据的销毁。
+③ **记录器 8 份快照里 `pytest-watchdog.log` 全部只有那句 armed（76/118 字节），没有一份带 dump** ⇒ 与
+"进程是被杀而不是在等"一致；这也是"六把表都不响"的统一解释：它们都在被打死的那棵树里。
+
+### 本轮新增的通用失效形状（五处，全都出自我自己写的东西）
+
+1. **凭证要带出处，不能只带一个号。** pid 文件、锁文件、"我上次看到的 pid"这类状态，凡是后来会被用来
+   **发信号**的，都必须写下"是谁写的"（这里是当时的 command line），否则读者只能选择盲目相信或永远拒绝。
+   比对时还要挑一个两侧都稳的部分：本机实测解释器会在 exec 之后重写 `argv[0]`（同一进程先答
+   `.venv/bin/python -c …`、随后答 framework 的真实路径），整行比对因此会拒掉一个从未变过的好凭证——
+   第一版就是这么把 7 条原本绿的用例打红的。**取 argv 尾**是量出来的结论，不是设计偏好。
+2. **夹具的形状会决定杀伤半径。** 桩"对任何参数都答话"这条老教训在信号层面同样成立：一个 mock 的
+   `pid` 属性回 1，不是"返回一个假的 pid"，是"把组信号变成 `kill(-1)` 广播"。凡是把 pid/pgid 交给内核的
+   代码，都要问"这个数字是不是一个可用整数、这个组是不是我造的"。新加的
+   `TestKillProcessGroupOwnership` 三条（自己的组→打；共享调用者的组→不打；没有可用 pid→谁都不打）
+   就是把这句话写成判据。
+3. **改 CHANGELOG 时不许用"下一条标题"当锚点，且事后必须数。** `3676343e` 本意改一条 bullet 的措辞，
+   diff 却是 +19/-50，连带删掉了**整个已发布的 `## [2.11.1]` 段落**（标题＋版本判断段＋7 条 bullet）与一条
+   操作者验收 bullet。也就是说 2.11.1 四格都发了，而它的台账一度不存在。修复按父提交逐字节取回、只插入
+   不重组，事后断言四条：插入文本与父提交相等、每个版本标题恰好一行（**按整行匹配**——bullet 里提到那个
+   标题会让子串计数变成 2）、bullet 数不变、`--numstat` 删除列为 0。同形错误本仓写过一次，这次是第二次。
+4. **"某一桶里有哪些模块"是一次 plan 的属性，不是仓的属性。** 同一棵树，本机 plan 的 bucket 06 与 CI plan 的
+   bucket 06 都是 521 tests / 32 modules 但**名单不同**：逐条 import 的计数随环境变（缺不缺 docker/node/可选
+   依赖），FFD 就重新分桶。⇒ 任何写进文档的"具名模块清单"都会过期；要拿名字就去读那一次 run 的 plan 日志。
+   这也是那条诊断线的矩阵坚持由 plan 现算的原因。
+5. **shell 的退出状态不能冒充内容的完整。** 同一夜两次：同步发布仓时一条被行连接符吃掉的 `cp` 让第一次
+   推送"带上了修复却没带上判它的 8 条用例"（逐 blob 比对抓出来，之后每个 `cp` 单独 `cmp`）；诊断包装器时
+   `ih --version 2>&1 | tail` 回 rc=0，而直接跑 `ih --version` 是 **rc=1**——`tail` 的状态又冒充了一次。
+   另外 `$VAR:foo` 在 zsh 里会被当修饰符吃掉（`rec/311-06:pytest-ci.log` 少了 `:r`），复杂命令一律写脚本文件。
+
+### 剩下没闭合的格子，写清不藏
+
+1. **本机 daemon 仍是 1.6.2**（壳 1.21.0）：能力对账会预告 `attach` 一类调用被 methodNotFound 答回。换
+   daemon 要重启正被另一个会话使用的进程，没动。
+2. **本机 `ih` 的 bootstrap 依赖镜像索引**：tuna 收录 2.11.2 之前，任何"让包装器自己重装"的动作都会三条
+   候选全败（而它 fail-closed 是对的）。这一格**已按产品自己的路走完**：清掉代理变量＋指官方索引重跑包装器
+   的 postinstall，由它自己把 `version.stamp` 写成 2.11.2（读数在下面"交付读数"第 0 段）。只影响这台机器，
+   不影响发布物。
+3. **2.11.2 的交付证据已跑**：cron 真往返、陌生 pid 的重放、三条跨仓验收、两扇门的拒绝读数都在下面
+   "交付读数"一节，全部打在 `/usr/local/bin/ih`（= 与 PyPI/GitHub 逐字相同的 2.11.2 运行时）上。
+
+### 交付读数（全部跑在**发布物**上：`/usr/local/bin/ih` → `~/.iterate-harness-npm/venv`，`ih --version` = `iterate_harness 2.11.2`，rc 一律直接取不经管道）
+
+本机升级是走产品自己的路走完的：先 `pip install --no-index` 装本机 `uv build` 那份 wheel（其 sha256 与
+PyPI/GitHub 两处 digest 逐字相等，所以它等价于发布物），再用清掉代理变量＋官方索引重跑包装器的
+postinstall，让**它自己**把 `version.stamp` 写成 `{"version":"2.11.2","pythonEnv":"","source":"iterate-harness==2.11.2"}`
+——不手改 stamp。第一次 `npm install -g` 因 npm 的 allow-scripts 策略没跑 postinstall，stamp 一度停在
+2.11.1，于是每次 `ih` 都重装并失败（三条候选：镜像未索引、GitHub 两条被 TLS 拦），包装器**如实拒绝安装**
+而不是装个旧的——这条行为是对的，需要修的只是本机环境那半边。
+
+0. **升级本身**：见上第 2 格。`ih --version` = `iterate_harness 2.11.2`，`command -v ih` =
+   `/usr/local/bin/ih`，模块解析到 `~/.iterate-harness-npm/venv/lib/python3.11/site-packages/iterate_harness/`
+   （不是任何源码树）——所以下面每一行都是发布物的读数。
+
+1. **cron 一轮真往返**（隔离 `ITERATE_DATA_DIR`/`ITERATE_LOGS_DIR`，不碰用户自己的调度状态）：
+   `status` → 未运行；`start` → `Scheduler started (pid=52063).`；pid 文件 205 字节，内容已是凭证
+   `{"pid": 52063, "cmdline": "/Library/Frameworks/.../Python -c from iterate_harness.servi…"}`；
+   `stop` → `Scheduler stopped.`、文件消失、`pgrep -f _run_daemon` 计数 0。
+2. **缺陷本身在发布物上重放**：把一个从没见过这个 daemon 的活 `sleep` 子进程的 pid 以**旧版裸整数**格式写进
+   pid 文件，`ih iterate cron stop` → rc=0、3.1 s、答 `Scheduler was not running.`；那个陌生进程
+   `poll() is None`（**活着**）；陈旧凭证被释放。2.11.1 上同一句会把它 SIGTERM 打死（本机对照实验实测退出码 `-15`）。
+3. **三条跨仓验收**（操作者命令，不在 CI 里）全 rc=0，在 `544f851a`（tag 内容）上：
+   `check_run_plan_channel.py` 两侧同一份字节、同一顺序的 9 个 id、digest `rp_68049dadeff6c85c…42380e` 相等；
+   `check_glasspane_channel.py` 打得开 `gp_last_evidence` 并取回真证据包（`operationId=op_01M35PAMYNNPJRNCCM6Q2C34XQ`、
+   `attribution.level=soft`、`schemaVersion=glasspane.evidence/0.1`）；
+   `check_glasspane_reverification.py` `sent 1 request, 2/2 answer(s) relayed`（1 条 evidence/diagnosis +
+   1 条具名编码拒绝 `GP_E_NOT_ATTACHED` 带 remedy）。
+4. **两扇门在空项目里的读数**（拒绝即接线证明，不伪造一次通过轮）：`ih iterate gate` rc=0 打
+   `no recipe gate recorded yet … that is absence, not a pass`；`ih iterate glasspane-ledger <不是链的文件>`
+   rc=1 打 `LEDGER_LINK_E_LEDGER_CHAIN … line 1 is not a valid entry: missing required entry field(s): [...]`
+   带 remedy；路径不存在时打 `LEDGER_LINK_E_READ … this command never makes a ledger, it only vouches for one`。
+5. 双向集成五场景的代码在 2.11.2 里**一行未动**（本批改的是 `cron_scheduler`、CI 形状与文档），所以
+   ①②③④⑤ 的判定沿用 2.11.1 那次逐条复核的结论；上面 3、4 两栏是在新发布物上重跑的**接线**读数，
+   不是新的语义变更证明。
