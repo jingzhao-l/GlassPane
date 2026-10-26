@@ -61,7 +61,15 @@ function build(name, want) {
   mkdirSync(path.join(pkg, "schemas"), { recursive: true })
   mkdirSync(path.join(dir, "script"), { recursive: true })
   mkdirSync(path.join(dir, "contracts"), { recursive: true })
-  writeFileSync(path.join(dir, "product.json"), `${JSON.stringify({ name: "glasspane-harness", version: "0.0.0" }, null, 2)}\n`)
+  // `registry` is part of the fixture because `--probe` now refuses to ask an unnamed server
+  // (2026-10-26: it used to run a bare `npm view`, which let an ambient `~/.npmrc` mirror answer the
+  // drift question about some other registry). A fixture that omits a field the real `product.json`
+  // carries turns every probe case into "cannot measure" — which is what it did to the five probe
+  // assertions in CI the first time this ran. The missing-registry shape has its own case below.
+  writeFileSync(
+    path.join(dir, "product.json"),
+    `${JSON.stringify({ name: "glasspane-harness", version: "0.0.0", registry: "https://registry.npmjs.org" }, null, 2)}\n`,
+  )
   cpSync(REAL_SCRIPT, path.join(dir, "script", "kernel-pin.mjs"))
   writeFileSync(path.join(pkg, "package.json"), `${JSON.stringify({ name: PACKAGE, version: want.installedVersion }, null, 2)}\n`)
   writeFileSync(path.join(pkg, "fixtures", "a.ok-01.json"), '{"fixture":"a"}\n')
@@ -124,12 +132,18 @@ function run(dir, ...args) {
 /**
  * `--probe` spawns `npm` off PATH, so a probe case has to control PATH rather than the script.
  * `npmStub` is the answer the fake registry gives; `null` means put no npm on PATH at all.
+ * `extraEnv` lets a case poison the ambient configuration the way a real host does
+ * (`npm_config_registry`, `~/.npmrc`), and the stub records the argv it was called with — because
+ * "the probe asked the pinned host" is only checkable if something writes down what was asked.
  */
-function runProbe(dir, name, answer) {
+function runProbe(dir, name, answer, extraEnv = {}) {
   const bin = path.join(root, `${name}-bin`)
   mkdirSync(bin, { recursive: true })
   if (answer !== null) {
-    writeFileSync(path.join(bin, "npm"), `#!/bin/sh\nprintf '%s\\n' ${JSON.stringify(answer)}\n`)
+    writeFileSync(
+      path.join(bin, "npm"),
+      `#!/bin/sh\nprintf '%s\\n' "$*" > ${JSON.stringify(path.join(root, `${name}-argv.txt`))}\nprintf '%s\\n' ${JSON.stringify(answer)}\n`,
+    )
     chmodSync(path.join(bin, "npm"), 0o755)
   } else {
     rmSync(path.join(bin, "npm"), { force: true })
@@ -139,9 +153,15 @@ function runProbe(dir, name, answer) {
     // With no stub the point of the case is that npm cannot be found, so PATH has to be only the
     // empty bin directory — inheriting the real PATH leaves the real npm in reach and the probe
     // answers (measured: it reported `DRIFTED — publishes 0.1.10`, exit 0, for want of a PATH).
-    env: { ...process.env, PATH: answer === null ? bin : `${bin}:${process.env.PATH}` },
+    env: { ...process.env, PATH: answer === null ? bin : `${bin}:${process.env.PATH}`, ...extraEnv },
   })
-  return { rc: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` }
+  let argv = ""
+  try {
+    argv = readFileSync(path.join(root, `${name}-argv.txt`), "utf8")
+  } catch {
+    // no call was made, which is itself the answer some cases assert on
+  }
+  return { rc: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, argv }
 }
 
 // 1 — a healthy tree: install, lock and golden all describe the same artifact.
@@ -257,6 +277,22 @@ function runProbe(dir, name, answer) {
   const missing = runProbe(dir, "probe-missing", null)
   check("no npm on PATH exits 2 rather than reading as green", missing.rc === 2, `rc=${missing.rc} ${missing.out.slice(0, 300)}`)
   check("and states that the question was NOT answered", missing.out.includes("the drift question was NOT answered"), missing.out.slice(0, 400))
+
+  // The pin is now named by the product, not by the ambient npm config: a tree whose `product.json`
+  // cannot say which registry to ask must refuse the question rather than let `~/.npmrc` or
+  // `npm_config_registry` pick a server and then report that server's `latest` as ours.
+  const unnamed = build("probe-unnamed-registry", { installedVersion: "0.1.7", pinVersion: "0.1.7", lockIntegrity: INTEG })
+  writeFileSync(path.join(unnamed, "product.json"), `${JSON.stringify({ name: "glasspane-harness", version: "0.0.0" }, null, 2)}\n`)
+  const noHost = runProbe(unnamed, "probe-unnamed-registry", "0.1.7")
+  check("a product.json without a registry refuses the probe at exit 2", noHost.rc === 2, `rc=${noHost.rc} ${noHost.out.slice(0, 300)}`)
+  check("and names the missing field as the reason, not a transport failure", noHost.out.includes('"registry" missing or unreadable'), noHost.out.slice(0, 400))
+
+  // And the question must go to the named host even when the environment points elsewhere: an
+  // ambient mirror that can answer faster is not evidence about this product's kernel.
+  const pinned = build("probe-pinned-host", { installedVersion: "0.1.7", pinVersion: "0.1.7", lockIntegrity: INTEG })
+  const ambient = runProbe(pinned, "probe-pinned-host", "0.1.7", { npm_config_registry: "https://mirror.invalid" })
+  check("an ambient npm_config_registry cannot replace the pinned host in the request", ambient.argv.includes("--registry https://registry.npmjs.org"), `argv=[${ambient.argv.trim()}]`)
+  check("and the mirror is never asked", !ambient.argv.includes("mirror.invalid") && ambient.rc === 0, `rc=${ambient.rc} argv=[${ambient.argv.trim()}]`)
 }
 
 console.log(failures === 0 ? "kernel-pin-selftest: every case verified red, and red for the named reason" : `kernel-pin-selftest: ${failures} assertion(s) FAILED`)
