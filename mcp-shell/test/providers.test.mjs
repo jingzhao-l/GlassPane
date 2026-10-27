@@ -47,6 +47,7 @@ import {
   shellProviderDrafts,
   shellProviderRegistry,
 } from "../dist/providers.js";
+import { GP_E_INTERNAL } from "../dist/errors.js";
 import { TOOL_BY_NAME, TOOL_SPECS, executeTool } from "../dist/tools.js";
 import { SERVER_INFO } from "../dist/dispatch.js";
 import { canonicalJson } from "../dist/canonical.js";
@@ -241,7 +242,13 @@ describe("resolution refuses instead of guessing", () => {
     ]);
     const refused = attributeCapability("diagnose", { registry: aeDeclaresPixelOnly });
     assert.equal(refused.status, "refused");
-    assert.equal(refused.error.code, PROVIDER_CODES.missingMethod);
+    // 2026-10-27 finding B2：`code` 这一格是**对外帧**的代号，只有一个家族（`GP_E_*`，
+    // 唯一作者 errors.ts）；内核自己的名字（PROVIDER_CODES.missingMethod）活在 message 里，
+    // 因为集成方要看的就是那句话。下面那条 `requireMethod` 抛出的用例照旧断言内核代号——
+    // 那是在契约层内侧，还没跨到 agent 面前。
+    assert.equal(refused.error.code, GP_E_INTERNAL, JSON.stringify(refused.error));
+    assert.match(refused.error.message, new RegExp(PROVIDER_CODES.missingMethod),
+      `内核的代号不能丢：${refused.error.message}`);
     assert.match(refused.error.message, /diagnose/);
     // The remedy is the half that tells the caller what exists; a generic one leaves it
     // guessing, which is the failure this contract forbids.
@@ -286,7 +293,10 @@ describe("resolution refuses instead of guessing", () => {
 
     const evidenceOnly = attributeCapability("diagnose", { registry: registryFrom([GLASSPANE_FIXTURE[1]]) });
     assert.equal(evidenceOnly.status, "refused");
-    assert.equal(evidenceOnly.error.code, PROVIDER_CODES.unknown);
+    // 同上（finding B2）：帧的 code 是壳的家族，内核的名字在 message 里。
+    assert.equal(evidenceOnly.error.code, GP_E_INTERNAL, JSON.stringify(evidenceOnly.error));
+    assert.match(evidenceOnly.error.message, new RegExp(PROVIDER_CODES.unknown),
+      `内核的代号不能丢：${evidenceOnly.error.message}`);
   });
 
   test("an engine method the registry claims nothing about is not claimed, and not refused", () => {
@@ -376,10 +386,18 @@ describe("an empty requires is a claim, a missing requires is not one", () => {
     // (drop the catch) and this becomes an uncaught KernelSchemaError, not a refusal.
     const refused = attributeCapability("diagnose", { producerVersion: "x".repeat(PROVIDER_ID_MAX_LENGTH + 1) });
     assert.equal(refused.status, "refused");
-    assert.equal(refused.error.code, "KERNEL_E_SCHEMA");
+    // 2026-10-27 finding B2：这一格从前断的是 `refused.error.code === "KERNEL_E_SCHEMA"`。
+    // 那条断言把缺陷钉成了规矩——`code` 是 agent 侧按已发布的表来 parse 的字段，而这张表
+    // 只有一个家族（`GP_E_*`，唯一作者 `errors.ts`）；把一个内核词汇的名字放进对外帧，
+    // 等于给调用方一个它无法分类的错误。内核的名字不能丢（它是集成方要看的那句话），
+    // 所以它活在 message 里。改的是**契约层**，不是把断言放宽。
+    assert.equal(refused.error.code, GP_E_INTERNAL,
+      `对外错误帧的 code 必须是壳自己的家族：${JSON.stringify(refused.error)}`);
+    assert.match(refused.error.message, /\(KERNEL_E_SCHEMA\)/,
+      `内核自己的代号要在 message 里看得见：${refused.error.message}`);
     assert.match(refused.error.message, /this product writes itself/);
     assert.match(refused.error.message, /the daemon's own hello self-report/,
-      "拒绝要说出这张注册表是用哪个测量填的版本：${JSON.stringify(refused.error)}");
+      "拒绝要说出这张注册表是用哪个测量填的版本");
     assert.match(refused.error.remedy, /shellProviderDrafts/);
     for (const field of ["code", "message", "remedy"]) {
       assert.equal(typeof refused.error[field], "string", `error frame 少了 ${field} 这一字段`);

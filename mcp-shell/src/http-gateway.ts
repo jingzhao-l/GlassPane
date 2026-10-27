@@ -27,7 +27,7 @@ import {
   GP_E_STATE_ROOT_REFUSED,
   GP_E_UNKNOWN,
 } from "./errors.js";
-import { engineBody, validateDimension } from "./dimension.js";
+import { dimensionAttributionLine, engineBody, validateDimension } from "./dimension.js";
 import { escapeHTML, renderHTML, renderMarkdown } from "./evidence-report.js";
 import type { EvidencePackReportView } from "./evidence-report.js";
 import {
@@ -174,6 +174,14 @@ const HTTP_PAYLOAD_TOO_LARGE = "GP_HTTP_PAYLOAD_TOO_LARGE";
  * the answer is an honest "not provided here", never a fabricated success.
  */
 const HTTP_NOT_PROVIDED = "GP_HTTP_NOT_PROVIDED";
+/**
+ * A request body that never completed (stalled mid-body, or hung up before
+ * `end`). Separate from {@link HTTP_BAD_REQUEST}, because the two answers imply
+ * different caller actions: one is "your JSON is wrong", this one is "you never
+ * finished sending it". Finding B1, 2026-10-27 — before this existed a stalled
+ * body had no answer at all, only a destroyed socket.
+ */
+const HTTP_BODY_UNREAD = "GP_HTTP_BODY_UNREAD";
 
 /** The client surface the gateway depends on; injectable for tests. */
 export interface EngineClientLike {
@@ -226,6 +234,16 @@ export interface HttpGatewayOptions {
    * stderr* — a promise that has to have a writer behind it (R8-高3).
    */
   report?: (note: string) => void;
+  /**
+   * Ceiling on how long one request body may take to arrive (finding B1,
+   * 2026-10-27). `readBody` had a byte cap and no *time* cap, and the server set
+   * no `requestTimeout`, so a caller that sent headers and then stalled the body
+   * held a handler open until Node's own default fired and destroyed the socket —
+   * which answers the caller with an unstructured `ECONNRESET`, the exact shape
+   * this file already refuses for oversized bodies. Tests may shorten it; it is
+   * never allowed to be absent.
+   */
+  bodyReadTimeoutMs?: number;
 }
 
 export interface HttpGateway {
@@ -361,9 +379,10 @@ export function createHttpGateway(options: HttpGatewayOptions): HttpGateway {
     report(`late engine reply to '${method}' (reply body below, raw engine content and not redacted): ${truncate(stringifyReply(result))}`);
   });
   const expectedToken = Buffer.from(options.token, "utf8");
+  const bodyReadTimeoutMs = options.bodyReadTimeoutMs ?? DEFAULT_BODY_READ_TIMEOUT_MS;
 
   const server = http.createServer((req, res) => {
-    handleHttp(req, res, client, expectedToken).catch((error) => {
+    handleHttp(req, res, client, expectedToken, bodyReadTimeoutMs).catch((error) => {
       // Never let one bad request kill the server; report an honest envelope. The
       // advice is the same fault advice every other route gets, because a blind
       // "…and retry" here is an instruction to re-perform an `act` that may have
@@ -541,6 +560,7 @@ async function handleHttp(
   res: ServerResponse,
   client: EngineClientLike,
   expectedToken: Buffer,
+  bodyReadTimeoutMs: number = DEFAULT_BODY_READ_TIMEOUT_MS,
 ): Promise<void> {
   if (!authorized(req, expectedToken)) {
     fail(res, 401, HTTP_UNAUTHORIZED,
@@ -555,7 +575,7 @@ async function handleHttp(
     return;
   }
   const segments = url.pathname.split("/").filter((part) => part !== "");
-  await dispatch(req, res, url, segments, client);
+  await dispatch(req, res, url, segments, client, bodyReadTimeoutMs);
 }
 
 /** Parse the request target against a fixed base; the host field is never trusted. */
@@ -576,6 +596,7 @@ async function dispatch(
   url: URL,
   segments: readonly string[],
   client: EngineClientLike,
+  bodyReadTimeoutMs: number = DEFAULT_BODY_READ_TIMEOUT_MS,
 ): Promise<void> {
   const [v1, resource, id] = segments;
   if (v1 !== "v1") {
@@ -605,11 +626,11 @@ async function dispatch(
     }
   } else if (req.method === "POST") {
     if (resource === "tools" && segments.length === 3 && id !== undefined) {
-      await handleToolForward(id, req, client, res);
+      await handleToolForward(id, req, client, res, bodyReadTimeoutMs);
       return;
     }
     if (resource === "recipes" && id === "validate" && segments.length === 3) {
-      await handleRecipeValidate(req, res);
+      await handleRecipeValidate(req, res, bodyReadTimeoutMs);
       return;
     }
   }
@@ -938,6 +959,7 @@ async function handleToolForward(
   req: IncomingMessage,
   client: EngineClientLike,
   res: ServerResponse,
+  bodyReadTimeoutMs: number = DEFAULT_BODY_READ_TIMEOUT_MS,
 ): Promise<void> {
   const spec = FORWARDABLE_TOOLS.get(name);
   if (spec === undefined) {
@@ -949,13 +971,20 @@ async function handleToolForward(
 
   let body: unknown;
   try {
-    const text = await readBody(req, MAX_REQUEST_BODY_BYTES);
+    const text = await readBody(req, MAX_REQUEST_BODY_BYTES, bodyReadTimeoutMs);
     body = JSON.parse(text);
   } catch (error) {
     if (error instanceof HTTPPayloadTooLargeError) {
       fail(res, 400, HTTP_PAYLOAD_TOO_LARGE,
         `request body exceeds ${MAX_REQUEST_BODY_BYTES} bytes`,
         "shrink the request payload and retry");
+      return;
+    }
+    if (error instanceof HTTPBodyUnreadError) {
+      fail(res, 408, HTTP_BODY_UNREAD,
+        `request body never completed: ${error.message}`,
+        `send the whole body in one request (Content-Length must match what you write) and retry; `
+        + `this gateway waits ${bodyReadTimeoutMs}ms for one body before it answers this way`);
       return;
     }
     fail(res, 400, HTTP_BAD_REQUEST,
@@ -1019,7 +1048,7 @@ async function handleToolForward(
         return;
       }
     }
-    ok(res, result, attribution);
+    ok(res, result, attribution, declared.dimension);
   } catch (error) {
     await failEngine(res, error, spec, engineBody(checked.value));
   }
@@ -1044,14 +1073,25 @@ function handleEvidenceStats(res: ServerResponse): void {
  * is a daemon CLI capability, not a socket method on this build. The recipe JSON
  * body is drained/disposed but never "validated" here, and no fake valid result
  * is minted — the caller is pointed at the daemon CLI that genuinely validates. */
-async function handleRecipeValidate(req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handleRecipeValidate(
+  req: IncomingMessage,
+  res: ServerResponse,
+  bodyReadTimeoutMs: number = DEFAULT_BODY_READ_TIMEOUT_MS,
+): Promise<void> {
   try {
-    await readBody(req, MAX_REQUEST_BODY_BYTES);
+    await readBody(req, MAX_REQUEST_BODY_BYTES, bodyReadTimeoutMs);
   } catch (error) {
     if (error instanceof HTTPPayloadTooLargeError) {
       fail(res, 400, HTTP_PAYLOAD_TOO_LARGE,
         `request body exceeds ${MAX_REQUEST_BODY_BYTES} bytes`,
         "shrink the request payload and retry");
+      return;
+    }
+    if (error instanceof HTTPBodyUnreadError) {
+      fail(res, 408, HTTP_BODY_UNREAD,
+        `request body never completed: ${error.message}`,
+        `send the whole body in one request and retry; this gateway waits ${bodyReadTimeoutMs}ms `
+        + "for one body before it answers this way");
       return;
     }
     fail(res, 400, HTTP_BAD_REQUEST, "could not read the request body", "resend the request");
@@ -1265,10 +1305,19 @@ function makeHardFailureNote(
  * therefore gets the same answer on either doorway, and a caller asking who produced a
  * judgement gets one answer rather than one per door.
  */
-function ok(res: ServerResponse, result: unknown, attribution?: string): void {
-  writeJson(res, 200, attribution === undefined
-    ? { ok: true, result }
-    : { ok: true, result, attribution });
+function ok(res: ServerResponse, result: unknown, attribution?: string, dimension?: string): void {
+  // `dimension` is this doorway's echo of a caller-declared dimension (finding B3,
+  // 2026-10-27): the MCP doorway answers the same declaration with its own content
+  // item (`tools.ts`, `dimensionAttributionLine`), and a curl caller that declared one
+  // got nothing back — two doors, two answers about the same argument, which is the
+  // family this file has already been amended for. The sentence is authored once in
+  // `dimension.ts` and reused here rather than re-spelled, so the two doorways cannot
+  // drift in wording while agreeing in meaning. Undeclared calls get no key at all:
+  // the daemon's `result` bytes do not move.
+  const body: Record<string, unknown> = { ok: true, result };
+  if (attribution !== undefined) body.attribution = attribution;
+  if (dimension !== undefined) body.dimension = dimensionAttributionLine(dimension);
+  writeJson(res, 200, body);
 }
 
 function fail(res: ServerResponse, status: number, code: string, message: string, remedy: string): void {
@@ -1567,10 +1616,46 @@ class HTTPPayloadTooLargeError extends Error {
   }
 }
 
-function readBody(req: IncomingMessage, limit: number): Promise<string> {
+/**
+ * The body never arrived, for one of two stated reasons: the caller went quiet
+ * mid-body, or the connection closed before `end`. Both are answers this surface
+ * used to *not have* — finding B1 (2026-10-27): `readBody` capped bytes and had no
+ * ceiling on time, and a stalled body kept the handler pending until Node destroyed
+ * the socket, so the caller received an `ECONNRESET` with no `{code,message,remedy}`
+ * while the gateway held a request open. The cause is carried in the message because
+ * "quiet" and "gone" are different facts for the caller to act on.
+ */
+class HTTPBodyUnreadError extends Error {
+  constructor(reason: string, timeoutMs: number) {
+    super(`request body did not arrive (${reason}; ceiling ${timeoutMs}ms)`);
+    this.name = "HTTPBodyUnreadError";
+  }
+}
+
+/** How long one request body may take, when the caller did not choose (see {@link HttpGatewayOptions.bodyReadTimeoutMs}). */
+export const DEFAULT_BODY_READ_TIMEOUT_MS = 15_000;
+
+function readBody(req: IncomingMessage, limit: number, timeoutMs: number = DEFAULT_BODY_READ_TIMEOUT_MS): Promise<string> {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks: Buffer[] = [];
+    let settled = false;
+    const finish = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      action();
+    };
+    const timer = setTimeout(() => {
+      finish(() => {
+        chunks.length = 0;
+        req.pause();
+        reject(new HTTPBodyUnreadError("no complete body within the read ceiling", timeoutMs));
+      });
+    }, timeoutMs);
+    // A pending body timer must not be the reason a process stays alive: the
+    // gateway's own shutdown path is bounded by the socket, not by this timer.
+    timer.unref?.();
     req.on("data", (chunk: Buffer) => {
       size += chunk.length;
       if (size > limit) {
@@ -1580,14 +1665,23 @@ function readBody(req: IncomingMessage, limit: number): Promise<string> {
         // `{code,message,remedy}` at all — measured with a 300 KiB POST — so the
         // remedy "shrink the request payload and retry" never reached anyone and
         // the caller retried the same oversized body.
-        chunks.length = 0;
-        req.pause();
-        reject(new HTTPPayloadTooLargeError(limit));
+        finish(() => {
+          chunks.length = 0;
+          req.pause();
+          reject(new HTTPPayloadTooLargeError(limit));
+        });
         return;
       }
       chunks.push(chunk);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", (error) => reject(error));
+    req.on("end", () => finish(() => resolve(Buffer.concat(chunks).toString("utf8"))));
+    // `close` before `end` is the caller hanging up mid-body. Without this arm the
+    // promise never settles and the handler — plus the byte ceiling's bookkeeping —
+    // is held for a request that no longer exists.
+    req.on("close", () => finish(() => {
+      chunks.length = 0;
+      reject(new HTTPBodyUnreadError("the connection closed before the body ended", timeoutMs));
+    }));
+    req.on("error", (error) => finish(() => reject(error)));
   });
 }

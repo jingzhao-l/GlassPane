@@ -432,15 +432,31 @@ export function attributeCapability(engineMethod: string, query: CapabilityQuery
       },
     };
   } catch (error) {
+    // Both classes below are the KERNEL's vocabulary (`KERNEL_E_*`), and this value is
+    // about to become an agent-facing tool error frame. The contract this repository
+    // enforces on that surface is one code family — `GP_E_*`, authored only in
+    // `errors.ts` — so the kernel's name is carried in the message (never dropped: it
+    // is the precise fault an integrator needs) while the `code` field answers in the
+    // language the caller is parsing. Finding B2, 2026-10-27: forwarding the raw
+    // `KERNEL_E_*` here made the frame unparseable by anyone holding the published
+    // code table, and the HTTP twin mapped it through the `default` arm to a 422.
     if (error instanceof KernelProviderError) {
-      return { status: "refused", error: { code: error.code, message: error.message, remedy: error.remedy } };
+      return {
+        status: "refused",
+        error: {
+          code: GP_E_INTERNAL,
+          message: `provider registration refused (${error.code}): ${error.message}`,
+          remedy: error.remedy,
+        },
+      };
     }
     if (error instanceof KernelSchemaError) {
       return {
         status: "refused",
         error: {
-          code: error.code,
-          message: `${error.message} — the kernel refused a registration this product writes itself, built with the version from ${registrationVersionSource(measured, usable(own))}`,
+          code: GP_E_INTERNAL,
+          message: `the kernel refused a registration this product writes itself (${error.code}): `
+            + `${error.message} — built with the version from ${registrationVersionSource(measured, usable(own))}`,
           remedy: "fix shellProviderDrafts in mcp-shell/src/providers.ts; it is the contract both harnesses read, "
             + "so it cannot be relaxed at a call site — run node scripts/check-kernel-corpus.mjs and compare "
             + "against kernel/fixtures/provider-registration.ok-01.json",
