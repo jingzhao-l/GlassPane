@@ -128,3 +128,19 @@ npm 两个包的 `bin` 声明没动，但任一项都足以否掉 patch。
 
 见本轮最终汇报第 ⑧ 项的表：删了什么、留下什么、各自判据。收口后的
 `git worktree list` 行数与 `git branch -a` 条数也在那一处给出。
+
+## 9. tag 之后又发现的一条（E2）与它为什么是 1.24.1 而不是重开 v1.24.0
+
+第 3 节的表写完之后，面板那条泳道的 E2（"项目页需要重启的横幅可能在重启成功之后仍亮着"）
+被我自己回代码复核确认为真：收起只挂在 `.onChange(of: settings.restartOutcome)`，
+而它只在项目页在屏上时收得到变化；另一条路径只在 liveness **翻转**时触发。
+"发布之后才发现的修复不许移动已发布的 tag"是 1.20.0 → 1.20.1 立下的规矩，
+所以这一条走 1.24.1（patch：状态文件字段、退出码集合、CLI 参数、`bin` 声明四项都没动），
+`v1.24.0` 的 tag / Release / registry 三格保持原样。
+
+E2 的修法与判据归宿写在 `CHANGELOG.md` 的 `[1.24.1]` 一节。两处值得留档的账：
+① 它撞红了既有的形状闸 `ReviewPanelTests.testShapeDeadEndPruneButtonIsNotDestructive`
+   ——那条闸要求清除那一行里写着 `case .confirmed`，而判据搬家后这不再成立。
+   改判的是**机制**（①清除必须问那道唯一谓词；②谓词定义处必须仍写着 `case .confirmed`），
+   强度不降：无条件清一行照样红，把谓词掏空也照样红。这不是把别人的红洗掉。
+② 复跑计数：`swift test --package-path engine` **1447 条 / 4 跳过 / 0 失败**（1444 + 3 条新用例）。
