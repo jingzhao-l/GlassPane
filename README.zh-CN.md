@@ -708,6 +708,7 @@ npm 发布走 `release.yml` 的 provenance 通道。
 | [P6](specs/GlassPane_P6_实施规格_v6.0_探针SDK与LLDB桥实现.md) | 探针 SDK、LLDB 桥、公开发布执行记录 |
 | [Audit 2026-09-22](specs/GlassPane_Audit_2026-09-22_全量审查与UI迭代.md) | 全量审查与 UI 迭代记录 |
 | [双向集成 2026-10-25](specs/GlassPane_双向集成_2026-10-25_状态.md) | 与审查回路的五个双向场景逐行状态、各自的证据路径，以及哪些是实测、哪些只是声明 |
+| [更新系统 2026-10-26](specs/GlassPane_更新系统_2026-10-26_状态.md) | 应用内更新为什么会"探测到了却装失败"：四条根因、部分成功＋一条可照抄的 npm 补救这条契约，以及逐版在发布物上取到的读数 |
 
 另一半产品的文档跟着它自己走：[GlassPane Harness 文档](https://github.com/jingzhao-l/glasspane-harness/tree/main/docs)
 覆盖安装、工具面、证据纪律与发布线。
