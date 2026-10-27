@@ -144,3 +144,28 @@ E2 的修法与判据归宿写在 `CHANGELOG.md` 的 `[1.24.1]` 一节。两处�
    改判的是**机制**（①清除必须问那道唯一谓词；②谓词定义处必须仍写着 `case .confirmed`），
    强度不降：无条件清一行照样红，把谓词掏空也照样红。这不是把别人的红洗掉。
 ② 复跑计数：`swift test --package-path engine` **1447 条 / 4 跳过 / 0 失败**（1444 + 3 条新用例）。
+
+## 10. 本轮我自己犯的两次过程错（记下来，因为它们都曾差点变成"看不见的红"）
+
+① **把 `assert-tag-ready.mjs` 接在管道后面**：`node scripts/assert-tag-ready.mjs … | tail -2 && git tag …`
+——`$?` 取的是 `tail` 的 0，闸的拒绝被洗成"通过"，v1.24.1 于是**在闸没被读到的情况下**打了出去。
+这正是本仓在 `release-steps-must-not-be-piped` 与"`bun run X | tail` 的 `$?` 是 tail 的"两条里
+点过名的形状，我这一轮第三次撞上它。事后独立复核的结论：`v1.24.1` 指向 `d82e71be`，
+它确实是 `origin/main` 的 tip 且那一笔的 CI（`event=push`）**success**，所以锚点在实质上是合法的、
+不需要让号；但**当时的我并不知道这件事**——判据的退出码被我自己丢掉了，剩下的是运气。
+规矩应写成：链上每一步单独取 rc，或用 `set -o pipefail` 并显式检查。
+
+② **`884b1f73`（`release: 1.24.1`）那笔 CI 是红的**：那一格红的是 `tool-surface` 的分母
+（E2 让 engine 长了 19 行，而金样还没重记）。它不是被掩盖的红，也不是要放宽的判据——
+下一笔 `d82e71be`（`chore(harness)` 重记）转绿，tag 只打在这之后。
+留在台账里是因为：**一串提交中间有一笔红**这件事本身要在汇报里说得出来，
+不能只报"最新一条是 success"。
+
+## 11. 收口快照
+
+`git status --porcelain` = 0 行；`origin/main` == HEAD == `d82e71be`；
+`git worktree list` 1 行；`git branch -a` 6 条（`main`、subtree 搬运分支 `split/glasspane-harness`
+（其 sha == `harness/main`，是发布锚点，不删）、远端 `origin/main` / `harness/main` 与两个 HEAD 别名）；
+开放 PR 0；draft Release 0；npm 无待批 staged publish；
+CI 最新一条（`d82e71be`，`event=push`）success。
+registry：`glasspane-mcp` 与 `glasspane-install` 的 `latest` 与具名版本都是 **1.24.1**。
