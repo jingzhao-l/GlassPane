@@ -12,6 +12,30 @@ contract does not).
 
 （空。本轮收口后没有未归号的条目。）
 
+## [0.12.2] — 2026-10-27
+
+**版本判断：patch。** 与 0.12.1 同一格形状，同一条尺子：父仓 `harness/tools/release-artifact.mjs` 要求
+**已发布 tag 背后的树等于主干 `harness/glasspane-harness` 的子树**，而它在 `9ba1183c` 之后又开口了。
+实测判决（那条 lane 自己打出来的读数，run `40485588489`）：v0.12.1 的树是
+`ab049bff0dad1e6261f23038043ed764f6b429cb`，主干子树是 `b1c3f189949105c05c96065df147e9326f8f6123`，
+三个文件差在"主干有、发布物没有"这一个方向——`README.md` −53 行、`README.zh-CN.md` −41 行、
+`SYNCLOG.md` −75 行；闸那句 remedy 数得很清：**其中两条不是发布台账，所以没有豁免可用**
+（`2 of the differing path(s) are not the release ledger, so no allowance applies`），
+唯一能闭合它的动作是"再切一个号，把主干这一侧交出去"。已发布的 tag 一律不动。
+
+本版不含任何行为变化：
+
+- 两份双语 README 里关于**与 iterate-harness 双向集成**的那段说明（`9ba1183c`，另一条会话写的）。
+  本号只做搬运与取号，那段文字的准确性由它自己的提交负责，这里不替它作背书。
+- `SYNCLOG.md` 第二十四次会话的账（0.12.1 的三格读数与"为什么现在就发一个只有文档的版本"）。
+- 版本线 8 处：`product.json`（`version` 与 `install.curl` 两行）、`packages/opencode/package.json`、
+  `scripts/install.sh` 的 curl 一行、`docs/install.md` 两处（第二处带
+  `GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1`，那条兜底通道的 URL 也是同一位点）、两份 README 各一处。
+  每个文件都是同行改写（`git diff --numstat` 六条位点 added == deleted），历史条目一字未动。
+- 父仓侧的金样跟了一笔：`harness/contracts/fork-diff.json` 里那两个被点名的 hash
+  （`README.md 57e2f87f → 58859216`、`README.zh-CN.md 44fc787e → 17d3fcab`），三张计数不变
+  （`4640/6744 byte-identical, 285 edited, 112 added, 1707 deleted`）⇒ 分叉面没有被这两笔动过。
+
 ## [0.12.1] — 2026-10-26
 
 **版本判断：patch。** 本产品的 pre-1.0 口径是"产品面/CLI 形状变动 = minor，纯修复 = patch"。本版不含任何
