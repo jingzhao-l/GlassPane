@@ -2,6 +2,81 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-27（第二十四次会话）· 取号 0.12.1：一次"为了让父仓那把尺子重新成立"的发布，和它真正的理由
+
+本轮搬运仓里只有两类改动，都不是代码：
+
+- `65b81727` 把两份 README 按 iterate-skill 的骨架重写，安装渠道改成 **npm 优先**
+  （`harness/glasspane-harness/README.md` +45、`README.zh-CN.md` +45，`git show --stat` 实数
+  `93 insertions(+), 3 deletions(-)`）。
+- `8f673c1b` 版本线 0.12.0 → 0.12.1，七个个位点（`product.json` 的 version 与 `install.curl`、
+  `packages/opencode/package.json`、`scripts/install.sh`、`docs/install.md` 两处、两份 README）
+  加一条 CHANGELOG 条目。
+
+### 为什么现在就发一个只有文档的版本
+
+父仓那把尺子 `harness/tools/release-artifact.mjs` 要求搬运仓 `refs/heads/main` **始终**等于主干的
+`harness/glasspane-harness` 子树，只给已发布的 tag 一格具名豁免（`△ artifact`），且只允许
+`SYNCLOG.md` / `CHANGELOG.md` 两个文件、只允许"台账落后"这一个方向。v0.12.0 之后主干又落了两笔，
+其中 README 不属于那两个文件——于是那一格从"记账豁免"变成了真红。红本身不是问题，**它说的是
+"发布物里没有主干已经有的东西"**：那正是 0.7.10 与 0.8.0 两次事故的形状。
+用户 2026-10-27 在"等下一轮带上真修复"与"现在发 0.12.1"之间选了后者。
+
+### 开工与前置（逐项量，不沿用上一轮的读数）
+
+- 开工 HEAD `434bc516`，`git status --porcelain` **0 行**；`git rev-parse HEAD origin/main` 两两相等。
+- `df -k /Volumes/Eng-Dev` 可用 20,413,332 KB ≈ 19.5 GiB（上一轮记的是 17.6 GiB，本轮多了两个
+  发布物缓存；这条只是要说"够不够跑三平台构建"，够）。
+
+### 三格读数（每条写明命令，没有一条是"应该已经"）
+
+1. **搬运分支**。`git subtree split --prefix=harness/glasspane-harness -b split/glasspane-harness`
+   → `f21b4f32`。推之前先证明它是同一棵树，不是靠"看起来一样"：
+   `git rev-parse split/glasspane-harness^{tree}` 与 `git rev-parse HEAD:harness/glasspane-harness`
+   都是 `ab049bff0dad1e6261f23038043ed764f6b429cb`。
+   **这次是快进**：`git merge-base --is-ancestor harness/main split/glasspane-harness` 成功
+   （旧远端头 `6b361236` 是新链的祖先），所以按 `docs/release.md` 第 3 步用普通推送，
+   `--force-with-lease` 那条兜底没有动用。旧教训"重切不是快进、SHA 必不同"说的是**签名链**那一次
+   （10-18），不是每一次——把它当恒真就会在不需要强推时强推。
+2. **tag 与 GitHub Release**。先把 `harness/main` 推到 `f21b4f32` 并 `git fetch harness` 回读确认，
+   **再**打 tag（10-16 那条 403 就是顺序反了）。`git push harness split/glasspane-harness:refs/tags/v0.12.1`
+   → `git ls-remote --tags harness` 回 `f21b4f32`。
+   tag 推送触发的 `release.yml` run `40419832597` 全绿（9m26s：version-check → create-release →
+   两个 binary → checksums+sign → publish-release），`gh release view v0.12.1 --json isDraft,assets`
+   回 `isDraft=false` 与 6 件资产（两平台 zip + 各自 `.asc` + `SHA256SUMS.txt` + 其 `.asc`）。
+   `version-check` 里那格"CI for the commit this tag points at"是**等**到的不是撞上的：
+   `script/assert-ci-green.mjs --budget 1800000 --poll 30000`，本机推 main 与推 tag 只差一分钟，
+   CI run `40419788621` 随后两 job 全绿。
+3. **签名锚点**。`gpg --verify --status-fd 1 SHA256SUMS.txt.asc SHA256SUMS.txt` 打出的
+   `[GNUPG:] VALIDSIG 0929EA31DF4F7429F63FC53189D88B1D043A1298 …` 与父仓
+   `updater/lib/signature.js` 的 `PINNED_PRIMARY_FINGERPRINT`（第 118 行）逐字相等——
+   即这台机器上那份产品自己认得的钥匙。
+4. **npm**。`gh workflow run release.yml --repo jingzhao-l/glasspane-harness --ref v0.12.1
+   -f publish_npm=true -f confirm=true` → run `40420968912` 全绿，含最后一格
+   `install the published bytes and run them`（装的是 registry 上的包，不是本地暂存树）。
+   `npm view <包> version --prefer-online` 三个都回 `0.12.1`：
+   `glasspane-harness` / `glasspane-harness-darwin-arm64` / `glasspane-harness-darwin-x64`。
+
+### 金样与闸
+
+- `harness/contracts/fork-diff.json` 跟了两笔：`fd390bfc` 记两份 README 的哈希，`434bc516` 记
+  版本线改动的 7 个 our-side 条目；两次都核对 `edited 285 / added 112 / deleted 1707` 的**计数不变**
+  且 our-side 键集对称差为空——只增不减、只换哈希，说明分叉面没有被这轮动过。
+- 父仓 `harness/tools/product-surface.mjs`：6587 处一致、0 处问题（版本线七个位点加 CHANGELOG 之后）。
+- `scripts/check-doc-links.mjs`、`check-version.mjs`、`tool-surface`、`brand-surface` 各自绿；
+  父仓 CI run `40419140202` 重跑 `--failed` 后 10 个 job 全绿（首跑红在 `release-artifact`，
+  那是重切**之前**的时序，正是这条尺子该说的）。
+- 本轮**没有**在本机跑 `bun run typecheck` / 套件——搬运仓只有文档与版本字符串，那条通道由
+  CI 的 `install, typecheck, fixed points` 与 `install.sh fallback channel` 两个 job 覆盖，都绿。
+
+### 替用户做的两个决定（各带回滚）
+
+1. **0.12.1 只装文档**。依据：三格里没有一处行为变化，`fork-diff` 的 our-side 计数不变。
+   代价：npm 上多一个只改文档的版本号，且不可回收。回滚：不存在"撤回"，只有发 0.12.2 并
+   在 CHANGELOG 写明 0.12.1 是文档版。
+2. **不动 `~/glasspane` 与本机全局 npm 层**——那是父仓那一轮的事，记在
+   `specs/GlassPane_更新系统_2026-10-26_状态.md`。
+
 ## 2026-10-26（第二十三次会话）· 取号 0.12.0：一条寄给不存在地址的移交，与三条"结构上不会红"的尺子判据
 
 ### 开工与前置（逐项量，不沿用上一轮的读数）
