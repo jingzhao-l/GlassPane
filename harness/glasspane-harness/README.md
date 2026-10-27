@@ -275,7 +275,7 @@ layer, [`iterate-kernel`](https://www.npmjs.com/package/iterate-kernel), and the
 stated honestly: whether the two implementations still agree on a case the corpus never wrote
 down is answered by `scripts/diff_kernel_implementations.py`, an operator command rather than a
 CI step. The exchange from the loop's side is documented in the iterate-harness README
-([GlassPane integration](https://github.com/jingzhao-l/iterate-harness#-glasspane-integration)),
+([Two-way integration with GlassPane](https://github.com/jingzhao-l/iterate-harness#-two-way-integration-with-glasspane)),
 and from the engine's side in [GlassPane's two-way integration section](https://github.com/jingzhao-l/GlassPane#two-way-integration-with-the-review-loop).
 Implementation detail: [`docs/kernel-integration.md`](docs/kernel-integration.md) and
 [`docs/evidence.md`](docs/evidence.md).

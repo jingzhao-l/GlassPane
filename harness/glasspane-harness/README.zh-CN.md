@@ -230,7 +230,7 @@ GlassPane Harness 是第二对产品里的一半。引擎回答"这次操作到�
 [`iterate-kernel`](https://www.npmjs.com/package/iterate-kernel)，边界也说清楚：
 "两份实现对语料没写过的案子还一致吗"由 `scripts/diff_kernel_implementations.py` 回答——它是给操作者
 跑的命令，不在 CI 步骤里。回路那一侧的说明见 iterate-harness README 的
-[GlassPane 集成](https://github.com/jingzhao-l/iterate-harness#-glasspane-integration)，
+[与 GlassPane 的双向集成](https://github.com/jingzhao-l/iterate-harness/blob/main/README.zh-CN.md#-与-glasspane-的双向集成)，
 引擎那一侧见 [GlassPane 的双向集成小节](https://github.com/jingzhao-l/GlassPane#two-way-integration-with-the-review-loop)。
 实现细节：[`docs/kernel-integration.md`](docs/kernel-integration.md) 与
 [`docs/evidence.md`](docs/evidence.md)。
