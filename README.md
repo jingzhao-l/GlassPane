@@ -53,6 +53,22 @@ attach → observe → act → measure the change → assert → diagnose if not
        → roll back to the checkpoint → export the evidence pack
 ```
 
+### The two GlassPane projects
+
+**GlassPane is one half of a pair.** The other half is **[GlassPane Harness](https://github.com/jingzhao-l/glasspane-harness)**, a coding agent for the terminal that carries the same `gp_*` surface natively. The two projects are installable and usable separately, but they are designed around one contract:
+
+- **this repository — the engine and the transport.** The Swift daemon measures the app; `glasspane-mcp` exposes the measurement over MCP to Claude Desktop, Cursor, or any other MCP host. Install with the one-command installer below.
+- **[GlassPane Harness](https://github.com/jingzhao-l/glasspane-harness) — the agent side.** An AI coding agent (an upstream [opencode](https://github.com/anomalyco/opencode) fork) that calls the engine through native `gp_*` tools, appends verified calls to a hash-chained decision log, and re-injects those evidence anchors when a long session is compacted. Install it from npm; it expects the engine to be running with Accessibility granted and prints the exact remedy when it is not.
+
+The division of labour is the same as the one described above: **the engine decides what the application did, and the harness transcribes; it never invents a verdict.** Neither product is a client of the other's private API — both consume the same published contract layer, so the formats that cross the boundary are one definition rather than two files evolving apart. The harness is installable on its own:
+
+```bash
+# The agent side. Requires the engine below to be installed and running with Accessibility granted.
+npm install -g glasspane-harness
+```
+
+> The rest of this document describes **this repository**: the engine, the MCP shell and the installer. The harness has its own README — [GlassPane Harness](https://github.com/jingzhao-l/glasspane-harness) (source [`harness/glasspane-harness/README.md`](harness/glasspane-harness/README.md)).
+
 ### The problem it solves
 
 On macOS, an agent's toolchain covers the static half of development well: compile, type-check, review, run tests that live in the terminal. The runtime half of a GUI app is where it falls off a cliff:
@@ -90,22 +106,6 @@ Taking a screenshot and asking a vision model about it is a real option, and it 
 The important line is the last two. A screenshot workflow cannot answer "put it back", and it cannot answer "show me" without re-opening the conversation.
 
 To be fair about the trade-off: a vision model can still judge things GlassPane does not — visual taste, whether a design *looks* right, or content in a view that exposes no accessibility tree at all. GlassPane measures; it does not have taste. Use both for what they are good at.
-
-### The two GlassPane projects
-
-GlassPane is deliberately one half of a pair. The other half is **[GlassPane Harness](https://github.com/jingzhao-l/glasspane-harness)**, a coding agent for the terminal that carries the same `gp_*` surface natively:
-
-- **this repository — the engine and the transport.** The Swift daemon measures the app; `glasspane-mcp` exposes the measurement over MCP to Claude Desktop, Cursor, or any other MCP host. Install with the one-command installer below.
-- **[GlassPane Harness](https://github.com/jingzhao-l/glasspane-harness) — the agent side.** An AI coding agent (an upstream [opencode](https://github.com/anomalyco/opencode) fork) that calls the engine through native `gp_*` tools, appends verified calls to a hash-chained decision log, and re-injects those evidence anchors when a long session is compacted. Install it from npm; it expects the engine to be running with Accessibility granted and prints the exact remedy when it is not.
-
-The division of labour is the same as the one described above: **the engine decides what the application did, and the harness transcribes; it never invents a verdict.** Neither product is a client of the other's private API — both consume the same published contract layer, so the formats that cross the boundary are one definition rather than two files evolving apart. The harness is installable on its own:
-
-```bash
-# The agent side. Requires the engine below to be installed and running with Accessibility granted.
-npm install -g glasspane-harness
-```
-
-> The rest of this document describes **this repository**: the engine, the MCP shell and the installer. The harness has its own README — [GlassPane Harness](https://github.com/jingzhao-l/glasspane-harness) (source [`harness/glasspane-harness/README.md`](harness/glasspane-harness/README.md)).
 
 ### Relationship to the iterate ecosystem
 
@@ -552,6 +552,7 @@ Releases: `node scripts/set-version.mjs <semver>` writes the whole version line;
 | [P6](specs/GlassPane_P6_实施规格_v6.0_探针SDK与LLDB桥实现.md) | probe SDK, LLDB bridge, public publish record |
 | [Audit 2026-09-22](specs/GlassPane_Audit_2026-09-22_全量审查与UI迭代.md) | full review and UI iteration record |
 | [双向集成 2026-10-25](specs/GlassPane_双向集成_2026-10-25_状态.md) | the five two-way scenarios with the review loop: row-by-row state, the evidence path for each, and what is measured rather than stated |
+| [更新系统 2026-10-26](specs/GlassPane_更新系统_2026-10-26_状态.md) | why an in-app update could detect a release and still fail: the four root causes, the partial-success contract with the one npm command it hands you, and the release-by-release readings taken on the published artifacts |
 
 The sibling product's documents live with it: [GlassPane Harness documentation](https://github.com/jingzhao-l/glasspane-harness/tree/main/docs) covers install, the tool surface, the evidence discipline and the release line.
 

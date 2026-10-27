@@ -58,6 +58,31 @@ attach → observe → act → measure the change → assert → diagnose if not
        → roll back to the checkpoint → export the evidence pack
 ```
 
+### 两个 GlassPane 项目
+
+**GlassPane 是一对产品里的一半。** 另一半是 **[GlassPane Harness](https://github.com/jingzhao-l/glasspane-harness)**，
+一个在终端里干活、原生带着同一套 `gp_*` 面的编程代理。两个项目可以分别安装、分别使用，但设计上共用一份契约：
+
+- **本仓库 —— 引擎与传输层。** Swift 后台服务负责测量应用；`glasspane-mcp` 把这套测量通过 MCP 交给
+  Claude Desktop、Cursor 或任何其他 MCP host。用下面那条一键安装命令装。
+- **[GlassPane Harness](https://github.com/jingzhao-l/glasspane-harness) —— 代理侧。** 一个 AI 编程代理
+  （上游 [opencode](https://github.com/anomalyco/opencode) 的 fork），通过原生 `gp_*` 工具调引擎，
+  把每条已验证的调用追加进哈希链决策账本，并在长会话被压缩时把这些证据锚点重新注入。它从 npm 安装；
+  它要求引擎已在运行且已授予辅助功能，条件不满足时会打印确切的补救命令。
+
+分工：**应用做了什么由引擎判定，harness 只负责转写，绝不自行发明一个判定。**
+两个产品都不是对方私有 API 的客户端——它们吃的是同一份公开发布出去的契约层，所以跨越边界的格式只有
+一份定义，而不是两份各自演化的文件。harness 也可以单独安装：
+
+```bash
+# 代理侧。需要先把下面这条引擎装好、跑起来并授予辅助功能。
+npm install -g glasspane-harness
+```
+
+> 本文余下部分描述的是**本仓库**：引擎、MCP 层与安装器。harness 有自己的 README——
+> [GlassPane Harness](https://github.com/jingzhao-l/glasspane-harness)（源码
+> [`harness/glasspane-harness/README.md`](harness/glasspane-harness/README.md)）。
+
 ### 它解决的问题
 
 在 macOS 上，代理的工具链把开发的**静态半场**cover 得很好：编译、类型检查、审查、跑终端里的测试。
@@ -102,31 +127,6 @@ GlassPane 给代理装上带账本的眼睛和手：
 
 也说清代价的另一面：视觉模型仍能判断 GlassPane 不判断的东西——视觉品味、一个设计**看起来**对不对、
 或者某个根本不暴露无障碍树的视图内容。GlassPane 负责测量，不负责审美。两者各自用于所擅长之处。
-
-### 两个 GlassPane 项目
-
-GlassPane 刻意是一对产品里的一半。另一半是 **[GlassPane Harness](https://github.com/jingzhao-l/glasspane-harness)**，
-一个在终端里干活、原生带着同一套 `gp_*` 面的编程代理：
-
-- **本仓库 —— 引擎与传输层。** Swift 后台服务负责测量应用；`glasspane-mcp` 把这套测量通过 MCP 交给
-  Claude Desktop、Cursor 或任何其他 MCP host。用下面那条一键安装命令装。
-- **[GlassPane Harness](https://github.com/jingzhao-l/glasspane-harness) —— 代理侧。** 一个 AI 编程代理
-  （上游 [opencode](https://github.com/anomalyco/opencode) 的 fork），通过原生 `gp_*` 工具调引擎，
-  把每条已验证的调用追加进哈希链决策账本，并在长会话被压缩时把这些证据锚点重新注入。它从 npm 安装；
-  它要求引擎已在运行且已授予辅助功能，条件不满足时会打印确切的补救命令。
-
-分工与上面那条闭环一致：**应用做了什么由引擎判定，harness 只负责转写，绝不自行发明一个判定。**
-两个产品都不是对方私有 API 的客户端——它们吃的是同一份公开发布出去的契约层，所以跨越边界的格式只有
-一份定义，而不是两份各自演化的文件。harness 也可以单独安装：
-
-```bash
-# 代理侧。需要先把下面这条引擎装好、跑起来并授予辅助功能。
-npm install -g glasspane-harness
-```
-
-> 本文余下部分描述的是**本仓库**：引擎、MCP 层与安装器。harness 有自己的 README——
-> [GlassPane Harness](https://github.com/jingzhao-l/glasspane-harness)（源码
-> [`harness/glasspane-harness/README.md`](harness/glasspane-harness/README.md)）。
 
 ### 与 iterate 生态的关系
 

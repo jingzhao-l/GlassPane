@@ -32,6 +32,7 @@
 - [Quick start](#quick-start)
 - [The `gp_*` tool surface](#the-gp-tool-surface)
 - [The evidence discipline](#the-evidence-discipline)
+- [Two-way integration with iterate-harness](#two-way-integration-with-iterate-harness)
 - [Documentation](#documentation)
 - [Development](#development)
 - [License & attribution](#license-attribution)
@@ -226,6 +227,58 @@ is never hard-coded here, because it grows upstream of this file. Full reference
    (`gp_* calls: N · decisions recorded: M`), never assumed.
 
 Details: [`docs/evidence.md`](docs/evidence.md).
+
+## Two-way integration with iterate-harness
+
+GlassPane Harness is one side of a second pair. The engine answers "did that operation really
+take effect?"; [iterate-harness](https://github.com/jingzhao-l/iterate-harness) answers "is this
+code right?". The two do not talk through a chat log — everything that crosses the boundary is
+written by one side as a verifiable record and read by the other.
+
+- **Same chain format, verified before quoting.** Every decision recorded from an evidence pack
+  is appended to a hash-chained ledger (`~/.local/share/glasspane-harness/decisions.jsonl`, or
+  wherever `GLASSPANE_DECISION_LOG` points). The review loop writes `.iterate/decision-log.jsonl`
+  in the project under review in the same chain format, so a claim quoted from the other side's
+  file is chain-verified first: a rewritten line is refused with the number of the line where the
+  chain stops. The production reader today is the loop's (`fix_proof`); this fork ships the same
+  verifier, and a fixed-point test pins that a chain written by the loop verifies here. A project
+  can name the loop's ledger as its fix-evidence source once, with
+  `ih iterate glasspane-ledger <absolute path>` — the link is written only after the whole chain
+  verifies, and it pins the chain's first entry, so a replaced ledger stops qualifying.
+- **A review dimension travels with the call.** Five `gp_*` tools take an optional `dimension`
+  argument — `gp_act`, `gp_observe`, `gp_diagnose`, `gp_last_evidence`, `gp_attach` — and they are
+  the same five on both surfaces. The engine never sees the word: the declaration is stripped
+  before a request leaves, and this harness echoes it back. A decision that contradicts what was
+  already witnessed for that operation id is refused (`KERNEL_E_DIMENSION_CONTEST`).
+- **A failed re-check goes back to the app.** When a round's invariant re-check fails, the loop
+  asks the running application again, read-only, through the host's MCP transport. It builds one
+  `gp_last_evidence` plus one `gp_diagnose` per recorded operation; the allow-list is the five
+  read-only tools, and a call that would mutate the app is refused by name.
+- **Compaction knows what was reviewed.** The compaction hook re-injects the session's evidence
+  anchors (operation id, outcome, ledger line, entry hash). The run plan (`.iterate/run-plan.json`
+  or `GLASSPANE_RUN_PLAN`) decides which dimension history is dropped first, and declarations that
+  could not reach an anchor are counted rather than assumed.
+- **A fix is not accepted on the agent's word.** Before advancing a repair recipe, the gate reads
+  this round's invariant verdict, the project's recipe (`GLASSPANE_RECIPE`), and a chain-verified
+  ledger line recording a passing outcome against an operation id. Anything absent or unmeasured
+  is refused by name (`RECIPE_GATE_E_*`). The answer is recorded in the project's ledger; a
+  contract refusal writes no ledger bytes. Both doors read it back: `ih iterate gate` in a
+  terminal, `/iterate gate` in a session.
+- **Both tool surfaces speak one provider contract.** This fork and the MCP shell register the
+  same provider id and the same prerequisites per method, and a gate that runs both registrations
+  reddens when they diverge.
+
+What stays where it belongs: the engine decides what the application did; neither harness judges
+an interface on its own. The gate reports and withholds — it does not run the recipe, because
+neither product ships a recipe executor. The formats above come from one published contract
+layer, [`iterate-kernel`](https://www.npmjs.com/package/iterate-kernel), and the boundary is
+stated honestly: whether the two implementations still agree on a case the corpus never wrote
+down is answered by `scripts/diff_kernel_implementations.py`, an operator command rather than a
+CI step. The exchange from the loop's side is documented in the iterate-harness README
+([GlassPane integration](https://github.com/jingzhao-l/iterate-harness#-glasspane-integration)),
+and from the engine's side in [GlassPane's two-way integration section](https://github.com/jingzhao-l/GlassPane#two-way-integration-with-the-review-loop).
+Implementation detail: [`docs/kernel-integration.md`](docs/kernel-integration.md) and
+[`docs/evidence.md`](docs/evidence.md).
 
 ## Documentation
 

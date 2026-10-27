@@ -32,6 +32,7 @@
 - [上手](#上手)
 - [`gp_*` 工具面](#gp-工具面)
 - [证据纪律](#证据纪律)
+- [与 iterate-harness 的双向集成](#与-iterate-harness-的双向集成)
 - [文档](#文档)
 - [开发](#开发)
 - [许可与署名](#许可与署名)
@@ -193,6 +194,46 @@ glasspane-harness --help
    （`gp_* calls: N · decisions recorded: M`），不许靠默认。
 
 细节：[`docs/evidence.md`](docs/evidence.md)。
+
+## 与 iterate-harness 的双向集成
+
+GlassPane Harness 是第二对产品里的一半。引擎回答"这次操作到底生效了吗"；
+[iterate-harness](https://github.com/jingzhao-l/iterate-harness) 回答"这段代码对不对"。
+两边不靠聊天记录对接——跨越边界的东西都由一侧写成可核验的记录，另一侧读它。
+
+- **同一种链格式，先验通再引用。** 每条从证据包记下的决定都追加进哈希链账本
+  （`~/.local/share/glasspane-harness/decisions.jsonl`，或由 `GLASSPANE_DECISION_LOG` 指到别处）。
+  审查回路把 `.iterate/decision-log.jsonl` 写进被审项目，用的是同一种链格式，所以从对方那本引来的
+  主张会先整链验通：被改过的行会被拒绝，并说清链断在第几行。今天在生产里跑这个读者的是回路这一侧
+  （`fix_proof`）；本 fork 带的是同一个校验器，一条固定点测试钉住"那边写的链在这边验得过"。
+  一个项目可以一次性用 `ih iterate glasspane-ledger <绝对路径>` 把回路的账本记为自己的修复证据来源：
+  链接只在整链验通之后落笔，并钉住链的首条，被替换的账本因此不再够格。
+- **审查维度跟着调用走。** 有 5 项 `gp_*` 工具接受可选的 `dimension` 参数——`gp_act`、`gp_observe`、
+  `gp_diagnose`、`gp_last_evidence`、`gp_attach`——两侧是同五项。引擎从不看见这个词：声明在请求
+  出网前就被剥掉，回显由本 harness 自己写。与同一 operationId 上已有见证矛盾的决定会被拒绝
+  （`KERNEL_E_DIMENSION_CONTEST`）。
+- **复核不过，就回到应用本身。** 一轮的 invariant 复核失败时，回路通过宿主的 MCP 通道再次只读地问
+  那个正在跑的应用：每个已记录操作构造一条 `gp_last_evidence` 加一条 `gp_diagnose`；允许名单是
+  5 项只读工具，会改动应用的调用被点名拒绝。
+- **压缩知道这次查了什么。** 压缩钩子会重新注入会话的证据锚点（operationId、结果、台账行号、
+  条目哈希）。运行计划（`.iterate/run-plan.json` 或 `GLASSPANE_RUN_PLAN`）决定先丢哪一维的历史；
+  声明了维度却进不了锚点的调用会被数出来，而不是假设它们还在。
+- **修复不靠代理自称就算完成。** 推进修复配方之前，闸会读三件实测的东西：本轮 invariant 判定、
+  项目配方（`GLASSPANE_RECIPE`），以及一条链可验、按 operationId 记着通过结果的账本行。
+  缺任何一件或未量到都具名拒绝（`RECIPE_GATE_E_*`）。答案落进项目账本；契约拒绝一个字节都不写。
+  两扇门都读得回来：终端里 `ih iterate gate`，会话里 `/iterate gate`。
+- **两个工具面说的是同一份 provider 契约。** 本 fork 与 MCP 层注册同一个 provider id 和每个方法
+  相同的先决条件；跑两侧注册代码的尺子一旦发现分叉就红。
+
+各归各位：应用做了什么由引擎判定，两个 harness 都不自行给界面下结论。闸只报与拦，不执行配方——
+两个产品都没有配方执行器。上面这些格式来自同一份发布出去的契约层
+[`iterate-kernel`](https://www.npmjs.com/package/iterate-kernel)，边界也说清楚：
+"两份实现对语料没写过的案子还一致吗"由 `scripts/diff_kernel_implementations.py` 回答——它是给操作者
+跑的命令，不在 CI 步骤里。回路那一侧的说明见 iterate-harness README 的
+[GlassPane 集成](https://github.com/jingzhao-l/iterate-harness#-glasspane-integration)，
+引擎那一侧见 [GlassPane 的双向集成小节](https://github.com/jingzhao-l/GlassPane#two-way-integration-with-the-review-loop)。
+实现细节：[`docs/kernel-integration.md`](docs/kernel-integration.md) 与
+[`docs/evidence.md`](docs/evidence.md)。
 
 ## 文档
 
