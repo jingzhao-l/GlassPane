@@ -18,6 +18,8 @@
 - **范围纪律**：不得为了"清零"擅自扩产品面（把 Electron 桌面 app、上游文档站、Web UI 内嵌拉进发布，或给 `product.json` 加新平台目标却没有对应 CI lane）。那属于范围变更；要做就连同代价、构建通道、brand/product 闸一起做完并留痕，否则按最小正确修法收口。**这条限制的是产品形状，不是缺陷处置**：已发现的问题仍要本轮修完，只是修的时候别顺手加没人要的新能力。
 - **诚实性优先于零遗留**：测不出的（真模型轮次、真 TUI 观感、musl/baseline 目标）照实写"未观测"，但仍要给出"补它的确切一条命令 + 为什么本轮没跑"。"如实标注"不等于可以不做。
 
+- **发布顺序这一格，2026-10-27 一天里花了三个号，别再花第四次的理由写在这里**：`harness/tools/release-artifact.mjs` 要求「已发布 tag 背后的树 == 主干 `harness/glasspane-harness` 子树」，豁免只有 `SYNCLOG.md`/`CHANGELOG.md` 在落后方向那一格。由此三条硬顺序：① **非台账文件（两份 README、`docs/**`、`script/**`、`scripts/install.sh`、`product.json`……）必须赶在本轮 tag 之前进 main**——tag 之后再改一行，那一行就只能由下一个号吸收（当天实测：`9ba1183c` 的 +94 行换来 `0.12.2`；`039df15e` 落在 `v0.12.3` 之后一分钟、两份各 1 行，又吃掉 `0.12.3`）。② **金样那一半不花钱**：`node harness/tools/fork-diff.mjs --record` 跟一笔即可，只许 hash 移动、不许三张计数（`285 edited / 112 added / 1707 deleted`）移动——版本号换三次不等于分叉面变过。③ **第 3 步的 split 推送要排在主仓 CI 起跑之前**：主仓 `ci.yml` 的 `harness-rulers` lane 里就住着这把尺子，你推完 main 才推 split，它读到的就是旧 split，于是红一次再 `gh run rerun --failed`。当天这种时序红出现三次、三次都能 rerun 转绿，所以**"旧 sha 转不了绿"不是恒真**——它不能当成"反正转不了就别重切"的借口，也不该被写成"这条 lane 修不好"。④ 与下一条并读：主仓那条线若在你的 tag 之后改了子树里的非台账文件，本线取号时把它一起带走，别让它留成一格红。
+
 【收口清理：每轮必做的最后一步（属收口硬条件）】
 
 本线跨**两个远端**（主仓 + split 仓），游离物会双倍积累。截至 2026-10-11 主仓积下 18 个 worktree、41 条本地分支、7 条远端分支，其中 `gp-harness-daily-*`、`gp-harness-orphan-*`、`gp-harness-port-*`、`split/*`、`harness/daily-*` 全是历轮任务"做完就走"的产物——你要消灭的就是这个形态。收口前按八步走：
