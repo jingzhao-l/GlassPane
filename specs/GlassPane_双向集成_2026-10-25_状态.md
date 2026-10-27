@@ -522,3 +522,42 @@ postinstall，让**它自己**把 `version.stamp` 写成 `{"version":"2.11.2","p
 5. 双向集成五场景的代码在 2.11.2 里**一行未动**（本批改的是 `cron_scheduler`、CI 形状与文档），所以
    ①②③④⑤ 的判定沿用 2.11.1 那次逐条复核的结论；上面 3、4 两栏是在新发布物上重跑的**接线**读数，
    不是新的语义变更证明。
+
+## 第二十四次补记（2026-10-27，父仓更新系统那一轮的末尾）· 上面那格"本机 daemon 仍是 1.6.2"已经不成立
+
+这一格是被**另一轮工作**顺带关掉的，不是在集成线上做的决定：父仓修更新系统那一轮在本机跑了
+`updater apply`（读法与逐格数字在
+[GlassPane_更新系统_2026-10-26_状态.md](./GlassPane_更新系统_2026-10-26_状态.md) 的"1.23.0 的发布读数"），
+daemon 从 1.21.0 换到 1.23.0，与壳同版。所以本节下面四条是**新量**，不是沿用 10-26 的读数：
+
+- 四条跨仓验收脚本在**当前装好的发布物**上重跑，四条 rc=0（Python 用的
+  `~/.iterate-harness-npm/venv/bin/python`，即与 PyPI/GitHub 同一份 2.11.2 运行时）：
+  `check_run_plan_channel.py` 两侧同一份字节、同一顺序 9 个 id、同一 digest；
+  `check_glasspane_channel.py` 连得上并取回真证据包（`operationId=op_01M35PAMYNNPJRNCCM6Q2C34XQ`、
+  `attribution.level=soft`、`schemaVersion=glasspane.evidence/0.1`）；
+  `check_glasspane_reverification.py` `sent 1 request, 2/2 answer(s) relayed`（1 条 evidence/diagnosis +
+  1 条具名编码拒绝 `GP_E_NOT_ATTACHED` 带 remedy）；
+  `check_gate_answer_reader.py` "a passing round's ④ answer is recorded, and both doors read it"。
+- **能力对账那一格从"会预告 methodNotFound"变成实测无话可说**：直接把发布物壳
+  `/usr/local/bin/glasspane-mcp` 喂一次 `initialize`+`tools/list`，`tools/list` 数到 16 条工具，
+  **stderr 0 行**——`describeCapabilityDrift` 只在两边不一致时才 print（一致时返回 null，
+  `mcp-shell/src/engine-client.ts:1725` 那一支不 print），所以"stderr 空"就是"这一趟没有分叉可报"，
+  不是"没跑"。这正是旧 daemon 1.6.2 配新壳时唯一会说的那句话，现在它不说了。
+- 版本读数当场取（`--prefer-online`，`--version` 直取不经管道）：
+  `ih --version` = `iterate_harness 2.11.2`、`glasspane-harness` npm = `0.12.1`、
+  面 A `glasspane-mcp` = `1.23.0`、`iterate-kernel` = `0.1.10`、daemon 二进制自报 `glasspaned 1.23.0`。
+- 上面"剩下没闭合的格子"第 1 条按此**关闭**；第 2 条（本机 `ih` 的 bootstrap 依赖镜像索引）与第 3 条
+  （交付证据已跑）状态不变——前者只影响这台机器、且已按产品自己的路走完。
+
+### 五场景的判定不因为这一轮而动，但边界照旧写在这里（不是"没做完"，是"按构造如此"）
+
+①②③④⑤ 的代码在 2.11.2 一行未动，父仓这边改的是更新链，所以判定沿用 10-26 那次逐条复核。
+每条"还只是陈述、没量到的那半"仍然成立，且它们不会被任何一次发布消掉：
+
+1. ① 的重验是**只读回看**——引擎对"重跑配方步骤"永远回 `deferred`，这是它既有纪律。
+2. ② 只有出 `evidencePack` 的方法能把声明维度带进锚点，其余四个工具上声明的维度到不了压缩；
+   根在 **Swift 侧证据发射面**，本行现在给的是宽度读数而不是解释。
+3. ③ 两本台账**不合成一本**（链接把"读哪一本"变成一次项目动作）——这是产物线的设计决定。
+4. ④ 契约只在复核**失败**时生成请求，且两侧都没有配方执行器：闸答"能否推进"，不答"下一步是哪步"。
+5. ⑤ 面 B 比面 A 多 `diagnose-pixel`/`diagnose-probed` 是正当不对称，但它是**记录**而非推导——
+   新增单边方法时必须有人重记金样。
