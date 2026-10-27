@@ -391,6 +391,35 @@ final class ConsoleModel: ObservableObject {
         refreshDaemonStats()
     }
 
+    /// 「没测得统计」这一格**下一步该按哪一颗**，由这一句回答（纯函数，所以它有闸）。
+    ///
+    /// 缺陷形状（2026-10-27 审查 E1）：这一页在 `daemonStats == .notAsked`（路径还没实测到）
+    /// 时给出的可见下一步是「重新问一次」，而那颗按钮调的就是 `refreshDaemonStats()`——
+    /// 它在 `daemonBinaryPath == nil` 时**立刻**短路回 `.notAsked`，一个字节都不发。
+    /// 于是按下去无事发生，句子还写着"点「刷新」恢复连接后这一栏才会实起来"：
+    /// 一句指着一个不在这张卡上的按钮的补救。路径的唯一来源是 `hello` 那一帧
+    /// （`ConsoleRootView:107` 的 `adoptDaemonReport`），所以能恢复它的那一步是重新握手，
+    /// 不是重发这次统计。
+    enum DaemonStatsRecovery: Equatable {
+        /// 路径已经在手上：重发那一次 `--evidence-stats` 就是这一步的真义。
+        case askStatsAgain
+        /// 路径还没实测到（或这一侧把自报的那个拒了）：必须重新握手把它取回来，
+        /// 重发统计在那一支上什么都不做。
+        case rehandshakeFirst
+    }
+
+    nonisolated static func daemonStatsRecovery(pathKnown: Bool) -> DaemonStatsRecovery {
+        pathKnown ? .askStatsAgain : .rehandshakeFirst
+    }
+
+    /// 按钮该说的那句话，与它真会做的那一件事一一对应（同一处判据，不各写一份）。
+    nonisolated static func daemonStatsRecoveryLabel(pathKnown: Bool) -> String {
+        switch daemonStatsRecovery(pathKnown: pathKnown) {
+        case .askStatsAgain: return "重新问一次"
+        case .rehandshakeFirst: return "重新连接后台服务"
+        }
+    }
+
     func reloadEvidence() {
         evidenceState = .loading
         let directory = evidenceDirectory

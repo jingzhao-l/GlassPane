@@ -46,6 +46,16 @@ public final class ProbeInbox {
         /// measurement, while `N` is really a lower bound.
         var evictionsAtBegin: Int = 0
         var eventsEvicted: Int = 0
+        /// The pid's eviction tally **at close** (finding A6, 2026-10-27).
+        /// `eventsEvicted` covers the in-window half of the window's life; the
+        /// grace period `(t1, t1 + lateGraceSeconds]` is the other half, and
+        /// nothing observed it. A late handler burst that overflowed the ring
+        /// during the grace dropped the earliest late events before
+        /// `lateReading` ever counted them, so `late` came back low — and when it
+        /// equalled the stored `lateCount`, `refreshLateCount` answered
+        /// `.confirmed` = "this count is final", which is exactly the certification
+        /// the two existing refusals were written to withhold.
+        var evictionsAtClose: Int = 0
     }
 
     /// One recorded probe drop-off (P6 §2.1/§5.4, R2-18): what *was* connected,
@@ -532,6 +542,9 @@ public final class ProbeInbox {
         // bound and `handlers` a truncated list, so the number has to travel with
         // the signal instead of silently looking like a complete measurement.
         window.eventsEvicted = max(0, (ringEvictions[pid] ?? 0) - window.evictionsAtBegin)
+        // The grace period's own baseline: whatever this pid loses from here on is
+        // loss this window's late count cannot see (finding A6).
+        window.evictionsAtClose = ringEvictions[pid] ?? 0
         window.stateBefore = entries
         window.stateSource = source ?? window.stateSource
         windows[index] = window
@@ -607,6 +620,12 @@ public final class ProbeInbox {
         case closed(Int)
         case graceOpen(TimeInterval)
         case unavailable
+        /// The grace elapsed, but the daemon's own ring dropped `evicted` events
+        /// for this pid inside that grace window. The number below is then a
+        /// **lower bound** on the late arrivals, never the count — so it may not be
+        /// certified, and it may not be compared against the stored value to
+        /// produce `.confirmed` (finding A6, 2026-10-27).
+        case truncated(Int, evicted: Int, pid: Int32)
     }
 
     private func lateReading(opId: String) -> LateReading {
@@ -638,7 +657,16 @@ public final class ProbeInbox {
                 seenKeys.insert("\(file):\(line)")
             }
         }
-        return .closed(late)
+        // Finding A6: the ring's loss *during the grace* belongs to this count. The
+        // in-window tally (`eventsEvicted`, defect 3) was taken at close and says
+        // nothing about `(t1, t1 + grace]`, so without this arm a burst that pushed
+        // the earliest late events out before the read answers a low number and — if
+        // that low number equals the stored act-time default — `.confirmed`, which
+        // removes the "this was never measured" basis from the pack.
+        let evictedDuringGrace = max(0, (ringEvictions[window.pid] ?? 0) - window.evictionsAtClose)
+        return evictedDuringGrace > 0
+            ? .truncated(late, evicted: evictedDuringGrace, pid: window.pid)
+            : .closed(late)
     }
 
     /// Late arrivals for a closed window: handler events received in the
@@ -653,7 +681,9 @@ public final class ProbeInbox {
     /// and a recycled pid's fresh ring is not this window's data — and, added by
     /// defect 1 proper, **the grace period has not closed yet**: what had arrived
     /// by read time is not the number of late arrivals, and a 0 read inside the
-    /// grace says only "nothing has landed so far".
+    /// grace says only "nothing has landed so far". A fifth now joins them (finding
+    /// A6): the grace closed but the daemon dropped events for this pid inside it,
+    /// so what can be read is a lower bound rather than a count.
     public func lateCount(opId: String) -> Int? {
         guard case let .closed(late) = lateReading(opId: opId) else { return nil }
         return late
@@ -709,6 +739,17 @@ public final class ProbeInbox {
             is only what had arrived by now — not a count of late arrivals, and a 0 here means nothing had \
             landed YET (T8 is undecidable until the grace closes: diagnose only after the grace has elapsed, \
             never within the grace window)
+            """)
+        case let .truncated(late, evicted, pid):
+            // Its own sentence, like the other two causes: waiting does not fix
+            // this one (the bytes are already gone), and what the reader should do
+            // is account for the loss, not re-diagnose into a number.
+            return .unmeasurable(reason: """
+            the grace period after \(pack.operationId) elapsed, but this daemon dropped \(evicted) handler event(s) \
+            for pid \(pid) from its event ring inside that window, so the late count readable now (\(late)) is a \
+            lower bound rather than a measurement — neither it nor the stored `lateCount=\(stored.lateCount)` can be \
+            certified (T8 stays undecidable for this pack; `probe_status` publishes `ringEvictedEvents` per pid, \
+            which is where this loss is counted)
             """)
         case .unavailable:
             // Kept verbatim in substance, with the advice half corrected: nothing

@@ -16,6 +16,10 @@ import GlassPaneEngine
 /// 绝不把两个零当"空档案"。
 struct EvidenceStatsView: View {
     @EnvironmentObject private var model: ConsoleModel
+    /// 这一张卡自己的"重新握手"那一支要走的那条路（`refresh()` 发 hello，
+    /// hello 的答复由 `ConsoleRootView` 的 `adoptDaemonReport` 灌回 `model`）。
+    /// 从前这一页只有 `model`，于是那句"点「刷新」恢复连接"指着的是**别的页上**的按钮。
+    @EnvironmentObject private var settings: SettingsModel
 
     /// 标题钉在卡片顶部，正文自己滚。
     ///
@@ -54,7 +58,10 @@ struct EvidenceStatsView: View {
             headerRow(title: "档案目录统计", source: "daemon --evidence-stats", systemImage: "server.rack", tint: .blue)
             switch model.daemonStats {
             case .notAsked:
-                unmeasuredLine("还没向后台服务问过：它的程序路径还没实测到。点「刷新」恢复连接后这一栏才会实起来。")
+                // 措辞必须指着这张卡上真有的那颗按钮：从前它写"点「刷新」恢复连接后这一栏
+                // 才会实起来"，而这一页的按钮叫「重新问一次」，且按下去只重发同一句"还没问过"
+                // （E1）。现在按钮的名字由 `daemonStatsRecoveryLabel` 给，这句话跟着它走。
+                unmeasuredLine("还没向后台服务问过：它的程序路径还没实测到。点下面「\(ConsoleModel.daemonStatsRecoveryLabel(pathKnown: false))」重新握手，这一栏才会实起来。")
                 retryButton
             case .asking:
                 HStack(spacing: 8) {
@@ -95,11 +102,25 @@ struct EvidenceStatsView: View {
 
     /// 每一句"没测得"后面都跟着一个做得动的动作：只报失败而不给重试，
     /// 用户能做的就只有把这页关掉再开一次。
+    ///
+    /// 而按钮必须**真能带来变化**（2026-10-27 审查 E1）：路径还没实测到时，
+    /// `refreshDaemonStats()` 在自己的第一行就短路回 `.notAsked`，那一次点击等于
+    /// 重发同一句"还没问过"。路径的来源是 `hello` 那一帧，所以这一支走的是与侧栏
+    /// 底部刷新同一条握手（`SettingsModel.refresh` → hello → `adoptDaemonReport`），
+    /// 措辞也跟着改成它真做的事。判据由 `ConsoleModel.daemonStatsRecovery` 一处给出，
+    /// 免得句子和动作各写一份。
     private var retryButton: some View {
-        Button {
-            model.refreshDaemonStats()
+        let pathKnown = model.daemonBinaryPath != nil
+        return Button {
+            switch ConsoleModel.daemonStatsRecovery(pathKnown: pathKnown) {
+            case .askStatsAgain:
+                model.refreshDaemonStats()
+            case .rehandshakeFirst:
+                settings.refresh()
+                model.refreshDaemonStats()
+            }
         } label: {
-            Label("重新问一次", systemImage: "arrow.clockwise")
+            Label(ConsoleModel.daemonStatsRecoveryLabel(pathKnown: pathKnown), systemImage: "arrow.clockwise")
         }
         .controlSize(.small)
         .accessibilityIdentifier("gp-refresh-daemon-stats")

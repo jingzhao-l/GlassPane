@@ -23,6 +23,14 @@ import Foundation
 ///  · A4 `latencyMs`/`pingMs` 用挂钟算，NTP/睡眠回拨会算出负数，而冻结 schema 写着
 ///    `minimum: 0`（axEvent L109-112、responsiveness L152-159）。旧代码只在 ping 超时
 ///    那一档 `max(0, …)`；`ArchiveFieldBounds` 给长度定的「在字节产生的地方收口」从没管过时长。
+///  · A6 迟到计数的宽限期只数了"到点还在环里的那些"：`eventsEvicted` 是**关闭时**的差值，
+///    `(t1, t1+2s]` 那一段里 daemon 自己丢掉的事件没人看着。于是 bursts 把最早的迟到事件
+///    挤出环之后 `late` 读回来偏低，而一旦它恰好等于存着的 `lateCount`，
+///    `refreshLateCount` 就答 `.confirmed` = "这个数是终态"，EngineCore 随之**撤掉**那句
+///    "没量过"——用一条没人测量过的尾巴认证了一次"没有迟到"。
+///  · A7c `EvidenceStore.stats()` 里 `if let size = try? …` 把问不出尺寸的档案静默丢掉，
+///    总数少一截而 `listFailure` 还是 nil —— R6-08 反对的正是"把读不懂的归档报成空的"，
+///    这是同一句话的另一半：把只数了一半的字节报成一个实测的总量。
 ///  · A5 `PixelDiffSignal` 有自定义 encoder（nil 写成显式 null），却用合成的 decoder ——
 ///    于是**缺席**的 `bounds` 被读成 `nil`，而本文件把 nil 定义成「量过：一个像素都没变」；
 ///    `diagnose → replace → persist` 还会把这份缺键的包重写成 `"bounds": null`。
@@ -31,6 +39,9 @@ import Foundation
 ///    "cannot prove ⇒ refuse"。改成：读得出、认得出（`boundsWasAbsentInArchive`），
 ///    并在读回来的那一刻把来历写进 `circuitBreaker.reason`（与 `late-arrivals-unmeasured`
 ///    同一个归宿、同一条理由）。
+///
+/// 另两条同轮落地的判据在 `Qoder20261027StatsRecoveryTests.swift`（面板那张统计卡的
+/// "下一步"按钮，E1）与本文件的 `testDiagnoseEchoes…`（A3）。
 ///
 /// REVERSE（每条都在本机实测过红）：
 ///  · 删掉 `scopedSnapshot` 里的身份比对 ⇒ 第 1 条与第 3 条红；
@@ -364,5 +375,117 @@ final class Qoder20261027EvidenceScopeTests: XCTestCase {
             pack.circuitBreaker.reason?.contains(EvidencePack.pixelDiffBoundsNotArchivedLabel) ?? false,
             pack.circuitBreaker.reason ?? "nil"
         )
+    }
+
+    // MARK: - A7c: 数不出尺寸的档案不许被折进一个"看着像测量"的总数
+
+    func testStatsRefusesToCertifyATotalWhenAnEntryWouldNotReportASize() throws {
+        let time = TimeBox()
+        let (core, _, store) = try makeCore(time: time, label: "gp-a7c-stats")
+        _ = try core.attach(bundleId: "com.example.app", pid: 4242)
+        _ = try actOn(core, title: "Submit")
+        _ = try actOn(core, title: "Cancel")
+
+        // 控制：两条真档案、真读尺寸 —— 这条路必须给出完整的数字。
+        let clean = store.stats()
+        XCTAssertEqual(clean.count, 2)
+        XCTAssertNil(clean.listFailure, clean.listFailure ?? "nil")
+        XCTAssertGreaterThan(clean.totalBytes, 0, "两条真包不可能合出 0 字节")
+
+        // 缺陷那一支：其中一条问不出尺寸。旧写法 `if let size = try? …` 把它静默丢了，
+        // 总数少一截而 `listFailure` 还是 nil —— 调用方于是把"部分加出来的数"
+        // 当成整个档案的实测总量（R6-08 反对的正是这件事）。
+        var answers = 0
+        let knownBytes = clean.totalBytes
+        let partial = store.stats(sizeOf: { _ in
+            answers += 1
+            return answers == 1 ? nil : knownBytes
+        })
+        XCTAssertEqual(answers, 2, "夹具必须真的问过两条档案的尺寸，否则下面那些断言是空的")
+        let failure = try XCTUnwrap(
+            partial.listFailure,
+            "一条量不出尺寸时不许交出一个更小的总数——那一趟没量到，就得说没量到"
+        )
+        XCTAssertTrue(failure.contains("1 of 2"), failure)
+        XCTAssertTrue(failure.contains("not obtained"), failure)
+        XCTAssertEqual(partial.totalBytes, 0, "未测得的合计在 --evidence-stats 那一侧是 null，不是半截数")
+        XCTAssertEqual(partial.count, 2, "列目录这一趟是真成功的，条数这个事实不许被牵连")
+    }
+
+    // MARK: - A6: 宽限期里的环丢失不许被认证成"没有迟到"
+
+    /// 一份带 handlerProbe 的包，形状就是 act 落盘时那一种（迟到计数取自 `endWindow`）。
+    private func packWith(
+        opId: String,
+        signals: (handlerProbe: HandlerProbeSignal?, stateDiff: StateDiffSignal?)
+    ) -> EvidencePack {
+        let base = TestTrees.standard
+        return EvidencePack(
+            operationId: opId,
+            createdAt: "2026-10-27T00:00:00.000Z",
+            attribution: Attribution(level: .soft, contaminated: false),
+            circuitBreaker: CircuitBreaker(level: .normal, reason: nil),
+            signals: Signals(
+                act: ActSignal(
+                    selector: Selector(role: "AXButton", title: "Submit"), action: .press, actConfirmed: true
+                ),
+                axEvent: AxEventSignal(
+                    treeDigestBefore: base.digest, treeDigestAfter: base.digest,
+                    nodeCount: base.nodeCount, axChanged: false, latencyMs: 20
+                ),
+                handlerProbe: signals.handlerProbe,
+                stateDiff: signals.stateDiff,
+                pixelDiff: PixelDiffSignal(changedPixelRatio: 0, bounds: nil, windowId: 12),
+                responsiveness: ResponsivenessSignal(responsive: true, pingMs: 3),
+                crash: CrashSignal(processAliveBefore: true, processAliveAfter: true)
+            )
+        )
+    }
+
+    func testGraceWindowRingLossIsNotCertifiedAsAnAnswer() throws {
+        let time = TimeBox()
+        let inbox = ProbeInbox(now: { time.now })
+        inbox.register(hello())
+        inbox.beginWindow(pid: 4242, opId: "op_a6_grace_evict")
+        let signals = try XCTUnwrap(inbox.endWindow(pid: 4242, opId: "op_a6_grace_evict"))
+        let target = packWith(opId: "op_a6_grace_evict", signals: signals)
+        XCTAssertEqual(signals.handlerProbe?.lateCount, 0)
+
+        // 宽限期内把这枚环灌爆：daemon 自己扔掉的那些事件，正是这一格该数却已经看不见的。
+        for index in 0..<(ProbeInbox.eventRingCapacity + 7) {
+            inbox.ingest(pid: 4242, frame: .handler(file: "Late\(index).swift", line: index, ts: 0, durationNs: nil))
+        }
+        time.now = time.now.addingTimeInterval(ProbeInbox.lateGraceSeconds + 0.5)
+
+        guard case let .unmeasurable(reason) = inbox.refreshLateCount(for: target) else {
+            return XCTFail("宽限期内丢过事件的环不许回答 .confirmed/.measured —— 那是一次认证")
+        }
+        XCTAssertTrue(reason.contains("lower bound"), reason)
+        XCTAssertTrue(reason.contains("dropped 7"), "要把丢了几个说出来：\(reason)")
+        XCTAssertNil(inbox.lateCount(opId: "op_a6_grace_evict"), "量不出就是量不出，不是 0")
+
+        // 三种成因不许共用一句话：这一条既不是"宽限期还没走完"，也不是"窗口出环"。
+        XCTAssertFalse(reason.contains("still open"), reason)
+        XCTAssertFalse(reason.contains("no longer in the probe inbox"), reason)
+    }
+
+    func testGraceWindowWithoutRingLossStillReachesTheHonestVerdicts() throws {
+        // 控制：这条闸不许变成恒拒。环没溢出时，宽限期走完就该给出能用的答案。
+        let time = TimeBox()
+        let inbox = ProbeInbox(now: { time.now })
+        inbox.register(hello())
+        inbox.beginWindow(pid: 4242, opId: "op_a6_clean")
+        let signals = try XCTUnwrap(inbox.endWindow(pid: 4242, opId: "op_a6_clean"))
+        let target = packWith(opId: "op_a6_clean", signals: signals)
+        time.now = time.now.addingTimeInterval(ProbeInbox.lateGraceSeconds + 0.5)
+        switch inbox.refreshLateCount(for: target) {
+        case .confirmed, .measured:
+            break
+        case let .unmeasurable(reason):
+            return XCTFail("没有丢失的一格又不该被拒绝：\(reason)")
+        case .notCarried:
+            return XCTFail("这份包带着 handlerProbe")
+        }
+        XCTAssertEqual(inbox.lateCount(opId: "op_a6_clean"), 0, "环没溢出时，量完的 0 就是一次测量")
     }
 }

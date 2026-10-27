@@ -705,7 +705,25 @@ public final class EvidenceStore {
     /// reports 0/0 with `listFailure == nil`; a directory that exists but cannot
     /// be read reports `listFailure`, because publishing 0 there is what let
     /// `--evidence-stats` certify an unreadable archive as empty. Never throws.
-    public func stats() -> EvidenceArchiveStats {
+    ///
+    /// 2026-10-27 finding A7c closes the other half of that same sentence. Listing
+    /// succeeded here, but each entry's **size** is a second read: `if let size =
+    /// try? …` used to drop any entry that would not report one, so the total came
+    /// back short — a number — while `listFailure` stayed nil. The caller then
+    /// published `totalBytes` as a measurement of an archive whose bytes had only
+    /// been partly counted. R6-08's rule is not "report what you managed to add up",
+    /// it is "an un-obtained figure is not a zero", so a partial read now reports
+    /// failure, names how many entries and which one first, and lets
+    /// `--evidence-stats` answer null + exit 1 the way it already does for an
+    /// unreadable directory.
+    ///
+    /// `sizeOf` is the seam that makes that arm testable without racing the
+    /// filesystem (a deleted-between-listing-and-stat entry is not a fixture an
+    /// author can write deterministically). Its default is the real `URL` resource
+    /// value read, so production behavior is the one under test.
+    public func stats(sizeOf: (URL) -> Int? = { url in
+        (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+    }) -> EvidenceArchiveStats {
         switch archiveListing(keys: [.fileSizeKey]) {
         case .absent:
             return EvidenceArchiveStats(count: 0, totalBytes: 0)
@@ -716,10 +734,22 @@ public final class EvidenceStore {
             )
         case let .entries(urls):
             var totalBytes = 0
+            var uncounted: [String] = []
             for url in urls {
-                if let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) {
+                if let size = sizeOf(url) {
                     totalBytes += size
+                } else {
+                    uncounted.append(url.lastPathComponent)
                 }
+            }
+            if !uncounted.isEmpty {
+                return EvidenceArchiveStats(
+                    count: urls.count,
+                    totalBytes: 0,
+                    listFailure: "\(uncounted.count) of \(urls.count) archive entries would not report a size "
+                        + "(first: \(uncounted.first ?? "")), so totalBytes is not obtained — this is reported as "
+                        + "null with exit 1 rather than as the smaller total of the entries that did answer"
+                )
             }
             return EvidenceArchiveStats(count: urls.count, totalBytes: totalBytes)
         }
