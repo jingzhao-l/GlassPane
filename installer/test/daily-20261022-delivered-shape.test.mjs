@@ -294,3 +294,104 @@ test('交付形状在全局前缀（npm i -g 那一种）里同样跑得出字�
   assert.equal(r.status, 0, `退出 ${r.status}｜${r.stderr}`)
   assert.ok(r.stdout.length > 1000, `实到 ${r.stdout.length} 字节：全局前缀那条 bin 软链没被执行`)
 })
+
+/* ------------------------------------------------------------------ 需要 URI 编码的安装路径 */
+
+/**
+ * 2026-10-27（finding C1）：这道闸问的是**装在一条需要 percent-encoding 的路径里**时两个 bin 还跑不跑。
+ * 形状来自真投递，不是猜想 —— macOS 账户名可以带空格与 CJK（`/Users/John Smith`、`/Users/张三`），
+ * npx 的缓存前缀也可以是这种形状，而 npm 把全局/局部前缀原样放在 `$HOME` 下。
+ *
+ * 缺陷本体：`installer/glasspane.js` 的入口守卫写成
+ * `realpathSync(new URL(import.meta.url).pathname)`。`.pathname` **不解码**：
+ * 实测 `new URL("file:///Users/John%20Smith/g.js").pathname` 仍是
+ * `/Users/John%20Smith/g.js`，那条路径上没有任何文件，于是 `realpathSync` 在 **import 期**抛出
+ * ENOENT，`glasspane --help`／`status`／`doctor`／`update` 每一支都带着一坨栈退出 1。
+ * 同一条规则在兄弟入口 `updater/agent-entry.js` 里早已写下（`fileURLToPath` + 包裹 try），
+ * 这一份是没跟上的那张脸 —— 半修比不修更糟，因为它把缺陷伪装成已经修过。
+ */
+let encodedArtifact = null
+let encodedUnavailable = null
+
+function deliveredEncoded() {
+  if (encodedUnavailable !== null) return null
+  if (encodedArtifact !== null) return encodedArtifact
+  if (artifact === null && unavailable === null) delivered()
+  if (artifact === null) {
+    encodedUnavailable = `没拿到那份 .tgz：${unavailable ?? 'npm 链子在本机没跑起来'}`
+    return null
+  }
+  // 空格 + CJK 两类需要编码的字符一次覆盖：只测空格会漏掉非 ASCII 那一半。
+  const prefix = path.join(SCRATCH, 'prefix John Smith 家')
+  fs.mkdirSync(prefix, { recursive: true })
+  const installed = npmRun(
+    ['i', '--prefix', prefix, '--no-audit', '--no-fund', '--prefer-offline', artifact.tarball],
+    prefix,
+  )
+  if (installed.status !== 0) {
+    encodedUnavailable = `npm i --prefix 装进带空格/CJK 的前缀退 ${installed.status}：`
+      + `${(installed.stderr || installed.stdout || installed.error || '（无输出）').slice(0, 600)}`
+    return null
+  }
+  encodedArtifact = {
+    prefix,
+    bins: Object.entries(bin).map(([command]) => path.join(prefix, 'node_modules', '.bin', command)),
+  }
+  for (const binPath of encodedArtifact.bins) {
+    if (!fs.existsSync(binPath)) {
+      encodedUnavailable = `装完了却读不到 ${binPath}（那前缀里没有这条命令）`
+      encodedArtifact = null
+      return null
+    }
+  }
+  return encodedArtifact
+}
+
+test('两个 bin 在需要 URI 编码的安装路径里都跑得出字节（入口守卫不许在 import 期抛）', (t) => {
+  if (artifact === null && unavailable === null) delivered()
+  if (encodedArtifact === null && encodedUnavailable === null) deliveredEncoded()
+  if (encodedArtifact === null) {
+    t.skip(`这台机器没能把包装进带空格/CJK 的前缀：${encodedUnavailable}。`
+      + `复现命令：cd ${PKG} && npm pack --pack-destination /tmp && npm i --prefix "/tmp/gp 家" <那份 .tgz>`
+      + ' && "/tmp/gp 家/node_modules/.bin/glasspane" --help —— 一条跳过的交付形状闸不算测量。')
+    return
+  }
+  for (const binPath of encodedArtifact.bins) {
+    const command = path.basename(binPath)
+    const r = execInstalled(binPath, ['--help'])
+    assert.equal(r.error, undefined, `exec ${command} 本身失败了：${r.error}`)
+    assert.equal(r.status, 0,
+      `${command} --help 装在 ${encodedArtifact.prefix}（路径需要 percent-encoding）时退出 ${r.status}。`
+      + `stdout=${r.stdout.length} 字节｜stderr 前 400 字节=${r.stderr.slice(0, 400)}——`
+      + '入口守卫读 `import.meta.url` 的 `.pathname`（不解码）并在 import 期裸调 realpathSync，'
+      + '这条路径上就没有那个文件，栈直接替命令答了话。')
+    // 判据是"这一页是用法页"，不是一个抄来的字节数：两个 bin 的 usage 长度本来就不同
+    // （`glasspane` 一条薄命令 757 字节，`glasspane-install` 3 327 字节），拿同一条下限
+    // 去量两条命令会把一条合法输出判成缺陷——坏对照比没有对照更糟。
+    assert.match(r.stdout, /用法/, `${command} 的 --help 第一行不是用法页：${r.stdout.slice(0, 200)}`)
+    assert.ok(!r.stdout.includes('\x00'), `${command} 的输出里出现 NUL：管道被截断的残迹`)
+    assert.equal(r.stdout.slice(-1), '\n', `${command} 的最后一行必须完整到达`)
+    assert.ok(r.stderr.length === 0,
+      `${command} --help 本该只写 stdout，实得 stderr ${r.stderr.length} 字节：${r.stderr.slice(0, 400)}`)
+    if (command === 'glasspane') {
+      // 薄命令这一支的签名：四个动词一个都不许少（缺一个就是 usage 被半路打断）。
+      for (const verb of ['update', 'status', 'doctor', 'help']) {
+        assert.match(r.stdout, new RegExp(`^\\s+${verb}\\s`, 'm'),
+          `${command} 的用法页里少了动词 ${verb}（实到 ${r.stdout.length} 字节）：${r.stdout}`)
+      }
+    }
+  }
+})
+
+test('那条守卫的判据本身：argv[1] 与包内文件不同路时必须答"不是被直接执行的"，而不是抛', () => {
+  // 生产形状里有一种是**悬空的 bin 软链**（`npm uninstall -g` 被打断）。argv[1] 指向不存在的文件时
+  // realpathSync 会抛；那时答案只能是"这次不是直接执行"，不能是整个模块在 import 期死掉。
+  const src = fs.readFileSync(path.join(PKG, 'glasspane.js'), 'utf8')
+  const guard = src.match(/function invokedAsCommand\(\)[\s\S]*?\n}/)
+  assert.ok(guard, 'glasspane.js 里找不到了口守卫函数——守卫被挪去哪了？')
+  assert.match(guard[0], /try\s*\{/, '守卫没有 try 包裹：任何一次 realpathSync 抛错都会替整条命令答话')
+  assert.match(guard[0], /catch\s*\{[\s\S]*return false/, '不可比对必须答"不是直接执行"（false），不是继续抛')
+  assert.match(guard[0], /fileURLToPath\(import\.meta\.url\)/,
+    '仍从 `.pathname` 读 URL：那条路径对带空格/CJK 的安装位置永远是 percent-encoded 的、永不存在的')
+  assert.doesNotMatch(guard[0], /\.pathname/, '守卫里不该再出现 .pathname')
+})

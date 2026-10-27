@@ -29,6 +29,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import process from 'node:process'
+import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
 export const VERBS = Object.freeze(['update', 'doctor', 'status', 'help'])
@@ -359,8 +360,24 @@ export async function main({ argv = process.argv.slice(2), env = process.env, sp
   return result.exitCode
 }
 
-const invokedDirectly = process.argv[1] !== undefined && fs.realpathSync(process.argv[1]) === fs.realpathSync(new URL(import.meta.url).pathname)
-if (invokedDirectly) {
+// Both sides must be realpath-resolved, not merely resolved against the cwd, and the comparison is
+// wrapped because `realpathSync` throws for paths that do not exist yet — this runs at import time, so
+// an uncomparable pair means "not invoked as a command", never "crash the entry". The URL is decoded
+// with `fileURLToPath`, not read through `.pathname`: `.pathname` leaves a path containing a space or a
+// CJK character percent-encoded (`/Users/John%20Smith/…`), which names no existing file, so the guard
+// threw and `glasspane <任何动词>` died with a stack trace for every account whose home needs encoding.
+// `updater/agent-entry.js` carries the same rule; this file was the face that never got it.
+function invokedAsCommand() {
+  const entry = process.argv[1]
+  if (entry === undefined) return false
+  try {
+    return fs.realpathSync(entry) === fs.realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+}
+
+if (invokedAsCommand()) {
   main().then((code) => {
     process.exitCode = code
   }, (error) => {
