@@ -399,6 +399,7 @@ test('advanceExistingClone: 完整 clone 的 fetch 不许带 --depth，浅仓才
     const spawn = (bin, args) => {
       calls.push(args.slice(2).join(' '))
       const join = args.join(' ')
+      if (args[args.length - 1] === 'remote') return { status: 0, stdout: 'origin\n', stderr: '' }
       if (/status --porcelain/.test(join)) return { status: 0, stdout: checkedOut ? '' : '', stderr: '' }
       if (/rev-parse --verify HEAD/.test(join)) return { status: 0, stdout: `${head}\n`, stderr: '' }
       if (/rev-parse --verify v9\.9\.9\^\{commit\}/.test(join)) {
@@ -414,7 +415,10 @@ test('advanceExistingClone: 完整 clone 的 fetch 不许带 --depth，浅仓才
         hasTag = true
         return { status: 0, stdout: '', stderr: '' }
       }
-      if (/checkout --detach v9\.9\.9/.test(join)) { checkedOut = true; head = A; return { status: 0, stdout: '', stderr: '' } }
+      // 切的是**落点 sha**，不是那个名字：`checkout --detach v9.9.9` 在按 tag 建的 clone 里
+      // 走不通（本机实测 git 报 "--detach does not take a path argument"），而 fetch 的落点就是
+      // 一个 sha。见 daily-20261027-clone-ref-resolution.test.mjs。
+      if (new RegExp(`checkout --detach ${A}`).test(join)) { checkedOut = true; head = A; return { status: 0, stdout: '', stderr: '' } }
       return { status: 128, stdout: '', stderr: `unexpected: ${join}` }
     }
     return { out: advanceExistingClone({ repoDir: '/Users/x/glasspane', ref: 'v9.9.9', spawn }), calls }
@@ -425,7 +429,8 @@ test('advanceExistingClone: 完整 clone 的 fetch 不许带 --depth，浅仓才
   assert.equal(full.out.advanced, true, 'fetch 之后复判成立才算前进过')
   const fullFetch = full.calls.find((a) => /fetch --tags/.test(a))
   assert.equal(fullFetch, 'fetch --tags origin v9.9.9', `完整 clone 的 fetch 不许带 --depth：${fullFetch}`)
-  assert.ok(full.calls.some((a) => a === 'checkout --detach v9.9.9'), JSON.stringify(full.calls))
+  assert.ok(full.calls.some((a) => a === `checkout --detach ${A}`),
+    `必须切到读到的那个 commit sha：${JSON.stringify(full.calls)}`)
 
   const shallowRun = run({ shallow: true })
   assert.equal(shallowRun.out.action, 'use', shallowRun.out.text ?? JSON.stringify(shallowRun.out))
@@ -455,10 +460,11 @@ test('advanceExistingClone: 只有读、fetch、detach 这几种动作，且切�
   const spawn = (bin, args) => {
     calls.push(args.slice(2))
     const join = args.join(' ')
+    if (args[args.length - 1] === 'remote') return { status: 0, stdout: 'origin\n', stderr: '' }
     if (/status --porcelain/.test(join)) return { status: 0, stdout: checkedOut ? '' : '', stderr: '' }
     if (/rev-parse --verify HEAD/.test(join)) return { status: 0, stdout: `${head}\n`, stderr: '' }
     if (/rev-parse --verify v9\.9\.9\^\{commit\}/.test(join)) return { status: 0, stdout: `${A}\n`, stderr: '' }
-    if (/checkout --detach v9\.9\.9/.test(join)) { checkedOut = true; head = A; return { status: 0, stdout: '', stderr: '' } }
+    if (/checkout --detach a{40}/.test(join)) { checkedOut = true; head = A; return { status: 0, stdout: '', stderr: '' } }
     if (/fetch/.test(join)) return { status: 0, stdout: '', stderr: '' }
     return { status: 128, stdout: '', stderr: `unexpected: ${join}` }
   }
@@ -469,7 +475,8 @@ test('advanceExistingClone: 只有读、fetch、detach 这几种动作，且切�
   for (const args of calls) {
     assert.doesNotMatch(args.join(' '), /(?:^|\s)-f(?:\s|$)|--force|stash|clean|reset/, `安装器不许动别人的工作：${args.join(' ')}`)
   }
-  assert.ok(calls.some((args) => args.join(' ') === 'checkout --detach v9.9.9'), '该切的那一步要真的切了')
+  assert.ok(calls.some((args) => args.join(' ') === `checkout --detach ${A}`),
+    `该切的那一步要真的切了，且切的是落点 sha 而不是那个名字：${JSON.stringify(calls.map((a) => a.join(' ')))}`)
 
   // 切完复判不成立 ⇒ 拒。这一条是"判据落在切换之后的事实上"这条规矩的读者：把复判删掉，
   // 上面那段 detach-fails-open 的代码就会把一棵切坏了的树交去构建。
@@ -479,6 +486,7 @@ test('advanceExistingClone: 只有读、fetch、detach 这几种动作，且切�
     ref: 'v9.9.9',
     spawn: (bin, args) => {
       const join = args.join(' ')
+      if (args[args.length - 1] === 'remote') return { status: 0, stdout: 'origin\n', stderr: '' }
       // 切之前：干净、HEAD 在 B、tag 在 A ⇒ 判成"前进"。切之后：HEAD 到了 A 却冒出一处改动，
       // 复判必须把它拦下来——这一支不许把"命令退出了 0"当成"这棵树可用"。
       if (/status --porcelain/.test(join)) return { status: 0, stdout: checkoutRan ? ' M 被切坏了的文件\n' : '', stderr: '' }

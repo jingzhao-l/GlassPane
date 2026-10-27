@@ -202,7 +202,10 @@ advance_existing_clone() { # $1=目录 $2=要装的 ref。回 0 = 这棵树可�
       say "      …另有 $(( _n - 10 )) 处"
     fi
     say "  下一步（两条都做得动，且不销毁任何东西）："
-    say "    a) 换一处干净的家：GLASSPANE_INSTALL_DIR=${_dir}-$(printf '%s' "$_ref" | tr -c 'A-Za-z0-9._+-' '_') 重跑一键安装"
+    # 路径必须加引号：HOME 里带空格时（/Users/John Smith）这一句照抄进去是**两个词**，
+    # 于是 clone 落在 /Users/John 而 Smith/glasspane-… 变成一条没人请求的命令 —— 静默落错位置
+    # 比拒掉更难发现。建议的目录也从被拒的这棵树推，不写死 ~。
+    say "    a) 换一处干净的家：GLASSPANE_INSTALL_DIR=\"${_dir}-$(printf '%s' "$_ref" | tr -c 'A-Za-z0-9._+-' '_')\" 重跑一键安装"
     say "    b) 自己收着这些改动：在 ${_dir} 里提交或转移到别处，再重跑本命令——这些文件去哪由你决定，不由安装器决定。"
     return 1
   fi
@@ -219,23 +222,60 @@ advance_existing_clone() { # $1=目录 $2=要装的 ref。回 0 = 这棵树可�
     if [ "$(git -C "$_dir" rev-parse --is-shallow-repository 2>/dev/null || echo unknown)" = "true" ]; then
       _depth="--depth 1"
     fi
-    say "  ${_dir} 里没有 ${_ref} 这个 tag（旧 clone 的 tag 表停在更早一版、浅 clone 都会这样）："
-    say "    先 fetch 它——git -C ${_dir} fetch --tags ${_depth:+$_depth }origin ${_ref}，只补对象、不动工作树。"
-    if ! git -C "$_dir" fetch --tags $_depth origin "$_ref" >/dev/null 2>&1; then
-      say "    git fetch 非零退出：确认网络与该 tag 存在（git ls-remote --tags origin ${_ref}），"
+    # 远端名不写死 origin：`git clone --origin up` 建的树、把 origin 改指镜像的树，走的都是同一条
+    # 拒绝，而那句拒绝让读者去跑 `git ls-remote --tags origin <ref>`——同一条用错名字的命令，照抄
+    # 只会再失败一次。判据只读事实：有 origin 用它；只有一个远端就用它；其余（零个或多个而无
+    # origin）是"答不出该从哪取"，不猜。
+    _remote=$(git -C "$_dir" remote 2>/dev/null | sed -n '/^origin$/p' | sed -n '1p')
+    if [ -z "$_remote" ]; then
+      _rn=$(git -C "$_dir" remote 2>/dev/null | grep -c '' || true)
+      if [ "${_rn:-0}" = "1" ]; then
+        _remote=$(git -C "$_dir" remote 2>/dev/null | sed -n '1p')
+      fi
+    fi
+    if [ -z "$_remote" ]; then
+      say "  ${_dir} 里没有 ${_ref} 这个引用，而这一趟连「该从哪个远端取」都答不出："
+      say "    git remote 里既没有 origin，也不是只剩一个远端（读到的远端：$(git -C "$_dir" remote 2>/dev/null | tr '\n' ' ')）。"
+      say "    不猜一个名字去 fetch。${_dir} 原地不动，没有 fetch、没有切分支、没有构建任何东西。"
+      say "    下一步：把要用的那个远端改名成 origin，或 GLASSPANE_INSTALL_DIR=<空目录> 换一处全新的 clone。"
+      return 1
+    fi
+    say "  ${_dir} 里没有 ${_ref} 这个引用（旧 clone 的 tag 表停在更早一版、浅 clone，以及**按 tag 建的 clone 里根本没有 refs/heads/** 都会这样）："
+    say "    先 fetch 它——git -C ${_dir} fetch --tags ${_depth:+$_depth }${_remote} ${_ref}，只补对象、不动工作树。"
+    if ! git -C "$_dir" fetch --tags $_depth "$_remote" "$_ref" >/dev/null 2>&1; then
+      say "    git fetch 非零退出：确认网络与该引用存在（git ls-remote ${_remote} ${_ref}），"
       say "    或 GLASSPANE_INSTALL_DIR=<空目录> 换一处全新的 clone。本轮没有 clone、没有切分支。"
       return 1
     fi
-    _tag=$(git -C "$_dir" rev-parse --verify "${_ref}^{commit}" 2>/dev/null || true)
-    [ -n "$_tag" ] || { say "    fetch 之后仍读不出 ${_ref} 指向的 commit：不动它。"; return 1; }
+    # fetch 退 0 不等于"本地多了一个叫 ${_ref} 的 ref"。按 tag 建的 clone 里 `fetch origin main`
+    # 只写 FETCH_HEAD（本机实测：fetch 前后 `rev-parse --verify 'main^{commit}'` 都回
+    # `fatal: Needed a single revision`，而 `checkout --detach main` 回
+    # `fatal: git checkout: --detach does not take a path argument 'main'`）。旧代码在这里直接
+    # 判"读不出就不动它"，把一条通了的网络说成网络问题，而文档第 64 行写明的
+    # 「要追主干必须写 GLASSPANE_REF=main」在这两条一键入口上就是**永久死路**。
+    # FETCH_HEAD 就是这一趟自己刚取回来的那个东西的落点，用它；不由别处默认打开，否则上一趟
+    # 别人 fetch 的残留会被读成"这一版就在它指的地方"。
+    _tag=$(git -C "$_dir" rev-parse --verify "${_ref}^{commit}" 2>/dev/null \
+      || git -C "$_dir" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null || true)
+    if [ -z "$_tag" ]; then
+      # 这一支是构造性护栏，不是对某条生产路径的归因：本机实测 git 对远端不存在的引用答退出 128，
+      # 所以上面那次 fetch 失败早被前一条 say 拦下了。留着它只为一句——`checkout --detach` 的实参
+      # 只许是读到的 commit，空串不行（旧写法在这里也只说"不动它"，同样的形状，不额外发明原因）。
+      say "    fetch 之后仍读不出 ${_ref} 指向的 commit（${_ref}^{commit} 与 FETCH_HEAD 都答不出）：不动它。"
+      say "    ${_dir} 原地不动，没有切分支、没有构建任何东西。"
+      say "    下一步：git clone --branch ${_ref} ${REPO_URL} 建一棵带分支的树，或 GLASSPANE_INSTALL_DIR=<空目录> 换一处全新的 clone。"
+      return 1
+    fi
   fi
   if [ "$_head" = "$_tag" ]; then
     say "  该目录已经在 ${_ref}（$(printf '%.7s' "$_head")），直接用它构建。"
     return 0
   fi
   say "  该目录干净而在 $(printf '%.7s' "$_head")，要装的是 ${_ref}（$(printf '%.7s' "$_tag")）：前进它。"
-  if ! git -C "$_dir" checkout --detach "$_ref" >/dev/null 2>&1; then
-    say "    git checkout --detach ${_ref} 失败：${_dir} 仍在 $(printf '%.7s' "$_head")，本轮没有构建任何东西。"
+  # 切的是那个 commit 的 sha，不是名字：名字在按 tag 建的 clone 里不是一个 ref，git 会拒
+  # `--detach <path>`；sha 才是这一句本来的意思。
+  if ! git -C "$_dir" checkout --detach "$_tag" >/dev/null 2>&1; then
+    say "    git checkout --detach ${_tag} 失败：${_dir} 仍在 $(printf '%.7s' "$_head")，本轮没有构建任何东西。"
     return 1
   fi
   # 切完再读一次：判据要落在切换之后的事实上，不是落在命令的退出码上。
@@ -278,9 +318,34 @@ say "Node.js $NODE_MAJOR 预检通过"
 assert_repo_url "$REPO_URL"
 assert_ref "$REF"
 
-# --- 3) 源码定位：GLASSPANE_REPO → 当前目录 → 既有 clone → 自动 clone --------
+# --- 2c) 透传参数里的两个源码定位旗标（2026-10-27 finding C6）-----------------
+# `--repo <dir>` 与 `--no-bootstrap` 写在 installer/cli.js 的 usageText 里（离线/免 clone 的两个
+# 控制口子）。从前这里只读 GLASSPANE_REPO / $PWD / 既有 clone 三个位置，把这两个旗标**原样透传**
+# 给委托的那一步——于是 `curl … | sh -s -- --repo ~/src/GlassPane` 仍旧先付一次 depth-1 网络 clone
+# （正是那个旗标要省掉的那笔副作用）；而 ~/glasspane 已存在又不是仓库时，脚本在**委托之前**就
+# 退出 1（下面那句"目标目录已存在"），文档里那条旗标在 primary 入口上根本没轮到 installer 去读。
+# 一个只在其中一条入口上生效的旗标，等于给读者留了一条看着能用的死路。
+_explicit_repo=""
+_no_bootstrap=0
+_want_repo_arg=0
+for _arg in "$@"; do
+  if [ "$_want_repo_arg" = "1" ]; then
+    _explicit_repo="$_arg"
+    _want_repo_arg=0
+    continue
+  fi
+  case "$_arg" in
+    --repo) _want_repo_arg=1 ;;
+    --no-bootstrap) _no_bootstrap=1 ;;
+  esac
+done
+
+# --- 3) 源码定位：--repo → GLASSPANE_REPO → 当前目录 → 既有 clone → 自动 clone --
 REPO=""
-if [ -n "${GLASSPANE_REPO:-}" ] && looks_like_repo "$GLASSPANE_REPO"; then
+if [ -n "$_explicit_repo" ] && looks_like_repo "$_explicit_repo"; then
+  REPO="$_explicit_repo"
+  say "使用 --repo 指定的仓库: $REPO"
+elif [ -n "${GLASSPANE_REPO:-}" ] && looks_like_repo "$GLASSPANE_REPO"; then
   REPO="$GLASSPANE_REPO"
   say "使用 GLASSPANE_REPO 指定的仓库: $REPO"
 elif looks_like_repo "$PWD"; then
@@ -304,6 +369,22 @@ elif looks_like_repo "$CLONE_DIR"; then
 fi
 
 if [ -z "$REPO" ]; then
+  # `--no-bootstrap` 承诺的就是"这一趟不 clone"，所以它必须在这一步就说话，不能等到委托
+  # 那一行才由 installer 拒绝——那时脚本已经付过一次网络 clone 了（见上面 2c 那段）。
+  if [ "$_no_bootstrap" = "1" ]; then
+    say "--no-bootstrap：本脚本不 clone。四个定位位都没命中："
+    say "  GLASSPANE_REPO=${GLASSPANE_REPO:-（未设置）}"
+    say "  --repo=${_explicit_repo:-（未给）}（给了但这个目录不像 GlassPane 仓库时也会走到这里）"
+    say "  当前目录=$PWD"
+    say "  既有 clone=$CLONE_DIR"
+    say "下一步：用 --repo <目录> 或 GLASSPANE_REPO=<目录> 指一棵含 engine/Package.swift 与"
+    say "  mcp-shell/package.json 的树，或去掉 --no-bootstrap 让它 clone 一份（ref: ${REF}）。"
+    if [ "$DRY_RUN" = "1" ]; then
+      say "[dry-run] 结论：这一趟在源码定位这一步就停，不会有 clone、不会有委托。"
+      exit 1
+    fi
+    exit 1
+  fi
 # 定位不到源码 ⇒ 这一步一定要 clone，而 clone 就是那笔白花的花费所在，所以平台闸正好卡在这里
   # （不是卡在入口）：README 两份都写着"macOS 14+"，而 Linux/BSD 上从前要付完整那次 5600 文件的
   # clone，然后在 installer 里被一句"未找到 open"间接地发现装不了。已经有源码的那一趟不在此列——

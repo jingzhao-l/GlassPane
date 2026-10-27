@@ -935,6 +935,10 @@ export function registerAgent({
         ok: true,
         verified: false,
         plistPath,
+        // `schedule: null` 是"没量过"，不是"没有时刻"。这一支连在册作业都没读回来，
+        // 所以它拿不出 launchd 手里的那个 interval；下游（installer 的那句"每日 X 点"）
+        // 只许把它当成"不知道"，不许回落成一个默认值再当成实测。
+        schedule: null,
         message: `update agent loaded (gui/${resolvedUid}/${label}) but the loaded job could not be read back (${loaded.reason}), so this run cannot show which command line launchd is holding${booted ? '' : `; the previous definition also failed to boot out (exit ${out.status}: ${(out.stderr || 'no stderr').trim().slice(0, 120)})`}`,
       }
     }
@@ -987,6 +991,7 @@ export function registerAgent({
         verified: false,
         plistPath,
         code: CODES.busyOrUnreachable,
+        schedule: heldSchedule ?? null,
         message: `the update agent was not replaced: the job launchd is holding runs at ${heldSchedule.hour}:${String(heldSchedule.minute).padStart(2, '0')}, `
           + `not the ${wantSchedule.hour}:${String(wantSchedule.minute).padStart(2, '0')} this run rendered, and its arguments name the stable entry `
           + `${cliPath ?? '<none>'} so the argv alone could not notice. Run "launchctl bootout gui/${resolvedUid}/${label}" until it answers `
@@ -1013,6 +1018,9 @@ export function registerAgent({
       ok: true,
       verified: true,
       plistPath,
+      // 从**在册作业**读回来的 interval（launchd 自己的答案）。null = 那份书答不出时刻，
+      // 这是"不知道"，不是"跑在默认那一档"—— installer 的那句"每日 X 点"只许用它说话。
+      schedule: heldSchedule ?? null,
       message: `update agent registered (gui/${resolvedUid}/${label}) and the loaded job names ${cliPath ?? 'the CLI path this run rendered'}`
         + (heldSchedule ? ` at ${heldSchedule.hour}:${String(heldSchedule.minute).padStart(2, '0')}` : ''),
     }

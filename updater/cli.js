@@ -654,6 +654,12 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         // answered bootstrap 0 but the book could not be read. The installer prints "registered" from
         // its own template, and it needs this fact to know whether it may say so without a caveat.
         agentVerified: disable ? null : agent.verified ?? null,
+        // 在册作业**实际**握着的那个 interval（`{hour, minute}`），由 launchd 自己的答案读回来；
+        // `null` = 这一趟没能读回来（作业没注册、或那份书答不出时刻）。installer 从前不管这里
+        // 答的是什么，直接打印 `DEFAULT_HOUR:DEFAULT_MINUTE` 那一个常量——于是本机装过
+        // `enable --hour 3` 的机器被重装之后，作业还在 3:00 跑，而安装日志与面板读者拿到的
+        // 那句是"每日 12:00"。判据要能答"不知道"，常量不能冒充实测。
+        agentSchedule: disable ? null : (agent.schedule ?? null),
         message: disable
           ? `automatic update is off${agent.message ? ` (${agent.message})` : ''}: "updater check" and "updater apply" still work by hand`
           : `automatic update is on${agent.message ? ` (${agent.message})` : ''}${ca ? `; ${ca.summary} — ${ca.remedy}` : ''}`,

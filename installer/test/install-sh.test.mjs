@@ -783,11 +783,22 @@ test('install.sh 与 installer/cli.js 对同一份既有 clone 事实给出同�
   // shell 那一侧不许有第二种"什么算脏"：它只可能问 `git status --porcelain`，且只可能用
   // detach 形态去切（没有 -f / stash / clean 的口子）。
   assert.match(INSTALL_SH_SRC, /git -C "\$_dir" status --porcelain/, 'shell 侧的"脏"必须来自同一把尺子')
-  assert.match(INSTALL_SH_SRC, /git -C "\$_dir" checkout --detach "\$_ref"/, '切只能是 detach 那一形')
+  // 切的是**读到的那个 commit**（$_tag），不是那个名字：按 tag 建的 clone 里没有 refs/heads/*，
+  // `checkout --detach main` 被 git 以"--detach does not take a path argument"拒绝（本机实测）。
+  assert.match(INSTALL_SH_SRC, /git -C "\$_dir" checkout --detach "\$_tag"/, '切只能是 detach 那一形，且切的是落点 sha')
+  assert.doesNotMatch(INSTALL_SH_SRC, /checkout --detach "\$_ref"/, '把名字直接交给 --detach 就是那条永久死路')
   assert.doesNotMatch(INSTALL_SH_SRC, /git[^\n]*(stash|clean|checkout -f|reset --hard)/, '安装脚本里不许出现销毁性的 git 动作')
   // fetch 的深浅形状由 git 自己答的那句决定，且**只有一条**带变量的命令：写两遍
-  // `fetch --tags …` 就是给下一次"改一处漏一处"留的口子。
+  // `fetch --tags …` 就是给下一次"改一处漏一处"留的口子。远端名由 `git remote` 读出来，
+  // 不写死 origin（`--origin up` 建的树在旧写法下连补救命令都是错的那一条）。
   assert.match(INSTALL_SH_SRC, /rev-parse --is-shallow-repository/, '浅不浅要问 git，不许脚本自己猜')
-  assert.match(INSTALL_SH_SRC, /git -C "\$_dir" fetch --tags \$_depth origin "\$_ref"/, 'fetch 只有一条命令，argv 由 $_depth 决定')
+  assert.match(INSTALL_SH_SRC, /git -C "\$_dir" fetch --tags \$_depth "\$_remote" "\$_ref"/,
+    'fetch 只有一条命令，argv 由 $_depth 与读出来的 $_remote 决定')
   assert.doesNotMatch(INSTALL_SH_SRC, /fetch --tags --depth 1 origin/, '不许再有那条无条件的 --depth：它会把完整 clone 变成浅仓')
+  assert.doesNotMatch(INSTALL_SH_SRC, /fetch --tags \$_depth origin/, '远端名不许写死 origin：它必须是读出来的那个')
+  assert.match(INSTALL_SH_SRC, /git -C "\$_dir" remote/, '远端名要问 git，不许脚本自己猜')
+  // fetch 退 0 而本地仍读不出那个名字，是因为按 tag 建的 clone 里 fetch 只写 FETCH_HEAD。
+  // 这条回落是"追主干"能走通的唯一原因，删掉它就把文档第 64 行写明的用法又变回死路。
+  assert.match(INSTALL_SH_SRC, /rev-parse --verify 'FETCH_HEAD\^\{commit\}'/,
+    'fetch 之后必须问过 FETCH_HEAD 这个落点')
 })

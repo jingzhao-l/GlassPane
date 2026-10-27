@@ -1571,7 +1571,15 @@ export async function registerAutoUpdate({
   }
 
   const registered = autoUpdate && !switchedOffByEnv
-  const schedule = `${launchd.DEFAULT_HOUR}:${String(launchd.DEFAULT_MINUTE).padStart(2, '0')}`
+  // 「每日几点」这句实话的唯一来源，是 updater 从**在册作业**里读回来的那个 interval
+  // （`outcome.agentSchedule`，2026-10-27 finding C4）。从前这里直接拼 `launchd.DEFAULT_*` 那两个常量：
+  // 装过 `updater enable --hour 3` 的机器被重装之后，作业照旧 3:00 跑（`enable` 故意保住在册时刻，
+  // updater/cli.js:583），而安装日志与 nextSteps 交给读者的那句却写成"每日 12:00"——一个默认值
+  // 冒充了一次实测，而面板与 gp_diagnose 的读者信的那句就是这个。读不回来时不猜，改口说清。
+  const held = outcome.agentSchedule ?? null
+  const scheduleMeasured = !!held && Number.isInteger(held.hour) && Number.isInteger(held.minute)
+  const defaultSchedule = `${launchd.DEFAULT_HOUR}:${String(launchd.DEFAULT_MINUTE).padStart(2, '0')}`
+  const schedule = scheduleMeasured ? `${held.hour}:${String(held.minute).padStart(2, '0')}` : defaultSchedule
   const summary = {
     ok: true,
     registered,
@@ -1579,6 +1587,9 @@ export async function registerAutoUpdate({
     reason: switchedOffByEnv ? 'env' : (autoUpdate ? null : 'flag'),
     agentLabel,
     schedule,
+    // 「这个数是读回来的还是默认值」本身要成为数据：只把 schedule 交给读者的话，两种来源在下游
+    // 长成同一个样子，而这两种说法对人是完全不同的。
+    scheduleMeasured,
     stateRoot,
     updaterCli: tree.cli,
     pointer: written.pointer,
@@ -1593,7 +1604,7 @@ export async function registerAutoUpdate({
     caRoots: outcome.state && outcome.state.caRoots ? outcome.state.caRoots : null,
   }
   if (registered) {
-    say(`每日自动更新已注册（${agentLabel}，默认 ${schedule}，状态根 ${stateRoot}；指针 ${written.path}）——一键关：node "${tree.cli}" disable`)
+    say(`每日自动更新已注册（${agentLabel}，${summary.scheduleMeasured ? `在册作业跑在 ${schedule}` : `默认 ${schedule}——这一档没能从在册作业读回实际时刻，所以下一句是默认值而不是实测`}，状态根 ${stateRoot}；指针 ${written.path}）——一键关：node "${tree.cli}" disable`)
     // "已注册"这三个字的证据是 updater 把在册作业读回来核对过。launchd 装载成功但读不回在册作业时，
     // 这句话只能算一半成立，而那另一半（原话）必须跟着说出来——否则这台机器看起来有每日作业，实际
     // 有没有人跑没人知道。措辞仍来自唯一作者 outcome.message，这里只转述。
@@ -1650,7 +1661,7 @@ export function updateGuidanceText(update) {
         : `   ⚠ 本机没能导出 node 要用的系统根证书束（${ca.status}）；HTTPS 被中间人替换的机器上，每日检查会在第一道校验上失败，`
           + '面板与 gp_diagnose 会一直显示这句话，修复办法是它给的那条。'
     return [
-      `6. 自动更新：默认开。launchd 每日 ${update.schedule} 跑 "${update.updaterCli}" check && apply`,
+      `6. 自动更新：默认开。launchd 每日 ${update.schedule}${update.scheduleMeasured ? '' : '（默认值——在册作业没读回实际时刻，这一句不是实测）'} 跑 "${update.updaterCli}" check && apply`,
       `   （作业 ${update.agentLabel}，RunAtLoad=false，日志 ${update.stateRoot}/update.log）；`,
       '   只在 daemon 空闲应答探针、且规格 §1 八道校验全过时才换版，major 永远等人点按钮。',
       ...(caLine ? [caLine] : []),
@@ -2374,7 +2385,11 @@ export function existingCloneDecision({ targetDir, ref, head = null, tagCommit =
         + shown.map((line) => `    ${line}`).join('\n')
         + (dirty.length > shown.length ? `\n    …另有 ${dirty.length - shown.length} 处` : '')
         + `\n下一步（不销毁任何东西，两条都做得动）：`
-        + `\n  a) 换一处干净的家再跑一键安装：GLASSPANE_INSTALL_DIR=~/glasspane-${String(ref).replace(/[^A-Za-z0-9._+-]/g, '_')} `
+        // 建议的目录必须从**被拒的那棵树**推出来，不能写死 `~/glasspane-<ref>`：GLASSPANE_INSTALL_DIR
+        // 指到 /Volumes/src/gp 时被拒的是那棵树，而句子里给的是家目录里另一条从没存在过的路径——
+        // 两条一键入口同源的那条规矩（判据不许指向一个与本次无关的位置）。路径带空格时必须加引号，
+        // 否则这句照抄进去的是两个词，clone 落在 `/Users/John` 而 `Smith/…` 变成一条命令。
+        + `\n  a) 换一处干净的家再跑一键安装：GLASSPANE_INSTALL_DIR="${String(targetDir)}-${String(ref).replace(/[^A-Za-z0-9._+-]/g, '_')}" `
         + `sh install.sh（或 npx glasspane-install）；`
         + `\n  b) 自己收着这些改动：在 ${targetDir} 里把它们提交或转移到别处，再重跑本命令——`
         + '安装器不替你决定这些文件去哪。',
@@ -2426,7 +2441,7 @@ export function existingCloneDecision({ targetDir, ref, head = null, tagCommit =
  * 只有 git 亲口答 `true` 才用 `--depth 1`；答不出来（老 git、不是仓库）按完整仓对待，宁可多取
  * 一点也不给人家的历史加边界。
  */
-export function readCloneFacts({ targetDir, ref, spawn = spawnSync } = {}) {
+export function readCloneFacts({ targetDir, ref, spawn = spawnSync, fetchHead = false } = {}) {
   const read = (args) => spawn('git', ['-C', targetDir, ...args], { encoding: 'utf8' })
   const sha = (what) => {
     const res = read(['rev-parse', '--verify', what])
@@ -2434,13 +2449,45 @@ export function readCloneFacts({ targetDir, ref, spawn = spawnSync } = {}) {
   }
   const status = read(['status', '--porcelain'])
   const shallow = read(['rev-parse', '--is-shallow-repository'])
+  // 按 tag 建的浅 clone 里**根本没有 refs/heads/**（`git clone --branch v1.23.0` 只配了那一个 tag
+  // 的 refspec）。所以对 `GLASSPANE_REF=main` 这种追主干的用法，`main^{commit}` 在本地永远读不出，
+  // 而紧跟其后的 `git fetch --tags origin main` **退 0 却不落下名为 main 的 ref**——它只写 FETCH_HEAD。
+  // 实测（真 git，一棵按 tag 建的浅 clone）：fetch 前后 `rev-parse --verify main^{commit}` 都回
+  // `fatal: Needed a single revision`，而 `checkout --detach main` 回
+  // `fatal: git checkout: --detach does not take a path argument 'main'`。旧代码把这两句都当成
+  // "网络或该 tag 有问题"，于是文档里写明的追主干口径在这两条一键入口上是**永久死路**。
+  // `fetchHead` 只在"这一趟自己刚 fetch 过那个 ref"之后打开：FETCH_HEAD 就是那次 fetch 的答案，
+  // 拿它当 ref 的落点比猜一个不存在的 ref 诚实；不由判据那一侧默认打开，否则上一趟别人 fetch 的
+  // 残留会被读成"这一版就在它指的地方"。
+  const refCommit = sha(`${ref}^{commit}`) ?? (fetchHead ? sha('FETCH_HEAD^{commit}') : null)
   return {
     head: sha('HEAD'),
-    tagCommit: sha(`${ref}^{commit}`),
+    tagCommit: refCommit,
     // `git status` 答非零时这里得到空数组，读起来是"干净"——那棵树随后会因为 `head` 读不出而被拒，
     // 所以"判不出来"走的是拒绝那一支，不是"那就切过去"。
     blocking: status.status === 0 ? String(status.stdout ?? '').split('\n').filter((line) => line !== '') : [],
     shallow: shallow.status === 0 ? String(shallow.stdout ?? '').trim() === 'true' : null,
+  }
+}
+
+/**
+ * 这棵 clone 该从哪个远端取（纯判定，可单测）。
+ *
+ * 旧写法把 `origin` 写死在 fetch 与诊断两处。一棵用 `git clone --origin up` 建的树、或把 origin
+ * 改指镜像的树，走到的是同一条拒绝，而那句拒绝让人去 `git ls-remote --tags origin <ref>`——**同一条
+ * 用错名字的命令**，照抄也只会再失败一次。判据只读事实：有 origin 用它；只有一个远端就用那一个；
+ * 一个都没有、或多个而没有 origin，都是"答不出该从哪取"，不猜。
+ */
+export function resolveRemoteName({ remotes = [] } = {}) {
+  const list = remotes.map((name) => String(name).trim()).filter((name) => name !== '')
+  if (list.includes('origin')) return { remote: 'origin' }
+  if (list.length === 1) return { remote: list[0] }
+  if (list.length === 0) {
+    return { error: '这棵树里一个远端都没有（git remote 答空）：fetch 无处可取，这里也不替它猜一个名字。' }
+  }
+  return {
+    error: `这棵树里有 ${list.length} 个远端（${list.join('、')}）而没有名为 origin 的那个：`
+      + '不猜该从哪一个取。下一步：把要用的那个远端改名成 origin，或直接 git fetch <那个远端> <ref> 之后重跑。',
   }
 }
 
@@ -2453,43 +2500,82 @@ export function readCloneFacts({ targetDir, ref, spawn = spawnSync } = {}) {
  * `checkout --detach <ref>`（只在树干净时执行）。没有 `-f`、没有 `stash`、没有 `clean`、
  * 没有 `reset --hard`：一个 installer 不该有能把别人的未提交工作抹掉的那一格。
  */
+/**
+ * 把既有 clone 前进到钉住的 ref（IO 步；判据全在 `existingCloneDecision` 里）。
+ *
+ * 只有这几种 git 动作：`status --porcelain`、`remote`、几次 `rev-parse --verify`、`rev-parse
+ * --is-shallow-repository`（全是读），`fetch --tags [remote <ref>]`（只往 .git 里加对象；
+ * 带不带 `--depth 1` 由 git 自己答的那句"是不是浅仓"决定，见 `readCloneFacts`），以及
+ * `checkout --detach <那个 commit 的 sha>`（只在树干净时执行）。没有 `-f`、没有 `stash`、没有
+ * `clean`、没有 `reset --hard`：一个 installer 不该有能把别人的未提交工作抹掉的那一格。
+ *
+ * 切的是 **sha 而不是那个名字**：按 tag 建的 clone 里没有 refs/heads/*，`main` 这个名字 fetch 之后
+ * 仍然不是一个 ref，`git checkout --detach main` 被 git 以"--detach does not take a path argument"
+ * 拒绝；而那次 fetch 的落点（FETCH_HEAD）就是一个 sha，切它才是这一句本来的意思。
+ */
 export function advanceExistingClone({ repoDir, ref, spawn = spawnSync } = {}) {
   const read = (args) => spawn('git', ['-C', repoDir, ...args], { encoding: 'utf8' })
+  const remoteNames = () => {
+    const res = read(['remote'])
+    return res.status === 0 ? String(res.stdout ?? '').split('\n').filter((line) => line !== '') : null
+  }
   let facts = readCloneFacts({ targetDir: repoDir, ref, spawn })
   if (facts.blocking.length === 0 && facts.head && !facts.tagCommit) {
-    // tag 不在这份历史里（旧 clone / 浅 clone 都会这样）：先把它取回来，再判。fetch 失败不改任何东西。
+    // 该 ref 在本地读不出（旧 clone 的 tag 表停在更早一版、浅 clone、按 tag 建的 clone 里没有
+    // refs/heads/*）：先把它取回来，再判。fetch 失败不改任何东西。
+    const remotes = remoteNames()
+    const remote = remotes === null ? null : resolveRemoteName({ remotes })
+    if (!remote || !remote.remote) {
+      return {
+        action: 'refuse',
+        blocking: [],
+        text: `${repoDir} 里没有 ${ref} 这个引用，而这一趟连"该从哪个远端取"都答不出来：`
+          + `${remote?.error ?? 'git remote 本身没答话。'}\n`
+          + `${repoDir} 原地不动，没有 fetch、没有切分支、没有构建任何东西。`,
+      }
+    }
     const fetchArgs = facts.shallow === true
-      ? ['fetch', '--tags', '--depth', '1', 'origin', ref]
-      : ['fetch', '--tags', 'origin', ref]
+      ? ['fetch', '--tags', '--depth', '1', remote.remote, ref]
+      : ['fetch', '--tags', remote.remote, ref]
     const fetched = read(fetchArgs)
     if (fetched.status !== 0) {
       return {
         action: 'refuse',
         blocking: [],
         fetchArgs,
-        text: `${repoDir} 里没有 ${ref} 这个 tag，而 `
+        remote: remote.remote,
+        text: `${repoDir} 里没有 ${ref} 这个引用，而 `
           + `git -C "${repoDir}" ${fetchArgs.join(' ')} 退出 ${String(fetched.status ?? 'null')}：`
           + `${String(fetched.stderr ?? '').trim().split('\n')[0] || '（git 没有留下 stderr）'}。\n`
-          + '没有 clone、没有切分支、没有写入任何东西。下一步：确认网络与该 tag 存在（'
-          + `git ls-remote --tags origin ${ref}），或 GLASSPANE_INSTALL_DIR=<空目录> 换一处全新的 clone。`,
+          + '没有 clone、没有切分支、没有写入任何东西。下一步：确认网络与该引用存在（'
+          + `git ls-remote ${remote.remote} ${ref}），或 GLASSPANE_INSTALL_DIR=<空目录> 换一处全新的 clone。`,
       }
     }
-    facts = readCloneFacts({ targetDir: repoDir, ref, spawn })
+    facts = readCloneFacts({ targetDir: repoDir, ref, spawn, fetchHead: true })
   }
   let decision = existingCloneDecision({ targetDir: repoDir, ref, ...facts })
   if (decision.action !== 'advance') return decision
-  const out = read(['checkout', '--detach', ref])
+  const targetCommit = facts.tagCommit
+  if (!targetCommit) {
+    // 这一支不是"生产会走到的判断"，而是一条**构造性的护栏**：git 在这台机器上对一个远端不存在
+    // 的引用答的是退出 128（本机实测：`fatal: couldn't find remote ref nosuchbranch`），所以
+    // fetch 退 0 而落点读不出这种形状没人给过。但 `checkout --detach` 的实参只许是一个读到的
+    // commit —— 把 null 拼进 argv 会让 git 报一条与本轮结论无关的错，而那正是"切了个不存在的东西"
+    // 的另一种写法。判据照旧是"不切就停下"，由上面那条 decision 说话。
+    return decision
+  }
+  const out = read(['checkout', '--detach', targetCommit])
   if (out.status !== 0) {
     return {
       action: 'refuse',
-      blocking: readCloneFacts({ targetDir: repoDir, ref, spawn }).blocking,
-      text: `切到 ${ref} 没成（git checkout --detach 退出 ${String(out.status ?? 'null')}）：`
+      blocking: readCloneFacts({ targetDir: repoDir, ref, spawn, fetchHead: true }).blocking,
+      text: `切到 ${ref}（${String(targetCommit).slice(0, 7)}）没成（git checkout --detach 退出 ${String(out.status ?? 'null')}）：`
         + `${String(out.stderr ?? '').trim().split('\n')[0] || '（git 没有留下 stderr）'}。\n`
         + `${repoDir} 仍在 ${String(facts.head ?? '读不出').slice(0, 7)}，本轮没有构建任何东西。`,
     }
   }
   // 切完再读一次：判据要落在**切换之后**的事实上，不是落在命令的退出码上。
-  const after = readCloneFacts({ targetDir: repoDir, ref, spawn })
+  const after = readCloneFacts({ targetDir: repoDir, ref, spawn, fetchHead: true })
   const recheck = existingCloneDecision({ targetDir: repoDir, ref, ...after })
   if (recheck.action !== 'use') {
     return {
