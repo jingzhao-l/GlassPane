@@ -61,8 +61,10 @@
   `npm-not-refreshed` 要说的那种状态。
 - `glasspane update` 在本机跑通：`检查：up-to-date` → 不进安装；`glasspane status` 随后把状态里的
   `current` 从 1.6.2 刷到 1.21.0（盘上两枚 bundle 的 `CFBundleShortVersionString` 实测均为 1.21.0）。
-- 测试：`node --test updater/test/` 688 passed / 0 fail；`node --test installer/test/` 237+10 passed /
-  0 fail；`node scripts/check-doc-links.mjs` 32 份文档 / 262 条内链无死链、双语成对、可复算主张与真源一致。
+- 测试：`npm test`（三个 workspace 各跑一次）rc=0 —— mcp-shell 652 / installer 241 / updater 688，
+  三个套件各自 0 fail（这一行的旧读数 237+10 是 1.22.0 那棵树量的，1.23.0 的三条修复把 installer
+  那一套加到 241 条）；`node scripts/check-doc-links.mjs` 32 份文档 / 262 条内链无死链、双语成对、
+  可复算主张与真源一致。
 - 反向变异 26 笔（`/var/tmp/mutation-battery-2428.py`，逐笔要求具名用例变红；被改的七个文件每笔之后
   按 sha256 与原件逐字核回）。这一轮它抓到两类东西：产品侧一处**没有读者的句子**（回滚时"这一趟没碰
   全局层"那句当时没有任何断言读它，M15 因此零红——补了断言才成立），以及电池自己的一处作用域错
@@ -81,9 +83,11 @@
    `lastErrorMessage` 非空时不看状态），所以本轮没改 Swift。真正的缺口是**没有一条 npm 交付的预编译
    引擎**：三条渠道最后都要本地 `swift build`，所以"用 npm 装"仍然要求 Command Line Tools——这句
    写在两份 README 里，不是可以悄悄省掉的代价。
-4. **daemon 是否还在 1.6.2**：`check` 之后状态记的是 1.21.0，盘上 bundle 也是 1.21.0；**在跑的进程**
-   要不要再重启一次换到新二进制，取决于另一个会话是否还在用它，本轮没有动。
-   本轮动了的是**全局 npm 层**（`npm install -g`，见下面的本机交付读数），那一层不需要重启任何进程。
+4. ~~**daemon 是否还在 1.6.2**~~ **已换到 1.23.0**（2026-10-27 零四十三分，`updater apply` 在这台机器上
+   真跑完，见"1.23.0 的发布读数"那一节最后一条）。盘上两枚 bundle、`glasspaned --version` 与状态里的
+   `current` 三处同读一个数，在跑的进程（pid 97127）就是那枚新二进制。
+   本轮动了的是**全局 npm 层**（`npm install -g`，见下面的本机交付读数），那一层不需要重启任何进程；
+   daemon 那一格最后也动了，动之前先量过"此刻没有别的客户端连在 socket 上"（`lsof` 只有监听者自己一行）。
 
 ## 发布读数（2026-10-27，每条写明命令）
 
@@ -202,3 +206,73 @@ npm 包的 `bin` 声明没动"**。本轮动了其中一项——`glasspane` 新
 `git ls-remote --tags origin` 里没有 `refs/tags/v1.23*`（`grep -c` 回 `0`），
 `npm view glasspane-mcp versions` / `glasspane-install versions` 的列表都以 `1.22.0` 结尾。
 已发布的 `v1.22.0` 一律不动（tag 绝不移动，那枚锚点的字节与版本号从此锁死）。
+
+## 1.23.0 的发布读数，与用发布物的端到端复跑
+
+### 发布链（每条命令都在文件里，不写"应该已经"）
+
+- CI：push main 的那一条 run `40425929662` 首跑红在 `harness rulers` 的
+  `The released artifact and the split branch are trunk's bytes` 那一格——**时序**，不是我改坏的判据：
+  那次 push 在 00:22:01 起跑，而 3b 的重切推送（`harness/main` → `d47f84d6`）落在 00:24。
+  `gh run rerun 40425929662 --failed` 之后 10 个 job 全绿（这是"旧 sha 转不了绿"那条的第二个反例，
+  前一个是 2026-10-23 的 `de5e3ac5`）。搬运仓自己的 CI run `40426210032` 两 job 全绿。
+- 重切与推送：`git subtree split --prefix=harness/glasspane-harness -b split/glasspane-harness`
+  → `d47f84d6`；`git rev-parse split/glasspane-harness^{tree}` ==
+  `git rev-parse HEAD:harness/glasspane-harness` == `d6d420e7…`；快进判定
+  `git merge-base --is-ancestor harness/main split/glasspane-harness` 成功 ⇒ 普通推送。
+- 金样：`node harness/tools/fork-diff.mjs --record` 只动两行（`observedAt` 的日期 +
+  `SYNCLOG.md` 那一条的 `forkHash` `53ec0a2d` → `c9d16f85`），三张计数逐字不变
+  （`4640/6744 byte-identical, 285 edited, 112 added, 1707 deleted`）。
+- tag：`node scripts/assert-tag-ready.mjs 1.23.0 --repository jingzhao-l/GlassPane` 放行
+  （`HEAD == origin/main == 34bc3015`，`ci.yml` 在该 sha 的 `event=push` 通道最新一条 success）→
+  `git tag -s v1.23.0 -F /var/tmp/gp-tag-1230-msg`；`git verify-tag` 回"完好的签名"、
+  密钥 `0929EA31DF4F7429F63FC53189D88B1D043A1298`、`[绝对]`；
+  `git ls-remote --tags origin` 回 `refs/tags/v1.23.0^{}` = `34bc3015`（tag 指的是那笔 CI 绿的树）。
+- GitHub Release：tag 推送的 run `40426894454` success（25s），`gh release view v1.23.0` 回
+  `isDraft=false` 与 4 件资产；`SHA256SUMS-1.23.0.txt` 那行
+  `5baed8914d09a7516aa296cf9ff1360bb07ed27109210131fbc69234d013f40e  GlassPane-1.23.0.tar.gz`
+  与 API `assets[].digest` 逐字相等；`.asc` 的 `VALIDSIG` 是那把钉住的钥匙。
+- npm：`gh workflow run release.yml --ref v1.23.0 -f mode=publish` → run `40426954729` success；
+  `npm view glasspane-mcp version` / `glasspane-install version` 都回 `1.23.0`；
+  `npm view glasspane-install@1.23.0 bin` 回 `{ glasspane: 'glasspane.js', 'glasspane-install': 'cli.js' }`，
+  `dist.shasum = 0dd2d3e0703c6d99cc3098ca098d31dd276641ac`。
+
+### 用**发布物**把三条修复各重跑一遍（本机，2026-10-27 零三分起）
+
+`npm install -g glasspane-mcp@1.23.0 glasspane-install@1.23.0` rc=0，随后：
+
+1. `glasspane --help` → 打用法、**rc=0**（1.22.0 的发布物在同一条命令上回"不认得命令「--help」"退 2）。
+2. `glasspane doctor` → 六格全答、rc=0，`全局 npm 包：glasspane-mcp=1.23.0 glasspane-install=1.23.0`。
+3. 旧 clone 前进：`node /var/tmp/gp-advance-real-clone.mjs`（它 import 的是
+   `/usr/local/lib/node_modules/glasspane-install/cli.js`，即发布物本体）→ 打印的钉住 ref 是 `v1.23.0`，
+   前进之前 `HEAD=434bc51 tag=null 未提交=0 处`——**这一串事实正是 1.22.0 判 refuse 的那一串**，
+   发布物现在答 `use`：`从 434bc51 前进到 v1.23.0（34bc301）`。
+   独立复核（不读代码的自述）：`rev-parse --short HEAD` = `34bc301`、`describe --tags` = `v1.23.0`、
+   `status --porcelain` 0 行、`--is-shallow-repository` 仍 `true`。
+4. 下载-验签-暂存这一整条链在真机上过：
+   `NODE_EXTRA_CA_CERTS=/var/tmp/glasspane-harness/ca-bundle.pem node
+   /Users/ethanlin/glasspane-v1.21.0/updater/cli.js check --json --state-dir ~/.glasspane`
+   → rc=0、`status=staged`、`current 1.21.0 → latest 1.23.0`，
+   stderr 里 `gate 8: SHA256SUMS-1.23.0.txt.asc … gpg exit 0 (verified)`，且
+   `digest measured 5baed8914d09…`——**暂存树量出来的 sha256 与发布物 API digest 同一个值**。
+   这一趟还顺手量到一个只属于本机环境的事：不带 `NODE_EXTRA_CA_CERTS` 时同一条命令是
+   `gate refused: release-unreachable … UNABLE_TO_VERIFY_LEAF_SIGNATURE`（那条代理拦 api.github.com
+   的旧账），它拒得老实、没有把"问不到"报成"没更新"。在册的定时代理自带 `NODE_EXTRA_CA_CERTS`，
+   所以 `doctor` 那一格答 `state=running`。
+5. **最后一步也跑了**：`… updater/cli.js apply --state-dir ~/.glasspane --json` → rc=0、
+   `status=applied`、`message="updated 1.21.0 -> 1.23.0"`，`authorship` 记的是
+   `signature: verified / keyFingerprint: 0929EA31…043A1298`，`runtime` 记的是
+   `status: refreshed, version: 1.23.0, cliPath: ~/.glasspane/runtime/1.23.0/updater/cli.js
+   （previousCliPath 是 /Users/ethanlin/glasspane-v1.21.0/updater/cli.js）, agentVerified: true`，
+   `caRoots.status=ok, certs=163`，而 `code` 是 `null`——**不是** `npm-not-refreshed`：这台机器的全局层
+   写得进去，那一格这次真的装上了。跑之前先量过"此刻没有别的客户端挂在 socket 上"
+   （`lsof ~/.glasspane/engine.sock` 只有监听者自己一行）。
+   事后三处独立复核，不读 apply 自己的话：`plutil -extract CFBundleShortVersionString` 对
+   `~/Applications/GlassPane.app` 与 `GlassPane Daemon.app` 都回 `1.23.0`；
+   `glasspaned --version` 回 `glasspaned 1.23.0`；在跑的进程（pid 97127，08:42:57 起）就是那枚新二进制。
+   `glasspane doctor` 随后六格全答：`status=applied 装着=1.23.0 最新=1.23.0`、
+   `定时代理：在册作业装载着，state=running`、`全局 npm 包：glasspane-mcp=1.23.0 glasspane-install=1.23.0`。
+   **这就是用户报的那条链路的终态**：旧 GUI 里那颗按钮当时是"探测到更新→显示更新失败"，
+   现在同一条链（探测 → 下载 → 验签 → 暂存 → 换 bundle → 重启并握手回读 → 刷全局层）在真机上走通，
+   且中途任何一格失败都说得出是哪一格。
+
