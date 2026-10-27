@@ -3,7 +3,7 @@
   "name": "glasspane-harness",
   "displayName": "GlassPane Harness",
   "tagline": "Evidence-honest GUI verification harness for macOS apps \u2014 an opencode fork carrying GlassPane's native tool surface",
-  "version": "0.12.2",
+  "version": "0.12.3",
   "binary": "glasspane-harness",
   "bins": [
     "glasspane-harness",
@@ -14,7 +14,7 @@
   "install": {
     "npm": "npm install -g glasspane-harness",
     "bun": "bun add -g glasspane-harness",
-    "curl": "curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.2/scripts/install.sh | bash",
+    "curl": "curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.3/scripts/install.sh | bash",
     "curlRefNote": "安装通道钉在**本版 tag** 上，不钉 main：`install.sh` 是验二进制的那个东西，而钉在分支上意味着任何能 push split 仓 main 的人都能换掉校验器。这条命令是用户读到的那一行，所以它跟着版本走；`product-surface` 的 `installer-curl-pinned` 规则同时核三件事——`install.curl` 含 `v<本版>`、不含 `/main/`、以及两份 README 与 `docs/install.md` 里那一行与它逐字相同。漏改一处就红，不靠人记得。"
   },
   "product": {

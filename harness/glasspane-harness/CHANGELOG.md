@@ -12,6 +12,34 @@ contract does not).
 
 （空。本轮收口后没有未归号的条目。）
 
+## [0.12.3] — 2026-10-27
+
+**版本判断：patch。** 这一天第三次，同一条尺子、同一个形状：父仓 `harness/tools/release-artifact.mjs`
+要求**已发布 tag 背后的树等于主干 `harness/glasspane-harness` 的子树**，而 `v0.12.2` 打出去一分钟之后
+（18:37 → 18:38），主干又被推进了两行。那条 lane 自己的读数（run `40492903363`）：
+
+```
+release-artifact — 1 agreement(s) held, 0 tolerated lag(s), 1 problem(s) [trunk fafa49d8…]
+  ✓ split-main: split refs/heads/main fafa49d8 == trunk's harness/glasspane-harness tree
+  ✗ artifact:   the tree behind the released v0.12.2 is b5e30712 but trunk's subtree is fafa49d8
+      edited on both sides: 2 — README.md (+1 / -1), README.zh-CN.md (+1 / -1)
+```
+
+`git diff --numstat b5e30712 fafa49d8` 独立复算：正好两个文件、各一行同行改写，内容就是
+`039df15e`（另一条会话，把指向 iterate-harness 的那一节改称"双向集成"）。
+**它不是发布台账，所以豁免用不上**；已发布的 tag 绝不移动，能闭合它的只有"再切一个号"。
+这三格该记的账记在这里：那两行文字是谁写的、什么时候写的，由 `039df15e` 自己负责，
+本号只做搬运，不改动那两个标题一个字，也不替它们的措辞作背书。
+
+本版内容 = 那两行 README 标题 + 版本线 8 处（`product.json` 两行、`packages/opencode/package.json`、
+`scripts/install.sh`、`docs/install.md` 两处、两份 README 各一处）+ 这条 CHANGELOG 条目。
+六个位点文件全是同行改写（`git diff --numstat` added == deleted），历史条目一字未动。
+
+- `node harness/tools/product-surface.mjs`：6587 agreements / 0 problems（`glasspane-harness@0.12.3`）。
+- 金样跟着走：`harness/contracts/fork-diff.json` 里被点名的 hash 逐笔重记，
+  三张计数不变（`4640/6744 byte-identical, 285 edited, 112 added, 1707 deleted`）——
+  版本号换三次不等于分叉面变过，这条尺子允许 hash 移动、不允许计数移动。
+
 ## [0.12.2] — 2026-10-27
 
 **版本判断：patch。** 与 0.12.1 同一格形状，同一条尺子：父仓 `harness/tools/release-artifact.mjs` 要求
