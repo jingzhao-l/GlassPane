@@ -33,7 +33,7 @@ set -eu
 # 勿手改）：一键安装 clone 的是这个 **tag**，不是移动的 main——同一天两个人跑
 # 同一条命令必须拿到同一份源码。入口脚本本身仍从 main 取，因为它是唯一需要
 # "最新"的东西：钉的是哪个 tag 就写在这行里。
-GLASSPANE_RELEASE="v1.22.0"
+GLASSPANE_RELEASE="v1.23.0"
 
 # 输出函数先定义：下面第 (0) 条 HOME 闸要用 fail 说话，而它必须排在任何 $HOME 展开之前。
 say() { printf '%s\n' "$*"; }
@@ -181,8 +181,10 @@ describe_ref() {
 # 同源（同一份"什么算脏"、同三种动作：用 / 前进 / 拒），两处过程由 install-sh.test.mjs 拿同一把
 # 假 git 各跑一遍钉住——在这里发明第二种说法，就是下一次"两条一键入口对同一件事给相反答案"的起点
 # （本轮被修掉的正是这一类：一条只打印提示、另一条直接 clone 失败）。
-# 三条 git 动作：status/rev-parse 是读，fetch 只往 .git 里加对象，checkout --detach 只在树**干净**
-# 时执行。没有 -f、没有 stash、没有 clean：安装脚本不该有能把别人的未提交工作抹掉的那一格。
+# 这几种 git 动作：status / rev-parse 是读，fetch 只往 .git 里加对象（带不带 --depth 1 由
+# git 自己答的"是不是浅仓"决定——对一棵完整 clone 加 --depth 1 会落下 .git/shallow，那不是
+# "只加对象"而是给人家的历史加边界），checkout --detach 只在树**干净**时执行。
+# 没有 -f、没有 stash、没有 clean：安装脚本不该有能把别人的未提交工作抹掉的那一格。
 advance_existing_clone() { # $1=目录 $2=要装的 ref。回 0 = 这棵树可以用；非 0 = 本轮别用它，且没动过它
   _dir="$1"
   _ref="$2"
@@ -210,8 +212,16 @@ advance_existing_clone() { # $1=目录 $2=要装的 ref。回 0 = 这棵树可�
   }
   _tag=$(git -C "$_dir" rev-parse --verify "${_ref}^{commit}" 2>/dev/null || true)
   if [ -z "$_tag" ]; then
-    say "  ${_dir} 里没有 ${_ref} 这个 tag（浅历史常见）：先 fetch 它——只往 .git 里加对象，不动工作树。"
-    if ! git -C "$_dir" fetch --tags --depth 1 origin "$_ref" >/dev/null 2>&1; then
+    # `--depth` 只在 git 自己答"这是浅仓"时才加。从前无条件加，而这行 say 写的是"只往 .git 里加
+    # 对象"——那句话对完整 clone 不成立：`fetch --depth 1` 会落下 `.git/shallow`，给一份本来完整的
+    # 历史加上人为边界（要抹掉得 `git fetch --unshallow`，而那不是这一趟该替人做的决定）。
+    _depth=""
+    if [ "$(git -C "$_dir" rev-parse --is-shallow-repository 2>/dev/null || echo unknown)" = "true" ]; then
+      _depth="--depth 1"
+    fi
+    say "  ${_dir} 里没有 ${_ref} 这个 tag（旧 clone 的 tag 表停在更早一版、浅 clone 都会这样）："
+    say "    先 fetch 它——git -C ${_dir} fetch --tags ${_depth:+$_depth }origin ${_ref}，只补对象、不动工作树。"
+    if ! git -C "$_dir" fetch --tags $_depth origin "$_ref" >/dev/null 2>&1; then
       say "    git fetch 非零退出：确认网络与该 tag 存在（git ls-remote --tags origin ${_ref}），"
       say "    或 GLASSPANE_INSTALL_DIR=<空目录> 换一处全新的 clone。本轮没有 clone、没有切分支。"
       return 1

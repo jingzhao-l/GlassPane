@@ -32,6 +32,8 @@ import process from 'node:process'
 import { spawnSync } from 'node:child_process'
 
 export const VERBS = Object.freeze(['update', 'doctor', 'status', 'help'])
+/** 用法里的同义写法：读不出"同一条命令的两种问法"就没有可比性，所以别名是一张明面上的表。 */
+export const VERB_ALIASES = Object.freeze({ '-h': 'help', '--help': 'help' })
 export const DAEMON_JOB_LABEL = 'com.glasspane.daemon'
 export const NPM_PACKAGES = Object.freeze(['glasspane-mcp', 'glasspane-install'])
 /** The three answers a read may give. `unverified` is the one that used to be missing everywhere. */
@@ -268,7 +270,7 @@ export function usageText() {
     '  update    问一次有没有新版本，有就装（走这台机器已经装着的那个更新器）',
     '  status    把更新器自己的那一行结论原样打出来',
     '  doctor    读这台机器的安装状态（安装指针、更新器、daemon 作业、socket、全局 npm 包）——只读，不写',
-    '  help      这一页',
+    '  help      这一页（`-h`、`--help` 同义）',
     '',
     '退出码：0 = 成/都在位；2 = 用法错；3 = 被拒或有一格不在位（doctor 用它表示"有东西要看上面那几行"）；',
     '4/5 来自 update（换版后回退 / 回退也没成），与更新器本身的口径一致。',
@@ -279,8 +281,12 @@ export function usageText() {
 export function parseVerb(argv) {
   const first = String(argv?.[0] ?? '')
   if (argv.length === 0) return { verb: null, error: '没给命令' }
-  if (!VERBS.includes(first)) return { verb: null, error: `不认得命令「${first}」` }
-  return { verb: first, error: null, rest: argv.slice(1) }
+  // `-h` / `--help` 与 `help` 同义：这条命令是本产品给 agent 的入口，而 agent 的第一反应就是
+  // `--help`。2026-10-27 用发布物实测：`/usr/local/bin/glasspane --help` 回"不认得命令「--help」"
+  // 且退出 2——同产品的 `installer/cli.js` 认 `--help`，两条入口对同一种问法给两种答案。
+  const verb = VERB_ALIASES[first] ?? first
+  if (!VERBS.includes(verb)) return { verb: null, error: `不认得命令「${first}」` }
+  return { verb, error: null, rest: argv.slice(1) }
 }
 
 /**

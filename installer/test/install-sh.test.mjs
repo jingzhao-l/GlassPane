@@ -600,8 +600,8 @@ test('install.sh: 头里声明的职责条数与实际列出的条目一一对�
  * 把切后复判删掉 → 第一条的 HEAD 断言红（只看 rc 的话，一条什么都不做的分支也能绿）。
  */
 
-/** 一棵能过 `looks_like_repo` 的源仓库，带两个 tag：旧的与要装的。 */
-function makeTaggedRepo(label) {
+/** 一棵能过 `looks_like_repo` 的源仓库，带两个 tag：旧的与要装的。`shallow: false` 给一棵完整 clone。 */
+function makeTaggedRepo(label, { shallow = true } = {}) {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), `glasspane-${label}-`))
   const src = path.join(work, 'src')
   fs.mkdirSync(path.join(src, 'engine'), { recursive: true })
@@ -620,10 +620,21 @@ function makeTaggedRepo(label) {
   git('commit', '-q', '-m', 'new release')
   git('tag', 'v9.9.9-new')
   const cloneDir = path.join(work, 'clone')
-  execFileSync('git', ['clone', '--quiet', '--branch', 'v0.0.1-old', '--depth', '1', `file://${src}`, cloneDir], { encoding: 'utf8' })
+  // 两棵都从旧 tag 起，且都**没有**要装的 v9.9.9-new，但缺的原因不同：浅的那棵因为边界只取一笔，
+  // 完整的那棵因为 `--single-branch` 只跟随 `v0.0.1-old` 这一个 ref（默认的全量 clone 会连
+  // `refs/heads/main` 一起拉下来，那笔新提交于是可达、tag 也被 auto-follow 带进来——第一版夹具就
+  // 在这里翻了车：前提"本地还没有这个 tag"根本没成立，fetch 那一支一步都没走，用例照样绿得起来）。
+  const cloneArgs = ['clone', '--quiet', '--branch', 'v0.0.1-old']
+  if (shallow) cloneArgs.push('--depth', '1')
+  else cloneArgs.push('--single-branch')
+  execFileSync('git', [...cloneArgs, `file://${src}`, cloneDir], { encoding: 'utf8' })
   const headIn = () => execFileSync('git', ['-C', cloneDir, 'rev-parse', '--verify', 'HEAD'], { encoding: 'utf8' }).trim()
   const tagCommit = (tag) => execFileSync('git', ['-C', src, 'rev-parse', '--verify', `${tag}^{commit}`], { encoding: 'utf8' }).trim()
-  return { work, src, cloneDir, headIn, tagCommit, cleanup: () => fs.rmSync(work, { recursive: true, force: true }) }
+  const isShallow = () => execFileSync('git', ['-C', cloneDir, 'rev-parse', '--is-shallow-repository'], { encoding: 'utf8' }).trim()
+  // 夹具的前提：要装的那个 tag 在**clone 里**还不存在。前提要能被测试自己问出来，
+  // 不然哪天 clone 的形状变了、fetch 那一支根本不走，用例却还在绿。
+  const hasTagLocal = (tag) => spawnSync('git', ['-C', cloneDir, 'rev-parse', '--verify', `${tag}^{commit}`], { encoding: 'utf8' }).status === 0
+  return { work, src, cloneDir, headIn, tagCommit, isShallow, hasTagLocal, cleanup: () => fs.rmSync(work, { recursive: true, force: true }) }
 }
 
 /** 一把只记录不干活的 node/uname：委托行不许真跑 installer，平台闸要按 macOS 走。 */
@@ -640,6 +651,27 @@ function makeStubBin(dir) {
   return dir
 }
 
+/**
+ * 一只记账的 git：把**真正执行的 argv**落进文件，再交给 `/usr/bin/git` 干活。
+ * 为什么要它：脚本里那句"先 fetch 它——git -C … fetch --tags … origin …"是 say 自己拼的字符串，
+ * 拿 stdout 断言"fetch 用了哪个 argv"读到的是**它说了什么**，不是**它做了什么**。
+ * 2026-10-27 的变异 M9（把命令里的 `$_depth` 删掉、say 那行照打）就这样绿了过去——
+ * 同一族"断言回显状态而不是指令"的账，这是第三次记。
+ */
+function makeGitSpy(dir) {
+  const log = path.join(dir, 'git-argv.txt')
+  fs.writeFileSync(path.join(dir, 'git'), [
+    '#!/bin/sh',
+    `printf '%s\\n' "$*" >> "${log}"`,
+    'exec /usr/bin/git "$@"',
+    '',
+  ].join('\n'), { mode: 0o755 })
+  return {
+    log,
+    read: () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter((line) => line !== '') : []),
+  }
+}
+
 const STUB_ENV = (bin, repo, extra = {}) => ({
   GLASSPANE_REPO: '',
   GLASSPANE_INSTALL_DIR: repo.cloneDir,
@@ -653,19 +685,54 @@ const STUB_ENV = (bin, repo, extra = {}) => ({
 test('install.sh: 既有 clone 干净时被前进到钉住的 tag，委托行用的是切完的那一棵', () => {
   const repo = makeTaggedRepo('sh-advance')
   const bin = makeStubBin(path.join(repo.work, 'bin'))
+  const spy = makeGitSpy(bin)
   const calls = path.join(bin, 'calls.txt')
   const before = repo.headIn()
   try {
+    assert.equal(repo.hasTagLocal('v9.9.9-new'), false, '夹具前提：浅 clone 本地没有要装的 tag')
     const result = runInstallSh({ cwd: repo.work, env: STUB_ENV(bin, repo) })
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
     assert.match(result.stdout, /该目录干净而在/, `要看得见"为什么切"：${result.stdout}`)
     assert.match(result.stdout, /已前进到 v9\.9\.9-new/, result.stdout)
+    // 浅仓缺 tag ⇒ 这一趟的 fetch 必须**真的**带 --depth 1（它已经在边界里，多取一个 tag
+    // 不必拉回整段历史）。读的是落进账里的 argv，不是脚本自己打印的那一句。
+    const fetches = spy.read().filter((line) => line.includes('fetch --tags'))
+    assert.deepEqual(fetches.filter((line) => /fetch --tags --depth 1 origin v9\.9\.9-new/.test(line)).length, 1,
+      `浅仓的 fetch argv 要恰好一条带 --depth 1：${JSON.stringify(spy.read())}`)
+    assert.equal(repo.isShallow(), 'true', '这一趟不改变深浅：浅仓前进之后还是浅仓')
     const after = repo.headIn()
     assert.notEqual(after, before, 'HEAD 真的动了——只看 rc 的话，一条什么都不做的分支也能绿')
     assert.equal(after, repo.tagCommit('v9.9.9-new'), '切到的必须正是钉住的那个 tag 指向的 commit')
     const delegated = fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8') : ''
     assert.match(delegated, /installer\/cli\.js/, `委托行必须落到切完的那一棵：${delegated}`)
     assert.ok(delegated.includes(repo.cloneDir), `GLASSPANE_REPO 要指向前进后的目录：${delegated}`)
+  } finally {
+    repo.cleanup()
+  }
+})
+
+test('install.sh: 前进一棵**完整** clone 时 fetch 不带 --depth——它不许把别人的历史变成浅仓', () => {
+  // 2026-10-27 本机 `~/glasspane` 的真实形状：一棵完整的旧 clone，tag 表停在更早的一版。旧写法对
+  // 任何树都 `fetch --tags --depth 1`，而 `--depth` 会落下 `.git/shallow`：一句"只往 .git 里加对象"
+  // 掩盖了它其实给一份完整历史加了人为边界（要抹掉得 `git fetch --unshallow`）。
+  const repo = makeTaggedRepo('sh-advance-full', { shallow: false })
+  const bin = makeStubBin(path.join(repo.work, 'bin'))
+  const spy = makeGitSpy(bin)
+  const before = repo.headIn()
+  try {
+    assert.equal(repo.isShallow(), 'false', '夹具前提：这棵 clone 是完整的')
+    assert.equal(repo.hasTagLocal('v9.9.9-new'), false, '夹具前提：要装的 tag 本地还没有，这一趟必须走 fetch 那一支')
+    const result = runInstallSh({ cwd: repo.work, env: STUB_ENV(bin, repo) })
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+    const fetches = spy.read().filter((line) => line.includes('fetch --tags'))
+    assert.equal(fetches.length, 1, `只该 fetch 一次，且必须是从 argv 里数出来的：${JSON.stringify(spy.read())}`)
+    assert.match(fetches[0], /fetch --tags origin v9\.9\.9-new$/,
+      `完整 clone 的 fetch argv 必须不含 --depth（读的是 argv，不是脚本自己说的那句）：${fetches[0]}`)
+    assert.doesNotMatch(fetches[0], /--depth/, fetches[0])
+    assert.equal(repo.headIn(), repo.tagCommit('v9.9.9-new'), 'fetch 之后照样前进到钉住的 tag')
+    assert.notEqual(repo.headIn(), before)
+    assert.equal(repo.isShallow(), 'false', '前进之后还是完整仓：这一趟没有落下 .git/shallow')
+    assert.equal(fs.existsSync(path.join(repo.cloneDir, '.git', 'shallow')), false, '边界文件本身也不许出现')
   } finally {
     repo.cleanup()
   }
@@ -702,6 +769,10 @@ test('install.sh 与 installer/cli.js 对同一份既有 clone 事实给出同�
   const cases = [
     { name: '已经在钉住的 tag 上', state: { head: A, tagCommit: A, blocking: [] }, want: 'use' },
     { name: '干净而在别处', state: { head: B, tagCommit: A, blocking: [] }, want: 'advance' },
+    // 本机 `~/glasspane` 那一棵（2026-10-27 实测：干净、HEAD 在 v1.5.0 之后、本地 tag 只到 v1.2.0）。
+    // 旧判据在这格上是 refuse，而 refuse 之后没有人会去 fetch 那个 tag——npm 入口对旧 clone 恒拒，
+    // shell 入口却能前进。两处对同一份事实给两种答案，修的就是这一类。
+    { name: '干净但本地还没有那个 tag', state: { head: B, tagCommit: null, blocking: [] }, want: 'advance' },
     { name: '脏', state: { head: B, tagCommit: A, blocking: [' M engine/Package.swift'] }, want: 'refuse' },
     { name: '读不出', state: { head: null, tagCommit: null, blocking: [] }, want: 'refuse' },
   ]
@@ -714,4 +785,9 @@ test('install.sh 与 installer/cli.js 对同一份既有 clone 事实给出同�
   assert.match(INSTALL_SH_SRC, /git -C "\$_dir" status --porcelain/, 'shell 侧的"脏"必须来自同一把尺子')
   assert.match(INSTALL_SH_SRC, /git -C "\$_dir" checkout --detach "\$_ref"/, '切只能是 detach 那一形')
   assert.doesNotMatch(INSTALL_SH_SRC, /git[^\n]*(stash|clean|checkout -f|reset --hard)/, '安装脚本里不许出现销毁性的 git 动作')
+  // fetch 的深浅形状由 git 自己答的那句决定，且**只有一条**带变量的命令：写两遍
+  // `fetch --tags …` 就是给下一次"改一处漏一处"留的口子。
+  assert.match(INSTALL_SH_SRC, /rev-parse --is-shallow-repository/, '浅不浅要问 git，不许脚本自己猜')
+  assert.match(INSTALL_SH_SRC, /git -C "\$_dir" fetch --tags \$_depth origin "\$_ref"/, 'fetch 只有一条命令，argv 由 $_depth 决定')
+  assert.doesNotMatch(INSTALL_SH_SRC, /fetch --tags --depth 1 origin/, '不许再有那条无条件的 --depth：它会把完整 clone 变成浅仓')
 })

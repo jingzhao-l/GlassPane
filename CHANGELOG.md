@@ -4,7 +4,41 @@
 
 ## [Unreleased]
 
-（空。1.22.0 收口后没有未归号的条目。)
+（空。1.23.0 收口后没有未归号的条目。)
+
+## [1.23.0] — 2026-10-27
+
+**版本判断：minor。** 判据是 1.22.0 那条自己写下的：patch 要求「状态文件的字段没动、退出码集合没动、
+CLI 参数没动、npm 包的 `bin` 声明没动」。本轮动了其中一项——`glasspane` 新接受 `-h` / `--help`
+两种写法，而一条原本拒绝的调用（旧 clone 上的 `npx glasspane-install`）现在会前进。四十分钟前发布的
+规则不当场改口，否则版本号就不再是机器读得到的承诺。状态文件的字段、退出码集合、`bin` 声明三项都没动；
+已发布的 `v1.22.0` 一律不动（tag 绝不移动，那枚锚点的字节与版本号从此锁死）。
+
+- **installer：`npx glasspane-install` 对一棵"本地还没有那个 tag"的旧 clone 不再恒拒。**
+  1.22.0 交付的那条前进判据把"该 tag 指向的 commit 读不出"与"HEAD 读不出"并成了同一句
+  "判不出来就拒"，而 `bootstrapPlan` 在判据这一层就问到了答案 —— 于是真正会去 fetch 那个 tag 的
+  `advanceExistingClone` **永远轮不到执行**。`install.sh` 那一支是对的（先 fetch 再判），两条一键
+  入口对同一棵树给两种答案，正是 finding 10 那一族，只不过这次是 1.22.0 自己造的。
+  推翻它的是本机走查：`~/glasspane`（`v1.5.0-1-gfb63118`、porcelain 0 行、tag 表停在 `v1.5.0`、浅仓）
+  在 npm 入口的同一份代码上回 `refuse`，文案还让人自己去跑 `git fetch --tags --depth 1`。
+  现在 tag 缺席归到"前进"，fetch 不成仍由 IO 步拒并交出 git 的原话；HEAD 读不出照旧是拒——
+  前者是能补的事实缺口，后者是判据本身没了。真机复跑：`fb63118 → 434bc51（v1.22.0）`，
+  随后用 git 自己的命令独立复核（`describe --tags` = `v1.22.0`、porcelain 仍 0 行、深浅不变）。
+- **install.sh + installer：前进旧 clone 的那次 fetch 不再把完整仓变成浅仓。**
+  无条件 `fetch --tags --depth 1` 的代价实测过（`/var/tmp/gp-depth-probe`）：一棵
+  `is-shallow-repository=false` 的 clone 跑一次之后答 `true`，`.git/shallow` 出现——而脚本当时打印
+  "只往 .git 里加对象，不动工作树"，那句话把"给一份完整历史落下人为边界"说成了无害。
+  改成先问 `git rev-parse --is-shallow-repository`：只有 git 亲口答 `true` 才带 `--depth 1`，
+  答不出来按完整仓对待（宁可多取一点也不替别人的历史加边界）。
+  测试侧同时补了一只记账的假 `git`（`makeGitSpy`）：反向变异 M9——删掉命令里的 `$_depth`、留下
+  `say` 那行照打——**第一次绿了过去**，因为断言读的是 stdout 的回显而不是执行的 argv；这是本项目
+  第三次记"断言回显状态而不是指令"那一族。夹具也翻过一次车：全量 `git clone --branch <旧 tag>`
+  会连 `refs/heads/main` 一起拉下来，要装的 tag 于是可达、被 auto-follow 带进本地，"本地还没有
+  这个 tag"这个前提根本没成立 ⇒ 补 `--single-branch` 与两条夹具前提断言才问得到。
+- **`glasspane` 命令接受 `-h` / `--help`。** 用发布物实测：`/usr/local/bin/glasspane --help`
+  回"不认得命令「--help」"并退 2，而同产品的 `glasspane-install --help` 打用法退 0。
+  别名是一张明面上的表（`VERB_ALIASES`），用法页写了；`--version` 这类未知选项照旧退 2——
+  打错的命令不许被读成帮助。
 
 ## [1.22.0] — 2026-10-26
 

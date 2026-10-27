@@ -222,7 +222,7 @@ curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.s
 #    mean to install an unreleased tree. The tag below is not verified by eye: it is a derived site
 #    owned by `scripts/version-sites.mjs`, and `scripts/check-doc-links.mjs` reddens when it stops
 #    matching install.sh.
-git clone --branch v1.22.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
+git clone --branch v1.23.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
 ```
 
 What npm does **not** deliver: the Swift engine. Every channel above ends in the same `swift build`

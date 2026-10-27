@@ -70,18 +70,135 @@
 
 ## 剩下没闭合的格子，写清不藏
 
-1. **1.22.0 的发布链**：本轮改动只在本地 main（5 笔）之上；取号、CHANGELOG、tag、GitHub Release、
-   npm 两包发布归版本线，逐格量法见本文件末尾的"发布读数"。
-2. **本机 `~/glasspane` 那棵旧 clone**：它是 v1.5.0 的源码树，本轮修的是"以后再遇到该怎么办"，
-   没有替你动它（它现在没有未提交改动，但把它切走会让另一个正在用这棵树的会话拿到不同的 HEAD）。
-   要清掉就 `GLASSPANE_INSTALL_DIR=~/glasspane-v1.22.0` 另起一份，或自己确认后再前进。
+1. ~~**1.22.0 的发布链**~~ **已闭合**（2026-10-27 零三分，逐格读数见下面"发布读数"）。
+   本文件写完之后真机走查又抓出三条，都已修并发出去（见"发布之后抓到的三条"那一节）。
+2. ~~**本机 `~/glasspane` 那棵旧 clone**~~ **已前进**（2026-10-27 零六分，用户当天选的正是"让它前进到
+   发布 tag"）。走的不是手工 `git`，是 npm 入口自己的两个生产函数（`bootstrapPlan` +
+   `advanceExistingClone`）——这一趟把 #27 那条判据的真缺陷抓出来了，见下一节第 1 条。
+   改后的读数：`HEAD` 从 `fb63118`（`v1.5.0-1-gfb63118`）到 `434bc51`，`git describe --tags` = `v1.22.0`，
+   `git status --porcelain` 仍 0 行，`--is-shallow-repository` 仍 `true`（前进没有改变深浅）。
 3. **面板那一格**：`npm-not-refreshed` 通过既有的 `lastError` 通道显示（`showsFailureCard` 在
    `lastErrorMessage` 非空时不看状态），所以本轮没改 Swift。真正的缺口是**没有一条 npm 交付的预编译
    引擎**：三条渠道最后都要本地 `swift build`，所以"用 npm 装"仍然要求 Command Line Tools——这句
    写在两份 README 里，不是可以悄悄省掉的代价。
 4. **daemon 是否还在 1.6.2**：`check` 之后状态记的是 1.21.0，盘上 bundle 也是 1.21.0；**在跑的进程**
    要不要再重启一次换到新二进制，取决于另一个会话是否还在用它，本轮没有动。
+   本轮动了的是**全局 npm 层**（`npm install -g`，见下面的本机交付读数），那一层不需要重启任何进程。
 
-## 发布读数
+## 发布读数（2026-10-27，每条写明命令）
 
-（取号与发布执行后补在这里；每条写明命令与读数，不写"应该已经"。）
+### harness 0.12.1
+
+用户 2026-10-27 在"等下一轮带上真修复"与"现在发"之间选了后者。理由不是"想发个版本"，是父仓那把
+尺子 `harness/tools/release-artifact.mjs` 要求搬运仓 `refs/heads/main` **始终**等于主干的
+`harness/glasspane-harness` 子树，只给已发布的 tag 一格具名豁免（`△ artifact`），而那格只允许
+`SYNCLOG.md` / `CHANGELOG.md` 在"台账落后"这一个方向存在。v0.12.0 之后主干落的是两份 README
+（npm 优先那处改写），不在豁免里 ⇒ 那一格红的是"发布物里没有主干已经有的东西"——0.7.10 与 0.8.0
+两次事故的同一个形状。
+
+- 搬运分支：`git subtree split --prefix=harness/glasspane-harness -b split/glasspane-harness` → `f21b4f32`。
+  推之前证明它是同一棵树：`git rev-parse split/glasspane-harness^{tree}` 与
+  `git rev-parse HEAD:harness/glasspane-harness` 都是 `ab049bff0dad1e6261f23038043ed764f6b429cb`。
+  **这次是快进**（`git merge-base --is-ancestor harness/main split/glasspane-harness` 成功），
+  所以按 `docs/release.md` 第 3 步用普通推送，`--force-with-lease` 那条兜底没有动用。
+- tag：`git push harness split/glasspane-harness:refs/tags/v0.12.1` →
+  `git ls-remote --tags harness` 回 `f21b4f32`。推 tag 之前先 `git fetch harness` 回读确认远端 main
+  已到 `f21b4f32`（10-16 那次 403 就是顺序反了）。
+- GitHub Release：tag 推送触发的 run `40419832597` 全绿（9m26s，`version-check` → `create-release` →
+  两个 `binary` → `checksums`+签名 → `publish-release`）；
+  `gh release view v0.12.1 --json isDraft,assets` 回 `isDraft=false` 与 6 件资产。
+  `version-check` 里"CI for the commit this tag points at"是 `assert-ci-green.mjs --budget 1800000
+  --poll 30000` **等**到的：CI run `40419788621` 两 job 全绿。
+- 签名锚点：`gpg --verify --status-fd 1 SHA256SUMS.txt.asc SHA256SUMS.txt` 打出的
+  `VALIDSIG 0929EA31DF4F7429F63FC53189D88B1D043A1298` 与 `updater/lib/signature.js:118` 的
+  `PINNED_PRIMARY_FINGERPRINT` 逐字相等。
+- npm：`gh workflow run release.yml --repo jingzhao-l/glasspane-harness --ref v0.12.1
+  -f publish_npm=true -f confirm=true` → run `40420968912` 全绿，含最后一格
+  `install the published bytes and run them`；`npm view <包> version --prefer-online` 三个都回 `0.12.1`。
+
+### GlassPane v1.22.0
+
+- 打 tag 前先问 `node scripts/assert-tag-ready.mjs 1.22.0 --repository jingzhao-l/GlassPane`
+  → 放行（`HEAD == origin/main == 434bc516`，`ci.yml` 在**这笔 sha**、`event=push` 通道里最新一条
+  success；那条红过的 `harness-rulers` 是 `gh run rerun 40419140202 --failed` 转的绿，10 个 job 全绿——
+  它红在重切**之前**的时序，是"旧 sha 转不了绿"的反例）。
+- tag：`git tag -s v1.22.0 -F /var/tmp/gp-tag-1220-msg` → `git verify-tag v1.22.0` 打出
+  使用 `0929EA31DF4F7429F63FC53189D88B1D043A1298`、"完好的签名"、`[绝对]`；
+  `git push origin v1.22.0` → `refs/tags/v1.22.0^{}` = `434bc516`（tag 指的是发布线那一笔，可达）。
+- GitHub Release：run `40421130342` success（`release archive` job）；
+  `gh release view v1.22.0` 回 `isDraft=false` 与 4 件资产；
+  `SHA256SUMS-1.22.0.txt` 里那行 `337b0d05…7df8ad  GlassPane-1.22.0.tar.gz` 与 API
+  `assets[].digest` 的 `sha256:` 逐字相等（本机不重新下载大文件做哈希，这条 10-16 就记过）。
+  `.asc` 的 `VALIDSIG` 同一把钥匙。
+- npm：`gh workflow run release.yml --ref v1.22.0 -f mode=publish` → run `40421215427` success
+  （`publish bare names with provenance`）；`npm view glasspane-mcp version --prefer-online` 与
+  `glasspane-install version` 都回 `1.22.0`，`@1.22.0` 逐字同号。
+  **交付形状**：`npm view glasspane-install@1.22.0 bin` 回
+  `{ glasspane: 'glasspane.js', 'glasspane-install': 'cli.js' }`——第三条契约（"注册一条 `glasspane`
+  命令"）到这一格才算交到用户手上。
+- 本机交付：`npm install -g glasspane-mcp@1.22.0 glasspane-install@1.22.0` rc=0。
+
+  跑之前先量了那两个目录（§3.4a 的预检口径）：`/usr/local/lib/node_modules` 与 `/usr/local/bin`
+  实测 owner `501:0`、`W_OK` 通过 ⇒ **这条补救在这台机器上 agent 自己做得动，不需要谁 sudo**。
+  装完 `/usr/local/bin/glasspane` 是 `../lib/node_modules/glasspane-install/glasspane.js` 的符号链接
+  （与 1.12.3 那次把 `glasspane-install` 打回 0 字节的同一形状），命令照常答话：
+  `glasspane doctor` 六格全答、`全局 npm 包：glasspane-mcp=1.22.0 glasspane-install=1.22.0`、rc=0。
+  这就是第 3 条根因（"探测到更新、显示更新失败"）留下的那半台机器被那句 remedy 收尾的样子。
+
+## 发布之后真机走查抓到的三条（归 1.23.0）
+
+上面那格"已前进"不是一句顺手的交代——它是**走查的产物**，而走查第一趟是红的。
+
+1. **npm 入口对"本地还没有那个 tag"的旧 clone 恒拒**（真缺陷，`installer/cli.js`）。
+   1.22.0 刚交付的前进判据里，"该 tag 指向的 commit 读不出"与"HEAD 读不出"被并成同一句
+   "判不出来就拒"；而 `bootstrapPlan` 在**判据**这一层就问到答案，于是真正会去 fetch 那个 tag 的
+   `advanceExistingClone` 永远轮不到执行。`install.sh` 那一支是对的（先 fetch 再判），
+   于是两条一键入口对同一棵树给两种答案——正是 finding 10 那一族，只不过这次是我自己新造的。
+   实测形状取自本机那棵树：porcelain 0 行、HEAD `fb63118`、tag 表停在 `v1.5.0`、浅仓 ⇒
+   `rev-parse --verify v1.22.0^{commit}` 答非零 ⇒ 旧代码回 `refuse`，拒绝文案还让人自己去跑
+   `git fetch --tags --depth 1`（那本来是代码自己会做的事）。
+   现在 tag 缺席归到"前进"，fetch 不成仍由 IO 步拒并交出 git 的原话；HEAD 读不出照旧是拒：
+   前者是**能补的事实缺口**，后者是**判据本身没了**。
+2. **前进旧 clone 的那次 fetch 会把完整仓变成浅仓**（`install.sh` + `installer/cli.js` 两处）。
+   无条件 `fetch --tags --depth 1` 的实测代价（`/var/tmp/gp-depth-probe`，2026-10-27 零二分）：
+   一棵 `is-shallow-repository=false` 的 clone，跑一次 `git fetch -q --tags --depth 1 origin v2`
+   之后答 `true` 且 `.git/shallow` 出现——而脚本当时打印的是"只往 .git 里加对象，不动工作树"，
+   那句话把"给一份完整历史落下人为边界"说成了无害。改成先问 `git rev-parse --is-shallow-repository`：
+   只有 git 亲口答 `true` 才带 `--depth 1`；答不出来（老 git、不是仓库）按完整仓处理，
+   宁可多取一点也不替别人的历史加边界。本机那棵是浅仓，所以它走 `--depth 1` 那一支、深浅不变。
+3. **`glasspane --help` 回的是 rc=2 与一句"不认得命令"**（`installer/glasspane.js`）。
+   用**发布物**量到的：`/usr/local/bin/glasspane --help` 非零，而同产品的 `glasspane-install --help`
+   打用法退 0；agent 与人敲的第一反应都是 `--help`，给它非零等于教它"这条命令不能用"。
+   `-h` / `--help` 现在是一张明面上的别名表（`VERB_ALIASES`），用法页也写了；`--version` 这类
+   未知选项照旧退 2——打错的命令不许被读成帮助。
+
+### 这三条各自的闸
+
+- 新增/改指用例：`installer/test/cli.test.mjs` 40 条（判据分叉、`readCloneFacts` 的三态深浅、
+  `advanceExistingClone` 的 fetch argv 两形与 fetch 失败那一拒），
+  `installer/test/install-sh.test.mjs` 26 条（浅/完整两棵真 clone 端到端、两侧动作对照表补了
+  "干净但本地还没有那个 tag"这一行），`installer/test/glasspane-command.test.mjs` 11 条。
+- **夹具自己翻过一次车**：第一版"完整 clone"用 `git clone --branch <旧 tag>` 造，而全量 clone 会连
+  `refs/heads/main` 一起拉下来 ⇒ 要装的 tag 可达、被 auto-follow 带进本地 ⇒ 前提"本地还没有这个 tag"
+  根本没成立，fetch 那一支一步都没走而用例照样绿。补了 `--single-branch` 与两条**夹具前提断言**
+  （`isShallow()`、`hasTagLocal()`）才问得到这件事。
+- **反向变异 9 笔**（`/var/tmp/mutation-battery-2027.py`，日志 `/var/tmp/gp-battery-2027-run2.log`：
+  `落地=True 具名命中=是 核回=是` ×9，`battery rc=0`；三个被改文件写回原件后 sha256 与原件逐字相等）。
+  它同时抓到我自己两处：M9（把命令里的 `$_depth` 删掉、`say` 那行照打）**第一次绿了过去**——因为断言读的是
+  stdout 那句回显而不是执行的 argv，于是补了一只记账的假 `git`（`makeGitSpy`，转给 `/usr/bin/git` 干活、
+  把 argv 落文件）改读 argv；另一处是电池自己的读数错（`核回` 在写回原件**之前**量，九笔全打"否"），
+  那是把仪器当结论的现成例子。这是本项目第三次记"断言回显状态而不是指令"那一族。
+- 真机复跑：`node` 直接吃 dev 树的 `installer/cli.js`（`/var/tmp/gp-advance-devtree.mjs`）把本机
+  `~/glasspane` 从 `fb63118` 前进到 `434bc51`（`v1.22.0`），随后用 git 自己的命令独立复核而不是信
+  代码那句自述：`rev-parse HEAD` = `434bc516…`、`describe --tags` = `v1.22.0`、`status --porcelain`
+  0 行、`--is-shallow-repository` 仍 `true`。
+
+### 版本判断：为什么这三条走 minor（1.23.0）而不是 1.22.1
+
+1.22.0 的条目里我自己写下了判据：**patch 要求"状态文件的字段没动、退出码集合没动、CLI 参数没动、
+npm 包的 `bin` 声明没动"**。本轮动了其中一项——`glasspane` 新接受 `-h` / `--help` 两种写法，
+且一条原本拒绝的调用（旧 clone 上的 `npx glasspane-install`）现在会前进。
+四十分钟前发布的规则不当场改口，否则版本号就不再是机器读得到的承诺。`1.23.0` 实测未被占用：
+`git ls-remote --tags origin` 里没有 `refs/tags/v1.23*`（`grep -c` 回 `0`），
+`npm view glasspane-mcp versions` / `glasspane-install versions` 的列表都以 `1.22.0` 结尾。
+已发布的 `v1.22.0` 一律不动（tag 绝不移动，那枚锚点的字节与版本号从此锁死）。

@@ -24,8 +24,11 @@ import {
   DAEMON_JOB_LABEL,
   NPM_PACKAGES,
   READS,
+  VERBS,
+  VERB_ALIASES,
   doctorReadings,
   doctorReport,
+  main,
   parseVerb,
   readInstallPointer,
   runUpdate,
@@ -277,6 +280,27 @@ test('用法与命令表：未知命令退 2，help 里写清了退出码与"不
   for (const verb of ['update', 'status', 'doctor', 'help']) assert.match(help, new RegExp(verb), `用法里必须列出 ${verb}`)
   assert.match(help, /不 sudo|不会给成可照抄执行的升权命令|需要人做的那一步/, help)
   assert.match(help, /退出码/, help)
+})
+
+test('`-h` 与 `--help` 就是 help：同产品的两条入口不许对同一种问法给两种答案', async () => {
+  // 2026-10-27 用**发布物**量到的：`/usr/local/bin/glasspane --help` 回"不认得命令「--help」"并退 2,
+  // 而 `glasspane-install --help` 打用法退 0。agent 的第一反应就是 `--help`,给它一个非零等于教它
+  // "这条命令不能用"。别名是一张明面上的表（`VERB_ALIASES`），不是散在 if 里的手感。
+  assert.deepEqual(Object.keys(VERB_ALIASES).sort(), ['--help', '-h'], JSON.stringify(VERB_ALIASES))
+  for (const alias of Object.keys(VERB_ALIASES)) {
+    assert.equal(parseVerb([alias]).verb, 'help', `${alias} 必须读到 help`)
+    assert.equal(parseVerb([alias]).error, null, `${alias} 不许再报错`)
+  }
+  for (const alias of Object.keys(VERB_ALIASES)) {
+    const lines = []
+    const rc = await main({ argv: [alias], write: (l) => lines.push(l), fail: (l) => lines.push(l) })
+    assert.equal(rc, 0, `${alias} 的退出码：${lines.join('\n')}`)
+    assert.match(lines.join('\n'), /用法：glasspane <命令>/, `${alias} 要把这一页交出来`)
+  }
+  // 别名表不许悄悄扩大成"任何带横杠的都是 help"：未知选项仍然退 2，否则打错的命令会被读成帮助。
+  assert.equal(parseVerb(['--version']).error, '不认得命令「--version」')
+  assert.equal(parseVerb(['-hepl']).error, '不认得命令「-hepl」')
+  assert.equal(VERBS.includes('help'), true, 'help 仍在命令表里：别名指的是它，不是第三种动作')
 })
 
 test('这一条命令真的会随包交付：bin 里两个名字，files 里有那个文件，且有可执行位', () => {

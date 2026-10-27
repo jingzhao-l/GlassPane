@@ -15,6 +15,7 @@ import {
   bootstrapPlan,
   existingCloneDecision,
   advanceExistingClone,
+  readCloneFacts,
   repoMissingText,
   RELEASE_VERSION,
   REPO_URL,
@@ -311,6 +312,10 @@ test('bootstrapPlan: 目标已是 GlassPane 结构 → 按那棵树的事实决�
   const shapes = {
     same: { head: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', tagCommit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', blocking: [] },
     older: { head: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', tagCommit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', blocking: [] },
+    // 本机那棵 `~/glasspane` 的真实形状（2026-10-27 量）：干净、HEAD 在 v1.5.0 之后一笔、
+    // 本地 tag 表停在 v1.2.0 ⇒ `rev-parse --verify v1.22.0^{commit}` 答非零。旧判据把这一格读成
+    // 拒绝，于是**会去 fetch 这个 tag 的那一步永远轮不到执行**——npm 入口对旧 clone 恒拒。
+    noTag: { head: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', tagCommit: null, blocking: [] },
     dirty: { head: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', tagCommit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', blocking: [' M engine/Package.swift'] },
     unreadable: { head: null, tagCommit: null, blocking: [] },
   }
@@ -325,6 +330,9 @@ test('bootstrapPlan: 目标已是 GlassPane 结构 → 按那棵树的事实决�
   const advance = bootstrapPlan({ homeDir: outer, installDir: repo, ref: 'v9.9.9', readCloneState: () => shapes.older })
   assert.equal(advance.advance.ref, 'v9.9.9', JSON.stringify(advance))
   assert.equal(advance.advance.targetDir, repo)
+  const missingTag = bootstrapPlan({ homeDir: outer, installDir: repo, ref: 'v9.9.9', readCloneState: () => shapes.noTag })
+  assert.ok(!missingTag.refuse, `tag 本地缺席不是拒绝：${JSON.stringify(missingTag)}`)
+  assert.equal(missingTag.advance?.decision?.needsFetch, true, '要交给会 fetch 的那一步，而不是在这里判死')
   const dirty = bootstrapPlan({ homeDir: outer, installDir: repo, ref: 'v9.9.9', readCloneState: () => shapes.dirty })
   assert.equal(dirty.refuse?.blocking.length, 1, JSON.stringify(dirty))
   assert.match(dirty.refuse.text, /engine\/Package\.swift/, '拒绝要点名挡路的那个文件')
@@ -335,13 +343,22 @@ test('bootstrapPlan: 目标已是 GlassPane 结构 → 按那棵树的事实决�
   assert.ok(Array.isArray(blind.gitArgs), '不报状态时仍按 clone 计划返回')
 })
 
-test('existingCloneDecision: 判不出来永远是拒，不是"那就照用"也不是"那就切过去"', () => {
+test('existingCloneDecision: HEAD 读不出是拒，tag 本地读不出是"先去 fetch 再判"', () => {
   const base = { targetDir: '/Users/x/glasspane', ref: 'v9.9.9' }
   assert.equal(existingCloneDecision({ ...base, head: 'a', tagCommit: 'a', blocking: [] }).action, 'use')
   assert.equal(existingCloneDecision({ ...base, head: 'b', tagCommit: 'a', blocking: [] }).action, 'advance')
   assert.equal(existingCloneDecision({ ...base, head: 'b', tagCommit: 'a', blocking: ['?? scratch/'] }).action, 'refuse')
-  assert.equal(existingCloneDecision({ ...base, head: 'b', tagCommit: null, blocking: [] }).action, 'refuse')
-  assert.equal(existingCloneDecision({ ...base, head: null, tagCommit: 'a', blocking: [] }).action, 'refuse')
+  // 这两格在 2026-10-26 是并成一句"判不出来就拒"的，于是本机那棵旧 clone 在 npm 入口上永远走不到
+  // fetch。分开之后：能补的事实缺口 ⇒ 前进（由 IO 步去 fetch）；判据本身没了 ⇒ 拒。
+  const noTag = existingCloneDecision({ ...base, head: 'b', tagCommit: null, blocking: [] })
+  assert.equal(noTag.action, 'advance', 'tag 缺席不许在这里判死：拒绝它的那一步之后没有人会去 fetch')
+  assert.equal(noTag.needsFetch, true, '结论要带着"缺一次 fetch"这个事实，句子里才说得出为什么还没切')
+  assert.match(noTag.text, /先 fetch/, noTag.text)
+  assert.match(noTag.text, /fetch 不成就是拒/, '要当场说清 fetch 失败的下场，不留"大概会切过去"的想象')
+  const noHead = existingCloneDecision({ ...base, head: null, tagCommit: 'a', blocking: [] })
+  assert.equal(noHead.action, 'refuse')
+  assert.doesNotMatch(noHead.text, /fetch --tags --depth 1 后重跑/, '旧文案让人手工跑那一步——而那本来是代码自己会做的')
+  assert.equal(existingCloneDecision({ ...base, head: null, tagCommit: null, blocking: [] }).action, 'refuse')
   // 挡路文件超过 10 个时只点前 10 个，但**计数**要说全：一句"有 47 处"加 10 行样本，读者知道规模。
   const many = Array.from({ length: 47 }, (_, i) => ` M file-${i}.swift`)
   const refused = existingCloneDecision({ ...base, head: 'b', tagCommit: 'a', blocking: many })
@@ -351,7 +368,85 @@ test('existingCloneDecision: 判不出来永远是拒，不是"那就照用"也�
   assert.equal(refused.text.split('\n').filter((l) => /file-\d+\.swift/.test(l)).length, 10, '屏幕上只点十个')
 })
 
-test('advanceExistingClone: 只走读、fetch、detach 三步，且切完按事实复判', () => {
+test('readCloneFacts: 浅不浅由 git 答，答不出来按完整仓对待', () => {
+  const read = (stdout, status = 0) => ({ status, stdout, stderr: '' })
+  const spawn = (bin, args) => {
+    const join = args.join(' ')
+    if (/status --porcelain/.test(join)) return read('')
+    if (/rev-parse --verify HEAD/.test(join)) return read('b'.repeat(40) + '\n')
+    if (/rev-parse --verify v9\.9\.9/.test(join)) return read('', 1)  // 本地没这个 tag
+    if (/--is-shallow-repository/.test(join)) return shallow
+    return read('', 128)
+  }
+  let shallow = read('true\n')
+  assert.equal(readCloneFacts({ targetDir: '/x', ref: 'v9.9.9', spawn }).shallow, true)
+  shallow = read('false\n')
+  assert.equal(readCloneFacts({ targetDir: '/x', ref: 'v9.9.9', spawn }).shallow, false)
+  // git 太老／答不了：`null` 是"不知道"，而"不知道"在 fetch 那一支落到**不带 --depth**——
+  // 宁可多取一点，也不给一棵可能完整的仓落下 .git/shallow 边界。
+  shallow = read('', 128)
+  assert.equal(readCloneFacts({ targetDir: '/x', ref: 'v9.9.9', spawn }).shallow, null)
+})
+
+test('advanceExistingClone: 完整 clone 的 fetch 不许带 --depth，浅仓才带；fetch 不成就是拒', () => {
+  const A = 'a'.repeat(40)
+  const B = 'b'.repeat(40)
+  const run = ({ shallow, fetchStatus = 0 }) => {
+    const calls = []
+    let head = B
+    let hasTag = false
+    let checkedOut = false
+    const spawn = (bin, args) => {
+      calls.push(args.slice(2).join(' '))
+      const join = args.join(' ')
+      if (/status --porcelain/.test(join)) return { status: 0, stdout: checkedOut ? '' : '', stderr: '' }
+      if (/rev-parse --verify HEAD/.test(join)) return { status: 0, stdout: `${head}\n`, stderr: '' }
+      if (/rev-parse --verify v9\.9\.9\^\{commit\}/.test(join)) {
+        return hasTag ? { status: 0, stdout: `${A}\n`, stderr: '' } : { status: 1, stdout: '', stderr: '' }
+      }
+      if (/--is-shallow-repository/.test(join)) {
+        return shallow === null
+          ? { status: 128, stdout: '', stderr: 'unknown repository' }
+          : { status: 0, stdout: `${shallow ? 'true' : 'false'}\n`, stderr: '' }
+      }
+      if (/\bfetch --tags/.test(join)) {
+        if (fetchStatus !== 0) return { status: fetchStatus, stdout: '', stderr: `fatal: remote did not send ${A}: 网络断了\n` }
+        hasTag = true
+        return { status: 0, stdout: '', stderr: '' }
+      }
+      if (/checkout --detach v9\.9\.9/.test(join)) { checkedOut = true; head = A; return { status: 0, stdout: '', stderr: '' } }
+      return { status: 128, stdout: '', stderr: `unexpected: ${join}` }
+    }
+    return { out: advanceExistingClone({ repoDir: '/Users/x/glasspane', ref: 'v9.9.9', spawn }), calls }
+  }
+  // 旧 clone 补 tag 这一趟以前在判据处就被拒了（见上一条用例），这里是它真正走完的样子。
+  const full = run({ shallow: false })
+  assert.equal(full.out.action, 'use', full.out.text ?? JSON.stringify(full.out))
+  assert.equal(full.out.advanced, true, 'fetch 之后复判成立才算前进过')
+  const fullFetch = full.calls.find((a) => /fetch --tags/.test(a))
+  assert.equal(fullFetch, 'fetch --tags origin v9.9.9', `完整 clone 的 fetch 不许带 --depth：${fullFetch}`)
+  assert.ok(full.calls.some((a) => a === 'checkout --detach v9.9.9'), JSON.stringify(full.calls))
+
+  const shallowRun = run({ shallow: true })
+  assert.equal(shallowRun.out.action, 'use', shallowRun.out.text ?? JSON.stringify(shallowRun.out))
+  assert.equal(shallowRun.calls.find((a) => /fetch --tags/.test(a)), 'fetch --tags --depth 1 origin v9.9.9',
+    '浅仓才带 --depth 1：它已经在边界里了，多一个 tag 不必把整段历史拉进来')
+
+  // git 答不出浅不浅 ⇒ 与"完整"同一形（宁可多取，不落下边界）。
+  const unknown = run({ shallow: null })
+  assert.equal(unknown.calls.find((a) => /fetch --tags/.test(a)), 'fetch --tags origin v9.9.9', JSON.stringify(unknown.calls))
+
+  // fetch 不成 ⇒ 拒，且交出 git 的原话、说清什么都没动。这一支是"tag 缺席改成前进"之后
+  // 唯一还在拒绝的地方：删掉它，切一个取不回来的 ref 就会把 clone 留在原地而不明说。
+  const failed = run({ shallow: false, fetchStatus: 128 })
+  assert.equal(failed.out.action, 'refuse', JSON.stringify(failed.out))
+  assert.match(failed.out.text, /网络断了/, 'git 的原话要淌进结论里，不许被"网络不可达"这种二手归因盖掉')
+  assert.match(failed.out.text, /没有切分支/, failed.out.text)
+  assert.equal(failed.out.fetchArgs.join(' '), 'fetch --tags origin v9.9.9', '拒的时候要把自己用的 argv 留在数据里')
+  assert.ok(!failed.calls.some((a) => /checkout/.test(a)), `fetch 失败之后不许切：${JSON.stringify(failed.calls)}`)
+})
+
+test('advanceExistingClone: 只有读、fetch、detach 这几种动作，且切完按事实复判', () => {
   const calls = []
   const A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
   const B = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'

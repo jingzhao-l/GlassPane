@@ -70,7 +70,7 @@ export const INSTALL_SH_URL =
 /** 发布线锚点（版本真源 = 根 package.json，由 scripts/set-version.mjs 统一改写，
  *  勿手改）：npx 形态下本地没有仓库时，引导 clone 的就是这个 tag，与 install.sh
  *  的 `GLASSPANE_RELEASE` 同值——两条一键入口必须拿到同一份源码。 */
-export const RELEASE_VERSION = '1.22.0'
+export const RELEASE_VERSION = '1.23.0'
 /** 发布 ref（tag 名）。GLASSPANE_REF 环境变量可覆盖（追主干用 `main`）。 */
 export const REPO_REF = `v${RELEASE_VERSION}`
 
@@ -2353,7 +2353,15 @@ export function bootstrapPlan({
  *   · 干净但不是那个 tag ⇒ 前进（fetch + detached checkout —— 这是移动**产品自己的 clone**，
  *     不是移动任何人的工作树）；
  *   · 脏 ⇒ 拒绝，点名前 10 个挡路的路径，并给一条不销毁任何东西的出路（换一个空目录）；
- *   · 读不出 HEAD 或 tag ⇒ 也拒绝。"判不出来"永远不许变成"那就照用/那就切过去"。
+ *   · HEAD 读不出 ⇒ 拒绝。"判不出来"永远不许变成"那就照用/那就切过去"。
+ *
+ * **"该 tag 本地读不出"不是一条拒绝**，2026-10-27 在本机被实测推翻的正是这一格。旧写法把它和
+ * "HEAD 读不出"并成同一句"判不出来就拒"，于是 `~/glasspane`（v1.5.0 的 clone，本地 tag 只到
+ * v1.2.0）在 npm 那条入口上**永远**走到 refuse：`bootstrapPlan` 先问判据、判据先拒，而那一步
+ * 之后**会 fetch 这个 tag 的代码（`advanceExistingClone`）根本轮不到执行**。`install.sh` 那一支
+ * 是对的（先 fetch 再判），两条一键入口对同一棵树给出两种答案——finding 10 那族的老形状。
+ * 现在 tag 缺席归到"前进"里：fetch 不成仍由 `advanceExistingClone` 拒，并交出 git 的原话；
+ * HEAD 读不出照旧是拒。前者是能补的事实缺口，后者是判据本身没了。
  */
 export function existingCloneDecision({ targetDir, ref, head = null, tagCommit = null, blocking = [] }) {
   const dirty = blocking.map((line) => String(line).trim()).filter((line) => line !== '')
@@ -2372,18 +2380,30 @@ export function existingCloneDecision({ targetDir, ref, head = null, tagCommit =
         + '安装器不替你决定这些文件去哪。',
     }
   }
-  if (!head || !tagCommit) {
+  if (!head) {
     return {
       action: 'refuse',
       blocking: [],
-      text: `${targetDir} 读不出 HEAD 或 ${ref} 指向的 commit（不是 git 仓库、浅历史里没有这个 tag，或 git 本身答不了）：`
-        + '判不出"这棵树是不是被签的那一份"就不动它，也不装它。'
-        + `\n下一步：git -C "${targetDir}" fetch --tags --depth 1 后重跑；要一份全新的 clone 就 `
-        + 'GLASSPANE_INSTALL_DIR=<空目录> 重跑一键安装。',
+      text: `${targetDir} 读不出 HEAD（不是 git 仓库、那目录没有一次提交，或 git 本身答不了）：`
+        + '连"这棵树在哪"都判不出来，就不动它，也不装它。'
+        + `\n下一步：确认 ${targetDir} 是一棵 git 仓库（git -C "${targetDir}" rev-parse HEAD 能不能答话）；`
+        + '要一份全新的 clone 就 GLASSPANE_INSTALL_DIR=<空目录> 重跑一键安装。',
     }
   }
-  if (head === tagCommit) {
+  if (tagCommit && head === tagCommit) {
     return { action: 'use', blocking: [], head, text: `${targetDir} 已经在 ${ref}（${String(head).slice(0, 7)}），直接用它构建。` }
+  }
+  if (!tagCommit) {
+    return {
+      action: 'advance',
+      blocking: [],
+      head,
+      tagCommit: null,
+      needsFetch: true,
+      text: `${targetDir} 是干净的 clone（HEAD 在 ${String(head).slice(0, 7)}），但本地没有 ${ref} 这个 tag`
+        + '（旧 clone 的 tag 表停在更早的一版，浅历史也会这样）：前进那一步先 fetch 它再切。'
+        + `fetch 不成就是拒——${targetDir} 原地不动，本轮不构建。`,
+    }
   }
   return {
     action: 'advance',
@@ -2396,9 +2416,15 @@ export function existingCloneDecision({ targetDir, ref, head = null, tagCommit =
 }
 
 /**
- * 一棵既有 clone 的三份事实（IO 读，不判定）：HEAD 指向的 commit、`ref^{commit}`、以及
- * `git status --porcelain` 的行。判据一律在 `existingCloneDecision`，两处调用（bootstrap 的纯计划、
- * 前进这一步的复判）共用同一份读数，避免出现第二个"什么算脏"的说法。
+ * 一棵既有 clone 的四份事实（IO 读，不判定）：HEAD 指向的 commit、`ref^{commit}`、
+ * `git status --porcelain` 的行，以及这份 clone 是不是浅仓。判据一律在 `existingCloneDecision`，
+ * 两处调用（bootstrap 的纯计划、前进这一步的复判）共用同一份读数，避免出现第二个"什么算脏"的说法。
+ *
+ * `shallow` 是给 fetch 挑形状的：`--depth 1` 会把一棵**完整**的 clone 变成浅仓（`.git/shallow`
+ * 一旦落下，之后的遍历都撞上人为边界，要恢复得 `git fetch --unshallow`）。旧写法对任何树都带
+ * `--depth 1`，而注释写的是"只往 .git 里加对象"——那句话对完整 clone 不成立，它加的是一个边界。
+ * 只有 git 亲口答 `true` 才用 `--depth 1`；答不出来（老 git、不是仓库）按完整仓对待，宁可多取
+ * 一点也不给人家的历史加边界。
  */
 export function readCloneFacts({ targetDir, ref, spawn = spawnSync } = {}) {
   const read = (args) => spawn('git', ['-C', targetDir, ...args], { encoding: 'utf8' })
@@ -2407,34 +2433,42 @@ export function readCloneFacts({ targetDir, ref, spawn = spawnSync } = {}) {
     return res.status === 0 ? String(res.stdout ?? '').trim() : null
   }
   const status = read(['status', '--porcelain'])
+  const shallow = read(['rev-parse', '--is-shallow-repository'])
   return {
     head: sha('HEAD'),
     tagCommit: sha(`${ref}^{commit}`),
     // `git status` 答非零时这里得到空数组，读起来是"干净"——那棵树随后会因为 `head` 读不出而被拒，
     // 所以"判不出来"走的是拒绝那一支，不是"那就切过去"。
     blocking: status.status === 0 ? String(status.stdout ?? '').split('\n').filter((line) => line !== '') : [],
+    shallow: shallow.status === 0 ? String(shallow.stdout ?? '').trim() === 'true' : null,
   }
 }
 
 /**
  * 把既有 clone 前进到钉住的 ref（IO 步；判据全在 `existingCloneDecision` 里）。
  *
- * 只有三条 git 动作：`status --porcelain` 与两次 `rev-parse`（读）、`fetch --tags --depth 1`（只往
- * .git 里加对象）、`checkout --detach <ref>`（只在树干净时执行）。没有 `-f`、没有 `stash`、没有
- * `clean`：一个 installer 不该有能把别人的未提交工作抹掉的那一格。
+ * 只有这几种 git 动作：`status --porcelain`、两次 `rev-parse --verify`、`rev-parse
+ * --is-shallow-repository`（全是读），`fetch --tags [origin <ref>]`（只往 .git 里加对象；
+ * 带不带 `--depth 1` 由 git 自己答的那句"是不是浅仓"决定，见 `readCloneFacts`），以及
+ * `checkout --detach <ref>`（只在树干净时执行）。没有 `-f`、没有 `stash`、没有 `clean`、
+ * 没有 `reset --hard`：一个 installer 不该有能把别人的未提交工作抹掉的那一格。
  */
 export function advanceExistingClone({ repoDir, ref, spawn = spawnSync } = {}) {
   const read = (args) => spawn('git', ['-C', repoDir, ...args], { encoding: 'utf8' })
   let facts = readCloneFacts({ targetDir: repoDir, ref, spawn })
   if (facts.blocking.length === 0 && facts.head && !facts.tagCommit) {
-    // tag 不在这份浅历史里：先把它取回来，再判。fetch 失败不改任何东西。
-    const fetched = read(['fetch', '--tags', '--depth', '1', 'origin', ref])
+    // tag 不在这份历史里（旧 clone / 浅 clone 都会这样）：先把它取回来，再判。fetch 失败不改任何东西。
+    const fetchArgs = facts.shallow === true
+      ? ['fetch', '--tags', '--depth', '1', 'origin', ref]
+      : ['fetch', '--tags', 'origin', ref]
+    const fetched = read(fetchArgs)
     if (fetched.status !== 0) {
       return {
         action: 'refuse',
         blocking: [],
+        fetchArgs,
         text: `${repoDir} 里没有 ${ref} 这个 tag，而 `
-          + `git -C "${repoDir}" fetch --tags --depth 1 origin ${ref} 退出 ${String(fetched.status ?? 'null')}：`
+          + `git -C "${repoDir}" ${fetchArgs.join(' ')} 退出 ${String(fetched.status ?? 'null')}：`
           + `${String(fetched.stderr ?? '').trim().split('\n')[0] || '（git 没有留下 stderr）'}。\n`
           + '没有 clone、没有切分支、没有写入任何东西。下一步：确认网络与该 tag 存在（'
           + `git ls-remote --tags origin ${ref}），或 GLASSPANE_INSTALL_DIR=<空目录> 换一处全新的 clone。`,
