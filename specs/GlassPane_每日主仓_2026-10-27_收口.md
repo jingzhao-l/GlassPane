@@ -66,4 +66,65 @@ npm 两个包的 `bin` 声明没动，但任一项都足以否掉 patch。
 
 ## 6. 收口时的门禁复跑数（与第 2 节逐项对照）
 
-见本轮最终汇报第 ③ 项；数字由命令当场量出，不沿用第 2 节的基线。
+改完代码之后逐字复跑（`/var/tmp/glasspane-daily-20261027/gates.log`，命令与第 2 节完全同形）：
+
+| 门禁 | 本轮收口读数 | 对照基线 |
+| --- | --- | --- |
+| `npm run build` | rc 0 | — |
+| `npm test --workspaces --if-present` | mcp-shell **661/661**、installer **256/256**、updater **688/688**，0 fail 0 skip | 652 / 241 / 688 |
+| `node scripts/check-version.mjs` | rc 0（1.24.0，15 处位点 + 两个 lockfile） | 1.23.0 一致 |
+| `node scripts/check-doc-links.mjs` | 文档 32 份 / 仓库内链接 270 条 / 外链 44 / 表格 **445** 张（扫 121 份 markdown） | 443 张 / 120 份（本轮新增 specs 与 smoke 两节） |
+| `node scripts/check-workflows.mjs --self-test` | **28 case(s)**：17 变异必须红 + 11 合法形状必须沉默 | 22（15+7） |
+| `node scripts/check-workflows.mjs` | 5 份 workflow clean | 同 |
+| `swift build --package-path engine` | rc 0 | — |
+| `swift test --package-path engine` | **Executed 1444 tests, 4 skipped, 0 failures**（XCTest）+ Swift Testing **33 tests in 3 suites** passed | 1424 / 4 skip |
+| `swift test --package-path engine/probe` | **Executed 51 tests, 1 skipped, 0 failures** | 同 |
+| `python3 -m pytest -q bridge` | **169 passed, 1 skipped** | 152 + 1 skip |
+| `sh -n install.sh` | rc 0 | — |
+| `cd engine && python3 .signal_smoke.py .build/debug/glasspaned` | SIGNAL SMOKE OK：SIGTERM/SIGINT 各自退出码 0 且 socket 被 unlink（三次起停各在自己点名并由 daemon 收紧的状态根里） | — |
+| `node scripts/check-kernel-corpus.mjs` | rc 0（corpus 与已装 `iterate-kernel@0.1.10` 逐字节一致） | — |
+| `cd mcp-shell && npm run bundle && npm pack --dry-run` | rc 0 / rc 0 | — |
+| `node harness/tools/tool-surface.mjs --check` | 先红（面 A +170、分母 +334）→ `--record` 之后 rc 0、0 条 `✗` | 无增长 |
+
+`npm ci` 干净复跑（删 `node_modules` 重装）后 `npm run build` 与三个工作区套件再跑一遍：
+661 / 256 / 688，0 失败。
+
+## 7. 发布链（1.24.0）实测
+
+- `release: 1.24.0` = `39db9794`，`chore(harness): 面 A 基线补记` = `cd23ad08`；
+  CI（run `40538805405`，`event=push`）**10 条 lane 全绿**后才打 tag。
+- `node scripts/assert-tag-ready.mjs 1.24.0 --repository jingzhao-l/GlassPane` 先行答"可以打"。
+- tag `v1.24.0` 是 **GPG 签名**的（与前几版同形；`git tag -v` 读回 tagger 与签名）。
+  推 `main` 走 SSH remote：HTTPS 那一次被仓库规则拒（`push declined due to repository rule
+  violations`，因为这轮动了 `.github/workflows/ci.yml`），换 `git@github.com:` 即通——
+  这条与"token 没有 workflow scope"那条既有记录同族。
+- Release（run `40541244025`）：`isDraft=false`、`targetCommitish=cd23ad08…`、4 件资产。
+  资产核对按 API 的 `assets[].digest` 与本机 `sha256sum` **逐字相等**
+  （tar `e7ca5dd5…`、SUMS `f9c50591…`）；`gpg --verify` 回"完好的签名，来自
+  jingzhao-l (sign-github)"，指纹 `0929EA31DF4F7429F63FC53189D88B1D043A1298`
+  == `updater/lib/signature.js:118` 钉死的那一个。
+  `node scripts/make-release-archive.mjs --verify` 回 **731 entries**、21 条声明的命令与 schema
+  齐、`harness/` 条目 0（`tar -tzf | grep -cE "(^|/)harness/"` 也是 0）；
+  `mcp-shell/dist` 20 条、`mcp-shell/schemas` 8 条在档内。
+  CI 注解里有两条 `签名身份闸判红…pinned=27D1903F…`：**是那道闸自己的自测**
+  （`tools/release-signing-gate.sh` 用一次性夹具 + 一次性密钥证明它能拒），
+  同一步对真产物的判决是 `GATE VERDICT GREEN: 2 件产物都由被钉的 key 签出`。
+- npm：`--ref v1.24.0 -f mode=dry` 绿（run `40542208682`）→ `--ref v1.24.0 -f mode=publish`
+  绿（run `40542767752`，publish job 7m9s）。回查 registry 带 `--prefer-online`：
+  `glasspane-mcp@1.24.0`、`glasspane-install@1.24.0` 都在，两个包的 `latest` 都是 1.24.0，
+  versions 列表尾部 `1.21.0/1.22.0/1.23.0/1.24.0`。**没有 staged publish 待批**
+  （trusted publisher 直发成功，无需 `npm stage approve`）。
+- 发布形态端到端（本机真跑，且专挑需要 percent-encoding 的前缀，一箭双雕地复验 C1）：
+  解档 `GlassPane-1.24.0.tar.gz` → 树内 `npm pack` → 装进 `/var/tmp/…/prefix 张三 Smith`
+  → `…/.bin/glasspane-mcp` 收 stdin 一条 `initialize`，回包
+  `serverInfo {name:"glasspane-mcp", version:"1.24.0"}`；
+  `…/bin/glasspane --help` 退 **0**、stdout **757 字节**、stderr **0 字节**
+  （1.23.0 及之前在这一形状下是带栈退 1）；`glasspane-install --help` 3327 字节。
+  daemon 冒烟 `engine/.build/debug/glasspaned --state-dir <临时根> --permissions`
+  的读数写在 `engine/smoke.md` 本节。
+- Apple 公证仍是 owner 未启用的决策，本文不写成已完成。
+
+## 8. 收口盘点（清理之后填）
+
+见本轮最终汇报第 ⑧ 项的表：删了什么、留下什么、各自判据。收口后的
+`git worktree list` 行数与 `git branch -a` 条数也在那一处给出。
