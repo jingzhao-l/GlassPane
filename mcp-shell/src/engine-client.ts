@@ -2,6 +2,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
 
@@ -1524,14 +1525,16 @@ export class EngineJsonRpcClient {
     // `title`/`value`/`description` fields are whatever is on-screen right now
     // (document titles, form fields, message text) — and stderr is captured by
     // whoever launched this server, so dumping a reply copied an on-screen secret
-    // into a log nobody asked for (review 2026-10-09 finding 3). The trail sink
-    // below still receives the body, because that is what an evidence record needs;
-    // this line keeps the part that is diagnostic — which request, how big — and
-    // states plainly that the engine did answer. The reverse mutation is to
-    // re interpolate the frame here, which is what this comment exists to refuse.
-    const bodyBytes = Buffer.byteLength(jsonOrString(frame.result), "utf8");
+    // into a log nobody asked for (review 2026-10-09 finding 3). The clause is
+    // {@link lateReplyBodyNote}, the one sentence both doorways say so they cannot
+    // drift. The trail sink below still receives the body, because that is what an
+    // evidence record needs; this line keeps the part that is diagnostic — which
+    // request, how big, a digest that correlates it with the archive — and states
+    // plainly that the engine did answer. The reverse mutation is to re-interpolate
+    // the frame here, which is what this comment exists to refuse.
+    const bodyJson = jsonOrString(frame.result);
     this.report(
-      `late engine reply for '${entry.method}' (id ${entry.id}), ${entry.deadlineMs}ms deadline already reported: the engine did answer, with a ${bodyBytes}-byte body that is raw engine content (an accessibility tree whose title/value fields are on-screen data), so its text is not written to this log${byOrder}`,
+      `late engine reply for '${entry.method}' (id ${entry.id}), ${entry.deadlineMs}ms deadline already reported: the engine did answer, ${lateReplyBodyNote(bodyJson, operationIdOf(frame.result))}${byOrder}`,
     );
     if (frame.result === undefined) {
       // A frame with neither `result` nor `error` is not an answer this sink can
@@ -1749,6 +1752,53 @@ export function truncate(text: string): string {
 }
 
 /**
+ * The late-reply body clause, authored ONCE so both doorways say the same thing.
+ *
+ * When a daemon answer lands after its caller's deadline this shell still has to record that
+ * it answered, and give an operator a way to correlate that answer with the record that holds
+ * it — *without* copying the answer into a log this product does not own. The body on this
+ * path is observe/assert content: element titles and values, sometimes a document's text, up
+ * to {@link LOG_BODY_CHARS} per frame. The state root itself is 0700, but the report sink
+ * (stderr, or whatever supervises the process) is a file this product never sets the mode of,
+ * so a reply written there leaves the 0700 boundary (review 2026-10-09 finding 3, and the F3
+ * fix on 2026-10-27 that moved the HTTP doorway onto this same sentence).
+ *
+ * The note therefore keeps only the diagnostic facts — the caller's context names the request,
+ * and this clause names the method's body by **size** and a short **deterministic** SHA-256
+ * digest of the serialized body (the same bytes always hash the same way, so an operator can
+ * match a note against the archive that holds it) — and states plainly that the body was not
+ * written and where the real content lives: the daemon's evidence archive under the state
+ * root, read back with `gp_last_evidence` / `gp_export_evidence`.
+ *
+ * It takes the *serialized* string, not the value, because each doorway owns how its own
+ * transport turns a reply into bytes; hashing that exact string is what makes the digest
+ * correlatable. The reverse mutation is to interpolate the body back into a log line.
+ */
+/**
+ * The daemon's own operation-id grammar (`op_` + 26 Crockford base-32 characters),
+ * byte-identical to the one `EvidenceStore.isEntryName` and the evidence schema pin.
+ * Used only to decide whether an id may be *named* in a log line.
+ */
+const ARCHIVE_OPERATION_ID = /^op_[0-9A-HJKMNP-TV-Z]{26}$/;
+
+export function lateReplyBodyNote(serializedBody: string, operationId?: unknown): string {
+  const bytes = Buffer.byteLength(serializedBody, "utf8");
+  const digest = createHash("sha256").update(serializedBody, "utf8").digest("hex").slice(0, 12);
+  // The id is the one field of the body that may be written: it is not screen content,
+  // it is the archive's own filename stem, and the strict grammar means a value that
+  // merely *looks* like an id (or an id-shaped field that holds something else) never
+  // reaches the line. Without it the note says "a reply landed" but not which operation
+  // it landed for, and the whole point of the digest was correlation.
+  const named = typeof operationId === "string" && ARCHIVE_OPERATION_ID.test(operationId)
+    ? `, for ${operationId}`
+    : "";
+  return `with a ${bytes}-byte body (sha256 ${digest})${named} that is on-screen accessibility content `
+    + "— element titles and values, sometimes a document's text — so its text is not written to "
+    + "this log; the reply itself is in the daemon's evidence archive under the state root, read "
+    + "it back with gp_last_evidence {operationId} or gp_export_evidence {operationId}";
+}
+
+/**
  * A frame field that says something, or the fallback for the one that says
  * nothing.
  *
@@ -1771,6 +1821,13 @@ function nonBlankOr(value: unknown, fallback: string): string {
 /** Inbound values come from JSON.parse, so serialization cannot throw or cycle. */
 function jsonOrString(value: unknown): string {
   return String(JSON.stringify(value));
+}
+
+/** The reply's operation id when the body is an object that states one; anything else is absent. */
+function operationIdOf(result: unknown): unknown {
+  return typeof result === "object" && result !== null
+    ? (result as { operationId?: unknown }).operationId
+    : undefined;
 }
 
 /** How a transport stream is opened; injectable so tests need no socket. */

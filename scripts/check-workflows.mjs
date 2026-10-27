@@ -306,7 +306,14 @@ function inspect(target) {
   shells.forEach((block, index) => {
     const script = block.lines.join("\n")
     if (!script.trim()) return
-    if (/^\s*(python3|node|bun)\s/.test(block.lines[0] ?? "")) return // a one-liner in another language
+    // A `run:` whose head is node/python3/bun and which is a SINGLE command is a script in
+    // another language: there is nothing in it for `bash -n` to judge, and feeding it would
+    // parse the interpreter's argument as shell. The exemption is for the one-code-line shape
+    // ONLY. A body whose head is `node` but which carries a second command is not "one script
+    // in another language" — the runner executes it as a shell script, so it is shell and owes
+    // the parse like any other body (D2, 2026-10-27: the exemption used to fire on
+    // multi-statement node bodies too, which is the same over-reach rule 2d had below).
+    if (block.lines.length <= 1 && /^\s*(python3|node|bun)\s/.test(block.lines[0] ?? "")) return
     const tmp = path.join(tmpdir(), `wf-step-${process.pid}-${index}.sh`)
     writeFileSync(tmp, `${script}\n`)
     const parsed = spawnSync("bash", ["-n", tmp], { encoding: "utf8" })
@@ -587,10 +594,13 @@ function ghJsonFieldProblems(text, base, known = GH_RELEASE_VIEW_FIELDS) {
  * was `tail`'s zero, and `harness-contract.yml`'s skip step read an empty `steps.tag.outputs.tag`
  * as "not equal" and walked on. A gate that lives in a default is a gate nobody edits.
  *
- * The exemption is rule 2a's own (`python3|node|bun` as the head — that body is one script in
- * another language) plus single-statement bodies: one command's exit status IS the step's verdict,
- * so `-e`, `-u` and `-o pipefail` have nothing there to change. Requiring a header on those would
- * add noise without adding a judgement.
+ * The exemption is single-statement bodies plus a genuine one-script-in-another-language
+ * head: one command's exit status IS the step's verdict, so `-e`, `-u` and `-o pipefail` have
+ * nothing there to change. It is NOT a free pass for a `node`/`python3`/`bun` HEAD. A multi-
+ * statement body whose first line names node is still run by the runner's shell — its verdict
+ * is whatever the LAST command says — so it owes the same gate as a shell body (D2, 2026-10-27:
+ * ci.yml's own workflow-lint step was two `node …` lines with no gate, exempted as "node").
+ * Requiring a header on a true single command would add noise without adding a judgement.
  */
 const SHELL_GATES = ["e", "u", "pipefail"]
 
@@ -630,9 +640,15 @@ function setHeaderFindings(shells) {
       continue
     }
     const code = block.lines.filter((l) => l && !l.startsWith("#"))
-    if (code.length < 2) continue
+    if (code.length < 2) continue // a single command's own exit status IS the step verdict
     const first = code[0]
-    if (/^(python3|node|bun)\s/.test(first)) continue
+    // D2 (2026-10-27): this used to `continue` on a `python3|node|bun` head as well, so a body
+    // of two or more sequential `node …` lines — exactly what ci.yml's workflow-lint step
+    // (689-691) shipped — was waved through "because it is node". But `code.length < 2` above
+    // already exempts the genuine one-script case; anything reaching here is multi-statement,
+    // and a multi-statement body runs under the runner's shell, whose verdict is the last
+    // command's. What is judged is the shell, not the interpreter, so the head being `node` buys
+    // no exemption: the body still owes `set -euo pipefail`.
     const flags = setGateFlags(first)
     if (flags === null) {
       out.push({ line: block.line, head: first, missing: [...SHELL_GATES] })
@@ -1265,6 +1281,46 @@ jobs:
       // Counter-case for the rule above, on the corrected text the red case just broke.
       apply: () => WITH_GATE,
       absent: /never declares/,
+    },
+    {
+      id: "a node-headed body of two commands that declares no gate (D2)",
+      // THE D2 REGRESSION CASE. ci.yml's own workflow-lint step (lines 689-691) is a `run: |`
+      // whose head is `node` and which carries a SECOND `node` line — two sequential commands
+      // relying on the runner's accidental `bash -e`. The rule used to exempt any body whose head
+      // named node/python3/bun, so this shape printed clean. What actually runs is the shell, and
+      // its verdict for a two-command body is the last command's, so the body owes its own gate.
+      // Restore `if (/^(python3|node|bun)\\s/.test(first)) continue` in `setHeaderFindings` and
+      // this case is the one that goes silent — i.e. the one that stops proving the rule.
+      apply: (t) =>
+        t.replace(
+          "      - name: run the real script\n        run: node scripts/check-version.mjs\n",
+          "      - name: run the real script\n        run: |\n          node scripts/check-version.mjs\n          node scripts/check-version.mjs\n",
+        ),
+      expect: /never declares -e\/-u\/pipefail/,
+    },
+    {
+      id: "that same node-headed body once it declares set -euo pipefail",
+      // Counter-case: the fix must not turn every node block into a permanent red. With the gate
+      // as the first line the head is no longer node, and the body is silent.
+      apply: (t) =>
+        t.replace(
+          "      - name: run the real script\n        run: node scripts/check-version.mjs\n",
+          "      - name: run the real script\n        run: |\n          set -euo pipefail\n          node scripts/check-version.mjs\n          node scripts/check-version.mjs\n",
+        ),
+      absent: /never declares -e\/-u\/pipefail/,
+    },
+    {
+      id: "a node-headed single-command body stays silent (the exemption is not dead)",
+      // The other half: a body that is genuinely one script in another language must STILL be
+      // exempt, or the fix over-shoots and reddifies the shape the exemption was written for.
+      // Written as a `run: |` block with exactly one node line so it exercises the block path,
+      // not just the inline shorthand — `code.length < 2` is what holds the exemption here.
+      apply: (t) =>
+        t.replace(
+          "      - name: run the real script\n        run: node scripts/check-version.mjs\n",
+          "      - name: run the real script\n        run: |\n          node scripts/check-version.mjs\n",
+        ),
+      absent: /never declares -e\/-u\/pipefail/,
     },
     {
       id: "a one-line `run:` whose pipeline hides the verdict (D6-b's blind spot)",

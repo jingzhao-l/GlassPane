@@ -6,10 +6,9 @@ import { URL } from "node:url";
 import {
   CALLER_VISIBLE_CEILING_MS,
   EngineCallError,
-  LOG_BODY_CHARS,
   isReplayUnsafeMethod,
+  lateReplyBodyNote,
   lateReplyRoute,
-  truncate,
   unixSocketEngineClient,
 } from "./engine-client.js";
 import {
@@ -369,14 +368,18 @@ export function createHttpGateway(options: HttpGatewayOptions): HttpGateway {
   client.onEngineNote?.((note) => report(`engine: ${note}`));
   client.onLateReply?.(({ method, result }) => {
     // The transport hands the sink the raw reply body, and on this surface that
-    // body is UI-tree content (titles, values, sometimes a document's text). The
-    // MCP path caps what it writes; an uncapped `JSON.stringify` here could put
-    // tens of megabytes of it on stderr per late reply. The cap and its marker are
-    // `engine-client.ts`'s (`truncate` over `LOG_BODY_CHARS`) — the file that
-    // produces the body owns how much of it gets written, and this sink writes the
-    // same content on the other surface, so it calls the same helper rather than
-    // re-spelling 64 KiB and drifting from it.
-    report(`late engine reply to '${method}' (reply body below, raw engine content and not redacted): ${truncate(stringifyReply(result))}`);
+    // body is UI-tree content (titles, values, sometimes a document's text). It
+    // must NOT be written here: this gateway's stderr is captured by whoever
+    // supervises the process, in a file whose mode this product never sets, so
+    // copying the body exported screen content into a log the product does not
+    // own (review 2026-10-09 finding 3, and F3 on 2026-10-27). The note keeps the
+    // diagnostic facts — the method, the byte length, a short deterministic digest
+    // — and says where the real bytes live (the daemon's evidence archive, read
+    // back with gp_last_evidence / gp_export_evidence). That sentence is authored
+    // once in `engine-client.ts` (`lateReplyBodyNote`, the file that owns the log
+    // budget) and the stdio doorway prints the same one, so the two surfaces
+    // cannot drift apart.
+    report(`late engine reply to '${method}': the engine did answer, ${lateReplyBodyNote(stringifyReply(result), (result as { operationId?: unknown } | null)?.operationId)}`);
   });
   const expectedToken = Buffer.from(options.token, "utf8");
   const bodyReadTimeoutMs = options.bodyReadTimeoutMs ?? DEFAULT_BODY_READ_TIMEOUT_MS;

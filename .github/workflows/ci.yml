@@ -687,5 +687,6 @@ jobs:
           node-version: 20
       - name: Reject workflow files GitHub would refuse to load
         run: |
+          set -euo pipefail
           node scripts/check-workflows.mjs --self-test
           node scripts/check-workflows.mjs

@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
@@ -592,10 +593,24 @@ test("the gateway registers for engine notes and late replies and writes them to
     fake.noteHandler("engine sent a frame for request id 3, which this client never issued");
     assert.ok(notes.some((line) => line.includes("never issued")), JSON.stringify(notes));
 
-    fake.lateHandler({ method: "act", result: { operationId: "op_http_late" } });
+    // 2026-10-27 F3 改的就是这一句的取证方式。从前它断"正文落地所以 operationId 取得到"
+    // ——那正是缺陷本体：这条正文是屏幕上的无障碍内容（标题、值、有时是文档正文），
+    // 而 stderr 归**启动这个进程的人**所有，本产品从没给它设过模式。
+    // 现在这一行留下的仍然够用来对账：方法名、字节数、一个确定性摘要，以及**只有严格
+    // 符合档案命名规则才允许出现**的 operationId（它是一个 id，不是屏幕文本）。
+    fake.lateHandler({ method: "act", result: { operationId: "op_0PAAAABBBBCCCCDDDDEEEEFFFF" } });
     const late = notes.find((line) => line.includes("late engine reply"));
-    assert.ok(late, `迟到回复必须带正文落地，operationId 才取得到：${JSON.stringify(notes)}`);
-    assert.ok(late.includes("op_http_late"));
+    assert.ok(late, `迟到回复必须留下一行（引擎确实答了，这件事不能被省略）：${JSON.stringify(notes)}`);
+    assert.ok(late.includes("op_0PAAAABBBBCCCCDDDDEEEEFFFF"), late);
+    assert.match(late, /-byte body \(sha256 [0-9a-f]{12}\)/, late);
+    assert.ok(!late.includes("operationId\":"), `正文的 JSON 不许进这一行：${late}`);
+    assert.match(late, /is not written to this log/, late);
+
+    // id 形状不对就不许出现在这一行里：它是"能不能写进日志"的唯一凭据。
+    fake.lateHandler({ method: "act", result: { operationId: "op_屏幕上的标题" } });
+    const shaped = notes.filter((line) => line.includes("late engine reply"));
+    const last = shaped[shaped.length - 1];
+    assert.ok(!last.includes("屏幕上的标题"), `非档案形状的 id 被原样抄进了日志：${last}`);
   } finally {
     await gw.close();
   }
@@ -1331,13 +1346,14 @@ test("the unknown-tool answer lists the routes that exist instead of a source sy
 });
 
 /* ------------------------------------------------------------------ *
- * R9-中7: the late-reply note stringified the whole body with no cap while the
- * MCP path truncates at 64 KiB and marks the cut — and the body on this surface is
- * raw UI-tree content. Reverse mutation: hand `JSON.stringify(result)` to `report`
- * again and the cap, the marker and the "not redacted" clause all go red.
+ * R9-中7 与 F3（2026-10-27）在同一条线上：这一行从前把整份正文塞进 stderr
+ * （MCP 侧至少还截到 64 KiB 并留下标记），而这份正文就是用户屏幕上的无障碍内容。
+ * 上限因此不再需要——正文一个字都不写。这一条从"截得对不对"改判"有没有漏出去"，
+ * 并保留 R9-中7 的另一半：sink 不许因为一个序列不了的正文就把这条事实弄丢。
+ * Reverse mutation：把正文重新插回这一行（`+ body`）⇒ 下面那条 SECRET 断言立刻红。
  * ------------------------------------------------------------------ */
 
-test("a late reply note is capped, says what it capped, and survives an unserialisable body", async () => {
+test("a late reply note names the size and digest, leaks no body text, and survives an unserialisable body", async () => {
   const fake = new FakeGatewayClient();
   const notes = [];
   const { gw } = await startGateway(fake, TEST_TOKEN, { report: (note) => notes.push(note) });
@@ -1345,26 +1361,19 @@ test("a late reply note is capped, says what it capped, and survives an unserial
     fake.lateHandler({ method: "observe", result: { tree: "x".repeat(100_000) } });
     const big = notes.find((line) => line.includes("late engine reply to 'observe'"));
     assert.ok(big, "迟到回复必须落一行");
-    assert.ok(big.length < 70_000, `未设上限的正文有 ${big.length} 字符`);
-    // R10-中6, re-pin: the marker's *words* changed because the helper that writes
-    // them moved to its authority (`engine-client.ts`'s `truncate`, the layer that
-    // produces these bodies). The property this line asserts is the one the old
-    // text asserted — the note says how much did not get written — and the number
-    // is checked against the cap rather than against a second spelling of it, so
-    // the assertion cannot be satisfied by a marker that stopped counting.
-    const excess = /… \[\+(\d+) chars not logged\]$/.exec(big);
-    assert.ok(excess, `截断要说出截了多少：${big.slice(-120)}`);
-    assert.equal(
-      Number(excess[1]),
-      JSON.stringify({ tree: "x".repeat(100_000) }).length - LOG_BODY_CHARS,
-      "报出的缺口必须是按上限算出来的那个数，不能是另一处抄来的常量",
-    );
-    assert.match(big, /not redacted/, "正文是原始 UI 树内容，不能不声明");
+    assert.ok(big.length < 1_000, `这一行从前要带上 64 KiB 正文，现在只留诊断事实：${big.length} 字符`);
+    assert.match(big, /-byte body \(sha256 [0-9a-f]{12}\)/, big);
+    // 摘要必须是对**同一串字节**算出来的：操作者拿它去档案里对上一条记录。
+    const stringified = JSON.stringify({ tree: "x".repeat(100_000) });
+    const expected = createHash("sha256").update(stringified, "utf8").digest("hex").slice(0, 12);
+    assert.ok(big.includes(`sha256 ${expected}`), `摘要要能独立复算：${big}`);
+    assert.ok(!big.includes("xxxx"), `正文一个字节都不许出现在这一行：${big.slice(0, 200)}`);
+    assert.match(big, /is not written to this log/, "为什么没写要说出来，否则下一位读者会'顺手'加回去");
+    assert.match(big, /gp_last_evidence/, "要给一条做得动的下一步");
 
     fake.lateHandler({ method: "act", result: { operationId: "op_http_small" } });
     const small = notes.find((line) => line.includes("late engine reply to 'act'"));
-    assert.ok(small.includes('{"operationId":"op_http_small"}'), "没超限的正文要原样落地");
-    assert.ok(!/not logged/.test(small), small);
+    assert.ok(!small.includes('{"operationId":"op_http_small"}'), "没超限的正文同样不许落地——规则不许只看大小");
 
     const circular = {};
     circular.self = circular;
@@ -1824,7 +1833,10 @@ async function assertEveryNamedRouteAnswers(gw, base, text) {
  * instead of drifting past.
  * ------------------------------------------------------------------ */
 
-test("both surfaces truncate one engine body at the same bound with the same marker", async () => {
+test("both doorways say the same late-reply sentence, authored in one place", async () => {
+  // R10-中6 的那条不变量在 F3 之后换了形状：从前要保证"两个门截同一个上限、留同一个标记"，
+  // 现在要保证"两个门说同一句话、并且谁都不再抄一份正文上限"。判据仍然是复算，不是抄文案：
+  // 摘要由这里独立算一遍，句子由 `engine-client.ts` 那位作者写。
   const fake = new FakeGatewayClient();
   const notes = [];
   const { gw } = await startGateway(fake, TEST_TOKEN, { report: (note) => notes.push(note) });
@@ -1834,23 +1846,18 @@ test("both surfaces truncate one engine body at the same bound with the same mar
     const note = notes.find((line) => line.includes("late engine reply to 'observe'"));
     assert.ok(note, "迟到回复必须落一行");
     const stringified = JSON.stringify(body);
-    assert.ok(
-      note.endsWith(truncate(stringified)),
-      "网关写下的正文必须与 engine-client 自己截出来的那一串逐字节相同——两条面截的是同一个上限",
-    );
-    assert.notEqual(truncate(stringified), stringified, "premise: 这条正文必须真的超上限");
-    // The arithmetic, from the imported bound rather than from a marker string the
-    // test and the gateway both copied: this is what fails if one surface's cap
-    // moves on its own.
-    const expectedExcess = stringified.length - LOG_BODY_CHARS;
-    assert.ok(expectedExcess > 0, "premise: 上限得小于这条正文");
-    assert.ok(note.endsWith(`[+${expectedExcess} chars not logged]`), `截断报出的缺口要按同一个上限算：${note.slice(-80)}`);
+    const digest = createHash("sha256").update(stringified, "utf8").digest("hex").slice(0, 12);
+    const clause = `${Buffer.byteLength(stringified, "utf8")}-byte body (sha256 ${digest})`;
+    assert.ok(note.includes(clause), `这一行要能由正文自己复算出来：${note.slice(0, 220)}`);
+    assert.ok(!note.includes("yyyy"), "正文不许出现在这一行");
   } finally {
     await gw.close();
   }
   const code = gatewayCode();
+  // 上限本身也不许在网关里留一份：它是 `engine-client.ts` 的，抄一份就是下一次分叉的起点。
   const caps = code.match(/\b65536\b|\b64 \* 1024\b|LOG_BODY_CHARS\s*=/g) ?? [];
   assert.deepEqual(caps, [], `网关又自己抄了一份正文上限，MCP 侧一改这里就悄悄分叉：${JSON.stringify(caps)}`);
+  assert.match(code, /lateReplyBodyNote/, "网关不再走那位作者，句子就会开始漂移");
 });
 
 test("the operationId rule this surface applies is the one the tool contract publishes", async () => {
