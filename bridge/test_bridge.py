@@ -1575,11 +1575,19 @@ class StubFrame(object):
 
     def __init__(self, index=0, pc=0x1000, module="App", function=None, file=None,
                  line=None, variables=(), registers=(), variables_error=None,
-                 registers_error=None):
+                 registers_error=None, variables_scope=(True, True, True)):
         self._index, self._pc, self._module = index, pc, module
         self._function, self._file, self._line = function, file, line
         self._variables, self._registers = variables, registers
         self._variables_error, self._registers_error = variables_error, registers_error
+        #: The ONE scope this frame models, as (in_scope, args_only, use_dynamic).
+        #: `_collect_locals` asks for in-scope arguments with dynamic values, i.e.
+        #: (True, True, True); the frame carries no data for a broader read (globals,
+        #: non-args) and must not pretend it can answer one.
+        self._variables_scope = tuple(variables_scope)
+        #: Every GetVariables() call's full arg tuple, so a test can pin the exact
+        #: scope decision the bridge made instead of only the returned list.
+        self.getvariables_calls = []
 
     def IsValid(self):
         return True
@@ -1598,8 +1606,20 @@ class StubFrame(object):
 
     def GetVariables(self, in_scope=True, args_only=False, show_types=False,
                      use_dynamic=False):
+        self.getvariables_calls.append((in_scope, args_only, show_types, use_dynamic))
         if self._variables_error is not None:
             raise self._variables_error
+        # A stub must be able to say no. This frame models exactly one variable
+        # scope; asked for a different set of variables (globals included, args
+        # dropped, dynamic off) it has no data to answer with, so it refuses loudly
+        # rather than handing back the same list for every argument combination —
+        # which is what let a mutated `_collect_locals` scope stay green.
+        if (in_scope, args_only, use_dynamic) != self._variables_scope:
+            raise AssertionError(
+                "StubFrame.GetVariables asked for scope (in_scope=%r, args_only=%r, "
+                "use_dynamic=%r) but this frame only models %r; it cannot answer a "
+                "read it has no data for" % (in_scope, args_only, use_dynamic,
+                                             self._variables_scope))
         return list(self._variables)
 
     def GetRegisters(self):
@@ -1721,11 +1741,22 @@ class StubTarget(object):
 class StubDebugger(object):
     """SBDebugger: the reads `_process_of` / the trace loop / the stop hook make."""
 
-    def __init__(self, process=None, target_valid=True):
+    #: The command texts this debugger will answer. `_install_stop_hook` and
+    #: `__lldb_init_module` are the only bridge callers, and both send one of these
+    #: prefixes. Anything else is refused rather than rubber-stamped True: a stub
+    #: that answers "yes" to arbitrary command text endorses a debugger that did
+    #: not exist, and hides which command `_install_stop_hook` actually handed over.
+    _ACCEPTED_PREFIXES = ("command script add -f glasspane_bridge.cmd_",
+                          "target stop-hook add ")
+
+    def __init__(self, process=None, target_valid=True, refuse=()):
         self._target = StubTarget(process, target_valid)
         self.async_calls = []
         self._async = False
         self.commands = []
+        #: substrings the debugger refuses even on an accepted shape, so a test can
+        #: drive `_install_stop_hook`'s rejection arm for the right reason.
+        self._refuse = tuple(refuse)
 
     def GetSelectedTarget(self):
         return self._target if self._target.IsValid() else None
@@ -1739,6 +1770,11 @@ class StubDebugger(object):
 
     def HandleCommand(self, text):
         self.commands.append(text)
+        if not any(text.startswith(prefix) for prefix in self._ACCEPTED_PREFIXES):
+            return False
+        for needle in self._refuse:
+            if needle in text:
+                return False
         return True
 
 
@@ -2941,6 +2977,184 @@ class RemedyArmsAreQuotedArgumentsNotInterpolations(unittest.TestCase):
                 self.assertIn(path, words, "cp 的源必须是原路径的那一个词：%r" % (words,))
                 self.assertIn('"$dest_dir/glasspane_bridge.py"', cp_arm[0],
                               "落点只能是那个引起来的 $dest_dir 字面量")
+
+
+class NoPayloadCauseReadsOnlyTheTrustedChannel(unittest.TestCase):
+    """DEFECT 1：载荷缺席的成因只从桥自己的可信通道（lldb 的 stderr）判。被调试目标
+    的 stdout 与 lldb 的 stdout 共用一条流（§ R30），绝不能因为目标自己 print 的一句
+    "cat: config: No such file or directory" 就自信地报 "bridge-not-imported"——那是
+    一条从没测量过的病因，配的补救还指向错误的 checkout 路径。"""
+
+    TARGET_NOISE = "cat: config: No such file or directory\n"
+
+    def test_target_stdout_cannot_trigger_the_import_cause(self):
+        cause, _remedy = gb.no_payload_cause("", self.TARGET_NOISE, "/tmp/b.py")
+        self.assertNotEqual(cause, "bridge-not-imported",
+                            "目标的 stdout 不许被读成桥没导入：%s" % cause)
+        self.assertEqual(cause, "not-determinable",
+                         "可信通道（stderr）没写任何东西，成因不可测量，只能说不确定")
+
+    def test_not_determinable_does_not_point_at_the_checkout_path(self):
+        _cause, remedy = gb.no_payload_cause("", self.TARGET_NOISE, "/tmp/b.py")
+        self.assertIn("cannot be measured", remedy)
+        # 补救不许指向那条从没被证实过的病因（checkout 路径 / 权限席位）。
+        self.assertNotIn("mktemp -d", remedy)
+        self.assertNotIn("Developer Tools", remedy)
+
+    def test_import_failure_still_classifies_from_stderr_alone(self):
+        # 控制项：真正的 lldb 导入失败写在可信的 stderr 上，仍判 bridge-not-imported。
+        cause, _ = gb.no_payload_cause(
+            "error: module importing failed: invalid pathname '/tmp/gp'\n",
+            "", "/tmp/gp sp/b.py")
+        self.assertEqual(cause, "bridge-not-imported")
+
+    def test_return_shape_stays_a_two_tuple_for_callers(self):
+        for args in (("", self.TARGET_NOISE, "/b.py"),
+                     ("error: process attach failed\n", "", "/b.py"),
+                     ("importing failed\n", "", "/b.py")):
+            result = gb.no_payload_cause(*args)
+            self.assertEqual(2, len(result), result)
+            self.assertIsInstance(result[0], str)
+            self.assertIsInstance(result[1], str)
+
+
+class CaptureBudgetNeverExceedsTheObservableTimeout(unittest.TestCase):
+    """DEFECT 2：预算的可观测上限就是外层 --timeout（外层到点先 killpg），任何
+    `--timeout < 30` 都不许交回一个大于外层窗口的预算，note 也不许自称一个空区间。"""
+
+    def test_budget_below_the_floor_is_capped_at_the_outer_timeout(self):
+        budget, note = gb.capture_budget_s("5", timeout=10)
+        self.assertLessEqual(budget, 10.0,
+                             "预算不许超过外层 --timeout：超了永远观测不到")
+        self.assertIsNotNone(note)
+        self.assertIn("--timeout", note)
+        self.assertIn("Raise --timeout", note)
+        self.assertNotIn("30..10", note, "文案不许再自称空区间")
+
+    def test_timeout_equal_to_floor_is_the_edge_of_the_normal_interval(self):
+        budget, note = gb.capture_budget_s("5", timeout=30)
+        self.assertEqual(30.0, budget)
+        self.assertLessEqual(budget, 30.0)
+        self.assertIn("clamped", note)
+
+    def test_in_range_value_in_a_short_window_still_names_the_knob(self):
+        budget, note = gb.capture_budget_s("10", timeout=10)
+        self.assertEqual(10.0, budget)
+        self.assertLessEqual(budget, 10.0)
+        self.assertIn("Raise --timeout", note)
+
+    def test_large_timeout_clamps_to_the_floor(self):
+        budget, note = gb.capture_budget_s("5", timeout=600)
+        self.assertEqual(30.0, budget)
+        self.assertIn("30..600", note)
+
+    def test_in_window_value_on_a_normal_timeout_produces_no_note(self):
+        self.assertEqual((45.0, None), gb.capture_budget_s("45", timeout=600))
+
+
+class TraceExeIsRefusedAtParseTime(unittest.TestCase):
+    """DEFECT 3：`trace --exe` 建了一条带 `--file <exe>` 却没有 launch 的 argv，永远
+    采到 0 stops 再退 1。CLI 不该为一个不存在的能力作答，所以在 parse 处拒掉，
+    口径与 `--samples` 越界（line 2460）一致。"""
+
+    def test_trace_with_exe_refuses_the_launch_it_cannot_do(self):
+        err = io.StringIO()
+        # Mock the child so that, if the parse-time refusal were ever removed, this
+        # proves the refusal by "no SystemExit + reached spawn", not by hanging on a
+        # real `xcrun lldb`.
+        def fake_child(argv, timeout, env=None):
+            return gb._Completed(0, "", ""), False
+
+        with mock.patch.object(gb, "run_child_captured", side_effect=fake_child):
+            with contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit) as ctx:
+                    gb.main(["trace", "--exe", "/bin/false"])
+        self.assertEqual(2, ctx.exception.code, "argparse 的 parser.error 退 2")
+        text = err.getvalue()
+        self.assertIn("trace --exe is not supported", text)
+        self.assertIn("--pid", text)
+        self.assertIn("capture --exe", text)
+
+    def test_trace_with_pid_is_not_blocked_by_the_new_guard(self):
+        seen = {}
+
+        def fake_child(argv, timeout, env=None):
+            seen["argv"] = argv
+            return gb._Completed(0, "", ""), False
+
+        with mock.patch.object(gb, "run_child_captured", side_effect=fake_child), \
+                contextlib.redirect_stdout(io.StringIO()):
+            gb.main(["trace", "--pid", "4242"])
+        self.assertTrue(any(str(a).startswith("gp-trace") for a in seen["argv"]),
+                        seen["argv"])
+
+    def test_capture_with_exe_is_still_accepted(self):
+        def fake_child(argv, timeout, env=None):
+            nonce = (env or {}).get(gb.SENTINEL_NONCE_ENV)
+            payload = {"mode": "capture", "status": "failed", "threads": []}
+            return gb._Completed(0, gb.wrap_sentinel(json.dumps(payload), nonce=nonce), ""), False
+
+        with mock.patch.object(gb, "run_child_captured", side_effect=fake_child), \
+                contextlib.redirect_stdout(io.StringIO()):
+            code = gb.main(["capture", "--exe", "/bin/false", "--timeout", "120"])
+        self.assertIn(code, (0, 1, 3))
+
+
+class TopFrameLocalsScopeDecisionIsPinned(unittest.TestCase):
+    """DEFECT 4（GetVariables）：桩从前对任何参数组合都交回同一份列表，所以
+    `_collect_locals` 的作用域判决可以被改坏（带全局、丢参数）而全绿。桩现在记录
+    被调用形参，并拒答它没有建模的作用域。"""
+
+    def test_collect_locals_asks_for_in_scope_args_with_dynamic_values(self):
+        frame = StubFrame(function="main", variables=[StubValue("argc", "3")])
+        variables, reason = gb._collect_locals(frame)
+        self.assertIsNone(reason, reason)
+        self.assertEqual([("argc", "3")], variables)
+        self.assertEqual([(True, True, False, True)], frame.getvariables_calls,
+                         "顶帧局部变量的作用域判决必须逐字钉住")
+
+    def test_the_frame_refuses_a_scope_it_does_not_model(self):
+        frame = StubFrame(function="main", variables=[StubValue("argc", "3")])
+        for bad in [(False, True, False, True),    # 丢掉 in_scope
+                    (True, False, False, True),    # 丢掉 args_only（读成局部/全局）
+                    (True, True, False, False)]:   # 关掉 dynamic
+            with self.subTest(scope=bad):
+                with self.assertRaises(AssertionError):
+                    frame.GetVariables(*bad)
+
+
+class StopHookInstallDrivesBothSeamArms(unittest.TestCase):
+    """DEFECT 4（HandleCommand）：桩从前对任何文本都 return True，让
+    `_install_stop_hook` 的拒绝臂在桩下不可达。桩现在只答桥会发的那一类命令，
+    并留一个 refuse 旋钮把命令文本递进去，好让两条臂都能被真实地跑到。"""
+
+    def setUp(self):
+        self.queue = gb.WatchQueue()
+        mock.patch.object(gb, "_WATCH_QUEUE", self.queue).start()
+        self.addCleanup(mock.patch.stopall)
+
+    def test_success_arm_installs_the_documented_stop_hook_and_marks_rearm_live(self):
+        dbg = StubDebugger(StubProcess(threads=[]))
+        ok, detail = gb._install_stop_hook(dbg)
+        self.assertTrue(ok, detail)
+        self.assertEqual(
+            ['target stop-hook add -o "script glasspane_bridge.on_watchpoint_stop()"'],
+            dbg.commands, "递给调试器的命令文本必须逐字钉住")
+        self.assertTrue(self.queue.snapshot()["rearmLive"])
+
+    def test_rejection_arm_marks_rearm_dead_when_the_debugger_refuses(self):
+        dbg = StubDebugger(StubProcess(threads=[]), refuse=("stop-hook",))
+        ok, _detail = gb._install_stop_hook(dbg)
+        self.assertFalse(ok, "调试器拒绝了这条命令，接缝必须走失败臂")
+        self.assertFalse(self.queue.snapshot()["rearmLive"],
+                         "被拒时账本不许假装自动 re-arm 还活着")
+        self.assertTrue(any("target stop-hook add" in c for c in dbg.commands),
+                        dbg.commands)
+
+    def test_stub_refuses_a_command_shape_it_should_not_answer_for(self):
+        dbg = StubDebugger(StubProcess(threads=[]))
+        self.assertFalse(dbg.HandleCommand("script do-something-the-bridge-never-runs()"),
+                         "不是桥会发的那一类命令，桩不许无条件说是")
 
 
 if __name__ == "__main__":

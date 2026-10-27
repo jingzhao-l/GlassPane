@@ -740,9 +740,11 @@ def lldb_command_quote(text):
 #: 离场、`--out` 与 `--send-sock` 零字节（D3，2026-10-24 上一泳道本机实测复现）。那违背
 #: 本文件 §6.2「失败也以 JSON 离场」，而且违背得最彻底——调用方拿到的是一个 Python
 #: ValueError 和退 1，一个字段都读不到。所以现在：解析不进去就用默认值，并且把这件事
-#: 如实写进 errors[]；值一律钳进 `[BUDGET_FLOOR_S, 外层 timeout]`——比 30s 还短的预算
-#: 连 debugserver 冷启动都不够（F5 实测 >5min 的首次attach 说的就是这件事），比外层
-#: 还长则根本不可能被观测到（外层先 killpg）。
+#: 如实写进 errors[]；预算的可观测上限就是外层 timeout（外层到点先 killpg，比外层还长
+#: 的预算根本不可能被观测到），下限是 30s 的 debugserver 冷启动地板（F5 实测 >5min 的
+#: 首次 attach 说的就是这件事）。外层 timeout 落在地板之上时钳进 `[地板, timeout]`；外层
+#: timeout 比地板还短时地板无法兑现，预算退到那唯一可观测的天花板（= timeout）本身，note
+#: 点名该抬的那一颗旋钮（`--timeout`），而不是报出一个自相矛盾的 `30..timeout` 区间。
 BUDGET_DEFAULT_S = 60.0
 BUDGET_FLOOR_S = 30.0
 
@@ -769,13 +771,39 @@ def capture_budget_s(raw_env_value, timeout=None):
         return BUDGET_DEFAULT_S, ("GPBRIDGE_BUDGET=%r is not a finite number: using the %gs default."
                                   % (raw_env_value, BUDGET_DEFAULT_S))
     floor = BUDGET_FLOOR_S
-    ceiling = floor if timeout is None else max(floor, float(timeout))
-    clamped = min(max(value, floor), ceiling)
+    # The observable upper bound is the outer --timeout: the bridge SIGKILLs the whole
+    # process group there, so a budget ABOVE it can never elapse. `ceiling` therefore
+    # equals the timeout when one is given — NOT `max(floor, timeout)`, which for a
+    # `--timeout < floor` handed back a budget larger than the window it could never
+    # be observed in (the note then asserted a self-contradictory "30..timeout").
+    ceiling = floor if timeout is None else float(timeout)
+    # The 30s floor is a *usefulness* bound (debugserver cold start, F5), not an upper
+    # bound. When the outer window is shorter than the floor, the floor simply cannot
+    # be honoured, so it collapses down to the ceiling; the note then names the knob to
+    # raise (--timeout) instead of claiming an empty "30..timeout" interval.
+    lower = floor if timeout is None else min(floor, ceiling)
+    clamped = min(max(value, lower), ceiling)
     if clamped != value:
-        return clamped, ("GPBRIDGE_BUDGET=%g clamped to %g (allowed %g..%g = the 30s cold-start "
+        if timeout is not None and ceiling < floor:
+            return clamped, ("GPBRIDGE_BUDGET=%g clamped to %g: the outer --timeout (%g) is "
+                             "smaller than the %gs debugserver cold-start floor, so no budget "
+                             "inside that window is long enough for a first attach (F5). The "
+                             "budget is capped at the observable ceiling (%g..%g = the outer "
+                             "--timeout itself), because a budget above the outer timeout can "
+                             "never be observed — the process group is killed first. Raise "
+                             "--timeout to at least %gs to get a meaningful capture."
+                             % (value, clamped, timeout, floor, lower, ceiling, floor))
+        return clamped, ("GPBRIDGE_BUDGET=%g clamped to %g (allowed %g..%g = the %gs cold-start "
                          "floor up to the outer --timeout; a budget above the outer timeout can "
                          "never be observed, because the process group is killed first)."
-                         % (value, clamped, floor, ceiling))
+                         % (value, clamped, floor, ceiling, floor))
+    # Even a value that needs no clamping deserves the cold-start warning when the
+    # whole outer window sits below the floor: the run cannot honour the floor either way.
+    if timeout is not None and ceiling < floor:
+        return clamped, ("GPBRIDGE_BUDGET=%g kept, but the outer --timeout (%g) is smaller than "
+                         "the %gs debugserver cold-start floor (F5): this capture window is too "
+                         "short for a first attach. Raise --timeout to at least %gs."
+                         % (value, timeout, floor, floor))
     return value, None
 
 
@@ -1487,7 +1515,7 @@ def outer_exit_code(payload):
 
 
 def no_payload_cause(stderr_text, stdout_text=None, bridge_path=None):
-    """把"lldb 没吐载荷"分成两种成因，各自给各自的补救。
+    """把"lldb 没吐载荷"分成几种成因，各自给各自的补救。
 
     从前这条路径不分成因，一律写"开发者工具权限挡住了 attach/launch"，于是
     一次**路径形态**故障（`command script import` 被 lldb 自己的命令分词切开，
@@ -1495,13 +1523,25 @@ def no_payload_cause(stderr_text, stdout_text=None, bridge_path=None):
     补救，而且怎么勾都不会好。lldb 的 stderr 里两种失败本来就长得不一样，
     所以放行者是测量，不是猜测。
 
-    返回 `(cause, remedy)`：cause ∈ {"bridge-not-imported", "debug-gated"}。
+    成因**只从桥自己的可信通道——lldb 的 stderr——判**，绝不读 stdout。本文件
+    §"R30 标记"那一段与 `run_child_captured` 都写着同一件事：被调试目标的输出与
+    lldb 自己的输出流同一条 stdout，所以为载荷缺席定因时把 stdout 也扫进子串，就是
+    拿一条从没测量过的通道去下一个自信的判决——目标只要 print 一句
+    `cat: config: No such file or directory`，就会命中 "no such file or directory"，
+    把"桥没被导入"连同一个指向 checkout 路径的补救报出来，而真正该看的通道是空的。
+    于是现在：stderr 明说导入失败 → bridge-not-imported；stderr 有内容但没说导入失败
+    → 桥确实导入了（可信通道里若没导入失败，lldb 一定会写下来），没载荷就归到
+    debug-gated；stderr 一片空白 → 可信通道回答不了，如实说 not-determinable，
+    不再从猜测里挑一个病因。`stdout_text` 仍留在签名里供调用方传，但不参与分类。
+
+    返回 `(cause, remedy)`：cause ∈ {"bridge-not-imported", "debug-gated",
+    "not-determinable"}。
     """
-    combined = ("%s\n%s" % (stderr_text or "", stdout_text or "")).lower()
+    trusted = (stderr_text or "").lower()
     named_us = bridge_path if bridge_path else "glasspane_bridge.py"
-    if ("importing failed" in combined or "invalid pathname" in combined
-            or "no such file or directory" in combined
-            or "module not found" in combined):
+    if ("importing failed" in trusted or "invalid pathname" in trusted
+            or "no such file or directory" in trusted
+            or "module not found" in trusted):
         # F2/F3（2026-10-24 复核）。这段文字是**给 agent 抄进 shell 的命令**，所以它受同一条
         # 规矩约束：一个路径必须是**一个词**，而 `'%s'` 不是保证——`bridge_path` 来自 `__file__`，
         # checkout 目录名里有一个 `'` 就把它自己那个引号组撕开，句子剩下的部分从此是 shell 文本。
@@ -1537,6 +1577,19 @@ def no_payload_cause(stderr_text, stdout_text=None, bridge_path=None):
                 "run their code as you. "
                 "No seat in System Settings fixes this one."
                 % (named_us, quoted, quoted, quoted))
+    if not trusted.strip():
+        # 可信通道一个字都没写：既没有 `command script import` 的失败，也没有 attach
+        # 被拒的那一行，成因无从测量。不许因为 stdout（目标的共享流，见上）里出现了
+        # 什么相似子串就挑一个病因——那正是本函数要避免的那种"为没测过的东西定因"。
+        return ("not-determinable",
+                "the cause of the missing payload cannot be measured: lldb wrote nothing to "
+                "its own stderr, so neither a `command script import` failure nor a refused "
+                "attach left a line on the bridge's trusted channel. The debug target's "
+                "stdout shares lldb's stdout (§ R30) and is deliberately NOT read for a "
+                "cause, so even a target that printed 'no such file or directory' there stays "
+                "undetermined here. Re-run the exact argv lldb echoed and read its stderr; if "
+                "stderr is genuinely empty the next step is a real-machine capture "
+                "(GLASSPANE_REAL_LLDB=1), not a permission seat or a path fix.")
     return ("debug-gated",
             "the bridge imported but produced no payload: debug attach/launch is "
             "permission-gated on this machine (P6 §0 F1/F2, §7.1) — grant System "
@@ -2445,7 +2498,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("mode", choices=["capture", "trace", "interactive"])
     parser.add_argument("--pid", type=int, help="attach to a running pid (needs developer-tools permission, P6 §7.1)")
-    parser.add_argument("--exe", help="launch this executable under the debugger")
+    parser.add_argument("--exe", help="launch this executable under the debugger "
+                        "(capture only; trace attaches a running pid with --pid, it "
+                        "never launches)")
     parser.add_argument("--exe-args", nargs=argparse.REMAINDER, default=None,
                         help="arguments forwarded to --exe")
     parser.add_argument("--samples", type=int, default=TRACE_SAMPLES, help="trace sample count (T2)")
@@ -2457,6 +2512,14 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not args.pid and not args.exe and args.mode != "interactive":
         parser.error("capture/trace need --pid or --exe")
+    if args.mode == "trace" and args.exe and args.pid is None:
+        parser.error("trace --exe is not supported: the bridge never launches a target in "
+                     "trace mode — launching lives only in the capture path "
+                     "(`run_capture_cli_b64`), so `trace --exe` would build a `--file <exe>` "
+                     "argv with no run command and then sample 0 stops and exit 1. Trace a "
+                     "hung, already-running process with `trace --pid <pid>`, or capture a "
+                     "fresh launch with `capture --exe <path>`. The parser refuses the "
+                     "combination rather than answering for a capability it does not have.")
     if args.mode == "trace" and not 1 <= args.samples <= MAX_TRACE_SAMPLES:
         parser.error("--samples must be within 1..%d; the bridge refuses a sample "
                      "count it cannot honour" % MAX_TRACE_SAMPLES)
