@@ -474,17 +474,30 @@ final class ReviewPanelTests: XCTestCase {
         let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         XCTAssertFalse(source.contains("prunePreview.isEmpty ? \"知道了\""),
                        "「知道了」又变成一枚灰掉的破坏性按钮")
-        // 合并后这里允许出现清除，但**必须带实测前提**：`if case .confirmed = outcome`
-        // 才算重启成功。无条件抹掉这句（点一下就算重启好了）才是这一条要挡的形状。
+        // 合并后这里允许出现清除，但**必须带实测前提**。从前这一条认的是行内写着
+        // `if case .confirmed = outcome`；2026-10-27 的 E2 把那一句判据收进了
+        // `SettingsModel.pruneBannerCleared(by:)`（判据住两处就会分叉，而那正是 E2 的形状），
+        // 所以这里改认"清除必须由那道唯一判据把关"。强度没有降低：
+        // ① 无条件的一行清除照样红（它不含谓词名）；② 谓词自己"只有 .confirmed 才为真"
+        //    由 Qoder20261027PruneBannerTests 逐臂钉住；③ 谓词的定义处必须仍然写着
+        //    `case .confirmed`——下面那第三条断言就是在问这件事，把谓词掏空成 `return true`
+        //    同样会红在这里。
         let clears = lines.filter {
             $0.contains("pruneNeedsRestart = false") && $0.contains("model.")
         }
         XCTAssertFalse(clears.isEmpty,
                        "重启确认之后总得有人撤掉这句横幅；一条清除都没有就是另一回事了")
         for line in clears {
-            XCTAssertTrue(line.contains("case .confirmed"),
-                          "抹掉这句只能凭实测确认，不能凭一次点击：\(line)")
+            XCTAssertTrue(
+                line.contains("SettingsModel.pruneBannerCleared(by:"),
+                "抹掉这句只能凭实测确认，不能凭一次点击：\(line)"
+            )
         }
+        let predicateHome = try readSource("engine/Sources/glasspane-settings/SettingsModel.swift")
+        XCTAssertTrue(
+            predicateHome.contains("if case .confirmed = outcome { return true }"),
+            "唯一判据的定义处不再写着 .confirmed——那道谓词被掏空了，横幅就会凭任何读数收起"
+        )
         let index = try XCTUnwrap(
             lines.firstIndex { $0.contains("知道了") && $0.contains("Button(") },
             "那一枚按钮不见了"

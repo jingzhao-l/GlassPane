@@ -38,7 +38,12 @@ struct ProjectsTabView: View {
         // "需要重启"的提示只在实测到进程号换过之后才收起：从前点一下就清旗，
         // 于是 kickstart 失败与重启成功在屏幕上长成同一个样子。
         .onChange(of: settings.restartOutcome) { outcome in
-            if case .confirmed = outcome { model.pruneNeedsRestart = false }
+            if SettingsModel.pruneBannerCleared(by: outcome) { model.pruneNeedsRestart = false }
+        }
+        // 回到这一页时补一次同一句判据：`onChange` 不会为"这一页不在屏上时发生的变化"补发，
+        // 于是重启成功后再切回来，屏上会同时留着两句互相矛盾的话（E2）。
+        .onAppear {
+            if SettingsModel.pruneBannerCleared(by: settings.restartOutcome) { model.pruneNeedsRestart = false }
         }
     }
 

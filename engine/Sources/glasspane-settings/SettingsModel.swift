@@ -949,6 +949,20 @@ final class SettingsModel: ObservableObject {
     /// 重启在途：按钮据此禁用，禁用理由由 `restartOutcomeText` 给出。
     var isRestartInFlight: Bool { restartOutcome == .inFlight }
 
+    /// 「注册表已改动，重启后台服务后它才会用新表」这面旗子该不该收起——只认实测到换过
+    /// 进程号那一个读数（2026-10-27 审查 E2）。
+    ///
+    /// 为什么收成纯函数：项目页的收起是靠 `.onChange(of: settings.restartOutcome)`，而
+    /// `onChange` 只在那个视图**挂在屏上**的时候收得到变化。于是"在项目页之外按下重启、
+    /// 且 1s 轮询没抓到 kill→bind 之间的空隙（liveness 不翻转，
+    /// `ConsoleModel.adoptDaemonReport` 那一支也不触发）"会留下屏上两句互相矛盾的话：
+    /// 「需要重启后才生效」和 `restartOutcomeText` 的「已换新进程（pid X → Y）」。
+    /// 判据在两个入口（变化时、回到这一页时）共用这一句，不各写一份。
+    nonisolated static func pruneBannerCleared(by outcome: DaemonRestartOutcome) -> Bool {
+        if case .confirmed = outcome { return true }
+        return false
+    }
+
     /// 重启 launchd 托管的 daemon 让授权生效。会打断正在进行的 act，
     /// 因此只作为用户显式点击的动作提供，绝不自动执行。
     ///
