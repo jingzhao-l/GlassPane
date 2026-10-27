@@ -77,6 +77,68 @@
 2. **不动 `~/glasspane` 与本机全局 npm 层**——那是父仓那一轮的事，记在
    `specs/GlassPane_更新系统_2026-10-26_状态.md`。
 
+### 收尾补记（同一会话）· 0.12.2 与 0.12.3：一条尺子在同一天里以同一个理由开了三次口
+
+0.12.1 的账写完不到十小时，`release-artifact` 又红了，而且**形状一模一样**：主干有、发布物没有。
+第二次是另一条会话 18:01 的 `9ba1183c`（两份 harness README 加双向集成说明，`README.md` +53、
+`README.zh-CN.md` +41）；第三次是同一会话 18:38 的 `039df15e`（把那节标题改称"双向集成"，两份各 1 行）。
+中间我只做了一件不用花版本号的事：把那两笔留下的**金样**补上（`a2146c39`、`713c36ac`、`0dbd4e73`、
+`d58d0ec7` 各一笔 `fork-diff` 跟账），因为金样红是"账面没跟上"，重记即可；而 artifact 红是
+"用户装到的不是仓库说发过的那一份"，重记不了，只能切号。
+
+**先分清责任，再动手。** 这两笔内容都不是我写的，README 里那 94 行与那两行标题措辞的对错由
+`9ba1183c`/`039df15e` 自己负责；我这两个号只做搬运与取号，一个字都没改他们的文字。
+这条界线写在账上，是因为"我发了这版"很容易被读成"我认可这版的全部内容"。
+
+闸自己的读数（父仓 run `40485588489` 与 `40492903363`）：
+
+```
+release-artifact — 1 agreement(s) held, 0 tolerated lag(s), 1 problem(s)
+  ✓ split-main: 搬运 refs/heads/main == 主干 harness/glasspane-harness 子树
+  ✗ artifact:   已发布 tag 背后的树 ≠ 主干子树
+      0.12.2 之前：ab049bff vs b1c3f189 — README.md −53 / README.zh-CN.md −41 / SYNCLOG.md −75
+                   ⇒ `2 of the differing path(s) are not the release ledger, so no allowance applies`
+      0.12.3 之前：b5e30712 vs fafa49d8 — README.md +1/−1 / README.zh-CN.md +1/−1（独立复算同数）
+```
+
+`git diff --numstat <tag^{tree}> <主干子树>` 是我自己复算的那一路，不是只信闸的打印。
+
+**取号 0.12.2 / 0.12.3 各判成 patch**：pre-1.0 口径里"产品面/CLI 形状变动 = minor，纯修复 = patch"，
+两版都不含行为变化，连文字都不是我的。8 处版本位点每笔重跑一次（`product.json` 两行、
+`packages/opencode/package.json`、`scripts/install.sh`、`docs/install.md` 两处、两份 README 各一处），
+六个文件全是同行改写（`git diff --numstat` added == deleted）。
+
+三格读数（0.12.3；0.12.2 同结构，各自的 run 号在下面）：
+
+- 搬运分支 `c3c8cd06`，树 `6152ca1d` == 主干子树；快进判定 `git merge-base --is-ancestor` 成功
+  ⇒ 普通推送，`--force-with-lease` 仍未动用（这一条链上三次都是快进）。
+- CI run `40502914642` 两 job 全绿；tag `v0.12.3` 签名（`git verify-tag` 回"完好的签名 [绝对]"，
+  密钥 `0929EA31DF4F7429F63FC53189D88B1D043A1298`），先推 main、`git fetch harness` 回读确认 tip 是
+  `c3c8cd06` 之后才打 tag（10-16 那格 403 的教训还留着）。
+- Release run `40502947099` 全绿；`gh release view v0.12.3` 回 `isDraft=false` 与 6 件资产；
+  `SHA256SUMS.txt` 里两行 zip 的 sha256 与 API `assets[].digest` 逐字相等
+  （arm64 `c83f7a0b…f5e13d`、x64 `ac6b96b4…b699c5`）；`gpg --verify --status-fd 1` 的 `VALIDSIG`
+  等于父仓 `updater/lib/signature.js` 的 `PINNED_PRIMARY_FINGERPRINT`。
+- npm：`gh workflow run release.yml --repo jingzhao-l/glasspane-harness --ref v0.12.3
+  -f publish_npm=true -f confirm=true` → run `40504008764` **success**，11 个 job 里该跑的都跑完
+  （`publish-gate`／两个平台包／wrapper／最后一格 `install the published bytes and run them`——
+  它装的是 registry 上那份 tarball，不是本地暂存树）。
+  `npm view <包> version --prefer-online` 三个都回 `0.12.3`；
+  `npm view glasspane-harness versions` 尾部实数 `0.12.0, 0.12.1, 0.12.2, 0.12.3`。
+  0.12.2 那一格同一路：run `40490750206` success，三个包当时都回 `0.12.2`。
+
+### 这一轮新增的通用失效形状：tag 之后一分钟改一份非台账文件，等式就再开口一次
+
+三个纯文档版本号在一天内被消耗，代价是实的：npm 上号不可回收，每个号都要走完 CI＋两平台构建＋签名＋
+registry 三格。根因不在闸太严，而在**并发写同一条子树时，"取号发布"与"改这份文件"没有互斥**：
+
+- 闸只允许 `SYNCLOG.md`/`CHANGELOG.md` 在落后方向存在（那是发布台账自己的时序）；
+  README 一进去就变成真红，这是对的——放宽它等于把"发布物≠主干"重新变成纸面承诺。
+- 已经发生的两次红都不是判据错：`9ba1183c` 与 `039df15e` 都没带金样、也没问一句
+  "这条线此刻是不是在取号"。第一次我用机械收口补了金样，第二次同样补金样，
+  但** artifact 那一半补不了**，这一点值得写进 `docs/release.md`：**同一棵子树里改非台账文件，
+  要么赶在 tag 之前，要么准备好再花一个号。**
+
 ## 2026-10-26（第二十三次会话）· 取号 0.12.0：一条寄给不存在地址的移交，与三条"结构上不会红"的尺子判据
 
 ### 开工与前置（逐项量，不沿用上一轮的读数）
