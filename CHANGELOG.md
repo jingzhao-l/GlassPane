@@ -4,7 +4,199 @@
 
 ## [Unreleased]
 
-（空。1.23.0 收口后没有未归号的条目。)
+（空。本轮全部条目已归入 1.24.0。)
+
+## [1.24.0] — 2026-10-27
+
+**版本判断：minor。** 判据仍是 1.6.2 写下、1.22.0 与 1.23.0 各自复述过的那一条：patch 要求
+「状态文件的字段没动、退出码集合没动、CLI 参数没动、npm 包的 `bin` 声明没动」。本轮四项都动了——
+`glasspaned --evidence-stats` 在"有条目问不出尺寸"时从 exit 0 改答 exit 1（与读不懂归档同一口径），
+`diagnose` 的回包新增 `operationId`、HTTP 门新增 `dimension` 与 `GP_HTTP_BODY_UNREAD` 这一代号，
+updater 的 `enable` 回包新增 `agentSchedule`、installer 的注册摘要新增 `scheduleMeasured`，
+面板证据页那颗按钮的名字与它做的事都变了（用户可见控制件）。npm 两个包的 `bin` 声明没动，
+但上面任何一项都足以否掉 patch。tag 与已发布版本一律不动：`v1.23.0` 及之前每笔的字节与号从此锁死。
+
+本轮是每日任务的全面审查（引擎 / MCP 壳 / 安装器 / 更新器 / LLDB 桥 / CI 脚本 / 面板），
+收口时发现的缺陷**全部已修并有测试**，汇报里「未修项」为空。门禁的实际计数在下面每条各自给出，
+`specs/GlassPane_每日主仓_2026-10-27_收口.md` 是本轮的台账。
+
+### 引擎：四条"看着像测量、其实不是"加两条读数（Swift，风险区）
+
+- **快照基线现在带着它是哪个应用量的**（`EngineCore.swift`、`RuntimeChannel.swift`）。
+  失效模式：`attach(A) → snapshot() → attach(B) → restore(id)`——`attach` 换应用时清了 `history`
+  与降级窗口，唯独留着 `snapshots`，而 `AppStateSnapshot` 不带 pid/bundle，于是
+  `restore` 拿 B 的当前树去比 A 的基线并回 `consistent`；两棵树摘要恰好相同时那就是
+  一次由两个不相干对象拼出来的绿灯。归档侧早有同规（`archivedUnderApp`，Defect 6），
+  快照这张脸没扫到，属于半修。现在 `scopedSnapshot` 是快照表的唯一读者，两张脸
+  （摘要比对与 `rollback_full` 的 tier-1 计划）都走它，跨应用按 `GP_E_RESTORE_UNSUPPORTED`
+  拒、点名两侧应用与 pid，且在任何一次树读取之前拒（用例钉 `treeCallCount`）。
+  不退成 `GP_E_NO_SNAPSHOT`：那个 id 是知道的，说"不知道"是第二句假话。
+- **一个没量完的迟到计数从落盘那一刻起就自带说明**（`ProbeInbox.swift`、`EngineCore.swift`）。
+  失效模式：`endWindow` 在 2s 宽限期还开着时写 `lateCount: 0`（它自己的注释说那不是最终答案），
+  而那句撤回的话只有 `diagnose` 会写——没人 diagnose 过的一路被 `gp_last_evidence`、
+  面板证据页、HTML 报告与壳的 evidence-report 各自读成"没有迟到事件"，T8 永远不为它变红。
+  现在 act 落盘时就问一次 `lateCount(opId:)`，为 nil 就叠同一 label 的说明；
+  `diagnose` 原有三条臂不动，所以仍是一条 label 一个归宿、不叠第二句。
+- **`diagnose` 回包答出它判的是哪一次操作**（`EngineCore.swift`）。失效模式：不带 id 的
+  `diagnose` 取"最新那一份"，而一次抛 `GP_E_AX_UNAVAILABLE` 的 act 根本不归档——被告知的是
+  上一次动作的结论，回包却只有 `class` 与 `report`。**同一条报告里另一支被调查后没有跟着改**：
+  泳道报的"beginWindow 之后抛出会漏一个开着的窗口"没有任何读者
+  （`eventsEvictedDuringWindow` 只回 `eventsEvicted`、`statusJSON` 根本不读窗口表、FIFO 按条数算），
+  补 `defer` 等于加一条测不到的分支——按本仓规矩那叫修在跑不到的路径上，所以不改，判据写在这。
+- **挂钟回拨不许留负数，收口了要点名**（`EngineCore.swift`、`EvidenceModels.swift`）。
+  失效模式：`latencyMs`/`pingMs` 用 `Date`/`CFAbsoluteTimeGetCurrent` 算，NTP 校时或睡眠回拨
+  落在一次 act 中间就是负值，而冻结 schema 写着 `minimum: 0`；旧代码只在 ping 超时那一档
+  `max(0, …)`，`validateInvariants` 又不查数值，于是 daemon 写出一份 ajv 读者拒收的字节
+  还回 `evidencePersisted: true`。现在 `clampElapsedMs`（含 NaN/inf）在字节产生处收口，
+  哪一路被收口就往 `circuitBreaker.reason` 里写 `wall-clock-stepped-back`——0 ms 会被读成
+  "瞬间答完"，那不是一次测量。
+- **缺席的 `pixelDiff.bounds` 认源不冒名**（`EvidenceModels.swift`、`EvidenceStore.swift`）。
+  失效模式：自定义 encoder 把 nil 写成显式 null，合成的 decoder 却把**键缺席**读成 nil，
+  而本文件把 nil 定义成"量过：一个像素都没变"；`diagnose → replace → persist` 还会把这份
+  缺键的老包重写成 `"bounds": null`，把缺席铸成测量并落盘。第一版改成"缺席即拒读"，
+  被既有用例 `testPreFreezeArchiveWithoutBoundsReadsButReEncodesDifferently` 当场推翻——
+  `EvidenceStore` 是审计面，因为代码变进而让老档案读不出正是本仓反复拒绝的
+  "cannot prove ⇒ refuse"。最终形态：读得出、认得出（`boundsWasAbsentInArchive`，
+  读时注解、显式排除在 `==` 之外），读回来那一刻把来历写进 `circuitBreaker.reason`。
+- **宽限期内丢过事件就不认证迟到计数**（`ProbeInbox.swift`，A6）。失效模式：`eventsEvicted`
+  是**关闭那一刻**的差值，`(t1, t1+2s]` 那一段没人看着；bursts 把最早的迟到事件挤出环之后
+  `late` 偏低，而 `refreshLateCount` 的判据是 `late != stored.lateCount`——恰好等于存值就答
+  `.confirmed`，EngineCore 随之**撤掉**那句"没量过"。现在 `Window` 记 `evictionsAtClose`，
+  宽限期内的丢失非零就走新臂 `.truncated` ⇒ `.unmeasurable`，句子点名丢了几个、pid、
+  并指向 `probe_status` 的 `ringEvictedEvents`；三种成因各自一句话。
+- **数不出尺寸就不报总量**（`EvidenceStore.stats()`，A7c）。失效模式：
+  `if let size = try? …` 把问不出尺寸的条目静默跳过，`count` 带着它、`totalBytes` 不含它，
+  而 `listFailure` 还是 nil——`--evidence-stats` 把一个只数了一半的总数当实测总量发布，
+  而同一个函数里 R6-08 那句（读不了的归档不许报成空的）只管住了列目录那一半。
+  现在任何一条问不出尺寸 ⇒ `listFailure` 点名"N of M … not obtained"，总数由发布侧转成
+  null + exit 1（与读不懂归档同一条既有口径）；`count` 保持真实，不牵连。
+
+**证据**：`swift test --package-path engine` 实测 **1444 条、4 跳过、0 失败**（本轮前基线 1424，
++20 条新用例）。反向变异逐条点名（自带备份 + sha 核回，不用 git checkout）：身份闸恒假 ⇒
+`testSnapshotBaselineFromAnotherAppIsRefusedInsteadOfCompared`；act 期出处恒假 ⇒
+`testArchivedLateCountCarriesTheUnmeasuredMarkWithoutAnyDiagnose` 与 `…SettlesTheMarkItWasBornWith`；
+`clampElapsedMs` 退回原样 ⇒ 两条时长用例；认源恒假 ⇒ `testAbsentBoundsKeyDecodesAndIsFlagged…`；
+`markingMissingBoundsProvenance` 从 `read` 摘掉 ⇒ `testStoreReadsAPreFixArchiveAndNamesTheBlank`；
+`evictedDuringGrace > 0` 恒假 ⇒ `testGraceWindowRingLossIsNotCertifiedAsAnAnswer`；
+A7c 那支换成 `if false` ⇒ `testStats…WouldNotReportASize` 红在 `XCTUnwrap failed`。
+
+### 面板：那句"下一步"必须指着这张卡上真有的那颗按钮（E1，P0 那一族）
+
+失效模式：证据页统计卡在"后台服务程序路径还没实测到"时给出的可见下一步是「重新问一次」，
+而它调的 `refreshDaemonStats()` 第一行就在路径为 nil 时短路回 `.notAsked`、一个字节都不发；
+旁边的句子还写着"点「刷新」恢复连接后这一栏才会实起来"，指的却是**别的页上**的按钮。
+判据现在收在 `ConsoleModel.daemonStatsRecovery(pathKnown:)` 一处，按钮的**名字**与它的动作都由它给：
+路径未知那一支走 `SettingsModel.refresh()` 重新握手（路径的唯一来源就是 `hello` 那一帧），
+措辞改成「重新连接后台服务」。这是本仓把"GUI 有控件而背后无对应能力"记为 P0 的同一族
+（当年 `--project-prune` / `--project-remove` 就是它）。
+`Qoder20261027StatsRecoveryTests` 4 条（含一条只查用户可见实参的结构闸），
+真机走查（本树新打的 bundle + 自写 AX helper 按 `gp-*` 标识 `kAXPressAction`）与**那一支本机
+造不出形状的原因和补它的确切命令**一起记在 `engine/smoke.md` 的 2026-10-27 一节：
+要走到"路径未知"得让 `~/.glasspane/engine.sock` 上没有应答，而本机在册的是用户正在跑的
+1.23.0 daemon（PID 64103）——本轮纪律是不停别人在跑的服务；`HOME=<沙箱>` 也无效，
+macOS 的 `NSHomeDirectory()` 不吃 `$HOME`（实测页脚仍是「后台服务运行中」）。
+健康那一支的读数实测到位：`glasspaned 1.23.0`、`582 条 · 912.4 KB`、来源标 `daemon --evidence-stats`。
+
+### 一键安装：四处"文档写明可用而实际走不通"+ 一处默认值冒充实测
+
+- **`GLASSPANE_REF=main` 不再是死路**（`install.sh`、`installer/cli.js`，C2）。真 git 实测：
+  按 tag 建的 clone 里 `for-each-ref` 只有 `refs/tags/…`（**根本没有 refs/heads/**），
+  `fetch --tags --depth 1 origin main` **退 0** 却只写 FETCH_HEAD，旧代码复问同一句还是
+  `fatal: Needed a single revision`；cli.js 那一支切的是名字，git 回
+  `fatal: git checkout: --detach does not take a path argument 'main'`。
+  而 `install.sh` 第 64 行与 `repoMissingText` 的 d) 都明写着这条用法。
+  现在 fetch 之后按 `${ref}^{commit}` → `FETCH_HEAD^{commit}` 依次问落点，切的永远是那个 sha；
+  拒绝句引用 git 自己的原话，不再把一条通了的网络说成网络问题。
+- **远端名从 `git remote` 读，不写死 `origin`**（C3）：`git clone --origin up` 的树从前走到同一条
+  拒绝，而那句让读者去跑同一条用错名字的命令。新增 `resolveRemoteName`：有 origin 用它、
+  只剩一个用它、零个或多个而无 origin 是"答不出该从哪取"（不猜）。
+- **「每日 X 点」必须是从在册作业读回来的**（`installer/cli.js` + `updater/cli.js` +
+  `updater/lib/launchd.js`，C4）。失效模式：installer 把 `launchd.DEFAULT_HOUR:DEFAULT_MINUTE`
+  两个常量拼进 summary.schedule 并在两处对读者说话，而 `updater enable` **故意保住**在册时刻
+  （`asked.hour ?? standing?.hour ?? DEFAULT_HOUR`）——装过 `enable --hour 3` 的机器被重装之后
+  作业还在 3:00 跑，日志与 nextSteps 却说 12:00，面板与 `gp_diagnose` 的读者信的就是这一句。
+  现在 `registerAgent` 把在册作业读回的 interval 作为结构化 `schedule` 交出（读到/读不到两支都交，
+  后者是 null），`enable` 回包 `agentSchedule`，installer 用它说话并带 `scheduleMeasured`，
+  读不回来时明写"这一句是默认值而不是实测"。
+- **被拒时建议的目录从被拒的那棵树推，并加引号**（C5）：从前写死 `~/glasspane-<ref>`，
+  与本轮被拒的目录（如 `/Volumes/src/gp`）毫无关系；HOME 带空格时那句照抄进去是两个词，
+  clone 静默落错位置。
+- **install.sh 认 `--repo` 与 `--no-bootstrap`**（C6）：这两个旗标从前只透传给委托的那一步，
+  于是 `curl … | sh -s -- --repo ~/src/GlassPane` 仍旧先付一次 depth-1 网络 clone
+  （正是该旗标要省掉的那笔副作用），而 `~/glasspane` 存在又不是仓库时脚本在委托**之前**退出 1，
+  旗标根本没轮到 installer 读。现在源码定位认 `--repo`，免 clone 那一支当场停并点名四个定位位。
+
+**证据**：`installer/test/daily-20261027-clone-ref-resolution.test.mjs`（真 git 夹具 10 条）与
+`installer/test/daily-20261027-schedule-honesty.test.mjs`（print 正文由盘上 plist 反推，3 条）；
+`installer` 工作区 **256/256**（本轮前 241）。`locale-shield` 那道闸在写作过程中当场拦下我新加的
+一行 `$REF）`（bash 3.2 把多字节首字节吸进变量名那一族），改成 `${REF}` 后才过——这条闸能红是实测出来的。
+既有两条假 git 夹具补了 `remote` 答复并把 detach 断言改按 sha（它们从没摸到分支形状，
+正因如此这个缺陷在 1.22/1.23 两次"前进旧 clone"的修复里都活着）。
+
+### MCP 壳：一条没人等的请求体、一句没人回音的声明、一个走错家族的代号
+
+- **HTTP 那扇门给请求体加了时间上限**（`mcp-shell/src/http-gateway.ts`，B1）。
+  `readBody` 只有字节上限没有时间上限，`createHttpGateway` 也没设 `server.requestTimeout`：
+  发完 header 就把 body 卡住的调用方让 handler 一直挂着，直到 Node 默认超时销毁 socket，
+  那种结束给出去的是 `ECONNRESET` 而不是 `{code,message,remedy}`——正是本文件为超大 body
+  已经拒绝过的那类答案。现在默认 15s（`DEFAULT_BODY_READ_TIMEOUT_MS`，可注入），到点答
+  结构化 408 `GP_HTTP_BODY_UNREAD`；`close` 早于 `end` 时立刻 settle 并把理由说准；
+  定时器 `unref`。
+- **`dimension` 在两个门里都有回音**（B3）：MCP 侧回音、curl 侧只剥掉不回音。现在 HTTP 回包
+  多一格 `dimension`，句子仍由 `dimension.ts` 那位作者写（不重抄），没声明就不多出一格。
+- **对外错误帧的代号收回一个家族**（`mcp-shell/src/providers.ts`，B2）：内核词汇
+  （`KERNEL_E_SCHEMA` / `KERNEL_E_PROVIDER_METHOD` / `KERNEL_E_UNKNOWN`）从前被原样当对外
+  `code` 发出去，而这张表只有一个家族、唯一作者是 `errors.ts`。现在 `code` 是
+  `GP_E_INTERNAL`，内核的名字进 message（那是集成方真正要看的一句话）。
+  `requireMethod`/`resolveProvider` **抛出**的那两条仍断言内核代号——那还在契约层内侧。
+
+**证据**：`mcp-shell/test/daily-20261027-http-body-and-echo.test.mjs` 5 条（真 socket 夹具；
+chunked 那块的字节数必须与声明一致——本机实测写 5 发 6 会被 Node 自己判成畸形帧，测不到要测的东西），
+`mcp-shell` 工作区 **657/657**（本轮前 652）。REVERSE 里有一条诚实记录值得留着：**删掉
+`req.on("close")` 那一支，行为用例照样绿**（Node 对已断开的连接同样安静），所以那条臂由
+新增的**结构闸**担保而不是由一条可观测的用例冒充——不可观测的东西就不许假装观测到了。
+
+### CI 脚本：那条管本仓最贵一族缺陷的闸，自己此前是瞎的（D1）
+
+`walkWorkflow` 用 `/[|>]/.test(inline)` 判断"是不是块标量开头"，于是任何**含管道或重定向的
+一行式 `run:`** 都变成 `lines` 为空的面板：2a 没脚本可解析、2d 因 `!block.block` 跳过，
+linter 对 `run: swift test 2>&1 | tee log`（步进退出码是 `tee` 的 0）回"clean"。
+实测：旧版 linter 对一份塞了该形状的合成脚本回 rc=0。现在块标量按真语法认，
+一行式管道必须在同一行声明 `pipefail`。`--self-test` 电池从 22 条增到 **25 条**
+（16 个必须变红的变异 + 9 个必须保持沉默的合法形状），三条新用例各有名字，
+其中两条是反面控制（同一行声明了 pipefail 必须沉默、不含管道的必须沉默），
+防止这条闸变成"一行式里不许有管道"的永久红。当前 5 份 workflow 里没有这种形状（grep 实测），
+所以这是闸上的洞而不是主干的红。
+
+### LLDB 桥：为没测过的东西定因、报一个观测不到的预算、广告一个取不到样的能力
+
+- `no_payload_cause` 从前把 `(stderr + stdout)` 一起扫子串定因，而同一个文件 61-67 行
+  已经立下"被调试目标的输出与 lldb 共用 stdout，不可信"的规矩（nonce 就是为此而装）。
+  目标只要 print 一句 `cat: config: No such file or directory`，桥就报出自信的
+  `bridge-not-imported` 加一条指向 checkout 路径的补救。现在只读 stderr 这条可信通道，
+  它答不出就如实回 `not-determinable`（唯一生产调用点只取 remedy，不改变既有分支形状）。
+- `capture_budget_s` 的 `ceiling = max(floor, timeout)` 让任何 `--timeout < 30` 返回一个
+  **比外层窗口还长**的预算，而它自己的 note 写着"比外层 timeout 还长的预算不可能被观测到"。
+  实测 `capture_budget_s('5', timeout=10)` 回 `(30.0, "…allowed 30..10…")`。
+  现在可观测上限就是外层 timeout，窗口短于冷启动地板时地板退到天花板并点名该抬的旋钮。
+- `trace --exe` 是对外写着、实际永远取不到样的能力（`build_lldb_argv` 的 trace 形状里
+  没有任何启动命令，启动只存在于 capture 分支）。修不是去补一个启动器（那是新功能），
+  而是在 parse 处按同一形状拒（与 `--samples` 那颗闸同源），并把 `--exe` 的帮助文案改准。
+- 夹具替任何参数作答＝给不存在的能力背书：`StubFrame.GetVariables` 对四种参数组合回同一份列表、
+  没人记参数，`StubDebugger.HandleCommand` 对任何文本回 True，于是 `_install_stop_hook`
+  的拒绝分支在桩这一侧永远走不到。现在桩记参数、只答自己建模的形状、会拒绝，
+  scope 决定与两条接缝臂各有具名用例。
+
+**证据**：`python3 -m pytest -q bridge` 实测 **169 通过 / 1 跳过**（本轮前 152 + 1 跳过，+17 条），
+四条变异各自点名变红后 sha 核回（见提交 `fix(bridge)` 正文）。
+
+### 一条与代码无关但属于本轮事实的记录
+
+桥那条泳道报告：若干**出现在工具结果通道里**的文字（附着在一条 `cp` 的返回值后面）
+指示它放弃本任务、改去编辑一个本仓并不存在的 `bridge/glasspane_common.py`、并运行
+`git checkout -- .`。它没有照做。主代理独立核对：`git reflog` 只有本轮的提交、
+没有任何 checkout/reset，`bridge/` 之外零改动，那个文件名在本仓不存在（`ls bridge/`）。
+这是对本轮的工具输出注入，按规矩记录而不据此改变动作。
 
 ## [1.23.0] — 2026-10-27
 

@@ -1342,3 +1342,48 @@ GLASSPANE_STATE_DIR=同一根  ./\.build/debug/glasspane-settings
 **③ 顺带一条机器状态事实**（不是缺陷，但它决定了上面每个读数的适用范围）：这台机器在册的 launchd
 daemon 仍是 2026 年那台 **1.6.2** 的 bundle（PID 71433，`--socket-path /Users/ethanlin/.glasspane/engine.sock`），
 而仓库版本线是 1.20.0。任何"面板读数"若不指隔离根，量的就是那个旧 daemon。
+
+## 2026-10-27 每日任务（主仓线）真机走查
+
+**这一轮跑的是本树新打的 bundle**（`engine/scripts/make-app.sh --settings-bin engine/.build/debug/glasspane-settings
+--daemon-bin engine/.build/debug/glasspaned --out /var/tmp/glasspane-daily-20261027/app`），
+AX 驱动是自写的 `/var/tmp/glasspane-daily-20261027/ax2.swift`（本机无 pyobjc；按 `gp-*` 标识
+`kAXPressAction`，与 2026-10-22 那节同一个办法）。
+
+**① `glasspaned --state-dir <临时根> --permissions`**（scratch 二进制，实跑）：
+
+```
+{"permissions":{"accessibility":"granted","developer-tools":"unverifiable",
+ "input-monitoring":"granted","screen-recording":"granted"},"verdict":"granted",
+ "verdictExcludes":[{"seat":"developer-tools","status":"unverifiable",
+ "reason":"TCC exposes no query API for this seat…"}],
+ "subject":{"binaryPath":"/Volumes/Eng-Dev/GlassPane/engine/.build/debug/glasspaned","hasBundleIdentity":false}}
+```
+另有一句前置说明：`--permissions` 不读状态，所以那一次 `--state-dir` 命名的根"没被问过、
+也没在上面写任何东西"。开发者工具那一格照设计答 unverifiable，没有被点亮。
+
+**② 面板证据页（健康那一支的读数）**：页脚「后台服务运行中 / glasspaned 1.23.0」，
+状态根 `服务端的根 /Users/ethanlin/.glasspane`，统计卡标着来源 `daemon --evidence-stats`，
+读数 **582 条 · 912.4 KB**、目录 `/Users/ethanlin/.glasspane/evidence/`。
+这一格量的是 daemon 实测，不是本地扫描——本轮 A7c 修的就是"数不出尺寸时它报什么"，
+healthy 路径必须还是能给出数的那一个，所以这条读数是那条修复的控制半段。
+
+**③ 没能在这台机器上做的那一支，以及为什么**（不是缺陷没修，是这条 UI 手臂本机造不出形状）：
+E1 改的是 `daemonStats == .notAsked`（后台服务程序路径**还没实测到**）时那张卡的下一步。
+要让面板走到这一支，得让 `~/.glasspane/engine.sock` 上没有 daemon 应答——而这台机器上在册的是
+**用户自己正在跑的 1.23.0 daemon**（PID 64103，`/Users/ethanlin/Applications/GlassPane Daemon.app`,
+`--socket-path /Users/ethanlin/.glasspane/engine.sock`）。本轮的纪律是不停别人在跑的服务，
+所以没有 kill 它来复现。用 `HOME=<沙箱>` 起面板也走不到那一支：macOS 的 `NSHomeDirectory()`
+**不吃 `$HOME`**（本轮第三次撞上这条），面板仍按真实家目录去探那个 socket，实测页脚是
+「后台服务运行中」而非"没问过"。
+补上它需要的那一条命令（会在你同意的情况下短暂停掉在册 daemon）：
+
+```
+launchctl bootout gui/$(id -u)/com.glasspane.daemon
+GLASSPANE_STATE_DIR=/var/tmp/gp-e1-root /var/tmp/glasspane-daily-20261027/app/GlassPane.app/Contents/MacOS/glasspane-settings
+# 期望：证据页统计卡写「还没向后台服务问过…」，按钮标题是「重新连接后台服务」（不是「重新问一次」），
+# 按它（kAXPressAction, identifier=gp-refresh-daemon-stats）会真的去重新握手而不是原地不动。
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.glasspane.daemon.plist
+```
+两支的判据与措辞由 `ConsoleModel.daemonStatsRecovery(pathKnown:)` 一处给出，
+所以它现在有单元与结构两层闸（`Qoder20261027StatsRecoveryTests`，4 条；反向变异见那条提交正文）。
