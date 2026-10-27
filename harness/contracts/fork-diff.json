@@ -2763,7 +2763,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "b448863c5d78aa8069d32ee87efc1d78ef1ca4e0"
+      "forkHash": "df6f9ca21a8784b18b392bbdb76acc8702059fff"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -3523,7 +3523,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "34640862a19e0c4a1ee3ff2eab2c4c84b12351d7"
+      "forkHash": "f3a7b424032bf3afe66dfecb513cde0fd677c7be"
     },
     {
       "file": "script/publish.ts",
@@ -3721,7 +3721,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "567d695f24503891eb0521422b80c9a6b2affb90"
+      "forkHash": "33cc870b0bbe9f51e0c28b2f6553f6097300b9dd"
     },
     {
       "file": "contracts/engine-methods.json",
@@ -3749,7 +3749,7 @@
     },
     {
       "file": "docs/install.md",
-      "forkHash": "5f81ca61efe89df95d9e78ad293086fe37d22245"
+      "forkHash": "32e4b6903f8c2b0c9104e7d1c003994180f5a18e"
     },
     {
       "file": "docs/kernel-integration.md",
@@ -3957,11 +3957,11 @@
     },
     {
       "file": "product.json",
-      "forkHash": "d02754cf91ebc897f5b68b6c823051b75c080535"
+      "forkHash": "2ff847d65da8de813d1e3ab65fd9c4c48b7eab2b"
     },
     {
       "file": "README.zh-CN.md",
-      "forkHash": "68b94929e5eeda166bd3549035efc05ac26b4141"
+      "forkHash": "e4cd0f05325c0a298d34b80ce28fb4c50eb8d056"
     },
     {
       "file": "script/assert-ci-green.mjs",
@@ -3989,7 +3989,7 @@
     },
     {
       "file": "scripts/install.sh",
-      "forkHash": "39861c875b8a681ae520d34f3189e151a72a5e12"
+      "forkHash": "1e2518065334d8f5796b50b11f78b4acb2a899a4"
     },
     {
       "file": "SYNCLOG.md",
