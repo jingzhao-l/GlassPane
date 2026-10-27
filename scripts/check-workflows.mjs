@@ -183,7 +183,16 @@ function walkWorkflow(text) {
     if (runMatch) {
       const [, indent, inline] = runMatch
       addRun({ text: inline, line: i + 1, dir: stepDir })
-      if (/[|>]/.test(inline)) {
+      // A block scalar is `run: |`, `run: |-`, `run: >-`, `run: |2` — and **nothing else**.
+      // The old test was `/[|>]/.test(inline)`, which also matched an ordinary one-line
+      // command containing a pipe or a redirect: `run: swift test 2>&1 | tee /tmp/x.log`
+      // became a `shellBlock` with an empty `lines` array, so rule 2a had no script to
+      // parse (`if (!script.trim()) return`) and rule 2d skipped it (`if (!block.block)
+      // continue`) — the linter printed "clean" for the exact shape whose verdict Actions
+      // computes through `tee`'s exit status. That is the D6 family, and the guard meant to
+      // police it was the thing that could not see it (measured: a synthetic workflow with
+      // that one-line pipeline was certified by this script before the fix).
+      if (/^[|>][+-]?\d*$/.test(inline.trim())) {
         inRun = true
         runIndent = indent.length
         shellBlock = { line: i + 1, lines: [], block: true }
@@ -606,7 +615,20 @@ function setGateFlags(head) {
 function setHeaderFindings(shells) {
   const out = []
   for (const block of shells) {
-    if (!block.block) continue // a one-line `run: cmd` inherits its verdict from the command itself
+    if (!block.block) {
+      // A one-line `run:` normally inherits its verdict from the command itself. A
+      // **pipeline** does not: under Actions' default `bash -e` the step's exit code is
+      // the last stage's, so `swift test | tee log` reports tee's zero when the suite died
+      // (ci.yml's own comment at lines 107-110 documents this for the block form). The
+      // verdict only becomes the command's when the same line declares `pipefail`.
+      const one = (block.lines ?? []).join(" ")
+      if (!/\|/.test(one)) continue
+      const flags = setGateFlags(/^\s*set\s+[^;]*;/.exec(one)?.[0]?.replace(/;\s*$/, "") ?? "")
+      if (flags === null || !flags.has("pipefail")) {
+        out.push({ line: block.line, head: one, missing: flags === null ? ["pipefail"] : SHELL_GATES.filter((g) => !flags.has(g)) })
+      }
+      continue
+    }
     const code = block.lines.filter((l) => l && !l.startsWith("#"))
     if (code.length < 2) continue
     const first = code[0]
@@ -624,6 +646,12 @@ function setHeaderFindings(shells) {
 
 function setHeaderProblems(shells) {
   return setHeaderFindings(shells).map((f) => {
+    if (/\|/.test(f.head) && !f.head.includes("\n")) {
+      return `line ${f.line}: this one-line \`run:\` pipelines (\`${f.head.slice(0, 80)}\`) and never declares `
+        + `pipefail — the step's exit code is the **last** stage's, so a suite that died upstream is `
+        + `reported through the downstream command's zero. Write \`set -euo pipefail; <cmd> | ...\` on the `
+        + `line, or make it a \`run: |\` block whose first line is \`set -euo pipefail\`.`
+    }
     return `line ${f.line}: this \`run:\` body opens with \`${f.head}\` and never declares ` +
       `${f.missing.map((g) => (g === "pipefail" ? "pipefail" : `-${g}`)).join("/")} — ` +
       `errexit, nounset and pipefail are what make a failing middle command, an unset variable and a ` +
@@ -1237,6 +1265,41 @@ jobs:
       // Counter-case for the rule above, on the corrected text the red case just broke.
       apply: () => WITH_GATE,
       absent: /never declares/,
+    },
+    {
+      id: "a one-line `run:` whose pipeline hides the verdict (D6-b's blind spot)",
+      // 2026-10-27 finding D1. The walker decided "is this a block scalar?" by
+      // `/[|>]/.test(inline)`, so an ordinary one-line command containing a pipe became a
+      // `shellBlock` with an EMPTY `lines` array — rule 2a had nothing to parse and 2d
+      // skipped it (`if (!block.block) continue`). This file therefore printed "clean" for
+      // `run: swift test 2>&1 | tee log`, whose step verdict is tee's zero: measured by
+      // running the pre-fix linter against exactly that shape. The rule now reads the real
+      // block-scalar grammar and demands `pipefail` on the line.
+      apply: (t) =>
+        t.replace(
+          "      - name: run the real script\n        run: node scripts/check-version.mjs\n",
+          "      - name: run the real script\n        run: node scripts/check-version.mjs 2>&1 | tee /tmp/x.log\n",
+        ),
+      expect: /one-line `run:` pipelines/,
+    },
+    {
+      id: "the same one-line pipeline with pipefail declared on the line",
+      // Counter-case: the fix must not become "no pipelines in one-line run: ever", or the
+      // next person switches the rule off. `set -o pipefail` on the same line is the whole
+      // ask.
+      apply: (t) =>
+        t.replace(
+          "      - name: run the real script\n        run: node scripts/check-version.mjs\n",
+          "      - name: run the real script\n        run: set -euo pipefail; node scripts/check-version.mjs 2>&1 | tee /tmp/x.log\n",
+        ),
+      absent: /one-line `run:` pipelines/,
+    },
+    {
+      id: "a one-line `run:` with no pipeline stays silent",
+      // Second counter-case: a redirect or a bare command must not be reddened, or the rule
+      // judges the shape it was written for and nothing else.
+      apply: (t) => t,
+      absent: /one-line `run:` pipelines/,
     },
     {
       id: "a gh call whose step declares no GH_TOKEN (D6-c)",
