@@ -55,6 +55,16 @@ public struct AppStateSnapshot: Equatable {
     /// nothing else records it (§1.2).
     public let maxDepth: Int
     public let capturedAt: String
+    /// Which attachment this baseline was taken under. A tree digest is a claim
+    /// about **one app's** UI tree, so a comparison against a tree read from a
+    /// different app is not a measurement of anything — it is a verdict invented
+    /// from two unrelated subjects. `attach` already invalidates `history` and
+    /// the degradation window on an app switch (§18.3); the snapshot store was
+    /// the face left unscoped, and `restore` without `steps` answered
+    /// `consistent: true` whenever two different apps happened to digest alike.
+    /// Same rule as `archivedUnderApp` for evidence packs, enforced where the
+    /// bytes are made rather than at each reader.
+    public let takenUnderApp: AttachedApp
     /// Z5 probe payload captured alongside the tree baseline (P5 v5.0 §6.2).
     /// Nil for snapshots taken without a probe; engine-internal shape — never
     /// written into an evidence schema.
@@ -66,6 +76,7 @@ public struct AppStateSnapshot: Equatable {
         nodeCount: Int,
         maxDepth: Int,
         capturedAt: String,
+        takenUnderApp: AttachedApp,
         probeInfo: SnapshotProbeInfo? = nil
     ) {
         self.snapshotId = snapshotId
@@ -73,6 +84,7 @@ public struct AppStateSnapshot: Equatable {
         self.nodeCount = nodeCount
         self.maxDepth = maxDepth
         self.capturedAt = capturedAt
+        self.takenUnderApp = takenUnderApp
         self.probeInfo = probeInfo
     }
 }

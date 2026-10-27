@@ -1135,7 +1135,23 @@ final class EngineCoreWaveThreeMappingTests: XCTestCase {
         )
         let pack = try core.lastEvidence(operationId: operationId)
         XCTAssertEqual(pack.signals.stateDiff?.changed, false, "asked and silent IS a measurement")
-        XCTAssertNil(pack.circuitBreaker.reason, "nothing is unmeasured: got \(pack.circuitBreaker.reason ?? "nil")")
+        // 2026-10-27 (finding A2) 改的就是这一句的口径。原来写的是
+        // `XCTAssertNil(pack.circuitBreaker.reason, "nothing is unmeasured")`——那句判据把
+        // "这条通道没有未测的格子"表达成"reason 必须是空的"，过宽：act 落盘时宽限期还开着，
+        // `lateCount: 0` 现在自带一句说明（那正是本次修复）。所以这里改判**具体是哪一句**：
+        // 不许有 stateDiff/像素/挂钟那一族的标记，而迟到计数那一句是预期内的。
+        // 把整条断言删掉或退回 XCTAssertNil 都是洗红，不是修判据。
+        let reason = pack.circuitBreaker.reason ?? ""
+        XCTAssertFalse(reason.contains("stateDiff"), "changed:false 是一次测量，不许被标成未测：\(reason)")
+        XCTAssertFalse(
+            reason.contains(EvidencePack.pixelDiffBoundsNotArchivedLabel)
+                || reason.contains(EngineCore.clockStepUnmeasuredLabel),
+            "这一趟没有像素缺席、挂钟也没回拨，不许多出别的说法：\(reason)"
+        )
+        XCTAssertTrue(
+            reason.contains(EngineCore.lateArrivalsUnmeasuredLabel),
+            "act 期落盘的迟到计数应当自带那一句说明（finding A2）：\(reason.isEmpty ? "（空）" : reason)"
+        )
     }
 
     // MARK: - X-13: delivery vs refusal, and the disconnection count

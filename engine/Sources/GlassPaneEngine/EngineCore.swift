@@ -36,6 +36,56 @@ public final class EngineCore {
     /// also pattern-matches rather than guesses.
     public static let lateArrivalsUnmeasuredLabel = "late-arrivals-unmeasured"
 
+    /// The act-time sibling of the sentence `diagnose` writes when it cannot refresh
+    /// a late count (finding A2, 2026-10-27). One label, one owner, one removal path
+    /// (`removingLateArrivalsBasis`) — which is why the text here carries **no `"; "`
+    /// inside it**: that separator is what makes the split-and-rejoin lossless, and a
+    /// sentence containing it would be half-removed by a later `diagnose`.
+    static func appendingActTimeLateBasis(_ reason: String?) -> String? {
+        let basis = "\(EngineCore.lateArrivalsUnmeasuredLabel): handlerProbe.lateCount=0 was archived at act time "
+            + "while the \(Int(ProbeInbox.lateGraceSeconds))s grace after this window closed is still open, so the 0 "
+            + "means nothing had landed YET rather than nothing arrived late, and T8 stays undecidable until "
+            + "gp_diagnose runs after the grace elapses"
+        let stripped = EngineCore.removingLateArrivalsBasis(from: reason)
+        return stripped.map { $0 + "; " + basis } ?? basis
+    }
+
+    /// A wall-clock step (NTP correction, sleep/wake) makes an elapsed-time
+    /// measurement come out **negative**. The frozen schema pins
+    /// `latencyMs`/`pingMs` at `minimum: 0` (kernel
+    /// `schemas/evidence-pack.schema.json`, axEvent L109-112, responsiveness
+    /// L152-159), so the honest options are "refuse the number" or "write a number
+    /// that is not a measurement" — and absence is not available, because those
+    /// keys are required. This clamps to the schema floor *and says so*, because a
+    /// silent clamp is the fabricated default in the other direction: `pingMs: 0`
+    /// reads as "the app answered instantly", which nobody measured.
+    ///
+    /// Same doctrine as `ArchiveFieldBounds` (EvidenceModels L199-233) — bound the
+    /// value where the bytes are made, not at each reader — extended from lengths
+    /// to elapsed times, which is the channel the 2026-10-27 review found unbounded.
+    public static let clockStepUnmeasuredLabel = "wall-clock-stepped-back"
+
+    /// Clamp one elapsed-milliseconds reading to the schema floor, and report
+    /// whether that is what happened. `Double` is also guarded against `NaN`/
+    /// `infinity`, which JSON cannot carry and `JSONSerialization` turns into a
+    /// write failure for the whole pack.
+    static func clampElapsedMs(_ raw: Double) -> (ms: Double, clamped: Bool) {
+        guard raw.isFinite else { return (0, true) }
+        return raw < 0 ? (0, true) : (raw, false)
+    }
+
+    /// Stack the clock-step basis onto `circuitBreaker.reason` once, naming which
+    /// channels it touched. Idempotent by label (the late-arrivals precedent): a
+    /// repeated `diagnose` must not accumulate copies of the same sentence.
+    static func appendingClockStepBasis(_ reason: String?, channels: [String]) -> String? {
+        guard !channels.isEmpty else { return reason }
+        if reason?.contains(EngineCore.clockStepUnmeasuredLabel) == true { return reason }
+        let basis = "\(EngineCore.clockStepUnmeasuredLabel): \(channels.joined(separator: ", ")) "
+            + "came out negative because the wall clock stepped during this operation; "
+            + "the archived value is the schema floor 0, not a measured duration"
+        return reason.map { $0 + "; " + basis } ?? basis
+    }
+
     /// Drop **this label's own basis** out of a stacked `circuitBreaker.reason`,
     /// leaving every other segment untouched (defect 1(d), 2026-10-22). Needed
     /// because a later `diagnose` can turn the earlier refusal into a measurement:
@@ -1016,7 +1066,11 @@ public final class EngineCore {
             // keeps the window-independent KVO/macro frames, which need no command.
         }
 
-        let latencyMs = clock().timeIntervalSince(started) * 1000
+        // A wall-clock step (NTP, sleep/wake) inside the operation makes this raw
+        // difference negative; the schema floor is 0, and the clamp has to be said
+        // out loud (`wall-clock-stepped-back`), because 0 ms reads as "instant".
+        let latency = Self.clampElapsedMs(clock().timeIntervalSince(started) * 1000)
+        let latencyMs = latency.ms
 
         // Signals.
         let axChanged = Self.axChanged(before: treeBefore, after: treeAfter)
@@ -1352,18 +1406,44 @@ public final class EngineCore {
             level: attributionLevel,
             contaminated: contaminated
         )
+        // `channel.ping()` measures with `CFAbsoluteTimeGetCurrent`, so it can come
+        // out negative for the same reason `latencyMs` can — and the timeout arm
+        // already clamps, which is the inconsistency this closes.
+        let ping = Self.clampElapsedMs(responsiveness.pingMs)
+        let archivedResponsiveness = ping.clamped
+            ? ResponsivenessSignal(responsive: responsiveness.responsive, pingMs: ping.ms)
+            : responsiveness
+        var clockSteppedChannels: [String] = []
+        if latency.clamped { clockSteppedChannels.append("axEvent.latencyMs") }
+        if ping.clamped { clockSteppedChannels.append("responsiveness.pingMs") }
+        let archivedReason = Self.appendingClockStepBasis(finalReason, channels: clockSteppedChannels)
+        // Finding A2 (2026-10-27): `endWindow` writes `lateCount: 0` before the grace
+        // period has elapsed — its own comment calls that "not the final answer" — and
+        // the retracting sentence used to be written *only* by `diagnose`. A pack nobody
+        // diagnosed therefore archived the provisional 0 unmarked, and every other reader
+        // (`gp_last_evidence`, the panel's evidence tab, the HTML report,
+        // mcp-shell/src/evidence-report.ts) showed it as "no late arrivals". The mark now
+        // travels with the bytes from birth; `diagnose` strips it when the refresh lands
+        // (`.measured`/`.confirmed`) or replaces it with its own unmeasurable reason.
+        var lateFromProvisionalWindow = false
+        if let inbox = probeInbox, probeSignals?.handlerProbe != nil {
+            lateFromProvisionalWindow = inbox.lateCount(opId: operationId) == nil
+        }
+        let archivedPackReason = lateFromProvisionalWindow
+            ? Self.appendingActTimeLateBasis(archivedReason)
+            : archivedReason
         let pack = EvidencePack(
             operationId: operationId,
             createdAt: nowISO(),
             attribution: attribution,
-            circuitBreaker: CircuitBreaker(level: finalLevel, reason: finalReason),
+            circuitBreaker: CircuitBreaker(level: finalLevel, reason: archivedPackReason),
             signals: Signals(
                 act: ActSignal(selector: selector, action: action, actConfirmed: actConfirmed),
                 axEvent: axEvent,
                 handlerProbe: probeSignals?.handlerProbe,
                 stateDiff: probeSignals?.stateDiff,
                 pixelDiff: pixelDiff,
-                responsiveness: responsiveness,
+                responsiveness: archivedResponsiveness,
                 crash: CrashSignal(processAliveBefore: aliveBefore, processAliveAfter: channel.isProcessAlive())
             )
         )
@@ -1731,6 +1811,12 @@ public final class EngineCore {
         updated.diagnosis = Diagnosis(class: diagnosisClass, report: report)
         replace(updated)
         return [
+            // Finding A3's other half: `diagnose` with no `operationId` resolves *whatever
+            // the newest pack is*, and an act that threw archived nothing — so the answer
+            // can describe an earlier operation while looking like it describes the one the
+            // caller just performed. The id being classified is now echoed, so the caller
+            // can see which operation it was told about instead of inferring it.
+            "operationId": target.operationId,
             "class": diagnosisClass.rawValue,
             "report": [
                 "path": report.path,
@@ -2086,7 +2172,7 @@ public final class EngineCore {
     /// Captures a digest-only baseline of the attached app's AX tree and
     /// stores it in the bounded in-memory snapshot store (§1.2 snapshot).
     public func snapshot(maxDepth: Int) throws -> [String: Any] {
-        guard attachedApp != nil else {
+        guard let snapshotOwner = attachedApp else {
             throw GPError(code: .notAttached, message: "no app attached")
         }
         let started = clock()
@@ -2132,6 +2218,7 @@ public final class EngineCore {
             nodeCount: tree.nodeCount,
             maxDepth: maxDepth,
             capturedAt: nowISO(),
+            takenUnderApp: snapshotOwner,
             probeInfo: probeInfo
         )
         storeSnapshot(snapshot)
@@ -2180,9 +2267,7 @@ public final class EngineCore {
             // tier-1 boundary), probe present → plan + validate. A returned
             // plan carries rollbackExecuted: false — the rollback execution
             // surface is the probe runtime, which this daemon does not ship.
-            guard let snapshot = snapshot(withId: snapshotId) else {
-                throw GPError(code: .noSnapshot, message: "unknown snapshotId \(snapshotId)")
-            }
+            let snapshot = try scopedSnapshot(snapshotId)
             guard let probe = snapshot.probeInfo else {
                 // A-01: "nothing was attached" and "the probe answered and the
                 // answer was unusable" are different facts, and only the first
@@ -2284,9 +2369,7 @@ public final class EngineCore {
                 "consistentBasis": "plan-only, state not re-measured"
             ]
         }
-        guard let snapshot = snapshot(withId: snapshotId) else {
-            throw GPError(code: .noSnapshot, message: "unknown snapshotId \(snapshotId)")
-        }
+        let snapshot = try scopedSnapshot(snapshotId)
 
         // P5 §3.5: 高风险操作的审批登记。登记是 best-effort——台账是审计面，
         // 不是闸门：写失败或原因被拒都不该改变 restore 语义。
@@ -2435,6 +2518,42 @@ public final class EngineCore {
 
     private func snapshot(withId snapshotId: String) -> AppStateSnapshot? {
         snapshots.first { $0.snapshotId == snapshotId }
+    }
+
+    /// The one reader of the snapshot store, with the app-scope rule attached.
+    ///
+    /// A baseline tree digest describes **one** app's UI tree. After
+    /// `attach(A) → snapshot() → attach(B)`, comparing B's live tree against A's
+    /// baseline used to answer `baselineTreeDigest`/`targetDigest`/`consistent` as
+    /// though it were a restore verdict for the attached app — and `consistent: true`
+    /// was reachable whenever the two trees happened to digest alike. That is a green
+    /// light invented from two unrelated subjects, which is the same fault `Defect 6`
+    /// removed for archived packs (`archivedUnderApp`); the snapshot store was the
+    /// face left unscoped while `attach` already cleared `history` on a switch.
+    ///
+    /// Refused with `GP_E_RESTORE_UNSUPPORTED`, not `GP_E_NO_SNAPSHOT`: the id *is*
+    /// known, so "unknown snapshotId" would be a second lie. Both restore faces go
+    /// through here, so there is no half-fixed path.
+    private func scopedSnapshot(_ snapshotId: String) throws -> AppStateSnapshot {
+        guard let snapshot = snapshot(withId: snapshotId) else {
+            throw GPError(code: .noSnapshot, message: "unknown snapshotId \(snapshotId)")
+        }
+        if let attached = attachedApp, attached != snapshot.takenUnderApp {
+            throw GPError(
+                code: .restoreUnsupported,
+                message: """
+                snapshot '\(snapshotId)' is a baseline of '\(snapshot.takenUnderApp.appName)' \
+                (pid \(snapshot.takenUnderApp.pid), bundle \(snapshot.takenUnderApp.bundleId ?? "unspecified")), \
+                while this daemon is attached to '\(attached.appName)' (pid \(attached.pid), \
+                bundle \(attached.bundleId ?? "unspecified")) — comparing one app's tree against another's \
+                baseline measures nothing, so no digest was compared and no step was rolled back
+                """,
+                remedy: "re-snapshot while attached to the app you want restored "
+                    + "('\(snapshot.takenUnderApp.appName)'), or attach that app first; "
+                    + "`gp_observe` on the current app gives this attachment its own baseline"
+            )
+        }
+        return snapshot
     }
 
     private func storeSnapshot(_ snapshot: AppStateSnapshot) {

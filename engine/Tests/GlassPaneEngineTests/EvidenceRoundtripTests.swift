@@ -36,6 +36,16 @@ final class EvidenceRoundtripTests: XCTestCase {
         // 读侧兼容：缺键的档案仍可解码并通过校验。
         let pack = try EvidencePack.decodeAndValidate(fixture)
         XCTAssertNil(pack.signals.pixelDiff?.bounds)
+        // 2026-10-27 finding A5：读得出**不等于**没有账。这一格的来历要有出处标记，
+        // 否则 `diagnose → replace → persist` 下一次落盘时，一次缺席就被铸成
+        // "量过：一个像素都没变"（本文件把 nil 定义成那个结论）。
+        XCTAssertEqual(pack.signals.pixelDiff?.boundsWasAbsentInArchive, true,
+                       "缺键的档案必须被认出是缺键，否则下面那句标记永远不会出现")
+        let marked = pack.markingMissingBoundsProvenance()
+        XCTAssertTrue(
+            marked.circuitBreaker.reason?.contains(EvidencePack.pixelDiffBoundsNotArchivedLabel) == true,
+            marked.circuitBreaker.reason ?? "nil"
+        )
 
         // 写侧诚实：重新编码必须把键补回来（值可以是 null），否则内核强校验会
         // 把一条合法档案说成 "engine and kernel schema drifted"。

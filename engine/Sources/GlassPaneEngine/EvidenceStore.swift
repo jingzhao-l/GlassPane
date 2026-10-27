@@ -681,7 +681,10 @@ public final class EvidenceStore {
             log.error("evidence pack \(filePath) carries operationId \(pack.operationId): refusing to answer it as \(operationId)")
             return nil
         }
-        return pack
+        // A pre-fix archive that never wrote `pixelDiff.bounds` stays readable (the
+        // audit trail is not to be narrowed by a code change) but is handed back with
+        // that blank named, so no downstream reader takes it for "no pixel changed".
+        return pack.markingMissingBoundsProvenance()
     }
 
     /// OperationId of the most recently written file, by file modification

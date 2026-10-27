@@ -48,6 +48,7 @@ final class RestorePipelineTests: XCTestCase {
             nodeCount: 10,
             maxDepth: 6,
             capturedAt: "2026-09-18T00:00:00.000Z",
+            takenUnderApp: AttachedApp(pid: 4242, bundleId: "com.example.app", appName: "Example"),
             probeInfo: probe
         )
     }

@@ -147,15 +147,52 @@ public struct PixelDiffSignal: Codable, Equatable {
     public let changedPixelRatio: Double
     public let bounds: Bounds?
     public let windowId: Int
+    /// Provenance, not measurement: this archive **never carried** the `bounds` key.
+    ///
+    /// The frozen schema (`kernel/schemas/evidence-pack.schema.json`, L130-147)
+    /// requires the key and types it `oneOf [bounds, null]` — so there is no byte
+    /// shape inside the contract that means "nobody wrote this field". Pre-freeze
+    /// packs (the Swift synthesized encoder omitted the key whenever bounds was
+    /// nil) therefore arrive as `nil`, which this file defines as the measured
+    /// answer "no pixel changed". Refusing to read them is not the fix either:
+    /// `EvidenceStore` is the audit trail, and "cannot prove ⇒ refuse" is the move
+    /// this project keeps rejecting (R1-06, and the `resolvedPack` comment that
+    /// says an entry this process never wrote is *unknown*, not contradicted).
+    ///
+    /// So the read stays lenient and the fact travels the one channel the repo
+    /// already uses for "a measurement channel that did not run":
+    /// `circuitBreaker.reason`, stamped by `markingMissingBoundsProvenance` at
+    /// read time — same doctrine as `late-arrivals-unmeasured`. Re-encoding still
+    /// adds the explicit null (that asymmetry is ok-05's documented point), but
+    /// now it says what it is.
+    ///
+    /// Deliberately excluded from `==` below: two packs with the same three
+    /// measurements are the same measurement record; this flag describes where the
+    /// bytes came from, and it is a read-time annotation, never a stored field.
+    public var boundsWasAbsentInArchive: Bool
 
-    public init(changedPixelRatio: Double, bounds: Bounds?, windowId: Int) {
+    public init(
+        changedPixelRatio: Double,
+        bounds: Bounds?,
+        windowId: Int,
+        boundsWasAbsentInArchive: Bool = false
+    ) {
         self.changedPixelRatio = changedPixelRatio
         self.bounds = bounds
         self.windowId = windowId
+        self.boundsWasAbsentInArchive = boundsWasAbsentInArchive
     }
 
     enum CodingKeys: String, CodingKey {
         case changedPixelRatio, bounds, windowId
+    }
+
+    /// Equality is the three measured fields only — see
+    /// `boundsWasAbsentInArchive` for why provenance is not part of it.
+    public static func == (lhs: PixelDiffSignal, rhs: PixelDiffSignal) -> Bool {
+        lhs.changedPixelRatio == rhs.changedPixelRatio
+            && lhs.bounds == rhs.bounds
+            && lhs.windowId == rhs.windowId
     }
 
     /// `bounds` stays a required, nullable key (P0 §4.2): a nil bounds is the
@@ -173,6 +210,17 @@ public struct PixelDiffSignal: Codable, Equatable {
             try container.encodeNil(forKey: .bounds)
         }
         try container.encode(windowId, forKey: .windowId)
+    }
+
+    /// The read side: absence decodes (the archive stays readable) but is
+    /// recorded, so `markingMissingBoundsProvenance` can say out loud that the
+    /// `nil` this pack now carries was never measured.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        changedPixelRatio = try container.decode(Double.self, forKey: .changedPixelRatio)
+        boundsWasAbsentInArchive = !container.contains(.bounds)
+        bounds = try container.decodeIfPresent(Bounds.self, forKey: .bounds)
+        windowId = try container.decode(Int.self, forKey: .windowId)
     }
 }
 
@@ -565,6 +613,37 @@ public extension EvidencePack {
     private static let createdAtRegex = try! NSRegularExpression(
         pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
     )
+
+    /// The label `markingMissingBoundsProvenance` stacks onto
+    /// `circuitBreaker.reason` for an archive that never carried
+    /// `pixelDiff.bounds`. Same home, same reason as
+    /// `EngineCore.lateArrivalsUnmeasuredLabel`: the frozen schema cannot carry the
+    /// fact as a key (`additionalProperties: false`, and `bounds` is
+    /// `oneOf [object, null]` with no "absent" member), so the one field that means
+    /// "a measurement channel that did not run" is the pack's own reason.
+    public static let pixelDiffBoundsNotArchivedLabel = "pixelDiff-bounds-not-in-archive"
+
+    /// Return this pack with the missing-`bounds` provenance said out loud, once.
+    ///
+    /// Only a read of stored bytes can produce the flag (`act` always writes the
+    /// key), so this is not a verdict about a live measurement — it is the daemon
+    /// refusing to let a pre-fix archive's blank be re-published as "no pixel
+    /// changed" after `diagnose → replace → persist` rewrote those bytes. Idempotent
+    /// by label, and every other channel's sentence in that reason stays untouched
+    /// (the `"; "` split is what `removingLateArrivalsBasis` relies on, so this text
+    /// carries no separator of its own).
+    func markingMissingBoundsProvenance() -> EvidencePack {
+        guard signals.pixelDiff?.boundsWasAbsentInArchive == true else { return self }
+        var marked = self
+        if marked.circuitBreaker.reason?.contains(Self.pixelDiffBoundsNotArchivedLabel) == true {
+            return marked
+        }
+        let basis = "\(Self.pixelDiffBoundsNotArchivedLabel): this archive was written before the "
+            + "write side started emitting pixelDiff.bounds explicitly, so the null now carried there "
+            + "is an inherited blank rather than a measured no-pixel-change"
+        marked.circuitBreaker.reason = marked.circuitBreaker.reason.map { $0 + "; " + basis } ?? basis
+        return marked
+    }
 
     /// Validates the pattern/const invariants the JSON Schema enforces on
     /// the TS side. Call after any decode of untrusted JSON.
