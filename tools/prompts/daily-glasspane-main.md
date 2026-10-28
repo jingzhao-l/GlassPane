@@ -29,7 +29,13 @@
 5. **临时件**：`/var/tmp/glasspane-main-check/` 快照、往轮临时前缀与归档、`engine/.build` 之外的本轮产物、`.worktrees/` 下已 remove 的目录残留，一并清掉。`npm cache`/`node_modules` 只在空间不足时清（那是环境不是遗留）。
 6. **台账侧的遗留同样算遗留**：`CHANGELOG.md` 的 `[Unreleased]` 归入本版；本轮记录已进 `specs/`（只新增，不改历史结论）；`gh pr list --repo jingzhao-l/GlassPane --state open` 为空或每条都给出去向；GitHub 上没有悬挂的 draft Release；npm 没有待批的 staged publish（有就按物理边界处理并写明）；CI 最新一条为 success。
 7. **不许删的**：任何 tag（发布锚点，`install.sh` 与 updater 钉的就是它）、别人的活跃分支、内容未证实落地的分支、以及为"数量好看"而删掉的任何历史。
-8. **收口快照进汇报**：清理后的 `git worktree list` 行数、`git branch -a` 条数，以及一张「删了什么 / 留下什么 / 各自去向与判据」的表。
+8. **进程**：本轮起的每一个后台命令、探针与 watch 都必须在本步结束前退出。判据是**两次 `pgrep`，不是"我执行过 pkill"**：
+   - 列候选按**归属**筛（`ps -eo pid,ppid,lstart,etime,command` 沿本会话 agent 进程的后代走），不要按启动时间窗筛——机器从睡眠唤醒的那一刻会带起上百个系统守护进程，时间窗把它们和真遗留一起捞出来，噪声正好盖住目标（2026-10-28 实测：703 个存活进程里 129 个落在时间窗内，全是系统的）。
+   - 杀之前 `pgrep -fl <模式>` 必须**非空**（模式取自 `ps` 里的真命令串，不是我以为的文件名）；杀之后再来一次必须**空命中**。`pkill` 的退出码与其后 `echo` 的输出都不算判决。
+   - 归属不明的长命进程一律不动（运行时自己的进程组监视器、别的会话的 daemon/pytest/build），在汇报里点名它是什么、凭什么判断不是本轮的。
+   - 收尾断言：本会话 `backgroundAgentCount` 为 0、自起后台任务全部已退出。同一形状：本线会话若挂着不退的后台命令，07:30 那条定时任务就不会派发（2026-10-28 实测过这条线的另一半：会话 `runtimeState` 连续两天是 running、`backgroundAgentCount` 归零后立刻转 idle）。
+
+9. **收口快照进汇报**：清理后的 `git worktree list` 行数、`git branch -a` 条数，以及一张「删了什么 / 留下什么 / 各自去向与判据」的表。
 
 
 
@@ -84,7 +90,7 @@
    i. **tag ≠ npm**：job 绿了不算发完，必须回查 registry：`npm view glasspane-mcp version`、`npm view glasspane-install version` 都要等于新版本；registry 在 publish 刚过的几分钟里可能返回读副本的旧值，所以按版本号点名再带 `--prefer-online`：`npm view glasspane-mcp@<X.Y.Z> version --prefer-online`、`npm view glasspane-install@<X.Y.Z> version --prefer-online`；`npm view glasspane-mcp versions --json | tail` 复算一次。
    j. 端到端实测（能本机做的就做完）：把发布归档解到临时目录 → 在树内 `npm pack` → 装进干净前缀 → 用 stdin 打一条 MCP `initialize` 断言回包含 `glasspane-mcp`；daemon 冒烟写 `engine/.build/debug/glasspaned --state-dir <临时根> --permissions`。**不要写 `GLASSPANE_STATE_DIR=<临时目录> glasspaned --permissions`**：2026-10-06 实测 daemon 不读那个环境变量，它照旧落到 home 默认根 `/Users/<you>/.glasspane` 并打一句"state is read and written under the home default"的警告后继续跑——同一条命令换成 `--prune-evidence` 就是在真机上删真档案（本轮差点就这么干了，事后核对 `~/.glasspane/evidence` 582 条完好）。归档类检查一律带 `--state-dir`。另外归档内容的判定要用 `grep -cE "(^|/)harness/"`：tar 里所有条目都在单一顶层目录 `GlassPane-<ver>/` 下，锚在 `^harness/` 的检查一条不中、会**空过成绿**。**CI 承载不了真机验收**（无障碍、事件监听、屏幕录制需登录 GUI 会话与已勾权限，记录在 `engine/smoke.md`），但**这条任务就跑在有 GUI 会话的本机上**，所以真机项属于"你能做就做完"，不是"标给别人"：用 AX `kAXPressAction` 按 `gp-*` 标识点面板控件、用 `--state-dir <临时根>` 复现状态、跑 `glasspaned --permissions` 核对读数，做完把实测结果写进汇报与 `engine/smoke.md` 的本轮记录。只有当这台机器确实没有登录会话/权限没勾时才允许写"未观测"，且必须附一句"补上它需要哪一条人工动作 + 为什么本轮跑不了"。**不得把未验证写成已验证。**
 5. 全程只要有文件更新，都必须及时提交并推送 GitHub，**且推的是 `main`**：临时分支、worktree 分支只能是你的工作台，不能是交付终点。收口时 `git status --porcelain` 为空、`git log origin/main -1` 就是本轮最后一笔。
-6. 发版与验证都完成后，执行上面【收口清理】那一节的八步，把工作区与远端清干净——**这一步没做完，本轮就不算完**。
+6. 发版与验证都完成后，执行上面【收口清理】那一节的九步，把工作区与远端清干净——**这一步没做完，本轮就不算完**。
 
 【不可让步的诚实性红线】
 

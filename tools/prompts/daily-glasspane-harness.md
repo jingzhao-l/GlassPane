@@ -22,7 +22,7 @@
 
 【收口清理：每轮必做的最后一步（属收口硬条件）】
 
-本线跨**两个远端**（主仓 + split 仓），游离物会双倍积累。截至 2026-10-11 主仓积下 18 个 worktree、41 条本地分支、7 条远端分支，其中 `gp-harness-daily-*`、`gp-harness-orphan-*`、`gp-harness-port-*`、`split/*`、`harness/daily-*` 全是历轮任务"做完就走"的产物——你要消灭的就是这个形态。收口前按八步走：
+本线跨**两个远端**（主仓 + split 仓），游离物会双倍积累。截至 2026-10-11 主仓积下 18 个 worktree、41 条本地分支、7 条远端分支，其中 `gp-harness-daily-*`、`gp-harness-orphan-*`、`gp-harness-port-*`、`split/*`、`harness/daily-*` 全是历轮任务"做完就走"的产物——你要消灭的就是这个形态。收口前按九步走：
 
 1. **列清单**：`git fetch origin --prune` 与 `git fetch <split-url> --prune` 两边的分支都要盘；`git worktree list`、`git for-each-ref refs/heads`、`git branch -r`；split 仓侧另有 `git ls-remote --heads <split-url>` 与 `gh pr list --repo jingzhao-l/glasspane-harness --state open`。
 2. **判去向用内容不用分支名**：`git cherry main <b>` 对 squash 合并过的分支会误报"未落地"，证实/证伪用 `git log --oneline main..<b>` 与逐文件 `git diff main <b> -- <路径>`。`split/*` 是 `git subtree split` 的搬运产物，其内容已由 tag 与 split 仓承载，不参与这个判定，但**用完的那条要删**。
@@ -31,7 +31,13 @@
 5. **临时件**：`/var/tmp/glasspane-harness/`（含往轮 `ca-bundle.pem` 之外的临时前缀、拆分归档、`split-*` 工作目录）、`harness/glasspane-harness/packages/*/dist/`、往轮 worktree 的目录残留。`node_modules`（4,671 个包）与 `.external/opencode`（223 MB 参照克隆）**不是遗留项**，是环境，别为"数量好看"去删——磁盘不足时按前置第 3 条处理。
 6. **台账类遗留也算遗留**：`CHANGELOG.md` 的 `[Unreleased]` 归入本版；`SYNCLOG.md` 本轮条目已写；fork-diff/tool-surface/brand 金样与本轮改动同批且 `--check` 复跑绿；split 仓 CI 最新一条 success；无悬挂 draft Release；无待批 staged publish；本轮开的 PR 已合并或给出去向。
 7. **不许删**：tag（发布锚点与 provenance 起点）、未证实落地的分支、别人的活跃分支、split 仓 `main` 的历史。
-8. **收口快照进汇报**：清理后主仓与 split 仓各自的 `git worktree list` 行数、分支条数，加一张「删了什么 / 留下什么 / 各自去向与判据」。
+8. **进程**：本轮起的每一个后台命令、探针与 watch 都必须在本步结束前退出。判据是**两次 `pgrep`，不是"我执行过 pkill"**：
+   - 列候选按**归属**筛（`ps -eo pid,ppid,lstart,etime,command` 沿本会话 agent 进程的后代走），不要按启动时间窗筛——机器从睡眠唤醒的那一刻会带起上百个系统守护进程，时间窗把它们和真遗留一起捞出来，噪声正好盖住目标（2026-10-28 实测：703 个存活进程里 129 个落在时间窗内，全是系统的）。
+   - 杀之前 `pgrep -fl <模式>` 必须**非空**（模式取自 `ps` 里的真命令串，不是我以为的文件名）；杀之后再来一次必须**空命中**。`pkill` 的退出码与其后 `echo` 的输出都不算判决。
+   - 归属不明的长命进程一律不动（运行时自己的进程组监视器、别的会话的 daemon/pytest/build），在汇报里点名它是什么、凭什么判断不是本轮的。
+   - 收尾断言：本会话 `backgroundAgentCount` 为 0、自起后台任务全部已退出。会话不进入 idle ⇒ 下一条定时任务不派发：2026-10-26 那个 `bun …/var/tmp/glasspane-harness/sock-shape.ts`（探针 `listen` 后从不 close）活了 2 天 7 小时，把本线会话钉在「运行中」，10-27／10-28 两天的每日任务因此一次没派发——而当时的 `pkill -f gp-shape.ts` 因真名是 `sock-shape.ts` 根本没命中，却打印了一句 `(killed)`。
+
+9. **收口快照进汇报**：清理后主仓与 split 仓各自的 `git worktree list` 行数、分支条数，加一张「删了什么 / 留下什么 / 各自去向与判据」。
 
 
 
@@ -82,7 +88,7 @@
    h. 复核发布物与 registry（**tag ≠ npm，"publish 退 0" ≠ "装得上跑得通"**）：`gh release view v<X.Y.Z> --repo jingzhao-l/glasspane-harness --json isDraft,targetCommitish,assets`（资产应含 `glasspane-harness-darwin-arm64.zip`、`glasspane-harness-darwin-x64.zip`、各自 `.asc`、`SHA256SUMS.txt` 与其 `.asc`）；registry 在 publish 刚过的几分钟里可能返回读副本旧值，所以按版本号点名再带 `--prefer-online`：`npm view glasspane-harness@<X.Y.Z> version --prefer-online`、`npm view glasspane-harness-darwin-arm64@<X.Y.Z> version --prefer-online`、`npm view glasspane-harness-darwin-x64@<X.Y.Z> version --prefer-online`；最后跑发布专有的那一条（它走的就是用户的路径：把**已发布**的 tarball 装进临时前缀、跑 `--version`、在 macOS 上确认那份二进制真在供内嵌 web）：`cd harness/glasspane-harness/packages/opencode && bun run script/verify-published.ts <X.Y.Z>`——publish 绿而这条红，就是一个坏发布，不是噪声。另记一条实测事实：v0.6.4 那次 `targetCommitish` 是分支名 `main` 而不是被 tag 的 commit（split 仓的 `create-release` 步没显式 `--target`），本轮如实核对并把这条可复现性锚点的改进项列进汇报，别把它当成已具备的保证。
    i. 端到端实测（"一键下载"真正成立的那一步）：`npm install -g --prefix "$HOME/.local" glasspane-harness` → `glasspane-harness --version` 与 `gp-harness --version` 都等于新版本；curl 兜底通道装到临时前缀并**真的校验** SHA256SUMS 与 `.asc`（0.6.4 之前的这条路径从未成功过且不验签）；`bun add -g` 同理。npm ≥ 11 对首次见到的包会打 `allow-scripts` 警告（安装仍成功）与全局前缀不可写时给确切补救，这两条文案要与 `scripts/install.sh`、README 一致。`gp_*` 工具面需要 `glasspaned` 在跑（daemon 权限席位齐），起不来就如实标"未观测"，不得声称通过。
    j. `SYNCLOG.md` 留痕（本轮的测量数字、红过又修好的项、未观测的边界），主仓与 split 仓收口时 `git status --porcelain` 均为空；只要有文件更新就及时提交推送。
-5. 上面全部完成后，执行【收口清理】那八步——主仓与 split 仓两边的分支、worktree、临时件与台账都要盘，**这一步没做完本轮就不算完**。
+5. 上面全部完成后，执行【收口清理】那九步——主仓与 split 仓两边的分支、worktree、临时件与台账都要盘，**这一步没做完本轮就不算完**。
 
 【不可让步的纪律】
 
