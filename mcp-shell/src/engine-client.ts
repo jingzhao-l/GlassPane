@@ -901,8 +901,8 @@ type Pending = {
 /** How many timed-out entries are kept for late replies before the oldest goes. */
 const LATE_REPLY_RETENTION = 16;
 
-/** Log ceiling for a frame body; excess is marked, never silently cut. */
-export const LOG_BODY_CHARS = 64 * 1024;
+/** How long a single frame *field* may be before a log line stops quoting it verbatim. */
+const LOG_FIELD_CHARS = 120;
 
 /**
  * How a reply frame was matched to the request it is reported for.
@@ -1269,7 +1269,7 @@ export class EngineJsonRpcClient {
     try {
       parsed = JSON.parse(line);
     } catch {
-      this.report(`engine sent a non-JSON frame, dropped: ${truncate(line)}`);
+      this.report(`engine sent a non-JSON frame, dropped: ${frameBodyNotLoggedNote(line)}`);
       return;
     }
     // 形状也要过这一遍，不能只挡住"不是 JSON"。`null`、数组、一个数字都是合法的
@@ -1278,7 +1278,7 @@ export class EngineJsonRpcClient {
     // 把所有在途请求一起带走。stdio 那一侧的 `isRequestBody` 早就防到这个形状了，
     // 引擎这一侧漏了：同一份"对端不可信"的判断，两半必须同一口径。
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      this.report(`engine sent a frame that is not a JSON object, dropped: ${truncate(line)}`);
+      this.report(`engine sent a frame that is not a JSON object, dropped: ${frameBodyNotLoggedNote(line)}`);
       return;
     }
     const frame = parsed as CallFrame;
@@ -1301,7 +1301,7 @@ export class EngineJsonRpcClient {
               + (kept.settled ? " (caller already answered)" : "")).join(", ");
         this.report(
           `engine sent a frame for request id ${id}, which this client never issued (or already gave up on); `
-          + held + ": " + truncate(line),
+          + held + ": " + frameBodyNotLoggedNote(line),
         );
         return;
       }
@@ -1379,17 +1379,17 @@ export class EngineJsonRpcClient {
         // guessed result to a live caller would answer it with another request's
         // data — so nothing is settled here and the request keeps its own
         // deadline.
-        this.report(`engine sent an id-less frame with a result while '${target.method}' (id ${target.id}) is still waiting for its answer; an id-less answer from this daemon is an error frame, so this one was not delivered to any caller: ${truncate(line)}`);
+        this.report(`engine sent an id-less frame with a result while '${target.method}' (id ${target.id}) is still waiting for its answer; an id-less answer from this daemon is an error frame, so this one was not delivered to any caller: ${frameBodyNotLoggedNote(line)}`);
         return;
       }
       this.report(frame.error
         // `null`, and not a guess at a method: this frame is being reported precisely
         // because no request this client still tracks owns it.
-        ? `engine reported ${this.engineError(frame.error, null).code} with no request in flight: ${truncate(line)}`
-        : `engine sent an id-less frame with no request in flight: ${truncate(line)}`);
+        ? `engine reported ${this.engineError(frame.error, null).code} with no request in flight: ${frameBodyNotLoggedNote(line)}`
+        : `engine sent an id-less frame with no request in flight: ${frameBodyNotLoggedNote(line)}`);
       return;
     }
-    this.report(`engine sent a frame with a non-numeric request id (${jsonOrString(id)}), which this client never issues: ${truncate(line)}`);
+    this.report(`engine sent a frame with a non-numeric request id (${shortFieldValue(id)}), which this client never issues: ${frameBodyNotLoggedNote(line)}`);
   }
 
   private settleFromFrame(entry: Pending, frame: CallFrame): void {
@@ -1745,10 +1745,53 @@ function attribute(error: EngineCallError, entry: Pending, inferred = true): Eng
   );
 }
 
-export function truncate(text: string): string {
-  return text.length <= LOG_BODY_CHARS
-    ? text
-    : `${text.slice(0, LOG_BODY_CHARS)}… [+${text.length - LOG_BODY_CHARS} chars not logged]`;
+/**
+ * The one sentence every unattributable-frame arm says about the bytes it refused to log.
+ *
+ * `handleMessage` has seven arms that drop a frame the client cannot attribute — not JSON, not
+ * an object, an id it never issued, an id-less answer, a non-numeric id. Each of them still has
+ * to be diagnosable, and none of them may copy the frame: a reply on this socket is observe /
+ * assert content (element titles and values, sometimes a document's text), while the report
+ * sink — stderr, or whatever supervises the process — is a file this product never sets the
+ * mode of. Copying the body there exports screen content past the 0700 state root, which is
+ * exactly what `lateReplyBodyNote` was authored to prevent on the late-reply path; the two
+ * surfaces cannot be allowed to hold opposite rules about the same bytes (review 2026-10-09
+ * finding 3, F3 on 2026-10-27, and this round's finding that the seven arms were never moved).
+ *
+ * So the note keeps the facts that survive redaction and are recomputable from the frame
+ * itself: the byte length and a short deterministic SHA-256 digest of the exact bytes this
+ * transport received. Unlike a *reply* to a request this client still tracks, a frame that
+ * belongs to no request may have no archive entry at all, so the note names where content the
+ * daemon did record lives, and says how to read it back, without promising this frame is in it.
+ *
+ * The reverse mutation is to interpolate the frame back into any of those seven lines.
+ */
+export function frameBodyNotLoggedNote(serializedFrame: string): string {
+  const bytes = Buffer.byteLength(serializedFrame, "utf8");
+  const digest = createHash("sha256").update(serializedFrame, "utf8").digest("hex").slice(0, 12);
+  return `a ${bytes}-byte frame (sha256 ${digest}) whose text is not written to this log: on this `
+    + "socket a frame body is on-screen accessibility content — element titles and values, "
+    + "sometimes a document's text — and this log's sink is a file this product never sets the mode "
+    + "of, so the state root's 0700 does not cover it. Anything the daemon did record is in its "
+    + "evidence archive under the state root, read back with gp_last_evidence {operationId} or "
+    + "gp_export_evidence {operationId}";
+}
+
+/**
+ * A single frame *field* quoted into a log line, bounded.
+ *
+ * A normal request id is a number or a short string, so it is printed exactly as it came —
+ * editing the daemon's words would be its own dishonesty. The bound is for the other case: a
+ * peer on this socket path that answers with an id-shaped field holding several kilobytes of
+ * text would otherwise put that text in the log through the one clause this file still trusted.
+ * Over the bound the value is reported by size and digest, the same shape as the frame note.
+ */
+export function shortFieldValue(value: unknown): string {
+  const text = JSON.stringify(value) ?? String(value);
+  if (text.length <= LOG_FIELD_CHARS) return text;
+  const bytes = Buffer.byteLength(text, "utf8");
+  const digest = createHash("sha256").update(text, "utf8").digest("hex").slice(0, 12);
+  return `${text.length}-char value (sha256 ${digest}, ${bytes} bytes) not quoted here`;
 }
 
 /**
@@ -1757,8 +1800,8 @@ export function truncate(text: string): string {
  * When a daemon answer lands after its caller's deadline this shell still has to record that
  * it answered, and give an operator a way to correlate that answer with the record that holds
  * it — *without* copying the answer into a log this product does not own. The body on this
- * path is observe/assert content: element titles and values, sometimes a document's text, up
- * to {@link LOG_BODY_CHARS} per frame. The state root itself is 0700, but the report sink
+ * path is observe/assert content: element titles and values, sometimes a document's text.
+ * The state root itself is 0700, but the report sink
  * (stderr, or whatever supervises the process) is a file this product never sets the mode of,
  * so a reply written there leaves the 0700 boundary (review 2026-10-09 finding 3, and the F3
  * fix on 2026-10-27 that moved the HTTP doorway onto this same sentence).

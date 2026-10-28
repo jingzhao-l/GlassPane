@@ -11,7 +11,7 @@ import { buildSync } from "esbuild";
 
 import { attributeCapability, providerAttributionLine } from "../dist/providers.js";
 import { assertLoopbackHost, createHttpGateway, EVIDENCE_FANOUT_BUDGET_MS, GLASSPANE_HTTP_TOKEN_ENV, MIN_TOKEN_CHARS, MIN_TOKEN_DISTINCT_CHARS } from "../dist/http-gateway.js";
-import { CALLER_VISIBLE_CEILING_MS, EngineCallError, LOG_BODY_CHARS, slowEngineRemedy, truncate } from "../dist/engine-client.js";
+import { CALLER_VISIBLE_CEILING_MS, EngineCallError, slowEngineRemedy } from "../dist/engine-client.js";
 import { replayUnsafePayloadAdvice, TOOL_BY_NAME, TOOL_SPECS } from "../dist/tools.js";
 import * as errorCodes from "../dist/errors.js";
 import {
@@ -1841,7 +1841,7 @@ test("both doorways say the same late-reply sentence, authored in one place", as
   const notes = [];
   const { gw } = await startGateway(fake, TEST_TOKEN, { report: (note) => notes.push(note) });
   try {
-    const body = { tree: "y".repeat(LOG_BODY_CHARS + 4_321) };
+    const body = { tree: "y".repeat(69_857) };
     fake.lateHandler({ method: "observe", result: body });
     const note = notes.find((line) => line.includes("late engine reply to 'observe'"));
     assert.ok(note, "迟到回复必须落一行");
@@ -1854,10 +1854,12 @@ test("both doorways say the same late-reply sentence, authored in one place", as
     await gw.close();
   }
   const code = gatewayCode();
-  // 上限本身也不许在网关里留一份：它是 `engine-client.ts` 的，抄一份就是下一次分叉的起点。
+  // 正文上限这件事已经没有第二份了：F3 之后两个门都不写正文，所以网关里既不许留一份
+  // 截断上限，也不许重新拿起那位作者（这两个形状都是"下一次分叉的起点"）。
   const caps = code.match(/\b65536\b|\b64 \* 1024\b|LOG_BODY_CHARS\s*=/g) ?? [];
   assert.deepEqual(caps, [], `网关又自己抄了一份正文上限，MCP 侧一改这里就悄悄分叉：${JSON.stringify(caps)}`);
   assert.match(code, /lateReplyBodyNote/, "网关不再走那位作者，句子就会开始漂移");
+  assert.doesNotMatch(code, /\btruncate\(/, "网关重新截正文＝重新把屏幕内容抄进自己不该拿的日志里");
 });
 
 test("the operationId rule this surface applies is the one the tool contract publishes", async () => {

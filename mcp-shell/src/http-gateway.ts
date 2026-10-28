@@ -358,6 +358,9 @@ export function createHttpGateway(options: HttpGatewayOptions): HttpGateway {
       // gateway must not die over its own log (same last resort as index.ts).
     }
   });
+  // 这一行把网关自己的 sink 交给 `wireCause`：否则那些自由函数形态的失败出口要么把内部
+  // 异常原文写上线（`Dispatcher.swift` 那条理由是它的，也是这一面的），要么一句明细都不留。
+  setGatewayReportSink(report);
   const client: EngineClientLike = options.connectController !== undefined
     ? options.connectController(options.socketPath)
     : unixSocketEngineClient(options.socketPath, { surface: "http" });
@@ -390,7 +393,19 @@ export function createHttpGateway(options: HttpGatewayOptions): HttpGateway {
       // advice is the same fault advice every other route gets, because a blind
       // "…and retry" here is an instruction to re-perform an `act` that may have
       // already gone out on the request this handler was still holding.
-      fail(res, 500, GP_E_INTERNAL, `internal gateway error: ${String(error)}`, gatewayFaultAdvice());
+      //
+      // The error's OWN TEXT stays off the wire (2026-10-28, the shape the daemon
+      // already refuses at `engine/Sources/GlassPaneEngine/Dispatcher.swift:48-60`):
+      // a thrown description carries absolute paths — the state root, the evidence
+      // archive, a caller's own document — and this answer goes to any same-user
+      // process that can reach the loopback port, which is not a privileged reader.
+      // What helps a reader is the TYPE, so the frame names the type and nothing
+      // else; the detail goes to `report`, the operator's stderr side, which is the
+      // one place `gatewayFaultAdvice()` promises the full account lives.
+      report(`internal gateway error for ${req.method} ${req.url}: ${String(error)}`);
+      fail(res, 500, GP_E_INTERNAL,
+        `internal gateway error of type ${errorTypeName(error)}; its own description names files this frame does not publish`,
+        gatewayFaultAdvice());
     });
   });
   server.listen(port, host);
@@ -545,6 +560,73 @@ export function assertTokenPolicy(token: string): void {
       + `it. Generate one with "openssl rand -hex 16" and export it as ${GLASSPANE_HTTP_TOKEN_ENV}.`,
     );
   }
+}
+
+/**
+ * The TYPE of a thrown value, as one short noun — never any part of what it carries.
+ *
+ * This is the whole reason the last-resort catch can say something useful without leaking: `Error`
+ * subclasses keep their constructor name (`TypeError`, `EngineCallError`), which points a reader at
+ * a class of fault, while the message — the part that names files — is dropped. A rejected value
+ * that is not an `Error` at all (a bare string, `null`, an object literal) is answered with its
+ * `typeof` rather than `String(error)`, because a thrown string's text IS its content and a thrown
+ * object's constructor name is the only part of it that is code rather than data.
+ */
+function errorTypeName(error: unknown): string {
+  if (error instanceof Error) {
+    const name = (error as { constructor?: { name?: unknown } }).constructor?.name;
+    return typeof name === "string" && name.length > 0 ? name : "Error";
+  }
+  if (error === null) return "null";
+  if (error === undefined) return "undefined";
+  return typeof error;
+}
+
+/**
+ * The sink the free helpers below use when they must keep an internal throw off the
+ * wire yet still hand the bytes to the operator. `createHttpGateway` installs its own
+ * `report` here when a gateway starts; before that (and in direct-call tests) the
+ * shared stderr fallback answers, which is the same policy the gateway's own default
+ * is — authored once, per R10-中6's rule about a body cap living twice.
+ */
+let gatewayReportSink: (note: string) => void = reportToFallbackStderr;
+
+/** Install the sink. Exported for the gateway factory; a caller that replaces it gets
+ *  the last writer, which is what a single-process gateway already is. */
+export function setGatewayReportSink(sink: (note: string) => void): void {
+  gatewayReportSink = sink;
+}
+
+/** The fallback: stderr, and a stderr that will not take the line is itself reported
+ *  nowhere — the honest default, because then nothing was written anywhere. */
+function reportToFallbackStderr(note: string): void {
+  try {
+    process.stderr.write(`${note}\n`);
+  } catch {
+    // Nothing is left to do: the sink is the thing that failed.
+  }
+}
+
+/**
+ * The wire-safe account of an internal throw, and the reason this file has a sink.
+ *
+ * The daemon refuses the other shape for the same reason (`Dispatcher.swift` withholds
+ * an `NSError` description because it carries absolute paths — the state root, the
+ * evidence archive, the home directory), and on this surface the throw can also be a
+ * parse failure of bytes that came out of a live screen. So the frame gets the *type*
+ * and a pointer to where the description went; the description goes to the operator's
+ * stderr, which is the one place this product is allowed to write it.
+ *
+ * Reverse mutation: interpolate `String(error)` back into any wire message here and
+ * `daily-20261028-gateway-error-shape.test.mjs`'s path-marker assertions go red.
+ */
+function wireCause(where: string, error: unknown): string {
+  const type = errorTypeName(error);
+  gatewayReportSink(
+    `${where}: internal ${type} — ${String(error)} (withheld from the HTTP frame: a description `
+    + "of an internal failure names files this frame does not publish)",
+  );
+  return `an internal ${type} failure inside this gateway, at ${where}; its own description is on the gateway's stderr, not in this frame`;
 }
 
 /** The transport's values come from JSON.parse, but an injected client can hand
@@ -844,7 +926,7 @@ async function handleEvidenceAggregate(
             kind: "frame",
             error,
             line: `${GP_E_INTERNAL}: the daemon returned a last_evidence frame this gateway cannot render `
-              + `(no parseable evidencePack for ${operationId}: ${boundedCause(describeCause(error))})`,
+              + `(no parseable evidencePack for ${operationId}: ${wireCause("the last_evidence fan-out", error)})`,
           };
           notFetched.push(...ids.slice(index + 1));
           break;
@@ -1224,20 +1306,6 @@ function makeNotFetchedNote(notFetched: readonly string[], format: ReportFormat)
 /** How many characters of a failure cause a response is allowed to carry. */
 const CAUSE_MAX_CHARS = 400;
 
-/**
- * The cause of a caught failure, as one line — never `undefined`, never a stack.
- *
- * `String(error)` on a plain `Error` yields "Error: message", and an empty-message error
- * yields the bare word "Error", which tells the reader nothing about *why* the frame was
- * refused. `message` is what this repo's own error classes fill in, so it is tried first.
- */
-function describeCause(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message.trim() === "" ? error.name : error.message;
-  }
-  return String(error);
-}
-
 /** Cap a cause without pretending the cut bytes were shown. */
 function boundedCause(text: string): string {
   return text.length <= CAUSE_MAX_CHARS
@@ -1255,7 +1323,7 @@ function boundedCause(text: string): string {
 function engineFailureLine(error: unknown): string {
   return error instanceof EngineCallError
     ? `${error.code}: ${boundedCause(error.message)}`
-    : `${GP_E_INTERNAL}: ${boundedCause(describeCause(error))}`;
+    : `${GP_E_INTERNAL}: ${wireCause("an engine call inside the partial report", error)}`;
 }
 
 /** The clause that keeps a stopped fan-out from reading as "the daemon refused everything". */
@@ -1474,7 +1542,7 @@ async function failEngine(
   // daemon is running, then retry" — an unearned diagnosis plus a restart order
   // for a daemon that had, in every reachable case, just answered.
   fail(res, 500, GP_E_INTERNAL,
-    `this gateway could not complete the request: ${String(error)}${tail}`,
+    `this gateway could not complete the request: ${wireCause(`the ${spec?.name ?? "tool"} route handler`, error)}${tail}`,
     gatewayFaultAdvice(spec));
 }
 
@@ -1597,7 +1665,7 @@ function failEvidenceFrameShape(
   tail: string = "",
 ): void {
   fail(res, 502, GP_E_INTERNAL,
-    `the daemon returned a last_evidence frame that does not match the engine contract (no parseable evidencePack${operationId === undefined ? "" : ` for ${operationId}`}: ${String(error)})${tail}`,
+    `the daemon returned a last_evidence frame that does not match the engine contract (no parseable evidencePack${operationId === undefined ? "" : ` for ${operationId}`}: ${wireCause("the last_evidence frame parser", error)})${tail}`,
     "the daemon answered this request, so the transport is up and restarting it changes nothing here; this gateway "
     + "validates a pack before rendering or forwarding it, so GET /v1/evidence/<operationId> and "
     + "POST /v1/tools/last_evidence {operationId} will both refuse this frame for the same reason. Read what the "

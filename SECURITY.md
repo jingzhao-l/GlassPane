@@ -170,13 +170,17 @@ shared bearer token, and that token is the whole boundary.
   to open the socket, so it runs as your user and gains nothing the socket did not already allow. What it
   changes is reach: the door it opens is one that other local accounts can knock on, which the socket's
   `0600` does not offer them.
-- **Late replies are raw engine content.** When an answer lands after its caller was already given a
-  deadline, the gateway writes that body to its own stderr, unredacted, capped at 64 KiB per reply with
-  the un-logged remainder counted in a marker (`LOG_BODY_CHARS`). If you redirect that stderr into a
-  file, it takes the mode that whatever started the gateway gave it, not one GlassPane chose. The
-  state-root log in section 2.4 is closed to `0600` now, but the warning it still carries applies here
-  too: a file's mode does not travel with a copy, so a redirect or copy of this stderr reads to whoever
-  can read the file it lands in.
+- **Reply bodies are not logged, but the log file is not ours.** When an answer lands after its caller
+  was already given a deadline, or when a frame arrives that belongs to no request this client tracks
+  (an id it never issued, a non-JSON line, an id-less answer), neither doorway writes that body to its
+  own stderr. Both record only the byte length and a deterministic SHA-256 digest of the exact bytes,
+  plus where the real content lives — the daemon's evidence archive under the state root, readable with
+  `gp_last_evidence` / `gp_export_evidence`. The reason is the mode of the sink, not the mode of the
+  state root: `~/.glasspane` is `0700` and its log is `0600` (section 2.4), but stderr belongs to
+  whatever supervises the process, and a file's mode does not travel with a redirect or a copy. This
+  was not always true — the late-reply path was fixed first and the unattributable-frame arms kept
+  printing raw frames until 2026-10-28, so treat "nothing here quotes screen text" as a property this
+  project now guards with named tests rather than as something the format guarantees.
 
 Practical consequences: do not leave this running when nothing is using it; treat the token as a
 password (environment, not a command line or a shell history line); and prefer the MCP path or the
