@@ -100,7 +100,7 @@ GUI 应用的**运行时半场**则是断崖：
 GlassPane 给代理装上带账本的眼睛和手：
 
 - **手** —— `gp_act` 按角色/标题/层级定位元素并执行无障碍动作，报告界面有没有响应；
-- **眼** —— `gp_observe` 返回无障碍树；`gp_assert_element` 把控件属性（存在/可用/值）判成过或不过；
+- **眼** —— `gp_observe` 返回无障碍树；`gp_assert_element` 把五个控件属性之一（`title`/`value`/`role`/`enabled`/`focused`）判成过或不过；
   受影响窗口区域给出像素变化数值；
 - **判断** —— `gp_diagnose` 给"没生效"分类：界面没变、变得晚了、还是有人同时操作污染了测量；
 - **撤销** —— `gp_snapshot` / `gp_restore` 把应用带回之前的状态，代理能重跑测试，
@@ -150,7 +150,7 @@ TypeScript。
 
 - **16 个 MCP 工具（stdio）** —— Claude Desktop、Cursor 或任意 MCP host；`tools/list` 是权威面。
 - **执行并当场确认** —— 操作直接返回它造成的变更，"我点了但没反应"成为对话里的事实而非争论。
-- **元素级断言** —— 存在/可用/值，返回布尔并附上被解析到的选择器。
+- **元素级断言** —— `title`/`value`/`role`/`enabled`/`focused` 之一，返回布尔并附上被解析到的选择器。
 - **界面可操作性审计** —— `gp_audit_ui` 走一遍元素几何并套用确定性规则：零尺寸、落在窗口外的控件判
   阻塞；命中目标过小、被裁切、互相重叠判提示。量不到的部分永远不计入"通过"，重叠扫描被截断时它自己会
   说明。大界面上遍历可能按预算提前停止：那时它交出已测到的部分并标 `complete: false`，而不是什么都不给。
@@ -391,7 +391,7 @@ node installer/cli.js --restore-launchd
 | "应用在跑、挂上了吗？" | `gp_attach`，再用 `gp_probe_status` 取引擎自报 |
 | "屏幕上是什么？" | `gp_observe` |
 | "拨一下开关，告诉我发生了什么" | `gp_act`（返回它造成的变更） |
-| "现在勾上了吗？" | `gp_assert_element`（存在 / 可用 / 值，过或不过） |
+| "现在勾上了吗？" | `gp_assert_element`（`title` / `value` / `role` / `enabled` / `focused`，过或不过） |
 | "为什么没动？" | `gp_diagnose`（没变 / 晚到 / 被污染） |
 | "把证据给我看" | `gp_last_evidence`、`gp_export_evidence`、`gp_recent_reports` |
 | "把它恢复回去" | `gp_snapshot`，然后 `gp_restore` |
@@ -470,7 +470,7 @@ node scripts/check-version.mjs
 | 驱动 | `gp_attach` | 按 `bundleId` 或 `pid` 挂接运行中的应用 |
 | | `gp_observe` | 返回应用的无障碍树 |
 | | `gp_act` | 执行 7 个无障碍动作之一并确认效果 |
-| 断言 | `gp_assert_element` | 控件属性判定：存在、可用、值 |
+| 断言 | `gp_assert_element` | 控件属性判定：`title`、`value`、`role`、`enabled`、`focused` |
 | | `gp_audit_ui` | 只读的界面布局审计：元素几何 + 确定性规则，给出 `pass`/`advisory`/`blocking`/`insufficient` 判定与覆盖率 |
 | | `gp_diagnose` | 给没生效的操作分类：没变 / 变晚了 / 被并发输入污染 |
 | 证据 | `gp_last_evidence` | 取最近（或指定）操作的完整证据包 |
@@ -626,7 +626,8 @@ GlassPane 的配置面分两层：引擎一层，每个消费者各一层。没�
 但 `gp_observe` 会把无障碍树送进**代理对话**，你的模型服务商记录什么就等于记录了那棵树——
 把会话内容按敏感处理。
 
-**怎么确认跑的是哪个版本？** 服务 `--permissions` 自报、设置面板同值、MCP `initialize` 响应回显，
+**怎么确认跑的是哪个版本？** `glasspaned --version` 自报（`--permissions` 里**没有**版本键，
+它只量 TCC 席位）、设置面板同值、MCP `initialize` 响应回显，
 `node scripts/check-version.mjs` 会打印版本号出现的每一处。它们都来自同一个数字
 （[CHANGELOG.md](CHANGELOG.md)）。
 

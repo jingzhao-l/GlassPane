@@ -83,7 +83,7 @@ Without the second row you don't have an autonomous macOS developer, you have a 
 GlassPane gives the agent eyes and hands with an accountability trail:
 
 - **hands** — `gp_act` performs an accessibility action on an element it identified by role/title/hierarchy, and reports whether the UI responded;
-- **eyes** — `gp_observe` returns the accessibility tree; `gp_assert_element` checks a property (present / enabled / value) as a pass-fail result; the affected window region is measured for pixel change;
+- **eyes** — `gp_observe` returns the accessibility tree; `gp_assert_element` checks one of the five element properties (`title` / `value` / `role` / `enabled` / `focused`) as a pass-fail result; the affected window region is measured for pixel change;
 - **judgement** — `gp_diagnose` classifies a non-effecting operation: nothing changed, it changed late, or a concurrent human hand contaminated the measurement;
 - **undo** — `gp_snapshot` / `gp_restore` take the app back to a prior state, so the agent can re-run a test instead of leaving your machine in a half-configured mess;
 - **proof** — `gp_export_evidence` / `gp_recent_reports` render the whole thing as an HTML or Markdown report that comes back as text in the session — they take no path and write no file, so saving it for a browser or beside a commit is your step; the settings panel's report button is the only writer of a report file.
@@ -119,7 +119,7 @@ This repository also dogfoods that ecosystem: [ITERATE.md](ITERATE.md) and [iter
 
 - **16 MCP tools over stdio** — Claude Desktop, Cursor, or any MCP host; `tools/list` is the authoritative surface.
 - **Act-and-confirm in one call** — the operation returns the change it produced, so "my click did nothing" is a fact in the transcript rather than an argument later.
-- **Element-level assertions** — present / enabled / value, as booleans with the selector that was resolved.
+- **Element-level assertions** — one of `title` / `value` / `role` / `enabled` / `focused`, as booleans with the selector that was resolved.
 - **Layout operability audit** — `gp_audit_ui` walks element geometry and applies deterministic rules: zero-sized or out-of-window controls are blocking; undersized hit targets, clipped elements and overlapping targets are advisory. Geometry it could not read never counts toward a `pass`, and a truncated or budget-stopped scan says so. On large interfaces the walk can stop early by design; it then reports what it measured plus `complete: false` rather than nothing.
 - **Numerical pixel verification** — how much of the target region changed and where, computed locally; that measurement stores no screenshot and ships none to a model.
 - **Attribution with a strength ladder** — `soft` by default; `strong` when the app under test embeds the probe SDK and confirms its own handler ran; `weak` only when contamination dominates.
@@ -323,7 +323,7 @@ A test job is a sequence the agent can execute and verify, not a question it has
 | "is the app running and attached?" | `gp_attach`, then `gp_probe_status` for the engine's self-report |
 | "what is on screen?" | `gp_observe` |
 | "flip the toggle and tell me what happened" | `gp_act` (returns the change it caused) |
-| "is it now checked?" | `gp_assert_element` (pass/fail on present / enabled / value) |
+| "is it now checked?" | `gp_assert_element` (pass/fail on `title` / `value` / `role` / `enabled` / `focused`) |
 | "why didn't it move?" | `gp_diagnose` (no change / late / contaminated) |
 | "show me the proof" | `gp_last_evidence`, `gp_export_evidence`, `gp_recent_reports` |
 | "put it back" | `gp_snapshot`, then `gp_restore` |
@@ -388,7 +388,7 @@ Stated plainly, because these determine whether it fits your workflow:
 | Drive | `gp_attach` | Attach to a running app by `bundleId` or `pid` |
 | | `gp_observe` | Return the attached app's accessibility tree |
 | | `gp_act` | Perform one of the 7 accessibility actions and confirm the effect |
-| Assert | `gp_assert_element` | Pass/fail on an element property — present, enabled, value |
+| Assert | `gp_assert_element` | Pass/fail on an element property — `title`, `value`, `role`, `enabled`, `focused` |
 | | `gp_audit_ui` | Read-only layout audit: element geometry plus deterministic rules, with a `pass` / `advisory` / `blocking` / `insufficient` verdict and its coverage |
 | | `gp_diagnose` | Classify a non-effecting operation: no change / late / contaminated |
 | Evidence | `gp_last_evidence` | Full evidence pack for the latest (or a given) operation |
@@ -484,7 +484,7 @@ The daily check is a launchd job; its time and consent level are the updater's, 
 
 **Does anything leave my machine?** No. Local unix socket, local stdio process, evidence under `~/.glasspane/`. But `gp_observe` returns accessibility trees *into the agent conversation*, so whatever your model provider logs, it logs that tree — treat transcripts as sensitive.
 
-**Which version am I running?** The daemon self-reports on `--permissions`, the panel shows the same value, the MCP `initialize` response echoes it, and `node scripts/check-version.mjs` prints every place the version appears. All of it comes from one number ([CHANGELOG.md](CHANGELOG.md)).
+**Which version am I running?** The daemon prints its own version on `glasspaned --version` — `--permissions` does **not** carry a version key, it only measures the TCC seats — the panel shows the same value, the MCP `initialize` response echoes it, and `node scripts/check-version.mjs` prints every place the version appears. All of it comes from one number ([CHANGELOG.md](CHANGELOG.md)).
 
 ---
 
