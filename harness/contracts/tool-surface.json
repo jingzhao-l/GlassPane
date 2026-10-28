@@ -7,18 +7,18 @@
     "fork": "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted, and one deleted line excuses at most one re-added line (pairing is one-to-one, so 40 copies of a rebranded line bill 39)",
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
-  "observedAt": "2026-10-27",
-  "engineLoc": 31015,
-  "engineFiles": 63,
+  "observedAt": "2026-10-28",
+  "engineLoc": 31859,
+  "engineFiles": 65,
   "surfaces": {
     "mcpShell": {
-      "loc": 12143,
+      "loc": 12254,
       "files": 16,
-      "ratio": 0.2212,
+      "ratio": 0.2194,
       "byFile": {
         "mcp-shell/src/tools.ts": 3120,
-        "mcp-shell/src/engine-client.ts": 1972,
-        "mcp-shell/src/http-gateway.ts": 1689,
+        "mcp-shell/src/engine-client.ts": 2015,
+        "mcp-shell/src/http-gateway.ts": 1757,
         "mcp-shell/src/project-registry.ts": 1630,
         "mcp-shell/src/update-state.ts": 625,
         "mcp-shell/src/providers.ts": 543,
@@ -1183,7 +1183,7 @@
           "lines": 0
         }
       ],
-      "ratio": 0.214,
+      "ratio": 0.2103,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
@@ -1199,7 +1199,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 23893,
+  "totalToolSurfaceLoc": 24004,
   "note": null,
   "carried": null
 }
