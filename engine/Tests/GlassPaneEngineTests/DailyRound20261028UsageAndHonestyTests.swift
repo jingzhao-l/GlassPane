@@ -218,7 +218,7 @@ final class DailyRound20261028UsageAndHonestyTests: XCTestCase {
     private func daemonBinary() throws -> String {
         let path = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("engine/.build/debug/glasspaned").path
+            .appendingPathComponent(".build/debug/glasspaned").path
         guard FileManager.default.isExecutableFile(atPath: path) else {
             throw XCTSkip("没有 \(path)；补上它：swift build --package-path engine")
         }
