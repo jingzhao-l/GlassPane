@@ -43,22 +43,49 @@ export const READS = Object.freeze({ available: 'available', absent: 'absent', u
 const POINTER_NAME = 'update-install.json'
 const STATE_NAME = 'update-state.json'
 
-/** Where this machine keeps GlassPane's state, and who said so. */
-export function stateRootOf({ env = process.env, homeDir = null } = {}) {
+/**
+ * Where this machine keeps GlassPane's state, and who said so.
+ *
+ * 顺序只有两级：`GLASSPANE_STATE_DIR`，然后是**口令档案**（`os.userInfo().homedir`）里的家目录。
+ * 中间没有 `$HOME`：`os.homedir()` 与 `$HOME` 都是调用方手里的那个变量，而这条产品的每一条入口
+ * 读的都是档案那一份——面板的 `NSHomeDirectory()`、daemon 的 `StateRoot.homeDefault()`、更新器的
+ * `recordHomeDir()`（`updater/cli.js` 里那句 "this process has no password-database record, so the
+ * state root cannot be named; pass --state-dir"）、`mcp-shell` 的 `recordHome()`。一个被重定向的
+ * `$HOME` 在这里意味着读一份"谁都不认识的机器"的状态：doctor 会对着一台装好的机器说指针缺席,
+ * `gp_diagnose` 点的是另一个文件，`runUpdate` 则把 `--state-dir <错根>` 交给真正的更新器去写。
+ * 档案读不到就是**拒绝**（`stateRoot: null`），不回退 `$HOME`、也不回退 `os.homedir()`——与
+ * `update-state.ts` 的 `recordHome()` 同一条规矩，同一个理由。
+ * `homeDir` 与 `readRecord` 是调用方/测试的注入口（`readRecord` 默认读真实档案），不是第三级优先级。
+ */
+export function stateRootOf({ env = process.env, homeDir = null, readRecord = passwdHome } = {}) {
   const named = String(env.GLASSPANE_STATE_DIR ?? '').trim()
   if (named !== '') return { stateRoot: path.resolve(named), source: 'GLASSPANE_STATE_DIR' }
-  const home = String(homeDir ?? (typeof env.HOME === 'string' && env.HOME !== '' ? env.HOME : safeHomedir()) ?? '').trim()
-  if (home === '') return { stateRoot: null, source: '读不到家目录（HOME 未设置，os.homedir() 也没答）' }
-  return { stateRoot: path.join(home, '.glasspane'), source: '默认（<HOME>/.glasspane）' }
+  const home = String(homeDir ?? readRecord() ?? '').trim()
+  if (home === '') {
+    return { stateRoot: null, source: '读不到口令档案里的家目录（os.userInfo() 没答或答了空的），而本产品不用 $HOME' }
+  }
+  return { stateRoot: path.join(home, '.glasspane'), source: '默认（口令档案的家目录/.glasspane）' }
 }
 
-function safeHomedir() {
+/** 口令档案里的那个家目录；读不到（没有档案的进程、root 起的 daemon）就是 null，不猜。 */
+function passwdHome() {
   try {
-    return os.homedir()
+    const info = os.userInfo()
+    const home = typeof info?.homedir === 'string' ? info.homedir.trim() : ''
+    return home === '' ? null : home
   } catch {
     return null
   }
 }
+
+/**
+ * 根读不出时唯一做得动的下一步。写 `--state-dir` 是因为那是更新器自己收的那面旗
+ * （`updater/cli.js` 的用法里就有它），而 `glasspane` 这一条不收；`export HOME=…` 那句是从前
+ * 印上去的假补救——它把裂缝制度化，改的变量没有一处在读。
+ */
+export const STATE_ROOT_REMEDY = '这一格答的是"读不出"，不是"没有"。下一步二选一：把根点名给更新器自己那支'
+  + '（`node <update-install.json 里那份 cli.js> status|check|apply --json --state-dir <状态根>`，别把 `--state-dir null` 交给它），'
+  + '或修好这个账号的口令档案（`dscl . -read /Users/<账号> NFSHomeDirectory`）。重定向 `$HOME` 不改变这里的答案。'
 
 /**
  * The install pointer: the one file that says which updater this machine is installed with. Three states,
@@ -151,6 +178,7 @@ export function spawnJson(bin, args, { spawn = spawnSync, timeoutMs = 120_000 } 
 export function doctorReadings({
   env = process.env,
   homeDir = null,
+  readRecord = passwdHome,
   readFile = (p) => fs.readFileSync(p, 'utf8'),
   exists = (p) => fs.existsSync(p),
   spawn = spawnSync,
@@ -158,11 +186,12 @@ export function doctorReadings({
   uid = null,
   runLaunchctl = null,
 } = {}) {
-  const { stateRoot, source } = stateRootOf({ env, homeDir })
+  const { stateRoot, source } = stateRootOf({ env, homeDir, readRecord })
+  const rootUnknown = stateRoot === null
   const out = []
 
-  out.push(stateRoot === null
-    ? { name: '状态根', read: READS.unverified, detail: source, remedy: 'export HOME=/Users/<你> 后重跑（这个产品把状态放在家目录下是刻意的）。' }
+  out.push(rootUnknown
+    ? { name: '状态根', read: READS.unverified, detail: `这一格是未验证（unverified）：${source}`, remedy: STATE_ROOT_REMEDY }
     : { name: '状态根', read: READS.available, detail: `${stateRoot}（${source}）`, remedy: null })
 
   const pointer = readInstallPointer({ stateRoot, readFile, exists })
@@ -171,12 +200,22 @@ export function doctorReadings({
     read: pointer.read,
     detail: pointer.read === READS.available
       ? `${pointer.updaterCli}（安装根 ${pointer.installRoot ?? '未记'}）`
-      : pointer.reason,
-    remedy: pointer.remedy ?? (pointer.read === READS.unverified ? '这一份是安装器写的 JSON，读不出来通常意味着它被手改过：重跑安装程序覆盖它。' : null),
+      : rootUnknown
+        // 根没读出来时就只到这一步：那句"update-install.json 不存在"是对着一台装好的机器说的假缺席。
+        ? `状态根没读出来（${source}），所以没有去查 ${POINTER_NAME}——这一格是未验证（unverified），不是"这台机器没装"。`
+        : pointer.reason,
+    remedy: pointer.remedy ?? (rootUnknown
+      ? STATE_ROOT_REMEDY
+      : pointer.read === READS.unverified ? '这一份是安装器写的 JSON，读不出来通常意味着它被手改过：重跑安装程序覆盖它。' : null),
   })
 
   if (pointer.read !== READS.available) {
-    out.push({ name: '更新器状态', read: READS.unverified, detail: '没有可跑的更新脚本，这一格没问', remedy: '先把上面那一格修好。' })
+    out.push({
+      name: '更新器状态',
+      read: READS.unverified,
+      detail: rootUnknown ? '状态根没读出来，所以没问更新器——问它也要给它 `--state-dir`。' : '没有可跑的更新脚本，这一格没问',
+      remedy: rootUnknown ? STATE_ROOT_REMEDY : '先把上面那一格修好。',
+    })
     out.push({ name: '定时代理', read: READS.unverified, detail: '同上', remedy: null })
   } else {
     const status = spawnJson(execPath, [pointer.updaterCli, 'status', '--json', '--state-dir', stateRoot], { spawn })
@@ -224,7 +263,7 @@ export function doctorReadings({
 
   const socketPath = stateRoot ? path.join(stateRoot, 'engine.sock') : null
   const socket = socketPath === null
-    ? { read: READS.unverified, detail: '没有状态根，socket 路径无从得出' }
+    ? { read: READS.unverified, detail: `状态根没读出来（${source}），socket 路径无从得出——没查过盘，所以不说它不在` }
     : exists(socketPath)
       ? { read: READS.available, detail: socketPath }
       : { read: READS.absent, detail: `${socketPath} 不在：daemon 没在跑（或这台机器上它注册在别的状态根）` }
@@ -297,6 +336,12 @@ export function parseVerb(argv) {
  * business re-interpreting that as its own verdict.
  */
 export async function runUpdate({ execPath = process.execPath, updaterCli, stateRoot, spawn = spawnSync, write = (line) => process.stdout.write(`${line}\n`) } = {}) {
+  // 状态根读不出来时不能把 `--state-dir null` 交给更新器：那个字符串会被拼成一个名叫 `null` 的目录
+  // （或按更新器的口径拒掉），两种都不是"这台机器的根"——写进去的那一份没有别的读者。一个子进程都不起。
+  if (typeof stateRoot !== 'string' || stateRoot.trim() === '') {
+    write(`没有状态根，更新器无从知道往哪儿写：这一趟一次子进程都没起。${STATE_ROOT_REMEDY}`)
+    return { exitCode: 3, stage: 'state-root' }
+  }
   const check = spawnJson(execPath, [updaterCli, 'check', '--json', '--state-dir', stateRoot], { spawn })
   if (check.read !== READS.available || check.json === null) {
     write(`检查没答话：${check.reason ?? `退出 ${check.status}：${check.stderr.slice(0, 200)}`}`)
@@ -324,7 +369,7 @@ export async function runUpdate({ execPath = process.execPath, updaterCli, state
   return { exitCode: apply.status ?? 0, stage: 'apply', json: apply.json }
 }
 
-export async function main({ argv = process.argv.slice(2), env = process.env, spawn = spawnSync, write = (line) => process.stdout.write(`${line}\n`), fail = (line) => process.stderr.write(`${line}\n`) } = {}) {
+export async function main({ argv = process.argv.slice(2), env = process.env, readRecord = passwdHome, spawn = spawnSync, write = (line) => process.stdout.write(`${line}\n`), fail = (line) => process.stderr.write(`${line}\n`) } = {}) {
   const parsed = parseVerb(argv)
   if (parsed.error) {
     fail(`${parsed.error}。\n\n${usageText()}`)
@@ -334,12 +379,19 @@ export async function main({ argv = process.argv.slice(2), env = process.env, sp
     write(usageText())
     return 0
   }
-  const { stateRoot } = stateRootOf({ env })
+  const { stateRoot, source } = stateRootOf({ env, readRecord })
   const pointer = readInstallPointer({ stateRoot, readFile: (p) => fs.readFileSync(p, 'utf8'), exists: (p) => fs.existsSync(p) })
   if (parsed.verb === 'doctor') {
-    const report = doctorReport(doctorReadings({ env, spawn }))
+    const report = doctorReport(doctorReadings({ env, readRecord, spawn }))
     write(report.text)
     return report.ok ? 0 : 3
+  }
+  // `doctor` 可以在读不出根的时候照常出六格（每格答自己的"不知道"），`update` 与 `status` 不行:
+  // 它们要把这一问交给更新器，而交出去的 `--state-dir` 需要一个真的根。放在指针那一问之前,
+  // 是为了让屏幕上的原因停在"根读不出"这一件事实上，而不是停在一个跟着来的假缺席。
+  if (stateRoot === null) {
+    fail(`读不出这台机器的状态根（${source}），所以更新器要写哪儿我们不知道：这一趟没动手。\n${STATE_ROOT_REMEDY}`)
+    return 3
   }
   if (pointer.read !== READS.available) {
     fail(`这台机器的安装指针读不出可用的一份更新器：${pointer.reason}\n${pointer.remedy ?? ''}`)

@@ -268,12 +268,28 @@ test('pidsFromPs: 按可执行名分流 daemon 与设置面板', () => {
   assert.deepEqual(panelPidsFromPs(SAMPLE_PS, { selfPid: 303 }), [], '自身 PID 不进清理名单')
 })
 
-test('listRunningPids: ps 执行失败一律视为无实例（不因探测中断安装）', () => {
+/**
+ * 2026-10-28 缺陷 1：这一条从前写的是「ps 执行失败一律视为无实例（不因探测中断安装）」，
+ * 断言 `listRunningPids(..., {spawn: () => ({status: 1})})` 深等于 `[]`。那句"一律视为无实例"
+ * 正是缺陷本身：`[]` 同时是"ps 答了：零个"与"ps 没答话"两种世界，而调用方按后一种的
+ * 空缺办事（跳过 terminatePids 与 launchd kickstart），最后在陈旧 daemon 可能仍占着的
+ * socket 上又起一份手动实例。诚实的读法是分档：非零退出回 `unverified`，`pids` 只是
+ * 这一档的附带值（空），不得被当成"没有实例"的结论。
+ */
+test('listRunningPids: 答话与没答话分两档，非零退出不是"无实例"', () => {
   const ok = listRunningPids(DAEMON_EXE_NAME, {
     spawn: () => ({ status: 0, stdout: SAMPLE_PS }),
   })
-  assert.deepEqual(ok, [101, 202])
-  assert.deepEqual(listRunningPids(DAEMON_EXE_NAME, { spawn: () => ({ status: 1, stdout: '' }) }), [])
+  assert.equal(ok.state, 'available')
+  assert.deepEqual(ok.pids, [101, 202])
+  const silent = listRunningPids(DAEMON_EXE_NAME, { spawn: () => ({ status: 0, stdout: '' }) })
+  assert.equal(silent.state, 'available', '退 0 且没有一行匹配＝**读到了**零个，这是答案不是没答案')
+  assert.deepEqual(silent.pids, [])
+  const failed = listRunningPids(DAEMON_EXE_NAME, { spawn: () => ({ status: 1, stdout: '' }) })
+  assert.equal(failed.state, 'unverified', 'ps 非零退出＝没答话，不许与"读到零个"同值')
+  assert.equal(failed.command, 'ps -Ao pid=,comm=', '红字要点名问的是哪一条命令')
+  const missing = listRunningPids(DAEMON_EXE_NAME, { spawn: () => ({ status: null, error: { code: 'ENOENT' } }) })
+  assert.equal(missing.state, 'absent', '命令不在是"absent"，仍旧不是"读到零个"')
 })
 
 test('terminatePids: SIGTERM 后仍存活者补 SIGKILL 并回报 forced', () => {

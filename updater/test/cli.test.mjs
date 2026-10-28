@@ -9,7 +9,9 @@
  * Reverse mutations that redden here: break the import guard (every test here
  * fails with a nonzero status before any subcommand runs); return the wrong exit
  * code for a refusal; print the JSON line to stderr instead of stdout; print two
- * lines.
+ * lines; send the `--help` usage block back to stderr (the `--help` tests below
+ * read stdout, which is what `updater --help | grep …` reads); drop a code from the
+ * usage table that `lib/codes.js` still answers with.
  */
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
@@ -19,8 +21,8 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { plainTextLine } from '../cli.js'
-import { STATUSES } from '../lib/codes.js'
+import { plainTextLine, USAGE } from '../cli.js'
+import { EXIT, STATUSES } from '../lib/codes.js'
 
 const CLI = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'cli.js')
 
@@ -122,6 +124,81 @@ function runCliAt(cliPath, args, { env = {} } = {}) {
     child.on('close', (code) => resolve({ code, stdout, stderr }))
   })
 }
+
+/* ---------------------------------------------------------------------------
+ * 2026-10-28（CLI 契约 lane）—— `--help` 的那一条流，与用法文本里的退出码契约。
+ *
+ * 缺陷形状：`main()` 把 USAGE 写在 stderr 上，而这个产品的**每一支** CLI 的用法都在
+ * stdout（`installer/cli.js` 的 `--help`、`installer/glasspane.js` 的 `help`、
+ * `engine/Sources/glasspaned/main.swift` 的 `--help` 都走 standardOutput）。后果是可执行
+ * 的：`updater --help | grep -- --state-dir` 读到的是**空**，而管道另一头退出码仍是 0，
+ * 于是"这个旗标不存在"看起来是被实测过的。诊断仍然只走 stderr —— 改的只有用法这一块。
+ * ------------------------------------------------------------------------- */
+
+test('--help 把用法打在 stdout：`updater --help | grep X` 读得到东西', async () => {
+  for (const flag of ['--help', '-h']) {
+    const result = await runCli([flag])
+    assert.equal(result.code, 0, `${flag} 不是一次操作，不该给非零结论：${result.stderr}`)
+    assert.match(result.stdout, /usage: node updater\/cli\.js/, `${flag} 的用法要在 stdout 上，实得 stdout=${JSON.stringify(result.stdout)}`)
+    assert.equal(result.stderr, '', `${flag} 不该往 stderr 写任何东西：${result.stderr}`)
+  }
+  // 这条是缺陷里那个"后果"的直接形状：用法里的一个旗标名必须从 stdout 读得到。
+  const piped = await runCli(['--help'])
+  assert.match(piped.stdout, /--state-dir/, '管道那头读 stdout，用法里点名的那面旗必须出现在 stdout')
+})
+
+test('用法错误照旧走 stderr 并退 2：改的只有 --help 那一块流', async () => {
+  const result = await runCli(['frobnicate'])
+  assert.equal(result.code, EXIT.USAGE, result.stderr)
+  assert.equal(result.stdout, '', '用法错误不许往 stdout 写字节（--json 的调用方只认那一行）')
+  assert.match(result.stderr, /unknown command/, result.stderr)
+  assert.match(result.stderr, /usage: node updater\/cli\.js/, '拒绝的原因后面要跟得着用法')
+})
+
+/**
+ * 用法文本里的退出码表 = 代码真的会答的那几个数（`updater/README.md` 把它称作契约）。
+ * 判据是 `lib/codes.js` 的 `EXIT`，不是手抄的一份：加一个码却不写进用法、或用法里写一个
+ * 代码答不出来的数，两边都会在这里红。
+ */
+test('USAGE 里的退出码表与 EXIT 常量一一对得上，且每个都带着它那一类失败的说法', () => {
+  const table = USAGE.slice(USAGE.indexOf('exit codes'))
+  const listed = [...new Set([...table.matchAll(/^ {2}(\d) {2}/gm)].map((m) => Number(m[1])))]
+    .sort((a, b) => a - b)
+  const real = [...new Set(Object.values(EXIT))].sort((a, b) => a - b)
+  assert.deepEqual(listed, real, `用法表的数字要正好是 ${real.join(', ')}，实到 ${listed.join(', ') || '（空）'}`)
+  // 每个码的说明就是它那一行加上后面那些五空格续行；表外的散文（"These five are…"）不算。
+  const blockOf = (code) => {
+    const lines = table.split('\n')
+    const start = lines.findIndex((line) => line.startsWith(`  ${code}  `))
+    if (start === -1) return null
+    const body = [lines[start].slice(4)]
+    for (let i = start + 1; i < lines.length; i += 1) {
+      if (!/^ {5}\S/.test(lines[i])) break
+      body.push(lines[i].trim())
+    }
+    return body.join(' ')
+  }
+  for (const [code, words] of [
+    [EXIT.OK, /did what it says|success/],
+    [EXIT.USAGE, /usage error/],
+    [EXIT.REFUSED, /nothing changed/],
+    [EXIT.ROLLED_BACK, /backup is back/],
+    [EXIT.ROLLBACK_FAILED, /a person is required/],
+  ]) {
+    const block = blockOf(code)
+    assert.ok(block, `退出码 ${code} 要在用法表里有一段自己的说明`)
+    assert.match(block, words, `退出码 ${code} 的说明不对题：${block}`)
+  }
+  assert.match(table, /no 1/, '这一支压根不答 1，用法要把那句话说出来')
+})
+
+test('USAGE 记下跨二进制的用法错码（记录已知分歧，不是修它）', () => {
+  assert.match(USAGE, /64/, 'glasspaned 对用法错答 64，读 rc 的人要能预见到')
+  assert.match(USAGE, /installer\/cli\.js/, '同一类失败在另一支 CLI 上是几，也要写出来')
+  assert.match(USAGE, /glasspaned/)
+  assert.match(USAGE, /KNOWN divergence|NOT a fix/i, '这一行是**说明**，不许被读成已经统一过了')
+})
+
 
 /**
  * `URL.pathname` 不是文件系统路径（`%20` 会把空格编进去），而这条 CLI 有**三处**要用"我自己

@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url'
 
 import { CODES } from './codes.js'
 import { CA_ENV_VAR } from './ca-bundle.js'
-import { COMMON_BIN_DIRS, LAUNCHD_PATH, npmGlobalBinDirs } from './binaries.js'
+import { COMMON_BIN_DIRS, LAUNCHD_PATH, npmGlobalBinDirs, recordHome } from './binaries.js'
 import { UpdaterError, STATE_FILE_MODE, sameRuntimePath, writePrivateFile } from './fsutil.js'
 import { stateDirReadings } from './policy.js'
 
@@ -802,14 +802,35 @@ export function agentTemplateText() {
   return fs.readFileSync(AGENT_TEMPLATE, 'utf8')
 }
 
-/** Where a user agent lives for this uid. */
-export function agentPlistPath({ label = AGENT_LABEL, homeDir = os.homedir(), uid = null } = {}) {
+/** Where a user agent lives for this uid.
+ *
+ *  The home this falls back to is the **password record's** (`binaries.js`'s `recordHome`), never
+ *  `os.homedir()`: `os.homedir()` consults `$HOME` first, and `$HOME` is a caller-controlled variable.
+ *  The plist this function names is loaded by launchd into the *account's* GUI session, and the daemon
+ *  and the settings panel both read `~/.glasspane` off the record — a `$HOME`-redirected `enable`
+ *  would register the daily job under a LaunchAgents directory that session never looks in, and the
+ *  machine would report "automatic update is on" while no job exists. With no record to read this
+ *  refuses the same way the rest of the module does (an `UpdaterError` carrying a `CODES` value the
+ *  panel and `gp_diagnose` already know): `home-record-unavailable`, nothing registered, and
+ *  `updater/cli.js`'s `recordHomeDir()` names the same code for the same reason.
+ */
+export function agentPlistPath({ label = AGENT_LABEL, homeDir = null, uid = null, readRecord = () => os.userInfo().homedir } = {}) {
   void uid
   // The label is the file *name* here, so this is the same refusal in a second place: a caller that
   // passed a foreign label would write `~/Library/LaunchAgents/<somebody else>.plist` and have
   // launchd load it as a login item for that identifier.
   assertOwnAgentLabel(label)
-  return path.join(homeDir, 'Library', 'LaunchAgents', label + '.plist')
+  const named = String(homeDir ?? '').trim()
+  const home = named !== '' ? named : recordHome({ readRecord })
+  if (home === null || home === '') {
+    throw new UpdaterError(
+      CODES.homeRecordUnavailable,
+      'the update agent\'s plist path needs a home directory and this process has no password-database '
+      + 'record to read one from (os.userInfo() did not answer); $HOME is not used as a fallback here because '
+      + 'launchd loads this file into the account\'s session, not the one a variable names. Nothing was registered.',
+    )
+  }
+  return path.join(home, 'Library', 'LaunchAgents', label + '.plist')
 }
 
 /**

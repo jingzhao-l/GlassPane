@@ -51,7 +51,10 @@ if [ -z "${HOME:-}" ]; then
   printf '%s\n' '错误: HOME 未设置：安装产物、socket 与 ~/Library/LaunchAgents 的路径全部由它拼出来，' >&2
   printf '%s\n' '缺了它这些会落到**当前目录**的相对位置（./.glasspane、./Library/LaunchAgents/…），' >&2
   printf '%s\n' '而 launchd 直接拒收相对的 StandardOutPath——本轮没有写入任何东西。' >&2
-  printf '%s\n' '补救：在自己的登录 shell 里重跑（必要时 export HOME=/Users/<你>）；' >&2
+  printf '%s\n' '补救：在自己的登录 shell 里重跑（那里 HOME 本来就有值）；' >&2
+  printf '%s\n' '  手工指定落点也可以：GLASSPANE_INSTALL_DIR=<目录> 管这一键安装把仓库放哪，' >&2
+  printf '%s\n' '  --state-dir <目录> 管 daemon/updater 的状态放哪。手动 export HOME 只搬得动本脚本——' >&2
+  printf '%s\n' '  daemon 与更新器读的是口令档案里的家目录，不看 ${HOME}，所以那样装完两侧会指着两个根。' >&2
   printf '%s\n' '不要用 `sudo -u 某用户` / `env -u HOME` 这类形态起安装器。' >&2
   exit 1
 fi
@@ -466,13 +469,20 @@ if [ "$DRY_RUN" = "1" ]; then
   say "[dry-run] 将执行: node $REPO/installer/cli.js $*"
   exit 0
 fi
-# 平台闸的第二道：上面那一支只管"要 clone 的那一趟"，而源码已经在手边时（GLASSPANE_REPO 指的仓库、
-# 当前目录、既有 clone）这一趟从不经过它，注释里那句"交给 installer 自己去说平台"从来没成立过——
-# installer/cli.js 里没有任何平台判据（grep `process.platform` 命中 0）。实测形状：在一个 GlassPane
-#  checkout 里把 `uname` 桩成 Linux 跑真装，本脚本会一路走到 `exec node cli.js`，随后 npm ci、tsc、
-# swift build 与 launchd 注册全部真的发生（本轮就被这件事咬过一次：测试从仓库根跑，HOME 是真家目录）。
-# 所以这里在委托之前问一次：不是 Darwin 就停，且不写任何东西。dry-run 已经在上面 exit 了，
-# CI 的 install-gate 那一格读到的计划行不受影响。
+# 平台闸有两道，两道都在，各有各的职责。（这一段从前写的是"installer/cli.js 里没有任何平台判据
+# （grep `process.platform` 命中 0）"——那句现在是被实测否证的：`grep -n process.platform installer/cli.js`
+# 命中 3 行（文档、`export function platformRefusal(platform = process.platform)` 的定义、main 里的注释），
+# 而 main 在 parseArgs 之后、install 之前真的调用 platformRefusal() 并据此置 exit 1。行号会漂，
+# 所以这里只给复测命令，不给坐标。
+# 真实的两闸形状是这一句：install.sh 在委托之前拒，cli.js 也拒，且 cli.js 那一拒才是桩不掉的那一道。
+# 这一道的职责是"源码已经在手边时也要停，且一个字节都不写"——上面那一支只管"要 clone 的那一趟"，
+# GLASSPANE_REPO 指的仓库、当前目录、既有 clone 这三条路都不经过它。那一道的职责是"把 PATH 换掉也
+# 绕不过去"：`uname` 是 PATH 上一个可以被换掉的程序，`process.platform` 是 node 向主机问来的。
+# 历史事实照旧记着（2026-10-22 实测）：那时本脚本还没有这一道，在一个 GlassPane checkout 里把
+# `uname` 桩成 Linux 跑真装，会一路走到 `exec node cli.js`，随后 npm ci、tsc、swift build 与 launchd
+# 注册全部真的发生，HOME 是开发者自己的。两道都不删：删这一道就回到"不写任何东西之前先跑了一半"，
+# 删那一道就回到"桩一个 uname 就通了"。dry-run 已经在上面 exit 了，CI 的 install-gate 那一格
+# 读到的计划行不受影响。
 if [ "$(uname -s)" != "Darwin" ]; then
   fail "本安装器只支持 macOS（uname -s = $(uname -s)）：Swift/XCTest、launchd 与 TCC 席位都在 macOS 这一侧。源码已经在手边（${REPO}）这一趟不付 clone，但它同样不会 delegate 给 installer —— 没有 npm ci、没有 swift build、没有注册 launchd 作业。现在这一步没有可绕的旗标。"
 fi

@@ -591,20 +591,32 @@ test('verifyCloneTagGpg: 仓库无该 tag → unavailable，不触发 gpg', () =
  * consent 洗不掉，两条路的诚实度不该不一样——而安装是更不可逆的那条。
  * 判据抽成 `tagVerifyDecision` 之后才有测试可指：埋在 main() 里的那一段没法单测。
  */
-test('tagVerifyDecision: 只有缺证明才继续，签不上就停下', () => {
+test('tagVerifyDecision: 只有 tag 真没签名才继续，签不上与没跑成都停下', () => {
   const repoDir = '/repo'
   const decide = (status, detail = 'd') => tagVerifyDecision({ sig: { status, detail }, pinRef: 'v1.2.3', repoDir })
 
   assert.equal(decide('verified').action, 'pass')
   assert.match(decide('verified').text, /签名验证通过/)
 
-  // 缺证明：黄字继续，但话说清是"缺增量"，不许写成"验签通过"。
-  for (const status of ['unsigned', 'unavailable']) {
-    const warn = decide(status)
-    assert.equal(warn.action, 'warn', `${status} 只是缺证明，应当继续`)
-    assert.match(warn.text, /继续安装/, `${status} 的文案要说明确实继续`)
-    assert.ok(!/签名验证通过/.test(warn.text), `${status} 不许冒充验签通过`)
-  }
+  // 缺证明（tag 里确实没有签名层）：黄字继续，但话说清是"缺增量"，不许写成"验签通过"。
+  const unsigned = decide('unsigned')
+  assert.equal(unsigned.action, 'warn', 'unsigned 只是缺证明，应当继续')
+  assert.match(unsigned.text, /继续安装/, 'unsigned 的文案要说明确实继续')
+  assert.ok(!/签名验证通过/.test(unsigned.text), 'unsigned 不许冒充验签通过')
+
+  // 2026-10-28 缺陷 2：`unavailable` 从前和 `unsigned` 合流放行，可它说的不是"这个 tag
+  // 没签名"，而是"这道验签在本机没跑成"（没有 gpg / 导入公钥失败 / 验签抛错）。
+  // "没跑成的检查"讲成"检查过了"就是替没验过的字节作保——拒装，出路是一条显式旗标。
+  const unavailable = decide('unavailable', 'gpg 不可用，跳过发布 tag GPG 验签')
+  assert.equal(unavailable.action, 'refuse', '验签没跑成不许与"没签名"合流放行')
+  assert.match(unavailable.text, /--accept-unverified-signature/, '拒绝必须给得出可执行的下一步')
+  assert.match(unavailable.text, /没有跑 npm install/, '拒装要说明确实什么都没做')
+  assert.ok(!/签名验证通过/.test(unavailable.text))
+  const waived = tagVerifyDecision({
+    sig: { status: 'unavailable', detail: 'gpg 不可用' }, pinRef: 'v1.2.3', repoDir, acceptUnverified: true,
+  })
+  assert.equal(waived.action, 'warn', '显式旗标才放行')
+  assert.match(waived.text, /没有验签结论/, '放行后仍要如实打出这是缺结论装上的')
 
   // 签不上：停下，并且说清哪些不可逆的事**没做**、下一步做什么。
   const refusal = decide('invalid', 'gpg: BAD signature from ...')

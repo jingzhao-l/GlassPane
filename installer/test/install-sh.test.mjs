@@ -94,11 +94,20 @@ test('install.sh: HOME 未设置 → 人话拒绝而不是 unbound variable，dr
     assert.doesNotMatch(text, /unbound variable/, `${label}：不许以 shell 的 nounset 报错收场`)
     assert.doesNotMatch(text, /\[dry-run\]/, `${label}：dry-run 不豁免这条拒绝（它拒的是路径拼不出来）`)
     assert.doesNotMatch(text, /node .*installer\/cli\.js/, `${label}：拒绝之后不得再打印委托行`)
-    // 与 installer 侧同口径：两条一键入口对同一个缺失给同一句补救。
-    for (const fragment of ['export HOME=/Users/', 'env -u HOME']) {
+    // 与 installer 侧同口径的那一条现在只剩 `env -u HOME` 这一句。
+    // 为什么不再要求两条入口的**整段**补救同句：installGuard 的补救已按"本产品读的是口令档案里的
+    // 家目录"改写（缺陷 2）——`export HOME=/Users/<你>` 改的那个变量没有一处在读状态根，所以
+    // cli 侧不再印它，改成点名真正生效的 `--state-dir <路径>` / `GLASSPANE_STATE_DIR`。
+    // install.sh 的那一段属于另一条 lane 的待修项（本轮不碰那个文件），两条入口的补救**暂时**
+    // 不一致是如实的，于是这里只闸两条今天都真打印了的那一句，cli 侧的新口径由下面三条单独钉住
+    // （把 `export HOME=` 那种补救改回去，第 3 条立刻红）。
+    for (const fragment of ['env -u HOME']) {
       assert.ok(guard.error.includes(fragment), `前提：installGuard 的补救里有 ${fragment}`)
       assert.ok(text.includes(fragment), `${label}：拒绝文案要带 installGuard 的补救片段「${fragment}」，实得：${text}`)
     }
+    assert.match(guard.error, /--state-dir/, '补救必须点名真正生效的那面旗，而不是挪 $HOME')
+    assert.match(guard.error, /GLASSPANE_STATE_DIR/, '环境变量那一条也要写出来（更新器与 glasspane 都读它）')
+    assert.doesNotMatch(guard.error, /export HOME/, '印一条改 $HOME 的补救＝把"CLI 挪走了、daemon 没挪走"这条裂缝制度化')
   }
 })
 

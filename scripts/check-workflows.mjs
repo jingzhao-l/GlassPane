@@ -501,13 +501,14 @@ function inspect(target) {
   //        advisory instead of being quietly exempted — the same shape
   //        `updater/test/scripts-test-suite-is-run.test.mjs` chose for `harness/` on 2026-10-16
   //        ("这一条例外写在报告里，而不是把判据放宽成'大概都跑了'").
-  //        HAND-OFF: `updater/test/scripts-check-workflows.test.mjs` builds its rule-2b fixture
-  //        from a `HEADER` that predates these two rules, so its three "the clean fixture exits 0"
-  //        controls are red until that fixture grows a `timeout-minutes:` on the job and a
-  //        `set -euo pipefail` in the block it appends — the same two lines its own comment says a
-  //        fixture owes a real workflow ("夹具与真 workflow 同形"). This lane may not write that
-  //        file; the rules stay red-for-real because a ceiling nobody demands is a ceiling nobody
-  //        has.
+  //        THAT HAND-OFF IS CLOSED (re-measured 2026-10-28): the `HEADER` fixture has since grown
+  //        `timeout-minutes: 15`, and the multi-statement blocks it appends carry `set -euo pipefail`
+  //        (the file's own comment at lines 70-74 records that amendment), so all three "the clean
+  //        fixture exits 0" controls in `updater/test/scripts-check-workflows.test.mjs` exit 0 and
+  //        that file runs green against rules 4a/4b (`node --test updater/test/scripts-check-workflows.test.mjs`
+  //        re-measures it). Its two single-line `run:` bodies owe no header because 4b judges
+  //        multi-statement blocks and piped one-liners, not a lone command. The rules themselves are
+  //        unchanged and still red-for-real, because a ceiling nobody demands is a ceiling nobody has.
   if (target.primary) {
     problems.push(...timeoutProblems(jobRecords, base))
     problems.push(...setHeaderProblems(shells))

@@ -371,10 +371,20 @@ test('the MCP half resolves glasspane-mcp through the same helper, and refuses w
     assert.doesNotMatch(absent.reason, /could not run \(/, '不是"跑坏了"，是"没有东西可跑"')
 
     // The default search knows where a global npm install puts the command, without asking npm.
-    const dirs = candidateDirsFor('glasspane-mcp', { env: { HOME: '/Users/dev', PATH: LAUNCHD_PATH }, execPath: '/usr/local/bin/node' })
+    // 2026-10-28（CLI 契约 lane）：这里从前写的是 `env: { HOME: '/Users/dev' }`——那个家的读法本身
+    // 就是缺陷（`$HOME` 是调用方可控的变量，而本产品每一处家目录都读**口令档案**：`updater/cli.js` 的
+    // `recordHomeDir`、`mcp-shell/src/update-state.ts` 的 `recordHome`）。所以候选表现在按 `readRecord`
+    // 注入同一个 `/Users/dev`，断言的内容（前缀 bin 必须在候选里、且排在 /usr/local/bin 前面）一字未改；
+    // 多加的那两行闸的是新契约本身：同一个 `env.HOME` 现在不许再改变搜索表。
+    const dirs = candidateDirsFor('glasspane-mcp', {
+      env: { HOME: '/Users/somebody-elses-home', PATH: LAUNCHD_PATH },
+      execPath: '/usr/local/bin/node',
+      readRecord: () => '/Users/dev',
+    })
     assert.ok(dirs.includes('/Users/dev/.npm-global/bin'), `npm 全局前缀的 bin 必须在候选里：${dirs.join(', ')}`)
     assert.ok(dirs.includes('/usr/local/bin'), '本机实测那一份就在这里')
     assert.ok(dirs.indexOf('/Users/dev/.npm-global/bin') < dirs.indexOf('/usr/local/bin'), '全局包落在前缀 bin，不在别处')
+    assert.equal(dirs.some((d) => d.startsWith('/Users/somebody-elses-home')), false, `$HOME 又成了搜索表的输入：${dirs.join(', ')}`)
   } finally {
     fx.cleanup()
   }

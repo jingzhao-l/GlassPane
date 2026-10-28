@@ -425,16 +425,19 @@ test('finding2: 别人签的同名 tag → install() 硬拒，且拒绝发生在
   }
 })
 
-test('finding2: 未签名（unsigned）仍按文档口径继续，不硬拒', () => {
-  // 这一条钉住"三档分得开"：unsigned 是作者身份无从确证，不是被证伪。
+test('finding2: 未签名（unsigned）仍按文档口径继续；验签没跑成（unavailable）改判拒装', () => {
+  // 这一条钉住"四档分得开"：unsigned 是作者身份无从确证（tag 里确实没签名层），
+  // unavailable 是**这道检查没跑成**——后一种从前也走 warn，等于把没做的检查说成做过的。
   const say = (status) => tagVerifyDecision({
     sig: { status, detail: 'd' }, pinRef: 'v1.9.0', repoDir: '/Users/dev/glasspane',
   })
   assert.equal(say('invalid').action, 'refuse', '签名对不上必须停下')
   assert.equal(say('unsigned').action, 'warn', '没签名只是缺那一层证明，不是被证伪')
-  assert.equal(say('unavailable').action, 'warn', '没有 gpg 同样是"这一档测不了"，不是"验不过"')
+  assert.equal(say('unavailable').action, 'refuse', '没有 gpg 是"这一档没测成"，既不是"验不过"也不是"没签名"——不能拿它当放行理由')
+  assert.match(say('unavailable').text, /--accept-unverified-signature/, '拒装要给可执行的下一步（对齐 updater 的 --consent unsigned-release）')
   assert.match(say('unsigned').text, /继续安装/, '告警那句要明说自己放行')
   assert.ok(!say('invalid').text.includes('继续安装'), '硬拒的文案里不许出现放行')
+  assert.ok(!say('unavailable').text.includes('继续安装'), '拒装的文案里也不许出现放行')
   // 一个不认识的新判据不得默默退回"没签名"那一档（上游那份的第四支，本轮保住它）
   assert.equal(say('whatever-comes-next').action, 'refuse')
   const source = fs.readFileSync(CLI, 'utf8')
@@ -876,8 +879,18 @@ test('finding11: 没拿到许可时 bootout 一次都没发生，且给的是 --
 test('finding11: --no-prompt 被三个破坏性步骤读，usage 与 install.sh 的口径一致', () => {
   const source = fs.readFileSync(CLI, 'utf8')
   const body = source.slice(source.indexOf('export async function install('))
-  assert.equal((body.match(/await confirm\(/g) ?? []).length, 3,
-    '被拦的应当恰好是三件破坏性动作：bootout 已加载作业、覆盖已存在 .app、结束在跑实例')
+  // 2026-10-28（缺陷 1）：「结束在跑的实例」那一步连同它的 confirm 一起搬进了导出的
+  // `collectStaleInstances`——从前那段埋在 install() 的 if 里，任何测试都指不到它，
+  // 于是 ps 没答话时 terminate 与 launchd 接管两道一起被跳过。闸门数量不许变，
+  // 只是现在分两处数：install() 自己那两处（bootout 已加载作业、覆盖已存在 .app）
+  // 加收拢那一步的一处。
+  const collectBody = source.slice(
+    source.indexOf('export async function collectStaleInstances('),
+    source.indexOf('/** 向 daemon socket 发一行 hello'),
+  )
+  const gates = (body.match(/await confirm\(/g) ?? []).length + (collectBody.match(/await askPerson\(/g) ?? []).length
+  assert.equal(gates, 3, '被拦的应当恰好是三件破坏性动作：bootout 已加载作业、覆盖已存在 .app、结束在跑实例')
+  assert.match(collectBody, /confirm: askPerson = confirm/, '收拢那一步的确认门只能由同一个 confirm 实现')
   assert.match(body, /autoYes: options\.prompt === false/, 'confirm 的放行只能由这个 flag 决定')
   assert.match(usageText(), /--no-prompt[\s\S]{0,600}bootout[\s\S]{0,400}\.app/, 'usage 要说清跳过的是哪几步')
   assert.match(usageText(), /必须显式带 --no-prompt/, '非交互调用方要被告知必须显式带 flag')

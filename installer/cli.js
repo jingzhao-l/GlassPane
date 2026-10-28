@@ -174,6 +174,7 @@ export function parseArgs(argv) {
     restoreLaunchd: false,
     autoUpdate: true,
     bootstrap: true,
+    acceptUnverifiedSignature: false,
     help: false,
   }
   const opts = { ...defaults }
@@ -224,6 +225,11 @@ export function parseArgs(argv) {
         break
       case '--restore-launchd':
         opts.restoreLaunchd = true
+        break
+      case '--accept-unverified-signature':
+        // 只覆盖 `unavailable` 那一档（验签没跑成）；`invalid` 在它面前仍旧是硬拒。
+        // 与 updater 的 `--consent unsigned-release` 同一形态：批的是"缺证明"，不是"签不上"。
+        opts.acceptUnverifiedSignature = true
         break
       default:
         return { options: defaults, error: `未知参数：${arg}（--help 查看用法）` }
@@ -540,13 +546,61 @@ export function panelPidsFromPs(psOutput, { selfPid = process.pid } = {}) {
   return pidsFromPs(psOutput, { exeName: PANEL_EXE_NAME, selfPid })
 }
 
-/** 按可执行名列出在跑的进程 PID（副作用层：读 `ps`，解析交给纯函数）。 */
+/** `ps` 那一探测的命令面：红字要点名"问的是哪一条命令"，所以命令本身是一个值。 */
+export const PS_PROBE_ARGS = Object.freeze(['-Ao', 'pid=,comm='])
+export const PS_PROBE_COMMAND = `ps ${PS_PROBE_ARGS.join(' ')}`
+
+/** 按可执行名列出在跑的进程 PID（副作用层：读 `ps`，解析交给纯函数）。
+ *
+ *  返回 `{state, pids, …}` 而不是裸数组（2026-10-28 缺陷 1）。旧实现写的是
+ *  `if (result.status !== 0) return []`——把"ps 没答话"与"ps 答了：一个也没有"压成
+ *  同一个值。调用方按"数组为空＝没有在跑的实例"办事，于是既跳过了 `terminatePids`，
+ *  也跳过了 `launchdTakeoverAfterTerminate` 那条安全接管，最后在一份陈旧 daemon 可能
+ *  仍然占着的 socket 上又起一份手动实例。本文件上方的 `PROBE_STATES`（"没答话"不许说成
+ *  "未找到"）已经立了这套词表，同一份文件里不能两套口径：这里复用它的三档，不发明第四种形状。
+ *  - `available`  ：ps 退 0，`pids` 就是它的答案（空数组是**读到的零个**，不是没读到）
+ *  - `absent`     ：ENOENT，这台机器没有 ps 这个命令
+ *  - `unverified` ：ps 起了没答话／非零退出／spawn 抛错——一律是"没读到" */
 export function listRunningPids(exeName, { spawn = spawnSync } = {}) {
-  const result = spawn('ps', ['-Ao', 'pid=,comm='], { encoding: 'utf8' })
-  if (result.status !== 0) {
-    return []
+  let result = null
+  let thrown = null
+  try {
+    result = spawn('ps', [...PS_PROBE_ARGS], { encoding: 'utf8' })
+  } catch (error) {
+    thrown = error
   }
-  return pidsFromPs(result.stdout, { exeName })
+  const code = thrown?.code ?? result?.error?.code ?? null
+  if (thrown || !result || result.status !== 0) {
+    return {
+      state: code === 'ENOENT' ? PROBE_STATES.absent : PROBE_STATES.unverified,
+      pids: [],
+      command: PS_PROBE_COMMAND,
+      exitCode: thrown ? null : (result ? result.status : null),
+      reason: thrown?.message ?? result?.error?.message ?? result?.error?.code ?? null,
+    }
+  }
+  return {
+    state: PROBE_STATES.available,
+    pids: pidsFromPs(result.stdout, { exeName }),
+    command: PS_PROBE_COMMAND,
+    exitCode: 0,
+    reason: null,
+  }
+}
+
+/** 探测没答话时那行红字（纯函数）：说的是"没读到"，永远不是"没有在跑的实例"。 */
+export function staleProbeUnansweredText(probe, { launchd = true } = {}) {
+  const why = probe.state === PROBE_STATES.absent
+    ? '这台机器上没有 ps 这个命令'
+    : `ps 这一趟没有答话（退出码 ${probe.exitCode === null ? '无（命令没跑成）' : probe.exitCode}`
+      + `${probe.reason ? `，${probe.reason}` : ''}）`
+  return `旧实例收拢**跳过**：${why}。当时问的是这一条命令：${probe.command}。\n`
+    + '这句是"没读到"，不是"没有在跑的实例"——本轮因此**没有**结束任何进程，'
+    + (launchd
+      ? '改走 launchd 主动接管（kickstart）这条安全兜底，它不依赖读到 PID。'
+      : '而本轮没有启用 launchd（--no-launchd），连那条安全兜底也没有：'
+        + '若有陈旧 daemon 仍占着 socket，接下来起来的会是一份手动实例。')
+    + `\n人工核对：${probe.command} | grep -E '${DAEMON_EXE_NAME}|${PANEL_EXE_NAME}'`
 }
 
 /** launchd 主动接管（重启）已注册作业的参数（纯函数）。
@@ -1078,6 +1132,116 @@ export async function launchdTakeoverAfterTerminate({
   }
 }
 
+/** 收拢旧实例这一步（原样埋在 install() 的 if 里，没有一条测试能指到它）。
+ *
+ *  为什么要抽出来：`listRunningPids` 从前返回裸数组，非零退出也是 `[]`，于是这里的
+ *  `staleDaemons.length > 0 || stalePanels.length > 0` 把"ps 没答话"读成"没有在跑的实例"，
+ *  **同时**跳过了 `terminatePids` 与 `launchdTakeoverAfterTerminate` 那条安全接管。
+ *  现在探测回三档：没答话时既不声称"没有实例"，也照走 kickstart（它不需要 PID），
+ *  并且把"收拢被跳过"用红字说给人听。`spawn`/`report`/`confirm`/`terminate`/`takeoverFn`/
+ *  `waitFn` 全是测试接缝——这一段判据只能由假探测跑出来，真机上永远只有一半天数。
+ */
+export async function collectStaleInstances({
+  spawn = spawnSync,
+  replaceDaemon = false,
+  launchd = true,
+  autoYes = false,
+  socketPath = null,
+  report = (text, color = null) => printStep(color ? paint(text, color) : text),
+  confirm: askPerson = confirm,
+  terminate = terminatePids,
+  takeoverFn = launchdTakeoverAfterTerminate,
+  waitFn = waitForSocket,
+  terminateOptions = {},
+  exeNames = { daemon: DAEMON_EXE_NAME, panel: PANEL_EXE_NAME },
+} = {}) {
+  const daemonProbe = listRunningPids(exeNames.daemon, { spawn })
+  const panelProbe = listRunningPids(exeNames.panel, { spawn })
+  const unanswered = [daemonProbe, panelProbe].filter((probe) => probe.state !== PROBE_STATES.available)
+  const staleDaemons = daemonProbe.pids
+  const stalePanels = panelProbe.pids
+  let relaunchedByLaunchd = false
+  let takeoverRan = false
+  const runTakeover = async () => {
+    if (!launchd || takeoverRan) return
+    takeoverRan = true
+    const got = await takeoverFn({ socketPath, spawn, waitFn })
+    if (got.uid === null) {
+      report(got.message, 'red')
+    } else {
+      relaunchedByLaunchd = got.relaunched
+      report(got.message)
+    }
+  }
+
+  if (unanswered.length > 0) {
+    for (const probe of unanswered) report(staleProbeUnansweredText(probe, { launchd }), 'red')
+    await runTakeover()
+    return {
+      probeAnswered: false,
+      unanswered: unanswered.map((probe) => probe.state),
+      staleDaemons,
+      stalePanels,
+      terminated: null,
+      takeoverRan,
+      relaunchedByLaunchd,
+    }
+  }
+
+  let terminated = null
+  if (staleDaemons.length > 0 || stalePanels.length > 0) {
+    const summary = `daemon ${staleDaemons.join(',') || '无'}｜面板 ${stalePanels.join(',') || '无'}`
+    if (replaceDaemon) {
+      // finding 12：结束在跑的实例是第三件破坏性动作（它会打断正在进行的 act，
+      // 而 daemon 侧的 SIGTERM 收尾是"清理 socket 后退出"）。`--no-prompt` 放行、
+      // 交互终端问一句、非交互且没给 flag 则不动别人的进程。
+      const mayTerminate = await askPerson(
+        `将结束已在跑的实例（${summary}），其间正在执行的 act 会被打断`,
+        { autoYes },
+      )
+      if (!mayTerminate) {
+        report('未确认：没有结束任何在跑的实例（脚本场景请加 --no-prompt）', 'yellow')
+      } else {
+        terminated = terminate([...staleDaemons, ...stalePanels], { spawn, ...terminateOptions })
+        report(
+          terminated.forced.length > 0
+            ? `既有实例已收拢（SIGTERM 未生效、已强杀：${terminated.forced.join(', ')}）`
+            : `已结束既有实例：${terminated.terminated.join(', ')}`,
+        )
+        // finding 5：`terminated`/`forced` 只覆盖确实已经不在了的 pid。安装器发不动
+        // 信号的进程（root 拉起的旧 daemon）必须单独用红字点名——它还在服务同一个
+        // socket，"已收拢"那句话对它不成立。
+        if (terminated.survivors.length > 0) {
+          for (const line of survivorText(terminated.survivors, { socketPath }).split('\n')) {
+            report(line, 'red')
+          }
+        }
+        // 收拢旧实例后主动让 launchd 接管：TERM 现在是 clean exit 0，KeepAlive
+        // (SuccessfulExit=false) 语义下 launchd 不会自动复活，必须 kickstart。
+        // 不这么做就会退化成"手动实例持有 socket"，开机自启那份配置形同虚设。
+        // uid 读不出来时**红字说出来**（判据与句子见 launchdTakeoverAfterTerminate），
+        // 静默跳过会让读者以为开机自启已经按新配置在跑。
+        if (staleDaemons.length > 0) await runTakeover()
+      }
+    } else {
+      report(
+        `检测到旧实例在跑（${summary}）：多实例会让系统设置里的授权条目与实际服务实例对不上；`
+        + '加 --replace-daemon 可一并收拢',
+        'yellow',
+      )
+    }
+  }
+  return {
+    probeAnswered: true,
+    unanswered: [],
+    staleDaemons,
+    stalePanels,
+    terminated,
+    takeoverRan,
+    relaunchedByLaunchd,
+  }
+}
+
 /** 向 daemon socket 发一行 hello（NDJSON 单行协议，与 FrameCodec 对齐），返回
  *  解析后的 result；不可达/超时/坏响应一律 null——恢复判定必须把"拿不到"
  *  如实降级为未验证，不得冒充 granted。 */
@@ -1265,18 +1429,24 @@ export function classifyTagVerify({ status, stdout = '', stderr = '' } = {}) {
 }
 
 /**
- * 验签结论怎么落成安装动作。三种结局各说各话：
+ * 验签结论怎么落成安装动作。四种结局各说各话：
  *  - `verified`   绿字继续；
- *  - `unsigned` / `unavailable`  黄字继续——缺的是来源证明的**增量**：被验的 tag 与
- *    装进构建的源码是同一个 ref，HTTPS + tag 钉版本已经保证内容完整；
+ *  - `unsigned`   黄字继续——tag 里**确实**没有签名层，缺的是来源证明的增量：
+ *    被验的 tag 与装进构建的源码是同一个 ref，HTTPS + tag 钉版本已经保证内容完整；
+ *  - `unavailable` **拒绝**（2026-10-28 缺陷 2）。这一档从前与 `unsigned` 合流，可它
+ *    说的根本不是"这个 tag 没签名"——是"这道验签在本机没跑成"（没有 gpg / 导入内置
+ *    公钥失败 / 验签自己抛错）。把"没跑成的检查"讲成"检查过了、答案是没签名"，等于
+ *    让人以为有一道门把过关。自动更新那面对它是 `signature-tool-missing`，与
+ *    `invalid` 分列两档，且**没有**人类同意就不放行（updater/lib/signature.js 的
+ *    `signature-tool-missing` 那句）；本文件的注释从前把这条跨渠道不对称点名成缺陷，
+ *    上一轮只把 `invalid` 并了进来，`unavailable` 还留在放行那一支。
+ *    放行只走显式旗标 `--accept-unverified-signature`（对应 updater 的
+ *    `--consent unsigned-release`），放行后仍要如实打出"这一版是缺验签结论装上的"；
  *  - `invalid`    签名在、验不过，那说的不是"缺证明"而是"这份字节不是发布者签过的
- *    那一份"，必须**停下**。自动更新那一面对它是硬拒且 `--consent` 洗不掉
- *    （updater/lib/check.js 的门 8）；安装这一面从前只黄字一句"继续安装"就往下跑
- *    npm install、swift build 并注册 launchd——同一件事在两条路上按两种诚实度处理，
- *    而安装是更不可逆的那条。
+ *    那一份"，必须**停下**，且任何旗标都不覆盖。
  * 判据放在纯函数里：这一段从前埋在 main() 的 if 里，没有一条测试能指到它。
  */
-export function tagVerifyDecision({ sig, pinRef, repoDir }) {
+export function tagVerifyDecision({ sig, pinRef, repoDir, acceptUnverified = false }) {
   if (sig.status === 'verified') {
     return { action: 'pass', text: `发布 tag ${pinRef} GPG 签名验证通过` }
   }
@@ -1298,7 +1468,37 @@ export function tagVerifyDecision({ sig, pinRef, repoDir }) {
         + '这一档写明是"任何同意都不覆盖的硬拒"，所以这里既没有 flag 也没有确认能放行。',
     }
   }
-  if (sig.status === 'unsigned' || sig.status === 'unavailable') {
+  if (sig.status === 'unavailable') {
+    // 这道检查**没跑成**，不是跑成了且答案是"没签名"。默认拒装：不给"没人验过"这件事
+    // 放行，就不许往下跑 npm install、swift build 与 launchd 注册。
+    if (!acceptUnverified) {
+      return {
+        action: 'refuse',
+        text: `发布 tag ${pinRef} 的 GPG 验签**没有跑成**（${sig.status}：${sig.detail}）。\n`
+          + '这一档说的不是"这个 tag 没签名"，而是"这道检查在本机没做成"——这台机器现在对'
+          + `${pinRef} 的作者身份一无所知。安装到此为止：没有跑 npm install，没有 swift build，`
+          + '没有注册 launchd 作业。\n'
+          + `内置公钥：key ${GLASSPANE_SIGNING_KEY_ID}（uid ${GLASSPANE_SIGNING_KEY_UID}），`
+          + '就是本文件里那份 GLASSPANE_SIGNING_PUBLIC_KEY。\n'
+          + `下一步（先自己把这道检查跑一遍，看清缺的是哪一样）：`
+          + `gpg --version；git -C "${repoDir}" rev-parse --verify refs/tags/${pinRef}；`
+          + `git -C "${repoDir}" tag -v ${pinRef}\n`
+          + '确实在没有 gpg 的机器上要装，就修好工具链再重跑（`brew install gnupg` 或 `xcode-select --install`）；'
+          + '理解风险、决定就在这一档缺结论的情况下继续，才显式带上放行旗标重跑：\n'
+          + `  node installer/cli.js --repo "${repoDir}" --accept-unverified-signature\n`
+          + `  curl -fsSL ${INSTALL_SH_URL} | sh -s -- --accept-unverified-signature\n`
+          + '它与 updater 的 `--consent unsigned-release` 同一形态：只批"缺证明"，'
+          + '签名存在而验不过（invalid）永不被它覆盖；`--no-prompt` 也不是这里说的同意。',
+      }
+    }
+    return {
+      action: 'warn',
+      text: `发布 tag ${pinRef} 的 GPG 验签没有跑成（${sig.status}：${sig.detail}），`
+        + '本轮由 --accept-unverified-signature 显式放行：这一版是在**没有验签结论**的情况下装上的，'
+        + '不是"验签通过"，也不是"确认它没签名"。',
+    }
+  }
+  if (sig.status === 'unsigned') {
     return {
       action: 'warn',
       text: `发布 tag ${pinRef} 没有可核验的 GPG 签名（${sig.status}：${sig.detail}）`
@@ -1360,11 +1560,11 @@ export function tagVerifyAgainstTree({ verdict, tree, pinRef, repoDir }) {
   }
 }
 
-/** 对 clone 下来的发布 tag 做 GPG 验签（best-effort，不抛错）。
+/** 对 clone 下来的发布 tag 做 GPG 验签（探测本身 best-effort，不抛错）。
  *  隔离 GNUPGHOME 并临时导入发布公钥，`git verify-tag` 只看退出码与 stderr；不动
  *  用户钥匙环、无网络依赖。返回 classifyTagVerify 的口径（verified/unsigned/invalid/
- *  unavailable）。不能确证来源时不阻断——被验的 tag 与安装用的源码是同一个 ref，
- *  HTTPS + tag 钉版本已保证内容完整。 */
+ *  unavailable）。这里只负责**读出哪一档**；落成什么动作由 `tagVerifyDecision` 判——
+ *  `unavailable`（检查没跑成）默认拒装，不再与"这个 tag 没签名"合流放行。 */
 export function verifyCloneTagGpg({
   repoDir,
   ref,
@@ -1663,7 +1863,7 @@ export function updateGuidanceText(update) {
     return [
       `6. 自动更新：默认开。launchd 每日 ${update.schedule}${update.scheduleMeasured ? '' : '（默认值——在册作业没读回实际时刻，这一句不是实测）'} 跑 "${update.updaterCli}" check && apply`,
       `   （作业 ${update.agentLabel}，RunAtLoad=false，日志 ${update.stateRoot}/update.log）；`,
-      '   只在 daemon 空闲应答探针、且规格 §1 八道校验全过时才换版，major 永远等人点按钮。',
+      '   只在 daemon 空闲应答探针、且候选发布版的八道校验全部通过时才换版，major 永远等人点按钮。',
       ...(caLine ? [caLine] : []),
       `   一键关：node "${update.updaterCli}" disable（卸该作业 + 状态记 disabled=true）；重开：enable。`,
       `   卸载本机安装时：bootout daemon 作业的同时**也必须** bootout ${update.agentLabel} 并删它的 plist。`,
@@ -1673,7 +1873,7 @@ export function updateGuidanceText(update) {
     `6. 自动更新：已关闭（${update.reason === 'env' ? 'updater 判定环境变量为关，安装器没有第二套解读' : '--no-auto-update'}）。`,
     `   ${update.agentLabel} 未注册，状态记 disabled=true：面板显示"自动更新已关闭（上次检查 …）"，`,
     '   不会静默消失；手动检查/安装仍是同一条 CLI（面板上那两个按钮也是它）。',
-    `   重开：node "${update.updaterCli}" enable${update.reason === 'env' ? '（先把那个环境变量去掉，否则 updater 按 §7 拒绝注册）' : ''}。`,
+    `   重开：node "${update.updaterCli}" enable${update.reason === 'env' ? '（先把那个环境变量去掉，否则 updater 会拒绝注册）' : ''}。`,
     `   它也负责卸载：bootout ${update.agentLabel} + 删 ~/Library/LaunchAgents 下那份 plist。`,
   ]
 }
@@ -2007,9 +2207,10 @@ export function usageText() {
     '                     socket，让系统设置里的授权条目与实际服务实例对不上）',
     '  --no-gui           不打开 glasspane-settings GUI',
     '  --no-app           不打包/安置 .app（仅裸二进制产物；权限条目将只显示文件',
-    '                     名且无图标，见 P1 v1.2 §11.1）',
+    '                     名且无图标，系统设置的列表里只能按文件名认 daemon；去掉本 flag 重跑安装',
+    '                     可拿回带图标的条目）',
     '  --no-launchd       不注册开机自启（launchd bootstrap）',
-    '  --no-auto-update   不注册每日自动更新代理（规格 2026-09-27 §5）：卸载该代理并在',
+    '  --no-auto-update   不注册每日自动更新代理：卸载该代理并在',
     '                     状态里记 disabled=true，面板显示"自动更新已关闭"而不是"从未',
     '                     检查"；手动 check/apply 仍可用。等价的环境开关由 updater 自己',
     '                     判定（本安装器不重复解读那个环境变量）',
@@ -2017,6 +2218,13 @@ export function usageText() {
     '                     校验 daemon 自报席位（勾完 TCC 框后重跑即自动换进程复验）；',
     '                     恢复要换的是**已加载**作业的定义时，它和 install 一样先过 ① 那道门',
     '  --skip-build       跳过 npm/tsc/swift 编译（已构建过时使用）',
+    '  --accept-unverified-signature  放行**一档**验签结论：发布 tag 的 GPG 验签在本机没跑成',
+    '                     （unavailable：没有 gpg、导入内置发布公钥失败、或验签命令自己抛错）。',
+    '                     默认是拒装——"没跑成的检查"不许被讲成"检查过了、答案是没签名"。',
+    '                     带上本 flag 才继续，并在屏幕上如实打出"这一版是在没有验签结论的情况下',
+    '                     装上的"。形态与 updater 的 `--consent unsigned-release` 一致：它只批',
+    '                     "缺证明"那一面——签名存在而验不过（invalid）是任何同意都不覆盖的硬拒，',
+    '                     `--no-prompt` 在这里也不算同意。',
     '  --no-bootstrap     本地找不到仓库时不自动 clone，改为打印定位指引',
     '  -h, --help         显示本帮助',
     '',
@@ -2025,6 +2233,9 @@ export function usageText() {
     '     （--no-daemon 且 --no-launchd）',
     '  1  收尾未通过 hello 校验（daemon 没起来/不应答），或构建/产物/launchd 出错',
     '  2  命令行参数错误',
+    '  跨二进制的用法错对照（**这是在记录一处已知分歧，不是修它**——那些码都是发出去的契约，',
+    '     本轮一个都没改）：同样是"命令行参数错误"，`node updater/cli.js` 回 2（与本文件一致），',
+    '     后台服务 `glasspaned` 回 64（并把整块用法打出去）。按 rc 分支的脚本要把 2 与 64 都当用法错。',
     '  注：install.sh 用 exec 委托本文件，所以**脚本自己跑完了**之后，退出码原样透传。',
     '      但 `curl … | sh` 的 $? 只在 curl 成功时才是这里的结论：curl 取不到脚本时 sh 读到的',
     '      是空输入，直接 EOF 退 0（本机实测 curl 退 7、管道退 0）；中途断流时 sh 只执行了',
@@ -2089,7 +2300,8 @@ export function nextStepsText({
     mcpClientConfigSnippet({ rootDir, socketPath }),
     '',
     '2. TCC 权限（辅助功能/输入监控/屏幕录制/开发者工具）：授权对象是 **daemon 进程**',
-    '   而不是设置窗口；授权勾选必须人工完成，无程序化路径（P1 v1.2 §10.1 / §11.2）。',
+    '   而不是设置窗口；授权勾选必须人工完成，macOS 没有程序化授予这些权限的接口，所以这一步',
+    '   没有命令行代做的方法，只能在系统设置里点。',
     daemon.viaBundle
       ? '   在系统设置的对应权限列表里应能看到「GlassPane Daemon」（带图标，可用「+」选择或从 Finder 拖入）。'
       : '   当前 daemon 是裸二进制形态，权限列表里只会显示文件名「glasspaned」（无图标，「+」选择器看不到隐藏目录）；重跑安装（默认打包 .app）可获得带图标的条目。',
@@ -2219,15 +2431,31 @@ export function installGuard({ home = '', uid = null } = {}) {
         'HOME 未设置：安装产物、socket 与 ~/Library/LaunchAgents 的路径全部由它拼出来，'
         + '缺了它这些会落到**当前目录**的相对位置（./.glasspane、./Library/LaunchAgents/…），'
         + '而 launchd 直接拒收相对的 StandardOutPath——本轮没有写入任何东西。'
-        + '补救：在自己的登录 shell 里重跑（必要时 export HOME=/Users/<你>）；'
-        + '不要用 `sudo -u 某用户` / `env -u HOME` 这类形态起安装器。',
+        // 补救从前那句是让操作者"必要时给 HOME 赋一个绝对路径再重跑"。它教的这个动作对不上本产品的
+        // 读法：状态根读的是**口令档案里的家目录**（`installer/glasspane.js` 的 `stateRootOf`、
+        // `updater/cli.js` 的 `recordHomeDir`、`mcp-shell/src/update-state.ts` 的 `recordHome`），
+        // 改 `$HOME` 只挪得动命令行这一头，挪不动 daemon 与设置面板读的那一份——把一次性的
+        // 变量覆盖写成正式补救，等于把这条裂缝制度化。所以这里只点名真正生效的开关。
+        + '补救：状态根要用 `--state-dir <路径>` 点名（更新器 `node updater/cli.js … --state-dir <路径>`、'
+        + '后台服务 `glasspaned --state-dir <路径>` 都收这一面旗），或设 `GLASSPANE_STATE_DIR=<路径>`'
+        + '（更新器与 `glasspane` 这条命令都读它）。这两条是 daemon、面板、更新器一起认的那一个根，'
+        + '它读的是**口令档案里的家目录**（`dscl . -read /Users/<账号> NFSHomeDirectory` 问的就是这一个）；'
+        + '改 `$HOME` 不改变它们读到的状态根。'
+        + '本安装器自己拼的那几条路径（socket 与 ~/Library/LaunchAgents）仍然读 $HOME，'
+        + '所以这一趟要在自己的登录 shell 里重跑；不要用 `sudo -u 某用户` / `env -u HOME` 这类形态起安装器。',
     }
   }
   if (!path.isAbsolute(homeText)) {
     return {
       ok: false,
       error: `HOME 必须是绝对路径，实为「${homeText}」：相对 HOME 会把状态根拼成 ${path.join(homeText, SOCKET_DIR_NAME)}，`
-        + 'plist 里的 StandardOutPath 也是相对的，launchd 不会收。补救：export HOME 成绝对路径后重跑。',
+        // 同上一条：这里原来写的补救是"把 HOME 设成绝对路径再重跑"，而那个变量不是状态根的读法
+        // （读的是口令档案），照它做的人会把 CLI 挪走、把 daemon 留在原地。生效的开关是下面那两条。
+        + 'plist 里的 StandardOutPath 也是相对的，launchd 不会收。补救：本安装器自己拼的这几条路径读 $HOME，'
+        + '所以在 $HOME 为绝对路径的那个登录 shell 里重跑同一条命令即可；状态根那一头不要靠 $HOME——它读口令档案，'
+        + '改 $HOME 不改变 daemon 与设置面板读到的那一份。要指名状态根就用 `--state-dir <路径>`'
+        + '（`node updater/cli.js … --state-dir <路径>`、`glasspaned --state-dir <路径>`），'
+        + '或 `GLASSPANE_STATE_DIR=<路径>`（更新器与 `glasspane` 这条命令读它）。',
     }
   }
   if (uid !== null && uid !== undefined && Number(uid) === 0) {
@@ -2854,7 +3082,12 @@ export async function install({
     const sig = verifyCloneTagGpg({ repoDir: rootDir, ref: pinRef })
     // 先判"签名对不对"，再判"要装的是不是被签的那棵树"——两问分开，绿字才只在对得上时出现。
     const verdict = tagVerifyAgainstTree({
-      verdict: tagVerifyDecision({ sig, pinRef, repoDir: rootDir }),
+      verdict: tagVerifyDecision({
+        sig,
+        pinRef,
+        repoDir: rootDir,
+        acceptUnverified: options.acceptUnverifiedSignature === true,
+      }),
       tree: tagTreeAgreement({ repoDir: rootDir, ref: pinRef }),
       pinRef,
       repoDir: rootDir,
@@ -3057,61 +3290,16 @@ export async function install({
     if (!fs.existsSync(daemonLaunch.path)) {
       throw new Error(`daemon 产物不存在：${daemonLaunch.path}（请勿在未构建时使用 --skip-build 启动 daemon）`)
     }
-    let relaunchedByLaunchd = false
-    const staleDaemons = listRunningPids(DAEMON_EXE_NAME)
-    const stalePanels = listRunningPids(PANEL_EXE_NAME)
-    if (staleDaemons.length > 0 || stalePanels.length > 0) {
-      const summary = `daemon ${staleDaemons.join(',') || '无'}｜面板 ${stalePanels.join(',') || '无'}`
-      if (options.replaceDaemon) {
-        // finding 12：结束在跑的实例是第三件破坏性动作（它会打断正在进行的 act，
-        // 而 daemon 侧的 SIGTERM 收尾是"清理 socket 后退出"）。`--no-prompt` 放行、
-        // 交互终端问一句、非交互且没给 flag 则不动别人的进程。
-        const mayTerminate = await confirm(
-          `将结束已在跑的实例（${summary}），其间正在执行的 act 会被打断`,
-          { autoYes: options.prompt === false },
-        )
-        if (!mayTerminate) {
-          printStep(paint('未确认：没有结束任何在跑的实例（脚本场景请加 --no-prompt）', 'yellow'))
-        } else {
-          const result = terminatePids([...staleDaemons, ...stalePanels])
-          printStep(
-            result.forced.length > 0
-              ? `既有实例已收拢（SIGTERM 未生效、已强杀：${result.forced.join(', ')}）`
-              : `已结束既有实例：${result.terminated.join(', ')}`,
-          )
-          // finding 5：`terminated`/`forced` 只覆盖确实已经不在了的 pid。安装器发不动
-          // 信号的进程（root 拉起的旧 daemon）必须单独用红字点名——它还在服务同一个
-          // socket，"已收拢"那句话对它不成立。
-          if (result.survivors.length > 0) {
-            for (const line of survivorText(result.survivors, { socketPath }).split('\n')) {
-              printStep(paint(line, 'red'))
-            }
-          }
-          // 收拢旧实例后主动让 launchd 接管：TERM 现在是 clean exit 0，KeepAlive
-          // (SuccessfulExit=false) 语义下 launchd 不会自动复活，必须 kickstart。
-          // 不这么做就会退化成"手动实例持有 socket"，开机自启那份配置形同虚设。
-          // uid 读不出来时**红字说出来**（判据与句子见 launchdTakeoverAfterTerminate），
-          // 静默跳过会让读者以为开机自启已经按新配置在跑。
-          if (staleDaemons.length > 0 && options.launchd) {
-            const takeover = await launchdTakeoverAfterTerminate({ socketPath })
-            if (takeover.uid === null) {
-              printStep(paint(takeover.message, 'red'))
-            } else {
-              relaunchedByLaunchd = takeover.relaunched
-              printStep(takeover.message)
-            }
-          }
-        }
-      } else {
-        printStep(
-          paint(
-            `检测到旧实例在跑（${summary}）：多实例会让系统设置里的授权条目与实际服务实例对不上；`
-            + '加 --replace-daemon 可一并收拢',
-            'yellow',
-          ),
-        )
-      }
-    }
+    // 收拢旧实例这一步的全部判据在 `collectStaleInstances`（那里才有测试可指；
+    // 从前这一段埋在 if 里，`ps` 没答话被当成"没有在跑的实例"，terminate 与
+    // launchd 接管两道一起被跳过）。
+    const stale = await collectStaleInstances({
+      replaceDaemon: options.replaceDaemon,
+      launchd: options.launchd,
+      autoYes: options.prompt === false,
+      socketPath,
+    })
+    const relaunchedByLaunchd = stale.relaunchedByLaunchd
     if (relaunchedByLaunchd || await socketReachable(socketPath)) {
       // launchd 刚 kickstart 起来的那一份算"本次重启的"；纯粹是 socket 早就有人听着，
       // 就是别人（很可能是上一版）在服务。

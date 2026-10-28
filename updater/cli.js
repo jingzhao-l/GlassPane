@@ -9,7 +9,9 @@
  *     5 swap failed and the rollback did not succeed (a person is required);
  *   · with `--json`, stdout is **exactly one line** of JSON matching
  *     `schema/update-state.schema.json` (plus `command`/`exitCode`/`message`);
- *   · every human sentence and diagnostic goes to stderr.
+ *   · every human sentence and diagnostic goes to stderr — with one exception:
+ *     the `--help` usage block goes to stdout, the stream every other CLI in this
+ *     product prints its usage on, so `updater --help | grep …` reads something.
  *
  * Run with `--help` for the subcommands. This file has no side effects at
  * import time: `main()` is only called from the executable guard at the bottom,
@@ -63,7 +65,10 @@ commands
 
 options
   --state-dir <path>   state root (same meaning as the daemon's flag);
-                       defaults to $GLASSPANE_STATE_DIR, then ~/.glasspane
+                       defaults to $GLASSPANE_STATE_DIR, then the password record's
+                       ~/.glasspane — the home os.userInfo() answers, not $HOME, so
+                       redirecting $HOME does not move this root out from under the
+                       panel and the daemon that read the same one
   --state-root <path>  accepted synonym of --state-dir: the installer-rendered launchd
                        plist passes this spelling (launchd.js' daemonFlag), so both names
                        resolve through one rule and one of them is not a secret
@@ -86,7 +91,27 @@ options
   --disable            alias of the "disable" subcommand; --enable likewise.
                        They refuse to sit next of a different command — a switch that
                        promises safety and does nothing is worse than not having it.
-  -h, --help
+  -h, --help           print this usage on stdout and exit 0
+
+exit codes (the panel and the launchd agent read these numbers, never the prose)
+  0  the command did what it says — "check" finding nothing new is a success,
+     and so is "--help"
+  2  usage error: unknown command or option, a missing/empty option value, or an
+     answer this tool cannot map onto its own status enum
+  3  refused, nothing changed: the daemon is busy, a consent is missing, the
+     scheduled run was asked to do a person's job, or a trust gate failed
+  4  the new version went in, the daemon did not answer the handshake, and the
+     verified backup is back in place
+  5  the new version went in and the rollback did not complete — a person is
+     required; the panel shows this case verbatim
+  These five are the whole vocabulary this entry point can answer: main() and
+  lib/codes.js' exitCodeFor() are the two places that choose one, and there is
+  deliberately no 1 — a crash inside the CLI answers 3, not 1.
+  Cross-binary usage-error vocabulary: this line documents a KNOWN divergence, it is
+  NOT a fix (those codes are published contracts and none of them was changed here).
+  The same "the command line itself is wrong" class answers 2 here, 2 from
+  "node installer/cli.js", and 64 from the daemon "glasspaned" — which prints its
+  whole usage block with it. A caller branching on rc must read 2 and 64 as one class.
 `
 
 /** Pure argument parse. Returns `{ ok:false, reason }` for anything unusable. */
@@ -860,7 +885,14 @@ export async function main({ argv = process.argv.slice(2), env = process.env, st
     return EXIT.USAGE
   }
   if (parsed.flags.help || parsed.command === null) {
-    stderr.write(USAGE)
+    // The usage block goes to **stdout**, like every other CLI in this product
+    // (`installer/cli.js`'s `--help`, `installer/glasspane.js`'s `help`, the daemon's
+    // `--help` in `engine/Sources/glasspaned/main.swift` — all three write stdout).
+    // It used to go to stderr, which made `updater --help | grep <option>` read
+    // nothing and an agent conclude the option does not exist. A refusal's reason
+    // still goes to stderr above: that one *is* a diagnostic, and `--json` keeps
+    // stdout to exactly one line.
+    stdout.write(USAGE)
     return EXIT.OK
   }
   let outcome

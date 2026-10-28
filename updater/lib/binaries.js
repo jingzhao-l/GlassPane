@@ -79,11 +79,29 @@ function splitPathValue(pathValue) {
     .filter((dir) => dir !== '' && dir !== '.')
 }
 
-function homeOf(env) {
-  const named = String(env?.HOME ?? '').trim()
-  if (named !== '') return named
+/** The one system call this module asks for a home. Throws when there is no record; `recordHome` turns that into `null`. */
+const passwordRecordHome = () => os.userInfo().homedir
+
+/**
+ * The home the **password record** answers for, or `null` when this process cannot read one.
+ *
+ * Why not `$HOME`: `env.HOME` and `os.homedir()` are the *same* caller-controlled value
+ * (`os.homedir()` consults `$HOME` first and only falls back to the record), and this
+ * product's every other home lookup reads the record — `updater/cli.js`'s `recordHomeDir`,
+ * `updater/agent-entry.js`'s `entryHomeDir`, `mcp-shell/src/update-state.ts`'s `recordHome`,
+ * `installer/glasspane.js`'s `stateRootOf`. A `$HOME`-redirected daily job would search a
+ * prefix bin that describes nobody's install while the panel and the daemon use the account's
+ * real one.
+ *
+ * Failure shape: `null`, which is what this module's home lookup already answered when it
+ * could not read one (`homeOf` used to `return null`), and which every caller already
+ * tolerates (`if (home)`). It is "unknown", not a guess — there is no fallback to `$HOME` behind it.
+ * `readRecord` is injectable so a test can arrange the no-record shape this machine has.
+ */
+export function recordHome({ readRecord = passwordRecordHome } = {}) {
   try {
-    return os.homedir()
+    const home = String(readRecord() ?? '').trim()
+    return home === '' ? null : home
   } catch {
     return null
   }
@@ -97,9 +115,13 @@ function homeOf(env) {
  * (`npm_config_prefix`, which npm reads before it reads any file). Every one of these is a *guess about a
  * directory*, checked with `existsSync` before it is ever used, so a wrong guess costs a stat and cannot
  * put a non-executable path in front of a real one.
+ *
+ * The home half of that list is the **password record's** home (`recordHome`), never `$HOME`: a redirected
+ * `$HOME` must not move where this search looks. With no record to read, that prefix is left out — the
+ * answer is "unknown", not a guessed directory — and the documented machine prefixes still stand.
  */
-export function npmGlobalBinDirs({ env = process.env } = {}) {
-  const home = homeOf(env)
+export function npmGlobalBinDirs({ env = process.env, readRecord = passwordRecordHome } = {}) {
+  const home = recordHome({ readRecord })
   const prefixes = []
   const configPrefix = String(env?.npm_config_prefix ?? '').trim()
   if (configPrefix !== '') prefixes.push(configPrefix)
@@ -122,9 +144,13 @@ export function npmGlobalBinDirs({ env = process.env } = {}) {
  * this process is by definition a directory this account can execute from — and node and npm are installed
  * together on every shape this project ships (measured: `/usr/local/bin/node` and `/usr/local/bin/npm`).
  */
-export function candidateDirsFor(name, { env = process.env, execPath = process.execPath } = {}) {
+export function candidateDirsFor(name, {
+  env = process.env,
+  execPath = process.execPath,
+  readRecord = passwordRecordHome,
+} = {}) {
   const nodeDir = path.dirname(String(execPath ?? ''))
-  const npmBin = npmGlobalBinDirs({ env })
+  const npmBin = npmGlobalBinDirs({ env, readRecord })
   if (name === 'glasspane-mcp') {
     // Installed by `npm install -g`, so the prefix bin is where it actually is; the node directory is the
     // same one on this machine and is kept behind it as the fallback.

@@ -30,7 +30,8 @@
  * measured against the artifact the registry served instead of merely being re-quoted at the mirror.
  * A machine that genuinely has no install may say so out loud with `GLASSPANE_KERNEL_CORPUS_ALLOW_SKIP=1`
  * (the shape `engine/.signal_smoke.py`'s `GLASSPANE_SMOKE_ALLOW_SKIP` already established); it excuses
- * "nothing to compare against", never a byte that disagrees, and must never be set in CI.
+ * "nothing to compare against", never a byte that disagrees and never an install that carries another
+ * version than the pin, and must never be set in CI.
  *
  * The third leg (check mode, always) asks the question a mirror cannot answer by itself: does the
  * version `mcp-shell` bundles equal the version the fork pins? That is where the two consumers of
@@ -41,7 +42,7 @@
  *   node scripts/check-kernel-corpus.mjs --help     # legs, exit codes, and the allow-skip switch
  */
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -77,12 +78,37 @@ candidate install dirs, in order (the repository root first — CI's install-gat
 
   ${ALLOW_SKIP_ENV}=1   excuses the installed ↔ pin leg on a machine that has NO install to
                         compare against (prints a SKIP line and continues). It never excuses a
-                        byte that disagrees, and it must not be set in CI — that is where this
+                        byte that disagrees, and neither does it excuse an install that carries a
+                        different version than the pin — that is a measured disagreement, red with
+                        the flag set or not. It must not be set in CI — that is where this
                         leg exists. Without it the leg is RED by default.`)
 }
 
 function sha256(file) {
   return createHash('sha256').update(readFileSync(file)).digest('hex')
+}
+
+/**
+ * What a mirror entry actually IS, as a short phrase, or `null` when it is a regular file.
+ *
+ * `lstat`, not `stat`: a symlink resolves to a regular file under `stat`, and the pin describes
+ * corpus *bytes committed to this tree* — it says nothing about whatever a stray link points at, so
+ * pruning one would follow a claim the pin never made. The answer is a noun for the message, not a
+ * boolean, because a refusal that only says "not a file" sends the reader off to guess.
+ */
+function nonRegularKind(abs) {
+  let stat
+  try {
+    stat = lstatSync(abs)
+  } catch {
+    return 'unreadable (lstat failed)'
+  }
+  if (stat.isFile()) return null
+  if (stat.isDirectory()) return 'directory'
+  if (stat.isSymbolicLink()) return 'symbolic link'
+  if (stat.isFIFO()) return 'FIFO'
+  if (stat.isSocket()) return 'socket'
+  return 'special file (block/character device)'
 }
 
 /**
@@ -149,8 +175,59 @@ if (record && recordSource === null) {
 }
 if (record) {
   const installed = recordSource
+  const pinned = new Set(pin.corpus.map((e) => e.file))
+  // Pruning is PLANNED here, before the first byte is copied, and an entry the pin does not describe
+  // is refused rather than removed. `rmSync(..., { force: true })` only swallows ENOENT: one stray
+  // DIRECTORY under kernel/fixtures or kernel/schemas makes it throw ERR_FS_EISDIR, and until
+  // 2026-10-28 that throw landed after the copy loop below had already written the corpus — so a
+  // single unpinned directory produced a half-recorded mirror plus a stack trace instead of an
+  // answer. Detect everything first, then write; a refusal writes nothing at all.
+  // Deleting recursively is the worse "fix": the mirror is a claim about contract bytes, and this
+  // command may only replace claims it can read. A tree the pin never described is not this
+  // command's evidence to destroy.
+  const notRegular = []
+  const prune = []
+  for (const sub of SUBDIRS) {
+    const dir = join(mirror, sub)
+    if (!existsSync(dir)) continue
+    for (const name of readdirSync(dir)) {
+      const rel = `${sub}/${name}`
+      if (pinned.has(rel)) continue
+      const abs = join(dir, name)
+      const kind = nonRegularKind(abs)
+      if (kind !== null) {
+        notRegular.push({ rel, kind })
+        continue
+      }
+      prune.push(rel)
+    }
+  }
+  if (notRegular.length > 0) {
+    const named = notRegular.map((e) => `${e.rel} [${e.kind}]`).join(', ')
+    die(1, `--record refused: ${notRegular.length} unpinned ${notRegular.length === 1 ? 'entry' : 'entries'} under ${relative(root, mirror)} ${notRegular.length === 1 ? 'is' : 'are'} not a regular file: ${named}`,
+      `no corpus file was copied and nothing was pruned — move that ${notRegular[0].kind} out of the mirror yourself (`
+        + `it is not a contract file the pin describes, so decide what it is before deleting it), then re-run `
+        + 'node scripts/check-kernel-corpus.mjs --record. This gate prunes files only, on purpose: silently '
+        + 'removing a directory tree the pin never named would launder an unknown tree into a green mirror.')
+  }
   // Recording means copying the *installed, pinned* bytes in — never re-stamping the pin from
   // whatever the mirror happens to hold, which would launder drift into "expected".
+  // Detect-then-write, the same discipline as the prune check above: a pinned destination that is
+  // already a directory (or a symlink/FIFO) used to be met inside the copy loop, where
+  // `writeFileSync` throws ERR_FS_EISDIR *after* earlier entries were written — a half-recorded
+  // mirror plus a stack trace. Refuse with nothing written instead.
+  const blockedDestinations = pin.corpus
+    .map((entry) => ({ rel: entry.file, dst: join(mirror, entry.file) }))
+    .filter((e) => nonRegularKind(e.dst) !== null)
+    .map((e) => ({ ...e, kind: nonRegularKind(e.dst) }))
+  if (blockedDestinations.length > 0) {
+    const named = blockedDestinations.map((e) => `${e.rel} [${e.kind}]`).join(', ')
+    die(1, `--record refused: ${blockedDestinations.length} pinned ${blockedDestinations.length === 1 ? 'corpus path lands on' : 'corpus paths land on'} something that is not a regular file: ${named}`,
+      'no corpus file was copied — the pin describes bytes committed to this tree, so a directory or a link '
+        + `sitting where ${blockedDestinations[0].rel} belongs has to be moved away first, then re-run `
+        + 'node scripts/check-kernel-corpus.mjs --record. Deleting it from here is not the remedy: only the '
+        + 'prune pass removes mirror entries, and it refuses non-regular ones on purpose.')
+  }
   for (const entry of pin.corpus) {
     const src = join(installed, entry.file)
     if (!existsSync(src)) die(2, `the installed package lacks ${entry.file}`, 're-run kernel-pin.mjs --record against a real install')
@@ -162,23 +239,13 @@ if (record) {
     mkdirSync(dirname(dst), { recursive: true })
     writeFileSync(dst, readFileSync(src))
   }
-  // Pruning belongs here: check mode calls an unpinned extra red, so recording without removing
-  // them left the next check failing on files this command had just declined to touch. The pin is
-  // the source of truth, so a corpus file outside it is not "also fine".
-  const pinned = new Set(pin.corpus.map((e) => e.file))
-  const pruned = []
-  for (const sub of SUBDIRS) {
-    const dir = join(mirror, sub)
-    if (!existsSync(dir)) continue
-    for (const name of readdirSync(dir)) {
-      const rel = `${sub}/${name}`
-      if (pinned.has(rel)) continue
-      rmSync(join(dir, name), { force: true })
-      pruned.push(rel)
-    }
-  }
+  // Pruning stays in record mode (not check mode): check calls an unpinned extra red, so recording
+  // without removing them left the next check failing on files this command had just declined to
+  // touch. The pin is the source of truth, so a corpus file outside it is not "also fine". Every
+  // entry here already passed the non-regular check above, so this loop cannot meet a directory.
+  for (const rel of prune) rmSync(join(mirror, rel), { force: true })
   console.log(`kernel-corpus: refreshed ${pin.corpus.length} file(s) into kernel/ from ${relative(root, installed)} (iterate-kernel@${pin.version})`
-    + (pruned.length ? `; pruned ${pruned.length} unpinned file(s): ${pruned.join(', ')}` : '; no unpinned extras to prune'))
+    + (prune.length ? `; pruned ${prune.length} unpinned file(s): ${prune.join(', ')}` : '; no unpinned extras to prune'))
   process.exit(0)
 }
 
@@ -230,10 +297,17 @@ console.log(`kernel-corpus: ${expected.size} corpus file(s) match the pin (itera
 // may not be stamped onto the green baseline applies here, so the leg is red by default now.
 if (pinnedInstall === null) {
   const found = candidates.map((dir) => `${relative(root, dir)}@${installedVersion(dir)}`).join(', ')
-  if (process.env[ALLOW_SKIP_ENV] === '1') {
-    console.log(`  installed-package leg: SKIP（${ALLOW_SKIP_ENV}=1 显式要求）：没有一份已安装的 ${PACKAGE_NAME} 与 pin（${pin.version}）同号`
-      + `——候选里读到的是 ${candidates.length ? found : '一份都没有'}。这条腿默认是红的；开关只豁免"本机没有可比的东西"，`
-      + '不豁免对不上的字节，CI 里设它等于把这条闸关掉。')
+  // The flag is gated on `candidates.length === 0` and on nothing else, because that is the only
+  // claim it is allowed to make ("this machine has nothing comparable"). `pinnedInstall === null`
+  // holds for BOTH "no install at all" and "installs exist, none carries the pinned version", and
+  // testing the flag first let the second case out through the first door — an escape hatch that
+  // excuses a stale install is a way to turn a measured disagreement green with an environment
+  // variable. This file's own non-skip branch calls that case "a disagreement, not a skip", and the
+  // header limits the flag to "本机没有可比的东西"; the code now says the same thing.
+  if (candidates.length === 0 && process.env[ALLOW_SKIP_ENV] === '1') {
+    console.log(`  installed-package leg: SKIP（${ALLOW_SKIP_ENV}=1 显式要求）：三个候选位里一份已安装的 ${PACKAGE_NAME} 都没有`
+      + '（一份都没有）——这条腿默认是红的；开关只豁免"本机没有可比的东西"，'
+      + '不豁免对不上的字节，也不豁免装了别的版本，CI 里设它等于把这条闸关掉。')
   } else if (candidates.length === 0) {
     die(2, `no installed ${PACKAGE_NAME} found in any candidate dir — the pin's bytes were never compared with the artifact the registry served`,
       `run npm ci at the repository root (its node_modules/${PACKAGE_NAME} is the first candidate and the shape CI's install-gate has); `

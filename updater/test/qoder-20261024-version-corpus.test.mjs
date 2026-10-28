@@ -157,9 +157,14 @@ test('装了但不是 pin 那一版 = 分歧（红 1，且报出两边的版本�
     assert.match(run.stderr, /0\.2\.0/, '要报出读到的是哪一版：' + run.stderr)
     assert.match(run.stderr, /0\.1\.9/, '要报出 pin 记的是哪一版：' + run.stderr)
     // 开关不冒充这条分歧的解药：它在这里同样拒（这条机器的说法是"装了别的版本"，不是"没装"）。
+    // 2026-10-28 复正：下面这两句从前断的是 `status 0` + `SKIP`，与本行注释正好相反——
+    // 那一支把"装了但不是 pin 那一版"也豁免掉了，于是安装态与 pin 分叉的机器上这条腿
+    // 打印一份没人量过的绿色。豁免只给"本机没有可比的东西"（`candidates.length === 0`），
+    // 判据在 `scripts/check-kernel-corpus.mjs` 的 D2 那一段。
     const skipped = runCorpus(tree, [], { [ALLOW_SKIP_ENV]: '1' })
-    assert.equal(skipped.status, 0, `显式要求跳过时它得真的跳过并自报：${skipped.out}`)
-    assert.match(skipped.stdout, /SKIP/, skipped.stdout)
+    assert.equal(skipped.status, 1, ` stale install 被开关放行了：${skipped.out}`)
+    assert.match(skipped.stderr, /stale install is a disagreement, not a skip/, '拒绝要说出为什么这不是"没装"：' + skipped.stderr)
+    assert.doesNotMatch(skipped.stdout, /SKIP/, '豁免那一支一个字都不许打印，否则读 stdout 的 CI 会以为这腿过了')
   } finally {
     tree.cleanup()
   }
