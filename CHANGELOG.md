@@ -6,6 +6,15 @@
 
 （空。1.25.0 收口后没有未归号的条目。)
 
+## [1.25.1] — 2026-10-28
+
+**为什么是 1.25.1 而不是 1.25.0。** `v1.25.0` 这个 tag 已经推出去了，但它那一棵树在 CI 的
+ `product-surface`（`engine-methods` 那条）上是红的：本轮一处 daemon 侧修复动了
+ `FrameCodec.swift` 的全文件 blob，而那份契约归 10:30 那条线。发布闸因此拒绝它（这正是那条闸该做的
+ 事），本线按既有纪律**不移动已推的 tag**——`v1.25.0` 是一格有解释的空号（先例：v1.16.2、v0.8.3），
+ 本版把那一处撤回后取 1.25.1 发出去。两格的内容差就是这一处撤回，CHANGELOG 的 1.25.0 条目里
+ 已按事实改写那一条。
+
 ## [1.25.0] — 2026-10-28
 
 **版本判断：minor。** 判据仍是 1.6.2 写下、1.22.0/1.23.0/1.24.0 各自复述过的那一条：patch 要求
@@ -78,9 +87,13 @@ exit 3「no project --dry-run is registered」，而 `--dry-run` 从未被执行
   （路由兜底、`last_evidence` 帧解析两处、局部报告行）改为：线上一句只给错误类型并说明明细
   去了哪里，明细进网关自己的 stderr。理由与 daemon `Dispatcher.swift` 拒绝回显 `NSError`
   描述同一条——那种描述写着绝对路径。`describeCause()` 随之删除。
-- **`method` 未知时把调用方原文不限长回显**（P2），并且报的是 Swift 的表示法
-  （`method 'Optional(obsserve)'`）。新增 `RequestParser.callerMethodDescription`：按 JSON 类型
-  报调用方送的东西，短的原样、超上限走既有的 `ParamValidation.cappedParamKey`。
+- **`method` 未知时把调用方原文不限长回显**（P2）——本轮**没有**随本版发出，原因是它钉在另一条线上：
+  那句 `method ...` 的构造住在 `engine/Sources/GlassPaneEngine/FrameCodec.swift`，而 harness 线的
+  `harness/glasspane-harness/contracts/engine-methods.json` 用 `swiftBlob` 钉住**整个文件**的 git blob 哈希
+  （`product-surface` 那条规则量的是全文件）。改它 = 要求那条线同日重记契约，本线无权动那个子树。
+  本线能负责的那一半已经修完：壳侧不再把任何帧正文写进日志（`frameBodyNotLoggedNote`/`shortFieldValue`），
+  网关不再把内部异常原文上线（`wireCause`）。剩下那一半是 daemon 把它**自己调用方**送来的值回显给
+  该调用方——不构成对第三方的泄露，交接判据与确切命令写在 `specs/GlassPane_每日2026-10-28_状态.md`。
 
 ### 用法、装机与更新器
 

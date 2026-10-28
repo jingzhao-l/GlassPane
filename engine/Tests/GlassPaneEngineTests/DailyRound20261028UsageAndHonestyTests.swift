@@ -189,29 +189,14 @@ final class DailyRound20261028UsageAndHonestyTests: XCTestCase {
                        "那个数就是这两条自己的大小，不是抄来的、也不是折出来的")
     }
 
-    // MARK: - S-F1：错误帧不许不限长地回显调用方原文
-
-    /// `method` 未知时那句错误从前把调用方的原文整个拼回去（任何类型、最长到帧上限），
-    /// 而本仓对"未知参数名"早有 `cappedParamKey` 这一条。这里量的是同一个未知值经过
-    /// 两条路得到同一个上限——不是新发明一个判据。
-    func testUnknownMethodEchoIsBoundedLikeUnknownParamKeys() throws {
-        let long = String(repeating: "m", count: 5_000) + "-screen-text"
-        let failure = RequestParser.parse(Data("{\"id\":1,\"method\":\"\(long)\"}\n".utf8))
-        guard case .failure(let error) = failure else {
-            return XCTFail("一个不存在的方法必须被拒")
-        }
-        let message = error.error.message
-        XCTAssertFalse(message.contains(String(repeating: "m", count: 200)),
-                       "调用方原文被不限长回显进了错误帧：\(message.prefix(200))")
-        XCTAssertTrue(message.contains("code points total"),
-                      "截断要标明总量，而不是悄悄剪掉：\(message.prefix(300))")
-        // 对照：一个正常的短方法名打错时照原样报——截断不许变成编辑器。
-        let shortFailure = RequestParser.parse(Data("{\"id\":2,\"method\":\"obsserve\"}\n".utf8))
-        guard case .failure(let shortError) = shortFailure else {
-            return XCTFail("拼错的方法必须被拒")
-        }
-        XCTAssertTrue(shortError.error.message.contains("'obsserve'"), shortError.error.message)
-    }
+    // S-F1（daemon 侧把调用方原文不限长回显进错误帧）本轮**没有**在这里修：
+    // 那句 `method ...` 的构造住在 FrameCodec.swift，而 harness 线的
+    // `harness/glasspane-harness/contracts/engine-methods.json` 把**整个文件**的 blob 钉住
+    // （`product-surface` 的 swiftBlob 规则量的是全文件哈希）——改它就要求那条线同日重记契约，
+    // 本线无权动那个子树。本轮把可由本线负责的那一半修完了：壳侧不再把任何帧正文写进日志
+    // （frameBodyNotLoggedNote / shortFieldValue），网关不再把内部异常原文上线（wireCause）。
+    // 剩下的那一半是 daemon 把它**自己调用方**送来的值回显给该调用方，交接判据与确切命令
+    // 写在 specs 的收口台账里。
 
     // MARK: - helpers
 
