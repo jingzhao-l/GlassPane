@@ -4,7 +4,135 @@
 
 ## [Unreleased]
 
-（空。1.24.1 收口后没有未归号的条目。)
+（空。1.25.0 收口后没有未归号的条目。)
+
+## [1.25.0] — 2026-10-28
+
+**版本判断：minor。** 判据仍是 1.6.2 写下、1.22.0/1.23.0/1.24.0 各自复述过的那一条：patch 要求
+「状态文件的字段没动、退出码集合没动、CLI 参数没动、npm 包的 `bin` 声明没动」。本轮动了其中两项：
+`glasspaned` 六面取值旗（`--request-permission`/`--active-project`/`--project-remove`/
+`--recipe-validate`/`--older-than`/`--project`）对「下一个 token 是另一面旗」从**吞掉它**改为
+用法错 64 + 整块 usage（此前 `glasspaned --state-dir X --project-remove --dry-run` 答的是
+exit 3「no project --dry-run is registered」，而 `--dry-run` 从未被执行）；`updater --help`
+从 stderr 搬到 stdout（同一失败类此前三个入口两套答案）。状态文件字段、两个 npm 包的 `bin`
+声明、证据 schema 都没动。本版没有合并任何未发布的旧号。
+
+本轮审出 24 条已核实缺陷，全部随本版发出；每条的失效模式与证据如下。
+
+### 证据诚实性（本产品的立身之本）
+
+- **输入通道掉过一次又装回来，归因仍发布「全程在测」**（P0）。`CGEventInputMonitor` 的读清位
+  `disabledSinceLastCheck()` 在自己文件的注释里写着「读者只有一个：`AttributionGuard` 的采样点」，
+  而守卫从来没问它——实测只有两条单元测试在读（有主张、无读者）。`tap` 在两次采样之间被系统停用
+  又重装成功时，两个采样点都读到 `tapAlive == true`、`humanEvents` 照样为空，于是档案里写下
+  `the input stream was watched for the whole operation window` 并给出 `.strong` 归因，而那段掉线里
+  的事件不会补投。修：协议加第三问 `inputTapDisabledSinceLastCheck()`（默认 false，与 2026-10-22
+  那条截短问同一条折叠路径），acquire / 每次采样 / release 收尾三处都问。
+  `DailyRound20261028TapDisableLatchTests` 8 条，含对照与反向变异。
+- **pid 被回收复用后，通道继续驱动别人家的 app**（P0）。`AXChannel.isProcessAlive()` 从前是
+  `kill(pid, 0)`：它回答的是「有没有进程占着这个号」。附着时记下的 bundleId 从没被复核。修：
+  附着记下 (bundleId, 进程起始时刻·微秒)，`isProcessAlive()`、`requireAppElement()`（`ping`/树读/
+  几何读/`performAction`/`readProperty` 全走这一道）与 `captureWindow()` 都按身份答；两半都记不到
+  时拒绝附着。代号沿用既有的 `appNotFound`，不新造线上词汇。真 app + 真 `proc_pidinfo` 读数驱动，
+  不用桩。
+- **收尾按路径删 socket，删掉的是继任者正在监听的那个**（P0）。`--force-socket` 的成文语义是
+  「旧实例继续活着，但失去这个 socket 名」，于是前任握着与继任同一个路径字符串；前任后来的
+  `run()`/`cleanup()`/`stop()`/sigwait 收尾都按名字 unlink。`SocketServer.swift` 文件头那句
+  「never unlink a socket file this instance did not create」一直存在，撑着它的却只有一个布尔。
+  修：新增 `SocketNameOwnership`，bind 成功后记 `lstat` 的 (st_dev, st_ino)，只在那个名字仍指着
+  它时才删；记不到就不删（下一次启动本来就会在亲眼确认无主之后清理）。附带量到并修掉一个平台
+  假设：macOS 上 `fstat(socket fd)` 回的是 VNONCE（`st_dev = -1`），与路径的 `lstat` 不是同一个
+  东西，所以记账必须走名字——这一条是测试的前提闸先红、才改成现在这一版的。
+- **0600 从 bind 那一刻就要成立，不是 chmod 之后**（P1）。`ReviewLifecycleTests` 在中间插入一次
+  系统调用后读到 `0755`：AF_UNIX 的 inode 按 `0777 & ~umask` 创建，`chmod` 是修复+复验，不建立
+  不变量。修：`SocketBindGuard.bindWithPrivateMode` 在 bind 那一步把 umask 收到 `0177`。对照用例
+  同时量「不设防时它不是 0600」，否则这条会由一台 umask 本来就严的机器空过。
+- **面板把部分统计到的档案字节总量当成测量发布**（P1）。`LocalArchive.scanEvidence` 对读不出
+  尺寸的条目 `total += listedSize ?? 0`，而 daemon `EvidenceStore.stats()` 对同一件事答 null +
+  exit 1（「not obtained … rather than the smaller total of the entries that did answer」）。
+  同一行里 `N 条` 用的是解得开的份数、`X KB` 用的是所有条目的人口。修：`totalBytes` 改可空 +
+  具名 `sizeFailure` + `entryCount` 用「拥有的人口」，面板那一行在没测全时写「总量未测得」。
+- **被 SIGTERM 打断的 act 不会留下档案，而这件事此前无人说出**（P2）。收尾 waiter 现在读
+  `EngineCore.activeOperationId`（act 进入时置、`defer` 两条出路都清），把「哪一次的证据没进档案」
+  写到 stderr。退出码仍为 0：本次实例确实干净收尾了，而把 rc 改成非零会翻转 launchd 的
+  `KeepAlive=SuccessfulExit=false` 语义——那是改运维契约，不是补诚实。
+- **`--grant-accessibility` 替 daemon 宣布「ready to attach」**（P1）。它量的是本进程的
+  `AXIsProcessTrusted()`，而 `--help` 与 `--permissions` 都写明那不是 daemon 的席位。文案改为
+  只说本进程测到了什么，并把下一步指向真能问到 daemon 席位的那条命令。
+- **给人看的文案里夹着内部 § 引用与自辩话术**（P1，本仓产品规则）。清掉 `glasspaned`
+  的一行、`installer/cli.js` 的五处、`UpdatePanelLogic.swift` 的两处；`RecipesTabView` 不再把
+  kernel schema 的 `description` 原样渲染到屏上（那会把内部批次号 R35 交给用户）。判据由
+  `DailyRound20261028UsageAndHonestyTests` 与 `DailyRound20261028PanelUiDefectTests` 量，
+  且只量真会打印出来的行——把注释当缺陷，下一轮就会删注释换绿。
+
+### 信息外泄（同一条规则的其余落点）
+
+- **daemon 帧的正文被抄进日志的七个分支**（P1）。`handleMessage` 七个「这帧不属于任何在途请求」
+  的分支各自 `truncate(line)` 把原样帧写进 report sink，上限 64 KiB；而同一文件早已为迟到回复
+  写过唯一作者 `lateReplyBodyNote`（只报字节数 + 确定性摘要，正文留在状态根的证据档案里）。
+  同一模块对同一批字节持有两条相反规则，且此前没有任何测试驱动过这七支。修：七支全部走
+  `frameBodyNotLoggedNote`，非数字 id 那一支的**字段**也加上界（短的原样报，那是诊断要的；
+  长的按「字符数 + sha256 + 字节数」报）。`truncate()`/`LOG_BODY_CHARS` 一并删除——正文上限
+  一旦存在就会被重新拿起。
+- **HTTP 网关把内部异常原文答给调用方**（P2，四处）。`String(error)` 上线的那四处
+  （路由兜底、`last_evidence` 帧解析两处、局部报告行）改为：线上一句只给错误类型并说明明细
+  去了哪里，明细进网关自己的 stderr。理由与 daemon `Dispatcher.swift` 拒绝回显 `NSError`
+  描述同一条——那种描述写着绝对路径。`describeCause()` 随之删除。
+- **`method` 未知时把调用方原文不限长回显**（P2），并且报的是 Swift 的表示法
+  （`method 'Optional(obsserve)'`）。新增 `RequestParser.callerMethodDescription`：按 JSON 类型
+  报调用方送的东西，短的原样、超上限走既有的 `ParamValidation.cappedParamKey`。
+
+### 用法、装机与更新器
+
+- **六面取值旗吞掉下一面旗**（P1）。判据收进 `ArgumentValue`，与三面路径旗共用的
+  `StateRootArgument.rejection` 同一条规则、两处各守其面。端到端用真二进制量：rc 64 + 整块
+  usage，并保留「给了真值就不该被拒」的对照。
+- **`ps` 没答话被当成「没有在跑的实例」**（P1）。`listRunningPids` 此前在 `ps` 退非零/起不来时
+  返回 `[]`，调用方据此跳过收拢**和** launchd kickstart，然后在旧 daemon 仍握着 socket 的情况下
+  起一个手工实例——把「没答话」折成「没有」，违反本文件自己的 `PROBE_STATES` 三口径。修：
+  三态返回，没答话时照跑 kickstart 并红字说出被跳过的是哪一步。
+- **签名检查「没跑成」被折进「未签名，继续装」**（P1）。`tagVerifyDecision` 的 `unavailable`
+  （gpg 不在、导公钥失败、抛错）此前与 `unsigned` 同一条 warn-and-continue 出路，装完 npm 依赖、
+  swift build 与 launchd 注册。updater 那一侧一直把这两件事分开并要求人签字。修：`unavailable`
+  独立成拒绝分支，需要显式 `--accept-unverified-signature` 才放行；`invalid` 照旧不可覆盖。
+- **状态根读 `$HOME`，而产品其余部分读口令档案**（P1）。`installer/glasspane.js` 的
+  `stateRootOf` 此前按 `$HOME`/`os.homedir()` 拼根，于是 `glasspane doctor` 对一次健康的安装报
+  「安装指针缺席」、`runUpdate` 把 `--state-dir <错根>` 交给真更新器。同一类还在
+  `updater/lib/binaries.js` 与 `updater/lib/launchd.js`。修：三处一律 `os.userInfo().homedir`，
+  读不到就答「未验证」而不是猜；文案里 `export HOME=…` 那类只搬得动一个进程的补救，全部换成
+  真生效的开关（`--state-dir` / `GLASSPANE_INSTALL_DIR`，并说明手动搬 `$HOME` 会让两侧指着两个根）。
+- **`--record` 的两个半写失败**（P2）。`check-kernel-corpus.mjs` 的 prune 撞上未 pin 的目录时以
+  `ERR_FS_EISDIR` 死在拷贝之后（半新半旧的镜像 + 一个栈）；pinned 目标位本身是目录时同样。
+  修：先探测后写入，非普通文件具名拒绝且一个字节都不动（不递归删——那会把 pin 没描述过的树
+  洗进金样）。
+- **`GLASSPANE_KERNEL_CORPUS_ALLOW_SKIP=1` 连「装了但不是 pin 那一版」也一起豁免**（P2）。
+  `pinnedInstall === null` 同时代表「什么都没装」与「装了别的版本」，而开关先判 ⇒ 后者从前者那扇
+  门出去，打印一份没人量过的绿色，与本文件自己的注释相反。修：豁免只对着 `candidates.length === 0`。
+  这条此前被一条既有测试钉死（`qoder-20261024-version-corpus.test.mjs:160-162` 断言 `status 0` +
+  SKIP，而同一处 `:159` 的注释写的是「开关不冒充这条分歧的解药」）——按注释的说法把断言翻正。
+- **`updater --help` 打在 stderr**（P2）：`updater --help | grep X` 读不到东西，而其余三个入口
+  都在 stdout。一并把 updater 的退出码表写进它自己的 USAGE（此前只有 README 有），并给两个
+  JS 入口各加一行「同一失败类在三个二进制里的码是 2 / 2 / 64」——这是**记录**一处已知分叉，
+  不是改契约：改退出码会打到已经在读 rc 的调用方。
+- **README 的三处假主张**（P1）：`--permissions` 并不自报版本（实测键集合里没有 `version`，
+  改为指向 `glasspaned --version`）；`gp_assert_element` 的可断言属性此前写成
+  present/enabled/value，真实闭集是 `title|value|role|enabled|focused`（README 两处 + 双语
+  共八处，判据从 `AssertionProperty.allCases` 现算，不抄字面量）。
+- **两个跑不到的分支**（P2）：屏幕录制席位那条 `denied` 打印——SDK 只给
+  `CGPreflight/CGRequestScreenCaptureAccess()` 两个布尔，本 binary 无从区分 denied 与
+  not-determined，所以删掉那句由推断点亮的指示器；`PermissionGuide.bannerHint` 唯一的读者是它
+  自己的 `isEmpty` 断言，字段与断言一并删。
+- **面板两处控件缺陷**（P1/P2）：「打开报告」在 `packLoad == .loaded` 而 `pack == nil` 这一
+  可达帧下静默返回（本项目里「按钮按下去无事发生」是 P0 级），改为走 `lastActionMessage` 说出
+  缺什么与下一步；`ApprovalsTabView` 每条台账记录写一个永久 UserDefaults 键（无界增长），
+  改为单键 + 24 条 LRU；折叠态与配方校验结论此前在切页时丢失，改为与兄弟控件同一
+  `@AppStorage` 机制。
+
+### 判定归属
+
+- 判定性逻辑仍全部留在 Swift：壳侧本轮没有新增任何 pass/fail 合成，`surface-semantics` 那把闸
+  本轮**没有**动用 `--record` 掩盖任何东西；只有面 A 的 LOC 棘轮按政策重记（单独一条
+  `chore(harness)` 提交，动的行逐条点名）。
 
 ## [1.24.1] — 2026-10-28
 
