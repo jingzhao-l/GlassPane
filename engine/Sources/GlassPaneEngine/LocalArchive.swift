@@ -196,7 +196,19 @@ public struct EvidenceArchiveScan: Equatable {
     /// 存在但解不开的文件名（不静默丢，条数要呈现）。
     public let unreadableFiles: [String]
     public let directoryExists: Bool
-    public let totalBytes: Int
+    /// 本档案所有条目的字节总量；**有条目没报出大小时为 nil**。从前这里是 `Int` 并把
+    /// 读不到大小那一条折成 `?? 0`，于是面板用一个更小的总数冒充一次测量——而 daemon
+    /// `--evidence-stats` 对同一件事的判据写在 `EvidenceStore.stats()` 里："not
+    /// obtained … reported as null with exit 1 rather than as the smaller total of the
+    /// entries that did answer"（本轮修的缺陷）。
+    public let totalBytes: Int?
+    /// nil = 每一个所有条目都报出了大小。非 nil = 哪几个没报出来，句子由本文件与
+    /// `EvidenceStore` 同一口径写；把它折回一个数字等于把"我没测到"说成"就这么大"。
+    public let sizeFailure: String?
+    /// 本档案**拥有**的条目数（`op_<26>.json` 那一份人口）。与 `summaries.count` 是两
+    /// 个数：后者只数解得开的。同一行里说"N 条 · X KB"时 KB 数的是拥有的人口，条数也
+    /// 必须用同一份人口，否则三个文件配一个"条"就是这一行自己在打架。
+    public let entryCount: Int
     /// nil = 列举**真的完成了**，所以 `summaries.isEmpty` 说的是"里面没有档案"。
     /// 非 nil = 目录存在却读不了，理由在这里；把它折回空档案等于把"我看不了"
     /// 说成"那里没有"。
@@ -206,13 +218,19 @@ public struct EvidenceArchiveScan: Equatable {
         summaries: [EvidenceSummary],
         unreadableFiles: [String],
         directoryExists: Bool,
-        totalBytes: Int,
+        totalBytes: Int?,
+        sizeFailure: String? = nil,
+        entryCount: Int? = nil,
         listFailure: String? = nil
     ) {
         self.summaries = summaries
         self.unreadableFiles = unreadableFiles
         self.directoryExists = directoryExists
         self.totalBytes = totalBytes
+        self.sizeFailure = sizeFailure
+        // 没显式给就按"这一份人口等于解得开的那一份"——只有既有调用方那种"扫不出
+        // 任何拥有条目"的场合会走到这里，此时两个数确实相同。
+        self.entryCount = entryCount ?? summaries.count
         self.listFailure = listFailure
     }
 
@@ -276,7 +294,13 @@ public enum LocalArchive {
     /// `unreadableFiles`，条数与名字都呈现。
     public static func scanEvidence(
         directory: String = EvidenceStore.defaultDirectory,
-        fileReader: (String) -> Data? = { path in try? Data(contentsOf: URL(fileURLWithPath: path)) }
+        fileReader: (String) -> Data? = { path in try? Data(contentsOf: URL(fileURLWithPath: path)) },
+        /// 单条目尺寸的读法，默认与 daemon `stats()` 同一句（`.fileSizeKey`）。可注入是
+        /// 因为生产里"报不出大小"是**列完之后那条被并发改掉**（prune 与扫描赛跑）才出现的
+        /// 形态；单元测试造不出这个竞态，而这条判据不许因此只能钉文本。
+        sizeReader: (String) -> Int? = { path in
+            try? URL(fileURLWithPath: path).resourceValues(forKeys: [.fileSizeKey]).fileSize
+        }
     ) -> EvidenceArchiveScan {
         let url = URL(fileURLWithPath: directory)
         guard FileManager.default.fileExists(atPath: directory) else {
@@ -302,6 +326,8 @@ public enum LocalArchive {
         var summaries: [EvidenceSummary] = []
         var unreadable: [String] = []
         var total = 0
+        var sizeFailures: [String] = []
+        var ownedEntries = 0
         for name in names {
             let path = directory + "/" + name
             guard EvidenceStore.isEntryName(name) else {
@@ -312,18 +338,23 @@ public enum LocalArchive {
                 unreadable.append(name)
                 continue
             }
+            ownedEntries += 1
             // Defect 9: the archive's size is what the daemon counts — the size of
             // every entry it owns, including one whose *contents* cannot be read.
             // Summing only the files that decoded made the panel state a smaller
             // archive in exactly the same breath as reporting it partly unreadable.
-            let listedSize = try? url.appendingPathComponent(name)
-                .resourceValues(forKeys: [.fileSizeKey]).fileSize
+            let listedSize = sizeReader(path)
+            // 大小报不出来 ⇒ 这一条**不计入**总量，而是记进 `sizeFailures`。把它折成
+            // `?? 0` 就是把"没测到"写成一个更小的测量值（daemon 那一侧同一件事报 null）。
+            if let listedSize {
+                total += listedSize
+            } else {
+                sizeFailures.append(name)
+            }
             guard let data = fileReader(path) else {
-                total += listedSize ?? 0
                 unreadable.append(name)
                 continue
             }
-            total += listedSize ?? data.count
             guard let pack = try? EvidencePack.decodeAndValidate(data) else {
                 unreadable.append(name)
                 continue
@@ -334,11 +365,19 @@ public enum LocalArchive {
             if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
             return lhs.operationId > rhs.operationId
         }
+        // 与 `EvidenceStore.stats()` 同一句判据：有条目没报出大小，总量就不是"测得的"，
+        // 报 null 而不是报那个少了几KB的数字。名字点出来，读的人才知道缺的是哪一份。
+        let sizeStatement: String? = sizeFailures.isEmpty ? nil :
+            "\(sizeFailures.count) of \(ownedEntries) archive entries would not report a size "
+            + "(first: \(sizeFailures.first ?? "")), so totalBytes is not obtained — this is reported as "
+            + "null rather than as the smaller total of the entries that did answer"
         return EvidenceArchiveScan(
             summaries: summaries,
             unreadableFiles: unreadable,
             directoryExists: true,
-            totalBytes: total,
+            totalBytes: sizeFailures.isEmpty ? total : nil,
+            sizeFailure: sizeStatement,
+            entryCount: ownedEntries,
             listFailure: listFailure
         )
     }

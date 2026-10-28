@@ -89,6 +89,10 @@ public final class ProbeSocketServer {
     private let stateLock = NSLock()
     private var running = false
     private var listenFD: Int32 = -1
+    /// 本实例 bind 成功那一刻 socket 的 (st_dev, st_ino)。`stop()` 从前按路径删文件，
+    /// 而 `--force-probe-socket` 之后同一个路径字符串可以正指着继任者**正在监听**的
+    /// socket——探针那条注入面就从此没人看得见（与 `SocketServer` 同一条缺陷、同一修法）。
+    private var boundInode: SocketInode?
     /// Every descriptor still owned: the listener plus accepted clients.
     /// Membership is the single ownership token (A-17). The client share of this
     /// set is what `maxConcurrentClients` bounds (A-11).
@@ -161,13 +165,13 @@ public final class ProbeSocketServer {
         guard chmod(socketPath, 0o600) == 0 else {
             let code = errno
             abandonListen(fd)
-            unlink(socketPath)
+            SocketNameOwnership.removeIfOurs(recorded: boundInode, atPath: socketPath)
             throw ProbeServerError.system(code, "chmod(0600)")
         }
         guard listen(fd, Int32(ProbeSocketServer.listenBacklog)) == 0 else {
             let code = errno
             abandonListen(fd)
-            unlink(socketPath)
+            SocketNameOwnership.removeIfOurs(recorded: boundInode, atPath: socketPath)
             throw ProbeServerError.system(code, "listen()")
         }
 
@@ -214,8 +218,12 @@ public final class ProbeSocketServer {
             abandonListen(fd)
             throw ProbeServerError.invalidPath(socketPath)
         }
-        let bound = ProbeSocketServer.withReboundAddress(address) { pointer, length in
-            bind(fd, pointer, length)
+        // 与 engine.sock 同一条：名字的 0600 从 bind 那一刻成立，不靠后面那句 chmod 补
+        // （探针 socket 是被注入的那一面，窗口更要不得）。
+        let bound = SocketBindGuard.bindWithPrivateMode {
+            ProbeSocketServer.withReboundAddress(address) { pointer, length in
+                bind(fd, pointer, length)
+            }
         }
         guard bound == 0 else {
             let code = errno
@@ -224,6 +232,11 @@ public final class ProbeSocketServer {
                 ? ProbeServerError.nameOccupied("bind(\(socketPath)): name already bound")
                 : ProbeServerError.system(code, "bind(\(socketPath))")
         }
+        // 名字从这一刻起属于这个 fd：记下它的 inode，后面每一处 unlink 都要对着它验一次。
+        let inode = SocketNameOwnership.currentInode(atPath: socketPath)
+        stateLock.lock()
+        boundInode = inode
+        stateLock.unlock()
         return fd
     }
 
@@ -261,6 +274,10 @@ public final class ProbeSocketServer {
         running = false
         let listener = listenFD
         let clients = ownedFDs.filter { $0 != listener }
+        // 与 `listenFD` 同一把锁里取、同一把锁里清：inode 是"这个名字归不归我"的凭证，
+        // 取的时候若与写入者错开，就可能拿别人刚换上的那一个去判"是我的"。
+        let recordedInode = boundInode
+        boundInode = nil
         stateLock.unlock()
         // Wake the reader threads and let each close *its own* descriptor on
         // the way out: stop() never closes a descriptor another thread may be
@@ -268,7 +285,12 @@ public final class ProbeSocketServer {
         // calls out and what double-closed these descriptors before (A-17).
         for fd in clients { shutdown(fd, SHUT_RDWR) }
         wakeAccept(listener: listener)
-        unlink(socketPath)
+        // 只删自己那一个 inode：名字已被继任者 bind 走时留它在原地，让那扇门继续开着。
+        if SocketNameOwnership.removeIfOurs(recorded: recordedInode, atPath: socketPath) {
+            log.info("probe socket removed \(socketPath)")
+        } else {
+            log.info("left \(socketPath) in place: it is not the socket this listener bound")
+        }
     }
 
     /// Unblock the accept thread without closing the descriptor it is blocked

@@ -317,6 +317,16 @@ public final class CGEventInputMonitor: InputEventSource, InputSourceMonitoring,
         eventsDroppedSinceLastCheck()
     }
 
+    /// 本文件的 `disabledSinceLastCheck()` 在生产里的**唯一**读者就是这里
+    /// （`AttributionGuard.noteTapDisabled()`，与上面那条截短问走同一条折叠）。
+    /// 从前它只有测试在读：tap 掉过一次又装回来时，两个采样点都读到 `tapAlive == true`，
+    /// 裁决于是发布 "the input stream was watched for the whole operation window"，
+    /// 而那段掉线里的事件不会补投——这一位上挂着的事实没人问。累计次数仍在
+    /// `tapDisableCount` 上，别处要看次数请读那条，不要在别处调这一条。
+    public func inputTapDisabledSinceLastCheck() -> Bool {
+        disabledSinceLastCheck()
+    }
+
     // MARK: - Liveness / diagnostics
 
     public var isTapAlive: Bool { isMonitoringInput }

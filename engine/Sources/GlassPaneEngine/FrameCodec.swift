@@ -119,6 +119,26 @@ public struct ParseFailure: Error {
 
 public enum RequestParser {
 
+    /// 调用方送来的 `method` 该怎么写进那句拒绝。
+    ///
+    /// 两件事在这一支上都要成立，而 `String(describing: dict["method"])` 两件都不做：
+    /// ① 报的是**调用方送的东西**，不是 Swift 的表示法——实测它会写出
+    ///    `method 'Optional(obsserve)'`，那个壳是本进程的内存模型，读的人只会照着它去找
+    ///    一个叫 `Optional(obsserve)` 的方法；② 原样回显一个调用方可控的、最长到整帧上限
+    ///    （4 MiB）的值，是把日志与线格式交给对方决定——本仓对"未知参数名"早有
+    ///    `ParamValidation.cappedParamKey` 这一条，两个未知面不许两套口径。
+    /// 短的原样报（那是一个人说得出、能照着改的名字），超上限的按"总量 + 前缀"报，
+    /// 截断要标明，不许悄悄剪。
+    static func callerMethodDescription(_ raw: Any?) -> String {
+        guard let raw else { return "<absent>" }
+        if raw is NSNull { return "null" }
+        if let string = raw as? String { return ParamValidation.cappedParamKey(string) }
+        if let number = raw as? NSNumber { return ParamValidation.cappedParamKey(number.stringValue) }
+        if let array = raw as? [Any] { return "<array of \(array.count)>" }
+        if let object = raw as? [String: Any] { return "<object of \(object.count) keys>" }
+        return ParamValidation.cappedParamKey("\(raw)")
+    }
+
     /// Parses a single frame payload into a request. Every failure maps to a
     /// GPError so the dispatcher can always answer with a structured frame.
     public static func parse(_ data: Data) -> Result<ParsedRequest, ParseFailure> {
@@ -167,7 +187,7 @@ public enum RequestParser {
                 // 改的只有文案。
                 error: GPError(
                     code: .methodNotFound,
-                    message: "method '\(String(describing: dict["method"]))' is not one the engine implements. The agent-facing capabilities it answers — and the set `hello` publishes in its `capabilities` field — are \(EngineMethod.capabilityWireNames.joined(separator: ", ")). Beyond that list this daemon also answers \(EngineMethod.unadvertisedMethodWireNames.joined(separator: " and ")), which are the handshake itself and an operational action rather than capabilities, so `hello` does not advertise them; call hello to read the advertised set from the running daemon instead of from this message"
+                    message: "method '\(RequestParser.callerMethodDescription(dict["method"]))' is not one the engine implements. The agent-facing capabilities it answers — and the set `hello` publishes in its `capabilities` field — are \(EngineMethod.capabilityWireNames.joined(separator: ", ")). Beyond that list this daemon also answers \(EngineMethod.unadvertisedMethodWireNames.joined(separator: " and ")), which are the handshake itself and an operational action rather than capabilities, so `hello` does not advertise them; call hello to read the advertised set from the running daemon instead of from this message"
                 )
             ))
         }

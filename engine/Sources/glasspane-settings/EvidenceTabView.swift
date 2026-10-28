@@ -90,10 +90,18 @@ struct EvidenceTabView: View {
         // 读不出条数的时候不许印 0：那一句就在"档案读不了"旁边，两个零会被读成
         // "这里确实没有东西"。
         if case .failed = model.evidenceState { return "条数未测得" }
-        if !model.unreadableFiles.isEmpty {
-            return "\(model.summaries.count) 条 · \(model.unreadableFiles.count) 个文件读不开"
+        // "N 条"用的是档案**拥有**的条目数（与 daemon `--evidence-stats` 的 count 同一份
+        // 人口）；从前这里是 `summaries.count`，于是三个文件配一个"条"，而同一行的字节数
+        // 明明按三个文件算——两个数各自没错，写在一行里就是自相矛盾。
+        let entries = "\(model.archiveEntryCount) 条"
+        if let failure = model.archiveSizeFailure {
+            // 总量没测全 ⇒ 不印一个更小的数字，把"哪几条没报出来"说出来。
+            return "\(entries) · 总量未测得（\(failure)）"
         }
-        return "\(model.summaries.count) 条 · \(ConsoleTheme.bytes(model.archiveTotalBytes))"
+        if !model.unreadableFiles.isEmpty {
+            return "\(entries) · \(model.unreadableFiles.count) 个文件读不开"
+        }
+        return "\(entries) · \(ConsoleTheme.bytes(model.archiveTotalBytes ?? 0))"
     }
 
     @ViewBuilder
@@ -764,8 +772,22 @@ struct EvidenceDetailView: View {
     /// 且只往一个属于本用户、同组/其他人写不动的目录里写。从前这里是一句
     /// `try? data.write(to:)`——umask 给 0644、名字人人可猜，写坏了还不吭声。
     /// 写不成必须把原因说出来：把「没写成」演成「已经打开了」是这一面修过的那类缺陷。
+    ///
+    /// 整包没到手时同样要说一句：这一枚的**启用**判据是 `packLoad`，正文读的是 `pack`，
+    /// 两者同一帧里可能对不上（上面 `packPendingOrFailed` 的 `.loaded` 那一支画的就是这种帧）。
+    /// 从前这里是一句 `guard let pack else { return }`——按下去无声无息，与同胞
+    /// `revealFile()` 修掉的是同一类毛病。判据与那句话都在 `ConsoleModel.reportAction`
+    /// 里（纯函数、有单测），这一处只负责把它交给已被渲染的那条横幅。
     private func openHTMLReport() {
-        guard let pack else { return }
+        switch ConsoleModel.reportAction(pack: pack, packLoad: packLoad) {
+        case .refuse(let message):
+            model.lastActionMessage = message
+        case .render(let pack):
+            writeAndOpenReport(pack)
+        }
+    }
+
+    private func writeAndOpenReport(_ pack: EvidencePack) {
         let html = EvidenceReportGenerator.renderHTML(pack: pack, diagnostics: nil)
         switch EvidenceReportGenerator.writePrivateHTMLReport(html, operationId: pack.operationId) {
         case .written(let path):

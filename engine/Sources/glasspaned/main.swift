@@ -166,12 +166,21 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
             // `--recipe-validate`) all print it. Measured on this machine at HEAD:
             // rc=64, one stderr line, 0 bytes of stdout. Same failure class, two
             // different answers — and the quieter one taught a caller nothing.
-            guard index + 1 < arguments.count else {
-                return .error("--request-permission requires one of: accessibility | input-monitoring | screen-recording | developer-tools")
+            let permissionValue = ArgumentValue.follow(arguments, after: index)
+            if let refusal = ArgumentValue.usageError(
+                flag: "--request-permission",
+                expects: "one of: accessibility | input-monitoring | screen-recording | developer-tools",
+                value: permissionValue
+            ) {
+                return .error(refusal)
+            }
+            guard case .value(let cliValue) = permissionValue else {
+                // `usageError` 已经拦下另外两支，这里只是把"有值"这一个形状交给编译器。
+                return .error("--request-permission requires a value")
             }
             index += 1
-            guard let kind = PermissionKind.from(cliValue: arguments[index]) else {
-                return .error("--request-permission unknown kind: \(arguments[index])")
+            guard let kind = PermissionKind.from(cliValue: cliValue) else {
+                return .error("--request-permission unknown kind: \(cliValue)")
             }
             options.requestPermission = kind
         case "--check-developer-tools":
@@ -222,28 +231,41 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
         case "--list-projects":
             options.listProjects = true
         case "--active-project":
-            guard index + 1 < arguments.count else {
-                return .error("--active-project requires a project ID")
+            // 六个取值旗共用 `ArgumentValue` 那一条判据：后面那面旗不是值，也不许被吃掉。
+            let projectIdValue = ArgumentValue.follow(arguments, after: index)
+            if let refusal = ArgumentValue.usageError(
+                flag: "--active-project", expects: "a project ID", value: projectIdValue
+            ) {
+                return .error(refusal)
             }
+            guard case .value(let projectId) = projectIdValue else { return .error("--active-project requires a project ID") }
             index += 1
-            options.activeProjectId = arguments[index]
+            options.activeProjectId = projectId
         case "--project-prune":
             options.projectPrune = true
         case "--project-remove":
-            guard index + 1 < arguments.count else {
+            let removeValue = ArgumentValue.follow(arguments, after: index)
+            if let refusal = ArgumentValue.usageError(
+                flag: "--project-remove", expects: "a project ID", value: removeValue
+            ) {
                 // 与 `--active-project` 缺值同一码、同一形状（都是 64 + 整块 usage）。
                 // 从前这两支一个回 2 一个回 64，同一个失败类两套退出码，读 rc 的人
                 // 无法预判（`--help` 虽然如实写了两个码，但"照表分叉"的调用方仍是猜）。
-                return .error("--project-remove requires a project ID")
+                return .error(refusal)
             }
+            guard case .value(let removeId) = removeValue else { return .error("--project-remove requires a project ID") }
             index += 1
-            options.projectRemoveId = arguments[index]
+            options.projectRemoveId = removeId
         case "--recipe-validate":
-            guard index + 1 < arguments.count else {
-                return .error("--recipe-validate requires a file path")
+            let recipeValue = ArgumentValue.follow(arguments, after: index)
+            if let refusal = ArgumentValue.usageError(
+                flag: "--recipe-validate", expects: "a file path", value: recipeValue
+            ) {
+                return .error(refusal)
             }
+            guard case .value(let recipePath) = recipeValue else { return .error("--recipe-validate requires a file path") }
             index += 1
-            options.recipeValidate = arguments[index]
+            options.recipeValidate = recipePath
         case "--approval-audit":
             options.approvalAudit = true
         case "--approval-verify":
@@ -253,23 +275,33 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
         case "--evidence-stats":
             options.evidenceStats = true
         case "--older-than":
-            guard index + 1 < arguments.count else {
+            let daysValue = ArgumentValue.follow(arguments, after: index)
+            if let refusal = ArgumentValue.usageError(
+                flag: "--older-than", expects: "a day count", value: daysValue
+            ) {
                 // 缺值 = 用法错（64 + 整块 usage，与其余取值开关同一条）。
+                return .error(refusal)
+            }
+            guard case .value(let daysToken) = daysValue else {
                 return .error("--older-than requires a day count")
             }
             index += 1
-            guard let days = Int(arguments[index]), days >= 1 else {
+            guard let days = Int(daysToken), days >= 1 else {
                 // 值给到了却用不了 = 2：旗标听懂了，它带的这个值没听懂（`--help` 的
                 // 2 段说的就是这一档）。
-                return .errorCode("--older-than requires a positive integer (days), got: \(arguments[index])", 2)
+                return .errorCode("--older-than requires a positive integer (days), got: \(daysToken)", 2)
             }
             options.pruneOlderThanDays = days
         case "--project":
-            guard index + 1 < arguments.count else {
-                return .error("--project requires a project ID")
+            let projectValue = ArgumentValue.follow(arguments, after: index)
+            if let refusal = ArgumentValue.usageError(
+                flag: "--project", expects: "a project ID", value: projectValue
+            ) {
+                return .error(refusal)
             }
+            guard case .value(let projectId) = projectValue else { return .error("--project requires a project ID") }
             index += 1
-            options.maintenanceProjectId = arguments[index]
+            options.maintenanceProjectId = projectId
         case "--dry-run":
             options.pruneDryRun = true
         case "--socket-path":
@@ -364,6 +396,7 @@ private func printUsage() {
         glasspaned --guide-screen-permission
         glasspaned --check-input-permission
         glasspaned --check-accessibility
+        glasspaned --check-developer-tools
         glasspaned --permissions
         glasspaned --version
         glasspaned --request-permission <kind>
@@ -697,7 +730,11 @@ private var cliCommandLabel = "glasspaned"
 
 private func runGrantAccessibilityFlow() {
     if AXIsProcessTrusted() {
-        print("accessibility permission already granted — the daemon is ready to attach.")
+        // 这一句的主语必须是本进程：`AXIsProcessTrusted()` 问的是"现在跑这条命令的这
+        // 个进程"有没有席位，而 `--help` 与 `--permissions` 都写明了它不是 daemon 的席位
+        // （daemon 的读数由 daemon 自己答）。从前这里替 daemon 宣布"ready to attach"，
+        // 于是量到的一件事被写成另一件事的结论。
+        print("accessibility permission is granted to **this process** — the daemon's own seat is a separate measurement: read it with `glasspaned --permissions` (or the `hello` identity of a running daemon).")
         return
     }
     // Show the system prompt anchored to this process, and open the pane.
@@ -710,14 +747,14 @@ private func runGrantAccessibilityFlow() {
     // 本命令在 daemon 自身上下文运行，列表里那条 glasspaned 才是正主。
     let selfPath = Bundle.main.executablePath ?? CommandLine.arguments[0]
     print("Enable the entry for the **daemon binary itself** — \(selfPath)")
-    print("(do NOT enable the terminal instead: that seat is borrowed from the launcher and breaks under launchd — P1 v1.2 §11.4;")
+    print("(do NOT enable the terminal instead: that seat is borrowed from the launcher and breaks under launchd and at boot;")
     print(" if the entry is absent, run: glasspaned --request-permission accessibility, which lands the grant on the daemon identity)")
     let pollIntervalSeconds: UInt32 = 1
     let timeoutSeconds = 300
     var waited = 0
     while waited < timeoutSeconds {
         if AXIsProcessTrusted() {
-            print("Accessibility permission granted — the daemon is ready to attach.")
+            print("Accessibility permission granted to **this process** — the daemon's own seat stays a separate measurement: `glasspaned --permissions`.")
             return
         }
         sleep(pollIntervalSeconds)
@@ -764,7 +801,16 @@ private func runGuideScreenPermission(_ probe: ScreenCapturePermissionProbe) -> 
     case .granted:
         print("screen recording permission already granted — no action needed.")
         return .granted
-    case .notDetermined:
+    case .notDetermined, .denied:
+        // Option (b) for the unreachable-denial defect: `ScreenCapturePermissionProbe.state`
+        // is a boolean preflight (`CGPreflightScreenCaptureAccess()` returns true/false; see
+        // ScreenCapturePermission.swift) — it yields `.granted` or `.notDetermined` and can
+        // never yield `.denied`. The SDK offers no call that separates granted / denied /
+        // not-determined for screen recording, so a denial is not something this command
+        // measures. The old separate `.denied` arm printed an outright-denial sentence as if
+        // it had read one; that arm was unreachable AND it lit an indicator from an inference,
+        // violating the core rule. Both not-granted readings now report only what was actually
+        // measured: preflight came back false, i.e. "has not been granted yet".
         print("Screen recording permission has not been granted yet. A system authorization dialog is being requested now.")
         let outcome = probe.guideAccess()
         openScreenRecordingPane()
@@ -774,10 +820,6 @@ private func runGuideScreenPermission(_ probe: ScreenCapturePermissionProbe) -> 
             print("Screen recording is still not granted after the request — this run measured no decision, so it is not reported as a denial. Enable the entry for this app under System Settings > Privacy & Security > Screen Recording, then re-run: glasspaned --check-screen-permission")
         }
         return probe.state
-    case .denied:
-        print("Screen recording permission is denied. Open System Settings > Privacy & Security > Screen Recording and enable the entry for this app, then re-run: glasspaned --check-screen-permission")
-        openScreenRecordingPane()
-        return .denied
     }
 }
 
@@ -807,18 +849,25 @@ var shutdownSignalSet: sigset_t = {
 /// the winner's socket file.
 private final class ShutdownSocketRegistry {
     private let lock = NSLock()
-    private var paths: [String] = []
+    /// 名字 + 登记那一刻的 inode。只按名字删是本轮修的缺陷：`--force-socket` 的成文
+    /// 语义是"旧实例继续活着，但失去这个 socket 名"，于是前任手里这个字符串与继任正在
+    /// 监听的那个 socket 是**同一个名字、不同的 inode**——前任后来收到 SIGTERM 时按名字
+    /// unlink，删掉的是继任的监听点：进程还在、accept 还在跑、按名字再也连不上。
+    private var entries: [(path: String, inode: SocketInode)] = []
 
+    /// 登记"这个名字是我刚刚 bind 出来的"。inode 当场取（`lstat`：调用点就在 bind 成功
+    /// 之后，此刻名字还归本次监听者）。取不到 ⇒ 不登记：宁可不删，也不删别人正在用的。
     func register(_ path: String) {
+        guard let inode = SocketNameOwnership.currentInode(atPath: path) else { return }
         lock.lock()
         defer { lock.unlock() }
-        if !paths.contains(path) { paths.append(path) }
+        if !entries.contains(where: { $0.path == path }) { entries.append((path, inode)) }
     }
 
-    var current: [String] {
+    var current: [(path: String, inode: SocketInode)] {
         lock.lock()
         defer { lock.unlock() }
-        return paths
+        return entries
     }
 }
 
@@ -855,13 +904,36 @@ private func blockShutdownSignalsEarly() {
 /// fd——跨线程 close 有 fd 复用竞态。sigwait 形态三条全免疫：遮罩继承送达确
 /// 定、收尾跑在普通线程上下文；这里只 unlink socket 文件、不关在用的 fd，
 /// 与正常退出留下的现场一致。运维不再需要 kill -9。
-private func startShutdownWaiter(registry: ShutdownSocketRegistry) {
+/// 两条本轮补上的口径（同一形态不动，sigwait 的三条真机结论仍然成立）：
+/// · unlink 要按 inode 认主。`--force-socket` 的成文语义是"旧实例继续活着，但失去这个
+///   socket 名"，于是前任握着与继任正在监听的那个 socket **同名、不同 inode** 的字符串；
+///   从前这里按名字删，删掉的是继任的监听点——进程还在、accept 还在跑、按名字再也连不上，
+///   `liveness` 回 `.noListener`。名字不是自己 bind 的那个就留在原地，退出码仍是 0：
+///   本次实例确实干净地收尾了，"没删"是一次测量，不是一次失败。
+/// · 被信号打断的 act 不会留下档案，所以那一份"少了一条证据"必须由日志具名说出那个
+///   operationId。调用方那一侧本来就会收到连接被掐断，这一句是给读日志的人的。
+private func startShutdownWaiter(registry: ShutdownSocketRegistry, inFlightAct: @escaping () -> String?) {
     Thread.detachNewThread {
         var signalNumber: Int32 = 0
         while true {
             let code = sigwait(&shutdownSignalSet, &signalNumber)
             guard code == 0 else { continue }
-            for path in registry.current { unlink(path) }
+            for entry in registry.current {
+                if SocketNameOwnership.removeIfOurs(recorded: entry.inode, atPath: entry.path) {
+                    continue
+                }
+                // 与 `EngineLog` 同口径的例外：quiet 会把"名字没删"整个吞掉，而那正是
+                // 运维最需要看见的一种现场（与上面 probe socket 那一条同一个先例）。
+                FileHandle.standardError.write(Data(
+                    "glasspaned: left \(entry.path) in place — the name is not the socket this instance bound\n".utf8
+                ))
+            }
+            if let abandoned = inFlightAct() {
+                let line = "glasspaned: the shutdown signal arrived while operation \(abandoned) held the "
+                    + "operation right; that operation's evidence pack was never archived, so its absence "
+                    + "from the archive is an interrupted run, not a run that produced nothing\n"
+                FileHandle.standardError.write(Data(line.utf8))
+            }
             exit(0)
         }
     }
@@ -1761,7 +1833,7 @@ blockShutdownSignalsEarly()
 // read as unkillable. That is the shape R5-07 removed for the single-instance guard,
 // reappearing one function later. Starting the thread first costs nothing: the
 // registry is empty until a listener really binds, so an early exit unlinks nothing.
-startShutdownWaiter(registry: shutdownSockets)
+startShutdownWaiter(registry: shutdownSockets, inFlightAct: { daemonCore?.activeOperationId })
 let channel = AXChannel()
 // T9 progressive degradation is on by default: it needs no TCC permission
 // (proc_pidinfo is same-user process inspection). C33 is injected by default
@@ -1800,6 +1872,9 @@ if options.unattendedWindowDeclared {
 // form (handlerProbe/stateDiff null). --no-probe skips the listener entirely.
 var probeInbox: ProbeInbox?
 var probeServer: ProbeSocketServer?
+/// 收尾 waiter 唯一要问的那一个读数（本次实例有没有一份 act 正握着操作权）。核心在下面
+/// 才建，而 waiter 的闭包在信号到达时才跑，所以这里挂一个可写的引用而不是把它当参数传。
+var daemonCore: EngineCore?
 if options.probeEnabled, probeListenerAllowed {
     let inbox = ProbeInbox()
     let server = ProbeSocketServer(
@@ -1845,6 +1920,7 @@ let core = EngineCore(
     inputMonitorAbsenceReason: inputMonitorAbsenceReason,
     declaresUnattendedWindow: options.unattendedWindowDeclared
 )
+daemonCore = core
 // X-22's read side: the root resolved above is the fact the console and the HTTP
 // gateway both need, and until now it lived only in this process's argv.
 core.stateRootPath = stateRoot.path

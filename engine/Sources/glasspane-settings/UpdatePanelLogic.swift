@@ -476,7 +476,7 @@ enum UpdatePanel {
 
     static let runningText = "上一个操作还在进行，等它结束再点。"
 
-    /// "面板不替它签字"之后的那一步该去哪儿读原话：**这一页真的写出来的那一份程序**。
+    /// "要看清缺什么"的那一步该去哪儿读原话：**这一页真的写出来的那一份程序**。
     ///
     /// 从前这里写的是"跑一次 `updater status`"，而这台机器上没有任何叫 `updater`
     /// 的可执行文件——那句话指的路人走不通，而它是这一屏唯一给出的下一步。
@@ -485,27 +485,42 @@ enum UpdatePanel {
     /// 拒绝**自己就带着一件跑得完的命令**（`apply --state-dir <这一侧认的根> --consent
     /// state-dir`，路径按 `quoteShellArg` 单引号包好）。从前这一屏只把人支去读 status，
     /// 于是读者看到的是"这一道门只能看，不能过"——而门的作者给出的恰恰是"人签了字就过得去"。
-    /// 面板不代签也不代跑：这里只把那条命令**原样转述**出来（它的 `updater` 换成这一页认出的
-    /// 那一份程序，理由与上面那句一样——这台机器上没有叫 `updater` 的可执行文件），
-    /// 并且说清**这一枚按下去会发生什么**：这一枚什么都不会发生，会动它的是你自己敲的那一条。
+    ///
+    /// 文案的三条口径（都是这一面的规矩，不是给这一侧辩白）：
+    ///   * **每条命令都带 `--state-dir <这一页正在显示的那个根>`**：这个旗标一缺，那条命令
+    ///     读的就是更新器自己的默认根，屏幕上这份读数与它说的就不是同一件事——从前
+    ///     `status` 那一句正缺了它，而隔壁那一句带着它，两个根在同一屏上并存。
+    ///     根没量到时不补一个尖括号模板（那是一条敲不出去的命令），改成说清"这一屏
+    ///     还没量到根，所以命令里没带它"。
+    ///   * **不写内部章节号，也不写"面板不替这台机器签字"那一类自述**：读者要的是
+    ///     这一枚按下去发生什么、那一条命令动起来做什么，不是这一侧的立场声明。
+    ///   * 更新器那条命令照原样转述，只把它的 `updater` 换成这一页认出的那一份程序。
     static func consentGateNextStepText(
         updaterPath: String?, stateRoot: String? = nil, code: String? = nil
     ) -> String {
         guard let updaterPath, !updaterPath.isEmpty else {
-            return "要看清缺什么、以及怎么把它补上，得先让这一页认出更新器在哪（看下面「更新器」那一栏），再读它那句原话。"
+            return "这一屏还没认出更新器是哪一份程序：先看下面「更新器」那一栏，"
+                + "认出它之后读一次它的状态，那里写着缺什么、以及怎么把它补上。"
         }
+        let measuredRoot = stateRoot?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let rootArgument = measuredRoot.isEmpty
+            ? ""
+            : " --state-dir \(RemedyCommand.quote(measuredRoot))"
         let readIt = "要看清缺什么、以及怎么把它补上，就把下面「更新器」那一栏记着的这一份读一次状态："
-            + "node \(updaterPath) status"
-        guard code == nonDefaultStateDirCode, let stateRoot, !stateRoot.isEmpty else {
+            + "node \(updaterPath) status" + rootArgument
+            + (rootArgument.isEmpty
+                ? "。这条命令里没带状态根，因为这一屏还没量到它在用哪一个——"
+                  + "先在下面「状态根」那一栏认出根，再读那一次状态，读回来的才是这一页显示的这一份。"
+                : "。那一个 --state-dir 就是这一页正在显示的状态根，命令与屏幕说的是同一份东西。")
+        guard code == nonDefaultStateDirCode, !measuredRoot.isEmpty else {
             return readIt
         }
-        return readIt + "。这一道门不是只能看：更新器自己就备了一条走得完的安装命令，"
-            + "面板不替这台机器签字、也不替它跑，只把原话转述在这里，跑不跑由你决定："
-            + "node \(updaterPath) apply --state-dir \(RemedyCommand.quote(stateRoot)) --consent state-dir。"
-            + "这一枚按下去不会发生任何事——这一道确认不在面板手里，它按不动说的就是这件事；"
-            + "上面那一条由你自己敲出去的命令才会动它：那一次安装带着你这一次给的确认去换版，"
-            + "确认不写进任何默认值，每天定时的那一次永远不带它，"
-            + "而换版仍然只在你的后台服务空闲时动手。"
+        return readIt + "这一道门不是只能看：更新器自己就备了一条走得完的安装命令——"
+            + "node \(updaterPath) apply --state-dir \(RemedyCommand.quote(measuredRoot)) --consent state-dir。"
+            + "跑不跑由你决定：这一枚按下去不会发生任何事（这一道确认要由你本人给，"
+            + "它按不动说的就是这件事），上面那一条由你自己敲出去的命令才会动它——"
+            + "那一次安装带着你这一次给的确认去换版，确认不写进任何默认值，"
+            + "每天定时的那一次永远不带它，而换版仍然只在你的后台服务空闲时动手。"
     }
 
     /// `updater/lib/policy.js` 给 `non-default-state-dir` 那道门配的 `--consent` 代号本体。
@@ -617,7 +632,7 @@ enum UpdatePanel {
                 let which = ctx.code ?? "这一页认不出的代号"
                 return Buttons(checkEnabled: true, checkReason: nil,
                                applyEnabled: false,
-                               applyReason: "拦住更新的是「\(which)」这一道确认，面板不替它签字。"
+                               applyReason: "拦住更新的是「\(which)」这一道确认，它要由你本人给出。"
                                    + consentGateNextStepText(
                                         updaterPath: ctx.updaterPath,
                                         stateRoot: ctx.stateRoot,
@@ -712,8 +727,9 @@ enum UpdatePanel {
                     + "自动更新不会替这个发布签字；你核对过发布页的校验和后，"
                     + "点「信任这个发布并重新检查」才会把它下载并暂存。"
             case .none:
-                return "\(version) 停在一道需要你本人判断的确认上（\(snapshot.code ?? "代号未给出")），"
-                    + "面板不替它签字；这一道门怎么走过去，写在下面「\(Self.applyButtonTitle)」那一行里。"
+                return "\(version) 停在一道需要你本人判断的确认上（\(snapshot.code ?? "代号未给出")）："
+                    + "这一道确认只有你给得了，所以这一屏那枚「\(Self.applyButtonTitle)」是按不动的；"
+                    + "怎么走过去，写在它下面那一行里。"
             }
         }
         return nil

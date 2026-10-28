@@ -178,14 +178,38 @@ struct ApprovalsTabView: View {
     }
 }
 
-/// 单条审批记录。可折叠，折叠状态按 `approvalId` 记在本机设置里。
+/// 单条审批记录。可折叠，折叠状态记在本机设置里。
 ///
 /// 台账是一条只增不减的链，一条真实机器上已经有十条以上，而核对时通常只关心
 /// "哪几条是自批的"。每张卡都摊开就得滚动半屏。折叠后风险等级、结论与批准人
 /// 仍在标题行——收起一张记录不该把它说的事一起收掉。
+///
+/// **开合状态只占一个 UserDefaults 键**（`ConsoleModel.ledgerCollapseDefaultsKey`）。
+/// 从前这里走的是 `PanelCard` 默认那份"每个 key 一个键"的存放，而 key 是
+/// `approval-<approvalId>`：台账一万条就是一万个永久键，写下去没有人回收。
+/// 现在这一页把开合接到那份**有界**的存放上（最多 `ledgerCollapseCapacity` 条，
+/// 满了挤掉最久没动的），条目取每条记录自己在链上的内容哈希——它只由这一条决定，
+/// 追加一条不会改动已有记录，也不会把另一份台账的偏好读到这一份头上。
 struct ApprovalRowView: View {
     let index: Int
     let record: ApprovalRecord
+    /// 整页共用的那一个键（不是每行一个键）。
+    @AppStorage(ConsoleModel.ledgerCollapseDefaultsKey) private var collapseStore = ""
+
+    /// 这一行在那一份有界存放里的名字。
+    private var token: String { ConsoleModel.ledgerCollapseToken(record) }
+
+    /// 读写都经过 `ConsoleModel` 那三个纯函数：判据只有一处，测试也 drives 那一处。
+    private var collapseBinding: Binding<Bool> {
+        Binding(
+            get: { ConsoleModel.ledgerRowIsCollapsed(collapseStore, token: token) },
+            set: { collapsed in
+                collapseStore = ConsoleModel.storingLedgerCollapse(
+                    collapseStore, token: token, collapsed: collapsed
+                )
+            }
+        )
+    }
 
     var body: some View {
         PanelCard(
@@ -194,7 +218,8 @@ struct ApprovalRowView: View {
             systemImage: riskIcon,
             tint: riskColor,
             summary: "\(riskText) · \(record.decision == .approve ? "已批准" : "已拒绝") · "
-                + (record.approvedBy == ApprovalGate.autoApprover ? "后台服务自批" : "由 \(record.approvedBy) 批准")
+                + (record.approvedBy == ApprovalGate.autoApprover ? "后台服务自批" : "由 \(record.approvedBy) 批准"),
+            collapse: collapseBinding
         ) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {

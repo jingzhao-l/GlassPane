@@ -72,7 +72,8 @@ final class PermissionGuideTests: XCTestCase {
     func testBannerTextsAreNonEmptyAndMentionDrag() {
         XCTAssertTrue(PermissionGuide.bannerTitle.contains("拖"))
         XCTAssertFalse(PermissionGuide.bannerTitle.isEmpty)
-        XCTAssertFalse(PermissionGuide.bannerHint.isEmpty)
+        // `bannerHint` 已删除：它唯一的读者是它自己这一行 `isEmpty` 断言，面板从不渲染它
+        // （面板读的是 `bannerTitle`）。删字段的同时删断言，不留一条没人读的主张。
     }
 
     // MARK: - 引导前后状态一致性（指令在同一 kind 上不串台）

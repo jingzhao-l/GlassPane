@@ -89,7 +89,14 @@ final class LocalArchiveTests: XCTestCase {
         XCTAssertEqual(scan.summaries.count, 2)
         XCTAssertEqual(scan.unreadableFiles, ["op_broken000000000000000000000.json"],
                        "解不开的文件要按名字列出来，不能静默丢")
-        XCTAssertGreaterThan(scan.totalBytes, 0)
+        XCTAssertGreaterThan(try XCTUnwrap(scan.totalBytes), 0,
+                             "每一条所有条目都报得出大小时，总量才是一次测得值")
+        // 夹具里那个 `op_broken…` 含 Crockford base32 之外的字母（r/o/k），本来就不是本
+        // 档案会写的条目名，所以"拥有的人口"是 2 而不是 3 —— 它出现在 unreadableFiles
+        // 里那一支（`isEntryName` 之外的名字只点名、不计数）。
+        XCTAssertEqual(scan.entryCount, 2,
+                       "条数用的是档案**拥有**的人口（`op_<26>.json`），不是解得开的那一份")
+        XCTAssertNil(scan.sizeFailure, "没有大小读不出来时不许凭空造一句失败")
     }
 
     func testScanSortsNewestFirst() {

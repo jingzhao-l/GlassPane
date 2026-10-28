@@ -80,8 +80,14 @@ final class ScriptedChannel: RuntimeChannel {
 
     func performAction(selector: Selector, action: Action) throws {
         actionCallCount += 1
+        // 可选钩子（默认 nil，既有调用点逐字不变）：给"这一次调用正在做什么"这类
+        // 只有从通道内部才问得到的问题一个运行时读数，而不是让那条断言只能钉文本。
+        onPerformAction?()
         if let actionError { throw actionError }
     }
+
+    /// `performAction` 被调用时先跑一下（在抛错之前）。
+    var onPerformAction: (() -> Void)?
 
     func readProperty(selector: Selector, property: AssertionProperty) throws -> StringOrBool {
         propertyCallCount += 1

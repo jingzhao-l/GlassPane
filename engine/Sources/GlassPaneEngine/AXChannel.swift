@@ -3,6 +3,19 @@ import AppKit
 import CoreGraphics
 import ApplicationServices
 
+/// 一个 pid 号在某一时刻的身份读数（本轮为 pid 复用而引入，见 `AXChannel.identityMatches`）。
+/// 两半都可以是 nil——`bundleId` 对一个没有 bundle 的进程就是 nil，`startMicros` 在
+/// `proc_pidinfo` 读不到时是 nil；附着那一次两半全 nil 的话，附着本身就被拒了。
+public struct ProcessIdentity: Equatable {
+    public let bundleId: String?
+    public let startMicros: UInt64?
+
+    public init(bundleId: String?, startMicros: UInt64?) {
+        self.bundleId = bundleId
+        self.startMicros = startMicros
+    }
+}
+
 /// Production RuntimeChannel backed by the macOS Accessibility API and
 /// CGWindow capture (the "eyes and hands" of the Z5 channel). Requires the
 /// daemon to hold accessibility permission; screen-recording permission is
@@ -32,8 +45,26 @@ public final class AXChannel: RuntimeChannel {
     /// this guard (observe is separately bounded by maxDepth).
     private static let searchMaxDepth = 24
 
-    private var appElement: AXUIElement?
-    private var attached: AttachedApp?
+    var appElement: AXUIElement?
+    var attached: AttachedApp?
+    /// 附着那一刻读到的进程起始时刻（微秒）。pid 会被内核回收复用，而 `kill(pid, 0)`
+    /// 只回答"有没有进程占着这个号"——复用之后它答"有"，于是 act 会去驱动一个跟附着
+    /// 对象毫无关系的 app，而证据包仍按原来的 bundleId/appName 归档（本轮修的缺陷）。
+    /// 读不到时留 nil，此时身份只能靠 bundleId 那一条；两条都记不到时附着本身被拒。
+    ///
+    /// 这三个存储位是 internal 而非 private：真 tap/真 AX 要 Accessibility 席位，单元测试
+    /// 进程没有席位，而"pid 复用有没有被认出来"必须能在运行时被回答，不能只钉文本。
+    /// 手法与本文件既有的 `messagingTimeoutSeconds`（internal 让测试能量算式）同一条。
+    var attachedStartMicros: UInt64?
+
+    /// 进程身份的当下读数——刻意做成一对可注入的缝，而不是直接调系统：真 app 需要
+    /// Accessibility 席位，单元测试装不上，但"pid 复用有没有被认出来"必须能被运行时
+    /// 回答，不能只钉文本。
+    var identityReader: (pid_t) -> ProcessIdentity? = { AXChannel.readProcessIdentity($0) }
+
+    /// 附着时读起始时刻的那一条（与 `identityReader` 分开，是因为附着要的是"记下"，
+    /// 检查要的是"比对"，而测试要能分别置位）。
+    var startStampReader: (pid_t) -> UInt64? = { AXChannel.readProcessStartMicros($0) }
 
     public init() {}
 
@@ -41,16 +72,28 @@ public final class AXChannel: RuntimeChannel {
 
     public func attach(bundleId: String?, pid: pid_t?) throws -> AttachedApp {
         let running = try resolveRunningApplication(bundleId: bundleId, pid: pid)
-        guard AXIsProcessTrusted() else {
-            throw ChannelError.axUnavailable(
-                reason: "accessibility permission not granted to the daemon process"
-            )
-        }
         let app = AttachedApp(
             pid: running.processIdentifier,
             bundleId: running.bundleIdentifier,
             appName: running.localizedName ?? "pid-\(running.processIdentifier)"
         )
+        // 身份先记，记不到就不附着：一个事后无法证明"还是当初那个进程"的附着，正是本轮
+        // 那条缺陷的起点——pid 被复用之后，通道照样能读 AX、照样能投合成事件，而档案按
+        // 原来的 app 名字归档。
+        // 这一问刻意排在权限那一支**之前**：它问的是"这个号上是谁"，与本机有没有席位无关；
+        // 排在后面会让这条拒绝在没有席位的机器上永远跑不到，也就永远没人能测它（本仓修过
+        // 很多次的那一类"跑不到的拒绝分支等于没修"）。
+        let startMicros = startStampReader(app.pid)
+        guard AXChannel.identityIsRecordable(bundleId: app.bundleId, startMicros: startMicros) else {
+            throw ChannelError.appNotFound
+        }
+        attachedStartMicros = startMicros
+        guard AXIsProcessTrusted() else {
+            attachedStartMicros = nil
+            throw ChannelError.axUnavailable(
+                reason: "accessibility permission not granted to the daemon process"
+            )
+        }
         let element = AXUIElementCreateApplication(app.pid)
         AXUIElementSetMessagingTimeout(element, Float(Self.messagingTimeoutSeconds))
         appElement = element
@@ -437,14 +480,87 @@ public final class AXChannel: RuntimeChannel {
         }
     }
 
+    /// 「我们附着的那个 app 还在」——不是「这个 pid 号上还有进程」。
+    ///
+    /// 从前这里是 `kill(attached.pid, 0) == 0 || errno != ESRCH`：它回答的是"有没有
+    /// 一个进程占着这个号"。号被回收复用之后它照样答"有"，而那个进程与附着对象毫无
+    /// 关系——通道继续读得到 AX、合成事件继续投得进去，`captureWindow()`  pixel 比对的
+    /// 是新住户的窗口，档案却按原来的 bundleId/appName 归档。`EngineCore` 的两处
+    /// CrashSignal 与 act 的全部真动手路径都问这一条，所以判据必须带身份。
     public func isProcessAlive() -> Bool {
+        attachedIsOurs()
+    }
+
+    /// 身份判据的运行时入口（`requireAppElement()` 与 `captureWindow()` 都走这里）。
+    private func attachedIsOurs() -> Bool {
         guard let attached else { return false }
-        return kill(attached.pid, 0) == 0 || errno != ESRCH
+        return Self.identityMatches(
+            recordedBundleId: attached.bundleId,
+            recordedStartMicros: attachedStartMicros,
+            current: identityReader(attached.pid)
+        )
+    }
+
+    /// 附着的那一问：**至少得有一半能记下来**，否则事后无从比对。抽成纯判据是因为
+    /// `bundleId` 来自真的 `NSRunningApplication`（测试造不出一个 bundleId 为 nil 的真 app），
+    /// 而这一支必须能被运行时回答，不能只活在文本里。
+    static func identityIsRecordable(bundleId: String?, startMicros: UInt64?) -> Bool {
+        bundleId != nil || startMicros != nil
+    }
+
+    /// 纯判据那一半。三条合起来才叫"还是它"：
+    /// ① 那个号上还要有一个运行中的 app（`NSRunningApplication` 认得的那种）——读不到
+    ///    就是没有了；本字段为真是一个肯定主张，测不到不许填真。
+    /// ② 附着时记下过 bundleId ⇒ 现在的必须相等（同 bundleId 的重启会被 ③ 拦住）。
+    /// ③ 附着时记下过起始时刻 ⇒ 现在的必须相等，**读不到也算不等**：附着那一次读得到，
+    ///    现在读不到就说明这个号已经换了语境（退出、权限变了、号被回收）。
+    /// 只有一条记下的场合（另一条当时读不到）就按那一条判——这是"记到的身份"的下界，
+    /// 不是宽松：附着本身在两条都记不到时已经被拒。
+    static func identityMatches(
+        recordedBundleId: String?,
+        recordedStartMicros: UInt64?,
+        current: ProcessIdentity?
+    ) -> Bool {
+        // 什么都没记下来 ⇒ 无从证明"还是它"。本字段为真是一次肯定主张，不许由"没有
+        // 反证"来供给。（`attach` 在两条都记不到时已经拒绝附着，所以这一支是纵深，
+        // 不是一个日常分支。）
+        guard recordedBundleId != nil || recordedStartMicros != nil else { return false }
+        guard let current else { return false }
+        if let recordedBundleId, current.bundleId != recordedBundleId { return false }
+        if let recordedStartMicros, current.startMicros != recordedStartMicros { return false }
+        return true
+    }
+
+    /// 这个 pid 号此刻的身份读数。
+    static func readProcessIdentity(_ pid: pid_t) -> ProcessIdentity? {
+        guard let running = NSRunningApplication(processIdentifier: pid) else { return nil }
+        return ProcessIdentity(
+            bundleId: running.bundleIdentifier,
+            startMicros: readProcessStartMicros(pid)
+        )
+    }
+
+    /// `proc_pidinfo(PROC_PIDTBSDINFO)` 的秒+微秒合成一个读数。取微秒是因为同秒内的
+    /// 复用是真实存在的（短命进程），只比秒会把它放过去；读不到回 nil。
+    static func readProcessStartMicros(_ pid: pid_t) -> UInt64? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        let read = withUnsafeMutablePointer(to: &info) { raw in
+            proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, raw, size)
+        }
+        guard read == size else { return nil }
+        return info.pbi_start_tvsec &* 1_000_000 &+ info.pbi_start_tvusec
     }
 
     public func captureWindow() throws -> WindowCapture {
         guard let attached else {
             throw ChannelError.pixelCaptureDenied(reason: "no app attached to the channel")
+        }
+        // 像素这一路不经 `requireAppElement()`（它按 pid 找窗口，不碰 AX 元素），所以身份
+        // 要在这里单独问一次：pid 复用之后 `frontmostOnScreenWindow(of:)` 找到的是新住户
+        // 的窗口，而差值会被归档成附着对象的那次测量。
+        guard attachedIsOurs() else {
+            throw ChannelError.appNotFound
         }
         guard let (windowId, _) = frontmostOnScreenWindow(of: attached.pid) else {
             throw ChannelError.pixelCaptureDenied(
@@ -494,6 +610,12 @@ public final class AXChannel: RuntimeChannel {
         guard let appElement else {
             throw ChannelError.axUnavailable(reason: "no app attached to the channel")
         }
+        // 每一次真正动手之前重问一次身份：附着与本次调用之间那个 app 可能已经退出、那个
+        // 号可能已经换了住户。`ping` / 树读 / 几何读 / `performAction` / `readProperty`
+        // 全部经过这一道，所以复用之后不会有一个字节投到别人身上——拒绝走的是既有的
+        // `appNotFound`（线上一句 "no running app matches the given bundleId/pid"），
+        // 不是新造一个代号。
+        guard attachedIsOurs() else { throw ChannelError.appNotFound }
         return appElement
     }
 

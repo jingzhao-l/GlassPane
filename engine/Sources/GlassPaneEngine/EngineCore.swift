@@ -263,6 +263,11 @@ public final class EngineCore {
         public let events: [InputEvent]
     }
     public private(set) var lastContamination: ContaminationRecord?
+    /// 此刻正在持有操作权的那一次 act 的 operationId；没有 in-flight act 时为 nil。
+    /// 唯一的读者是收尾路径（`glasspaned` 的 SIGTERM/SIGINT waiter）：被打断的那一次 act
+    /// 不会留下档案，所以"少了一份证据"必须由日志具名说出来的那个 id 来说。
+    /// 刻意不进 `hello`、不进证据包——它不是对外能力，是本次进程自己的一次在途事实。
+    public private(set) var activeOperationId: String?
     /// `humanInputEvents` 的投递上限；`humanInputEventCount` 始终是真实总数
     /// （样本可截断，计数不截断）。
     public static let humanEventWireLimit = 32
@@ -887,12 +892,18 @@ public final class EngineCore {
             if let attributionGuard, attributionGuard.isHolding {
                 _ = attributionGuard.releaseOperationRight()
             }
+            activeOperationId = nil
         }
 
         let started = clock()
         // P6 §2.3: the operationId is generated up-front so probe events can
         // be windowed against it. Still a fresh ULID per act, same contract.
         let operationId = OperationID.generateLive()
+        // 这一次 act 的 id 挂在核心上，直到操作权交回。收尾路径（SIGTERM waiter）唯一的
+        // 用途是把"有一份证据不会进档案"写进行业日志——被 SIGTERM 打断不是"做完了"，
+        // 而档案里从来不会有这一条，所以那句话必须落在日志里，否则这段历史只剩
+        // "调用方拿到一个连接被掐断"这一种读法。
+        activeOperationId = operationId
 
         let aliveBefore = channel.isProcessAlive()
 

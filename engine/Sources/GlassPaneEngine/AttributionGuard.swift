@@ -30,12 +30,26 @@ public protocol InputSourceMonitoring: AnyObject {
     /// 的成员：没有事件队列的源（两个测试脚本源）逐字维持今天的行为——对它们来说
     /// "没挤掉"就是真话，而要求它们各自写一遍 false 只会让下一个 conformer 忘了写。
     func inputEventsDroppedSinceLastCheck() -> Bool
+    /// 这一轮里源有没有**自己掉过一次、又装回来了**（读清位，形状同上两条：一位读者
+    /// 问"自上次以来发生过吗"，次数在 `CGEventInputMonitor.tapDisableCount` 上）。
+    ///
+    /// 这一问不能被前两问代替，因为前两问都是**采样时刻**的：tap 在两次采样之间被系统
+    /// 停用又在下一次采样前装回来时，`isMonitoringInput` 采到的仍是真，`humanEvents`
+    /// 也照样为空——而那段没人看的时间恰好是最早那几条人类输入最可能落在的地方。裁决
+    /// 里那句 "the input stream was watched for the whole operation window"
+    /// （`EngineCore`）说的就是"全程"，缺这一问它就是没被兑现的主张。
+    ///
+    /// 同一条折叠规则：声明成协议成员 + 扩展里给默认实现，没有"掉过又装回"这种状态的源
+    /// （测试脚本源）逐字维持今天的行为。
+    func inputTapDisabledSinceLastCheck() -> Bool
 }
 
 public extension InputSourceMonitoring {
     /// 缺省答案：**没有投递被挤掉**。只在源自己没有队列时才是缺省值——有队列的
     /// 源必须覆盖它，否则"缓冲区溢过"这件事又一次无人知晓。
     func inputEventsDroppedSinceLastCheck() -> Bool { false }
+    /// 缺省答案：**没有停用发生过**。同上——只对着"没有重装这回事"的源才成立。
+    func inputTapDisabledSinceLastCheck() -> Bool { false }
 }
 
 /// 一次操作持有操作权后的污染裁决。
@@ -123,6 +137,13 @@ public final class AttributionGuard {
         + "before the guard drained the queue, so what happened at the start of the window is unknown "
         + "and an empty humanEvents here measures nothing"
 
+    /// 掉线-重装那一问的具名原因：说清**不知道的是哪一段**——停用与重装之间的事件不会
+    /// 补投，而重装后的存活位看不出那段空档存在过。
+    private static let tapDisabledFault =
+        "the input tap was disabled and re-armed inside this window: events delivered while it was "
+        + "down are not replayed, so the channel being alive at both samples does not mean it watched "
+        + "the interval between them"
+
     public init(
         inputSource: InputEventSource,
         clock: @escaping () -> Date = { Date() },
@@ -169,6 +190,7 @@ public final class AttributionGuard {
         // 那批正是上面 `peekAvailable()` 读过头部的队列，而本次持有的起点还可能
         // 回拨到那段里（`degradeOnBusy`）——这段的开头同样没人知道，不是冤枉账。
         noteDroppedEvents()
+        noteTapDisabled()
         return .acquired
     }
 
@@ -189,9 +211,11 @@ public final class AttributionGuard {
             holdMonitored = false
         }
         // 存活位为真不等于这一轮**测全了**：队列还在投、但最早那几条已经被容量
-        // 挤掉，drain 出来的 `humanEvents` 照样为空。两次提问合起来才回答"这个
-        // 窗口有人看着吗"，缺一条都得把窗口折成未监测。
+        // 挤掉，drain 出来的 `humanEvents` 照样为空；tap 也可能在两次采样之间掉了
+        // 又装回来，两次采样都读到真。三次提问合起来才回答"这个窗口有人看着吗"，
+        // 缺一条都得把窗口折成未监测。
         noteDroppedEvents()
+        noteTapDisabled()
     }
 
     /// 源这一轮挤掉过投递 ⇒ 把本窗口按监测故障折叠：`holdMonitored = false` +
@@ -205,6 +229,19 @@ public final class AttributionGuard {
         holdMonitored = false
         if holdMonitoringFault == nil {
             holdMonitoringFault = Self.droppedEventsFault
+        }
+    }
+
+    /// 掉线-重装同样按监测故障折叠（与 `noteDroppedEvents` 同一条裁决通路、同一个理由）：
+    /// 存活位为真只说明**采样那一刻**有人看着。落在这段之间的那次停用，正是"零投递"与
+    /// "没人碰机器"无法区分的另一种来历，所以窗口照样折成未监测、`contaminated` 照样取
+    /// 保守的 true。未实现 `InputSourceMonitoring` 的源与落在默认实现上的源逐字不变。
+    private func noteTapDisabled() {
+        guard let source = inputSource as? InputSourceMonitoring else { return }
+        guard source.inputTapDisabledSinceLastCheck() else { return }
+        holdMonitored = false
+        if holdMonitoringFault == nil {
+            holdMonitoringFault = Self.tapDisabledFault
         }
     }
 

@@ -68,7 +68,11 @@ final class ConsoleModel: ObservableObject {
         var summaries: [EvidenceSummary] = []
         var unreadableFiles: [String] = []
         var directoryExists = false
-        var totalBytes = 0
+        /// nil = 有所有条目没报出大小，总量因此不是测得值（与 `EvidenceStore.stats()`
+        /// 同一条判据，见 `LocalArchive` 的返回处）。
+        var totalBytes: Int? = 0
+        var sizeFailure: String? = nil
+        var entryCount = 0
         var listFailure: String? = nil
     }
 
@@ -102,7 +106,14 @@ final class ConsoleModel: ObservableObject {
     @Published private(set) var summaries: [EvidenceSummary] = []
     @Published private(set) var unreadableFiles: [String] = []
     @Published private(set) var archiveExists = false
-    @Published private(set) var archiveTotalBytes = 0
+    /// nil = 这一份档案的字节总量**没测到**（有所有条目报不出大小）。面板不许把 nil
+    /// 折成一个数字——那一行写的就是"这里的档案有多大"。
+    @Published private(set) var archiveTotalBytes: Int? = 0
+    /// 没测全的那几条叫什么（`LocalArchive` 与 daemon 同一口径写的句子）。
+    @Published private(set) var archiveSizeFailure: String?
+    /// 本档案拥有的条目数（`op_<26>.json` 那一份人口），与 `summaries.count`（解得开的）
+    /// 是两个数；那一行"N 条"用的是这一个。
+    @Published private(set) var archiveEntryCount = 0
     @Published var filter: EvidenceFilter = .all
     @Published var searchText = ""
     @Published var selectedOperationId: String?
@@ -432,6 +443,8 @@ final class ConsoleModel: ObservableObject {
                 self.unreadableFiles = outcome.unreadableFiles
                 self.archiveExists = outcome.directoryExists
                 self.archiveTotalBytes = outcome.totalBytes
+                self.archiveSizeFailure = outcome.sizeFailure
+                self.archiveEntryCount = outcome.entryCount
                 self.applyEvidenceState()
                 if self.selectedOperationId == nil {
                     self.selectedOperationId = outcome.summaries.first?.operationId
@@ -585,6 +598,8 @@ final class ConsoleModel: ObservableObject {
             unreadableFiles: scan.unreadableFiles,
             directoryExists: scan.directoryExists,
             totalBytes: scan.totalBytes,
+            sizeFailure: scan.sizeFailure,
+            entryCount: scan.entryCount,
             // 列不出来是一次失败，不是"里面没有档案"：这一路的 `listFailure` 与
             // daemon `--evidence-stats` 那个同名键同义，缺键读成 nil（= 列举真的完成了）。
             listFailure: scan.listFailure
@@ -1267,6 +1282,97 @@ final class ConsoleModel: ObservableObject {
                 "「在访达中显示」现在按不动：这一帧没读到这条记录的内容（还没点中左侧的记录，"
                 + "或列表刚重扫）。下一步：左侧点一条记录，或点「刷新」重读一次。")
         }
+    }
+
+    // MARK: - 证据页「打开报告」这一枚**按下去那一刻**的结局
+
+    /// 「打开报告」这一次点击做得成做不成（纯函数，供单测）。
+    ///
+    /// 缺陷形状：这一枚的**启用**判据只看 `packLoad`（`reportButtonControl`），而它的
+    /// 正文读的是另一个来源 `pack`。同一帧里两次读数可以对不上——`packLoad` 说这条档案
+    /// 已经读到，手里那份 `pack` 却是 nil（详情页 `packPendingOrFailed` 的 `.loaded`
+    /// 那一支已经把这种帧如实画出来了）。从前这里是一句 `guard let pack else { return }`：
+    /// 控件看着能按、按下去什么都不发生、屏幕上没有一个字说为什么——同胞 `revealFile()`
+    /// 修掉的就是同一类毛病（键鼠与无障碍都会绕过灰掉的按钮，所以"看着能按"这件事
+    /// 本身就是一种主张）。
+    ///
+    /// 拒绝那两支都给出**缺的是什么 + 下一步做什么**，由调用方交给 `lastActionMessage`
+    /// （那条横幅已被渲染；不在这里新开一个只有模型知道的口子）。
+    enum PanelReportAction: Equatable {
+        /// 整包在手：报告写得出来。
+        case render(EvidencePack)
+        /// 这一按做不成，`message` 是这一屏说得出那句话。
+        case refuse(message: String)
+    }
+
+    nonisolated static func reportAction(
+        pack: EvidencePack?, packLoad: PackLoad
+    ) -> PanelReportAction {
+        if let pack { return .render(pack) }
+        switch packLoad {
+        case .loaded:
+            return .refuse(message:
+                "报告没有写出来：这一屏说这条档案已经读到了，手里却没有它的内容——两次读数对不上，"
+                + "而报告要拿到整条信号链才写得出来。下一步：点「刷新」重读这一条，"
+                + "它把内容读全之后，这一枚才真写得出一份报告。")
+        case .loading, .failed, .none:
+            // 按不动的那三形态本来就不该被点到；真被点到了（键盘、自动化），
+            // 说的还是这一枚自己那句禁用理由，不在这里另编一套说法。
+            return .refuse(message: reportButtonControl(packLoad: packLoad).help)
+        }
+    }
+
+    // MARK: - 审批行折叠状态的**有界**存放
+
+    /// 台账每一行的开合状态存在哪儿：**整页一个 UserDefaults 键**，里面是一小组内容哈希。
+    ///
+    /// 缺陷形状：从前这一份开合走的是 `PanelCard` 默认那份"按卡片 key 自成一键"的存放，
+    /// 而审批行的 key 是 `approval-<approvalId>`——**一条记录一个键**，台账又是只增不减的：
+    /// 一万条记录就是一万个永久键，谁也不会去回收它们。
+    ///
+    /// 现在：一个键（`ledgerCollapseDefaultsKey`）里最多放 `ledgerCollapseCapacity` 条，
+    /// 满了把最久没动的那几条挤出去——收起一行只是版面偏好，挤掉一条不改动任何台账事实。
+    /// 条目取每条记录**自己的**链上内容哈希（`ApprovalRecord.hash`，SHA-256）：它是内容派生
+    /// 的，追加一条不会改动已有记录，所以这份偏好跟着记录走，不跟着行号或台账长度走，
+    /// 也不会把另一份台账（另一个状态根）的偏好读到这一份头上。
+    nonisolated static let ledgerCollapseDefaultsKey = "glasspane.card.approval.collapsed"
+    nonisolated static let ledgerCollapseCapacity = 24
+
+    /// 这一行在折叠状态里怎么被指认：内容哈希的前 16 位；哈希为空（读不出形状的那一类）
+    /// 退回 `id:` + 审批号。两种都只由这一条记录自己决定，与它在表里排第几无关。
+    nonisolated static func ledgerCollapseToken(_ record: ApprovalRecord) -> String {
+        let digest = record.hash.lowercased().filter { $0.isHexDigit }
+        if !digest.isEmpty {
+            return String(digest.prefix(16))
+        }
+        return "id:" + record.approvalId
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: ",", with: "")
+    }
+
+    /// 那个键里现有的集合（**最近改动在前**）。
+    nonisolated static func ledgerCollapseTokens(stored: String) -> [String] {
+        stored.split(separator: ",", omittingEmptySubsequences: true)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// 写下一次开合：去重 + 容量上限，返回要存进那一个键的那一串。
+    /// 展开（`collapsed == false`）只是把这一条从集合里去掉，不会让串变长。
+    nonisolated static func storingLedgerCollapse(
+        _ stored: String, token: String, collapsed: Bool, capacity: Int = ledgerCollapseCapacity
+    ) -> String {
+        var tokens = ledgerCollapseTokens(stored: stored).filter { $0 != token }
+        if collapsed {
+            tokens.insert(token, at: 0)
+            if capacity > 0 { tokens = Array(tokens.prefix(capacity)) }
+        }
+        return tokens.joined(separator: ",")
+    }
+
+    /// 这一行现在收起来了吗（纯函数，供单测与视图同读一处判据）。
+    nonisolated static func ledgerRowIsCollapsed(_ stored: String, token: String) -> Bool {
+        ledgerCollapseTokens(stored: stored).contains(token)
     }
 
     // MARK: - 项目页「清理」这一枚

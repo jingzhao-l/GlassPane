@@ -445,10 +445,13 @@ struct DailyRound20261021PanelTests {
         let invalid = RecipesTabView.foldValidation(
             stdout: "{\"valid\":false,\"recipeName\":\"最小单步\",\"errors\":[\"steps: minItems\"]}",
             stderr: "", exitCode: 1)
-        guard case .verdict(let valid, let recipeName, let errors) = invalid else {
+        // `notes` 是 `.verdict` 新增的第四个载荷（后台服务随结论交出的那份数据；本页只照录、
+        // 不再自己抄一遍）。这一份回话里没有那个键，所以它折成空数组，上面三条断言一字未改。
+        guard case .verdict(let valid, let recipeName, let errors, let notes) = invalid else {
             Issue.record("一条答出来的非法结论被折成 \(invalid)")
             return
         }
+        #expect(notes.isEmpty, "回话里没有 notes，就不许凭空长出一条：\(notes)")
         #expect(!valid)
         #expect(recipeName == "最小单步")
         #expect(errors == ["steps: minItems"])

@@ -202,10 +202,14 @@ final class Qoder20261019ArchiveHonestyTests: XCTestCase {
             expectedBytes += try fileSize(of: directory + "/" + name)
         }
         XCTAssertEqual(
-            scan.totalBytes, stats.totalBytes,
+            try XCTUnwrap(scan.totalBytes), stats.totalBytes,
             "revert: the panel summed a different set of files than the daemon, so its figure was neither the archive nor a stated subset of it"
         )
-        XCTAssertEqual(scan.totalBytes, expectedBytes, "and the shared figure is those three entries' own sizes")
+        XCTAssertEqual(try XCTUnwrap(scan.totalBytes), expectedBytes, "and the shared figure is those three entries' own sizes")
+        XCTAssertEqual(
+            scan.entryCount, stats.count,
+            "面板那一行的\"N 条\"与 daemon 的 count 必须是同一份人口：KB 数三个文件而条数说一个，就是这一行自己在打架"
+        )
         XCTAssertEqual(chmod(sealedPath, 0o600), 0, "cleanup: leave the sandbox normal")
     }
 

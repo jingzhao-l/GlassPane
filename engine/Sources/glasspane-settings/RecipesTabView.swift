@@ -22,8 +22,28 @@ struct RecipesTabView: View {
 
     @AppStorage("glasspane.recipeEditor") private var editorText = RecipeTemplates.emptyEditorSlot
 
+    /// 校验结论落盘用的那**一个**键（与上面那份草稿同一个机制：`@AppStorage`）。
+    private nonisolated static let outcomeDefaultsKey = "glasspane.recipe.lastValidation"
+
+    /// 结论本体在 UserDefaults 里的那个形状（JSON 一串，见 `encodeOutcome`）。
+    @AppStorage(RecipesTabView.outcomeDefaultsKey)
+    private var persistedOutcome = RecipeValidationOutcome.noVerdictStored
+
     /// 校验结论（nil = 还没点过校验）。
-    @State private var outcome: RecipeValidationOutcome?
+    ///
+    /// **它必须活过切页**：这一页的草稿本来就落在 UserDefaults（上面那份 `editorText`），
+    /// 切走再切回来时编辑器里仍然是那一串 JSON，而结论从前是 `@State`——跟着视图一起销毁。
+    /// 于是屏幕上留下"一份没有结论的草稿"：那一趟校验是这一页**测到过**的事实，
+    /// 一次 tab 切换不该把它抹掉；抹掉的后果是读者要么以为从没校验过，要么再点一次
+    /// 「校验」才知道它说过什么（而那一趟的结果可能与上一次的草稿已经不是同一份东西）。
+    /// 这里改用与本页其余持久控件同一套机制（`@AppStorage`），折算只走
+    /// `encodeOutcome`/`decodeOutcome` 那一对纯函数：存的东西解不出来时按"没有结论"处理，
+    /// 不替后台服务猜一个结论出来。
+    private var outcome: RecipeValidationOutcome? {
+        get { Self.decodeOutcome(persistedOutcome) }
+        nonmutating set { persistedOutcome = Self.encodeOutcome(newValue) }
+    }
+
     @State private var isValidating = false
     /// 每次校验分配递增序号（token）：后台完成时仅当 token 仍最新才写 outcome，
     /// 保证显示的结论一定对应当前编辑器内容，不被旧校验覆盖。
@@ -38,13 +58,21 @@ struct RecipesTabView: View {
         /// 临时文件写入失败。
         case writeFailed
         /// daemon 给出了明确结论。
-        case verdict(valid: Bool, recipeName: String?, errors: [String])
+        ///
+        /// `notes` 是后台服务**随结论一起交出的那一份数据**（`RecipeValidationResult.notes`，
+        /// 由引擎侧 `RecipeLoader.executionNote` / `vocabularyNote` 写就）。这一页只把它读出来、
+        /// 照录成数据，不再自己抄一遍——抄一遍就是两份说法，一定漂（见 `verdictBody(notes:)`）。
+        case verdict(valid: Bool, recipeName: String?, errors: [String], notes: [String] = [])
         /// daemon **回了话**，却没把结论交出来：它读不到那个文件（stderr + 退出码 2），
         /// 或结论编码不出去（stderr + 退出码 1），或回了一段读不出形状的文本。
         /// 这一支必须与下面那一支分开——它的原话是事实，"它没在说话"是另一件事实。
         case daemonRefused(reason: String, exitCode: Int32)
         /// 一次回话都没拿到：起不来 / 超时 / 两路管道都读不出。
         case daemonUnavailable
+
+        /// "还没有结论"在那一个键里长什么样：一个 `encodeOutcome` 永远不会产出的字符串
+        /// （它产出的每一串都以 `{` 开头），所以它不会与任何真结论撞车。
+        nonisolated static let noVerdictStored = "no-verdict"
     }
 
     var body: some View {
@@ -221,15 +249,19 @@ struct RecipesTabView: View {
                             + "下一步：点侧栏底部的「刷新」确认它在跑，再点一次「校验」；"
                             + "一直如此就把编辑器里的内容另存成文件，"
                             + "用后台服务的命令行 --recipe-validate <路径> 跑一次看它说什么。")
-        case .verdict(let valid, let recipeName, let errors):
+        case .verdict(let valid, let recipeName, let errors, let notes):
             if valid {
-                verdictBanner(icon: "checkmark.seal.fill", tint: .green,
-                              title: recipeName.map { "形状合法（\($0)）" } ?? "形状合法",
-                              body: Self.validVerdictBody)
+                VStack(alignment: .leading, spacing: 6) {
+                    verdictBanner(icon: "checkmark.seal.fill", tint: .green,
+                                  title: recipeName.map { "形状合法（\($0)）" } ?? "形状合法",
+                                  body: Self.verdictBody(notes: notes))
+                    daemonNotesReadout(notes)
+                }
             } else {
                 VStack(alignment: .leading, spacing: 6) {
                     verdictBanner(icon: "xmark.circle.fill", tint: .red, title: "非法",
                                   body: recipeName.map { "配方名：\($0)" } ?? "daemon 判定配方不符合契约。")
+                    daemonNotesReadout(notes)
                     if !errors.isEmpty {
                         VStack(alignment: .leading, spacing: 3) {
                             ForEach(Array(errors.enumerated()), id: \.offset) { _, error in
@@ -253,13 +285,19 @@ struct RecipesTabView: View {
 
     /// 「合法」那一屏的正文（纯函数，供单测）。
     ///
-    /// 缺陷形状：从前这里只写"daemon 校验通过。"——读者从一个"通过"里自然要问的下一句是
-    /// "那怎么跑它"，而这一页**没有任何入口能跑**：`--recipe-validate` 是 `RecipeLoader.validate`
-    /// 在本构建里唯一的调用点（`engine/Sources/glasspaned/main.swift:1195`），
-    /// 后台服务既没有执行配方的方法，也没有哪一层读这份文件并按步骤做它说过的事。
-    /// 于是那三个字把"形状合契约"说成了"这份配方能跑"——那是这一层从没测过的一件事，
-    /// 写进结论就是假话。这里把测到的与没测到的各说各的，并且不顺手编一个下一步：
-    /// 这一页给不出"运行"这个入口，这句话就得直说给不出。
+    /// **这一句的作者不在面板**：这两条事实——"这一份构建里没有执行器，合法只指形状"、
+    /// "配方词汇表里的 `assert` 是文件的名字，线上答的是 `assert_element`"——由引擎侧写死
+    /// （`RecipeLoader.executionNote` / `RecipeLoader.vocabularyNote`），`glasspaned
+    /// --recipe-validate` 把它们放在回话的 `notes` 数组里一起交出来，MCP 侧
+    /// （`mcp-shell/src/tools.ts` 那一层）转述的也是**同一份** `notes`。面板从前在这里
+    /// 手抄了一遍（下面那一份 `validVerdictBody`），两份说法从此各写各的——抄一次就是
+    /// 漂一次。现在这一页只**读那个数组、逐条照录**（`daemonNotesReadout`），自己只留一句
+    /// 关于**这一次校验**的话：那一趟只核对了形状、没执行这里的任何一步，那是本页做的事。
+    ///
+    /// 下面那份 `validVerdictBody` 仍然留着，但只作**兜底**：后台服务一句 notes 都没交出来
+    /// 的那一帧（旧版 daemon / 回话里没有那个键），屏幕上还是得把"合法"说成"形状合法"，
+    /// 不许退回"daemon 校验通过。"那三个字——它把"形状合契约"说成"这份配方能跑"，
+    /// 是这一层从没测过的一件事。
     nonisolated static var validVerdictBody: String {
         "「校验」这一次只核对这份 JSON 的形状：版本号那一个字、配方名，以及每一步的 "
             + "kind 与 params 写得合不合后台服务的规则——形状合法。"
@@ -270,6 +308,108 @@ struct RecipesTabView: View {
             + "（observe / act / assert_element，MCP 那边是 gp_observe、gp_act、gp_assert_element），"
             + "那不需要这份配方，也不是这一页能替你做完的。"
             + "要改的就只是形状：改完再点一次「校验」，它同样只回一个形状结论。"
+    }
+
+    /// 「合法」那一屏正文的取法（纯函数，供单测）：有 notes 就只说本页测到的那一半，
+    /// 把"这一构建没有执行器"那一句留给它的作者；一条 notes 都没交出来时才用上面那份兜底。
+    nonisolated static func verdictBody(notes: [String]) -> String {
+        if notes.isEmpty { return validVerdictBody }
+        return "这一趟只核对了这份 JSON 的形状（版本号那一个字、配方名，以及每一步的 kind 与 "
+            + "params 写得合不合后台服务的规则），没有执行这里的任何一步——那是这一页做过的事。"
+            + "至于这一份构建里有没有能跑配方的入口，本页不替后台服务说话：它随这次结论交出的"
+            + "那几条原话，逐条照录在下面（它的 notes，一个字没改）。"
+    }
+
+    /// 后台服务随结论交出的 `notes`：**它们是数据，就按数据摊**——一个说清出处的标题，
+    /// 加逐条原文（可选中、可复制），不把任何一条改写成本页自己的一句话。
+    /// 空数组时整块不画：那一帧就是"它没交出 notes"，与"它交出了空话"不是一回事，
+    /// 兜底那句 `validVerdictBody` 已经把这一屏该说的说完。
+    @ViewBuilder
+    private func daemonNotesReadout(_ notes: [String]) -> some View {
+        if !notes.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("后台服务随这次结论交出的 notes（\(notes.count) 条，逐条照录，本页不替它改写）")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                ForEach(Array(notes.enumerated()), id: \.offset) { _, note in
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "note.text").font(.caption2).foregroundStyle(.tertiary)
+                        Text(note)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .padding(8)
+            .background(ConsoleTheme.insetBackground.opacity(0.6))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .accessibilityIdentifier("gp-recipe-daemon-notes")
+        }
+    }
+
+    // MARK: - 结论的持久化折算（纯函数，供单测）
+
+    /// 结论 → 那一个键里的一串 JSON；nil（还没点过校验）与"这串解不出来"都写成
+    /// `RecipeValidationOutcome.noVerdictStored`。
+    nonisolated static func encodeOutcome(_ outcome: RecipeValidationOutcome?) -> String {
+        guard let outcome else { return RecipeValidationOutcome.noVerdictStored }
+        var payload: [String: Any]
+        switch outcome {
+        case .idle:
+            payload = ["case": "idle"]
+        case .notJSON(let error):
+            payload = ["case": "notJSON", "detail": error]
+        case .noDaemon:
+            payload = ["case": "noDaemon"]
+        case .writeFailed:
+            payload = ["case": "writeFailed"]
+        case .daemonUnavailable:
+            payload = ["case": "daemonUnavailable"]
+        case .verdict(let valid, let recipeName, let errors, let notes):
+            payload = ["case": "verdict", "valid": valid, "errors": errors, "notes": notes]
+            if let recipeName { payload["recipeName"] = recipeName }
+        case .daemonRefused(let reason, let exitCode):
+            payload = ["case": "daemonRefused", "reason": reason, "exitCode": Int(exitCode)]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else {
+            // 编不出来就写"没有结论"：留一份假的比抹掉一次读数诚实，但这一页不猜结论。
+            return RecipeValidationOutcome.noVerdictStored
+        }
+        return text
+    }
+
+    /// 那一串 → 结论；解不出来 / 形状不对 / 标记位 = 没有结论（返回 nil，不猜一个）。
+    nonisolated static func decodeOutcome(_ stored: String) -> RecipeValidationOutcome? {
+        guard stored != RecipeValidationOutcome.noVerdictStored,
+              let data = stored.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let name = object["case"] as? String else {
+            return nil
+        }
+        switch name {
+        case "idle": return .idle
+        case "notJSON": return .notJSON((object["detail"] as? String) ?? "")
+        case "noDaemon": return .noDaemon
+        case "writeFailed": return .writeFailed
+        case "daemonUnavailable": return .daemonUnavailable
+        case "verdict":
+            guard let valid = object["valid"] as? Bool else { return nil }
+            return .verdict(
+                valid: valid,
+                recipeName: object["recipeName"] as? String,
+                errors: (object["errors"] as? [String]) ?? [],
+                notes: (object["notes"] as? [String]) ?? []
+            )
+        case "daemonRefused":
+            guard let exitCode = object["exitCode"] as? Int else { return nil }
+            return .daemonRefused(reason: (object["reason"] as? String) ?? "", exitCode: Int32(exitCode))
+        default:
+            return nil
+        }
     }
 
     private func verdictBanner(icon: String, tint: Color, title: String, body: String) -> some View {
@@ -397,7 +537,10 @@ struct RecipesTabView: View {
             return .verdict(
                 valid: valid,
                 recipeName: object["recipeName"] as? String,
-                errors: (object["errors"] as? [String]) ?? []
+                errors: (object["errors"] as? [String]) ?? [],
+                // `notes` 是那一份结论自带的另一半数据（引擎侧写的，见 `verdictBody(notes:)`）：
+                // 这里只把它读出来，一条都不替它改写；键不在（旧版 daemon）就是没有，不补一份抄本。
+                notes: (object["notes"] as? [String]) ?? []
             )
         }
         return .daemonRefused(

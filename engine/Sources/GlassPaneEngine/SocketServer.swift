@@ -24,6 +24,11 @@ public final class SocketServer {
     /// descriptor number here that another subsystem has since reused (R2-09).
     private var listenFD: Int32 = -1
     private var didUnlinkOnExit = false
+    /// 本实例 bind 成功那一刻 socket 的 (st_dev, st_ino)。上面文件头那句"never unlink a
+    /// socket file this instance did not create"从前只由 `didUnlinkOnExit` 这一个布尔撑着，
+    /// 而它证明的是"我删过/我打算删"，不是"这个名字还指着我的 socket"——`--force-socket`
+    /// 让前任与继任握着同一个路径字符串，于是它成了一条没有实现的主张（本轮修的缺陷）。
+    private var boundInode: SocketInode?
 
     /// A client that stops mid-line may not pin the single-client daemon
     /// forever (B-12): this is the absolute budget for one *incomplete* frame.
@@ -94,8 +99,15 @@ public final class SocketServer {
 
         close(listenFD)
         listenFD = -1
-        unlink(socketPath)
+        // 只删自己那一个 inode（见 `SocketNameOwnership`）：`--force-socket` 之后这个
+        // 字符串可能正指着继任者**正在监听**的 socket。
+        if SocketNameOwnership.removeIfOurs(recorded: boundInode, atPath: socketPath) {
+            log.info("socket removed \(socketPath)")
+        } else {
+            log.info("left \(socketPath) in place: the name no longer points at the socket this instance bound")
+        }
         didUnlinkOnExit = false
+        boundInode = nil
         log.info("shutdown complete")
     }
 
@@ -109,8 +121,9 @@ public final class SocketServer {
             listenFD = -1
         }
         if didUnlinkOnExit {
-            unlink(socketPath)
+            SocketNameOwnership.removeIfOurs(recorded: boundInode, atPath: socketPath)
             didUnlinkOnExit = false
+            boundInode = nil
         }
     }
 
@@ -184,9 +197,13 @@ public final class SocketServer {
             throw SocketErrorResponse.invalidPath(socketPath)
         }
 
-        let bindResult = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
-                bind(fd, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_un>.size))
+        // 名字以 `0777 & ~umask` 创建，所以 0600 这条硬不变量要从 bind 那一刻就成立，
+        // 不能等下面那句 chmod 去补（`SocketBindGuard` 记了为什么）。
+        let bindResult = SocketBindGuard.bindWithPrivateMode {
+            withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                    bind(fd, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
             }
         }
         guard bindResult == 0 else {
@@ -198,18 +215,25 @@ public final class SocketServer {
         }
         // From here the name belongs to this fd; later failures remove it again.
         didUnlinkOnExit = true
+        // 记下"这个名字此刻是我这个 socket"的那对 (st_dev, st_ino)——bind 刚成功时取
+        // `lstat`，记下的就是本实例建的那个 inode（`SocketNameOwnership` 记了为什么不能用
+        // `fstat`）。`--force-socket` 让两个实例握着同一个路径字符串，而下面每一处 unlink
+        // 都是按字符串动手的。
+        boundInode = SocketNameOwnership.currentInode(atPath: socketPath)
         guard chmod(socketPath, 0o600) == 0 else {
             let code = errno
             close(fd)
-            unlink(socketPath)
+            SocketNameOwnership.removeIfOurs(recorded: boundInode, atPath: socketPath)
             didUnlinkOnExit = false
+            boundInode = nil
             throw SocketErrorResponse.system(code, "chmod(0600)")
         }
         guard listen(fd, 1) == 0 else {
             let code = errno
             close(fd)
-            unlink(socketPath)
+            SocketNameOwnership.removeIfOurs(recorded: boundInode, atPath: socketPath)
             didUnlinkOnExit = false
+            boundInode = nil
             throw SocketErrorResponse.system(code, "listen()")
         }
         return fd

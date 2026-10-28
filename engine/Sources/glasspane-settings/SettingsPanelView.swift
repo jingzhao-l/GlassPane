@@ -18,6 +18,16 @@ struct SettingsPanelView: View {
     /// 权限轮询定时器（1s 间隔；全部达成 granted/unverifiable 或窗口关闭即停）。
     @State private var pollTimer: Timer?
 
+    /// 「不勾选会怎样」那一组的开合状态。
+    ///
+    /// 它**必须活过切页**：同页其余的可收起来控件都用同一个机制记住了人自己收拾好的
+    /// 版面（`ConsoleTheme.PanelCard` 与下面那份 `PermissionExplain`，都是 `@AppStorage`），
+    /// 而这一组从前没有：切到别的 tab 再切回来，它就自己合上了——那一组里摊的是
+    /// "缺这一项会具体坏在哪"，正是要来回对照着读的那一段。合上一次的代价不该由
+    /// 一次切页来付。默认仍是收起（这次改动不替人预先展开任何东西）。
+    @AppStorage("glasspane.card.permissions-degradation.expanded")
+    private var degradationExpanded = false
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -273,7 +283,7 @@ struct SettingsPanelView: View {
     private var degradationSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("不勾选会怎样").font(.headline)
-            DisclosureGroup {
+            DisclosureGroup(isExpanded: $degradationExpanded) {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(model.entries) { entry in
                         VStack(alignment: .leading, spacing: 2) {

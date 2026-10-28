@@ -265,8 +265,10 @@ public enum PermissionGuide {
     public static let panelSubjectDisclaimer = "要勾选的是后台服务 glasspaned（或其 .app），不是本设置窗口"
 
     /// 拖拽引导条标题（诚实呈现可自动检测的子集）。
+    /// 注：原先此处还有一个 `bannerHint`，全仓唯一读者是它自己的
+    /// `XCTAssertFalse(bannerHint.isEmpty)`——面板从未渲染它（面板只读 `bannerTitle`）。
+    /// 一条没人读的文案就是"未接线的主张"，按产品规矩删除，不留死字段。
     public static let bannerTitle = "拖拽引导：把窗口顶部的 GlassPane 图标拖到下方权限卡上，直接打开对应的系统设置面板"
-    public static let bannerHint = "授权对象是后台服务 glasspaned（卡片显示的就是它自己的状态）。开发者工具一项系统不提供查询，按卡片提示点「验证调试能力」即可。"
 
     // MARK: - 拖拽源选择（P1 v1.2 §11.3）
 

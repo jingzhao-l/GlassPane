@@ -69,6 +69,11 @@ extension View {
 ///
 /// 折叠状态记在本机设置里、按卡片的稳定 key 存：面板重开一次不该把人自己
 /// 收拾好的版面重置掉。折叠时标题与状态色仍在，收起来不等于看不见这件事。
+///
+/// **数量有上限的那种列表**（审批台账：一条记录一张卡，台账只增不减）不能走这份
+/// "每个 key 一个 UserDefaults 键"的默认存放——一万条记录就是一万个永久键。它们把开合
+/// 状态接到外面那份有界的存放上（`collapse:`，实现见 `ConsoleModel.storingLedgerCollapse`）：
+/// 给了 `collapse` 就**一次都不碰**下面那份 @AppStorage（它是惰性的，不读不写就不落键）。
 struct PanelCard<Content: View>: View {
     let key: String
     let title: String
@@ -81,8 +86,22 @@ struct PanelCard<Content: View>: View {
     /// 标题行右侧常驻的控制件（如"刷新"）。它必须待在折叠按钮**外面**：
     /// 一个动作被收进"要点开才看得见"里，等于收起卡片时把动作也停了。
     var accessory: AnyView? = nil
-    @AppStorage private var collapsed: Bool
+    /// 外来的开合存放（有界的那一种）。给了它，下面那份按 key 自成一键的存放全程不读不写。
+    private var externalCollapse: Binding<Bool>?
+    @AppStorage private var storedCollapsed: Bool
     @ViewBuilder var content: Content
+
+    /// 这一张现在收起来了吗。读写都只走一处：有外来存放就用那一份，否则用本机那一个键。
+    private var collapsed: Bool {
+        get { externalCollapse?.wrappedValue ?? storedCollapsed }
+        nonmutating set {
+            if let externalCollapse {
+                externalCollapse.wrappedValue = newValue
+            } else {
+                storedCollapsed = newValue
+            }
+        }
+    }
 
     init(
         key: String,
@@ -92,6 +111,7 @@ struct PanelCard<Content: View>: View {
         tint: Color? = nil,
         summary: String? = nil,
         accessory: AnyView? = nil,
+        collapse: Binding<Bool>? = nil,
         @ViewBuilder content: () -> Content
     ) {
         self.key = key
@@ -101,15 +121,25 @@ struct PanelCard<Content: View>: View {
         self.tint = tint
         self.summary = summary
         self.accessory = accessory
-        self._collapsed = AppStorage(wrappedValue: false, "glasspane.card.\(key).collapsed")
+        self.externalCollapse = collapse
+        // 有外来存放时，那份按 key 自成一键的 @AppStorage **不挂这个 key**：
+        // 它一次都不读不写（上面的 `collapsed` 走短路），而把 key 换成一个公共占位是第二道
+        // 保险——万一这个包装类型哪天改成"初始化就登记默认值"，一万行也只占一个占位键，
+        // 不会又长出一万个永久键。（`PanelCard` 是泛型类型，放不了 static 存储属性，
+        // 所以这个占位串就地写；它与 `ConsoleModel.ledgerCollapseDefaultsKey` 无关。）
+        self._storedCollapsed = AppStorage(
+            wrappedValue: false,
+            collapse == nil ? "glasspane.card.\(key).collapsed" : "glasspane.card.external-collapse-holder"
+        )
         self.content = content()
     }
+
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Button {
-                    collapsed.toggle()
+                    collapsed = !collapsed
                 } label: {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Image(systemName: collapsed ? "chevron.right" : "chevron.down")
