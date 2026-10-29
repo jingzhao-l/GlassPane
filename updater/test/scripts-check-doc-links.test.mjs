@@ -31,7 +31,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
-import { toolCountDrift, claimDrift, headingsOf, check, CLAIMS, shellResidue, DOCS, rulerProvenance } from '../../scripts/check-doc-links.mjs'
+import { toolCountDrift, claimDrift, headingsOf, check, CLAIMS, shellResidue, DOCS, rulerProvenance, markdownTableProblems } from '../../scripts/check-doc-links.mjs'
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -583,3 +583,34 @@ function independentlyCountedSlots() {
   assert.equal(a, b, `两面各数一遍应当相等：壳 ${a}，fork ${b}`)
   return a
 }
+
+/**
+ * `.worktrees/` 是派生目录（S11，2026-10-29）。并行会话/每日任务会把隔离工作树开在仓库目录
+ * **里面**，那是同一棵树的多份未追踪拷贝：本机实量，`.worktrees/` 下开出 5 份之后这道闸自己打印
+ * 的扫描量从 122 份 markdown 涨到 1257 份、表格从 448 张涨到 3275 张。同一棵 main 的树因为旁边
+ * 有没有工作树而给出不同读数，就不是"仓库里有什么"的度量了。
+ */
+test('表格形状闸不数 .worktrees 里的未追踪拷贝，但仍然数仓库里的那份', () => {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-mdwt-'))
+  const broken = ['| a | b |', '|---|---|', '| 1 | 2 | 3 |', ''].join('\n')
+  const good = ['| a | b |', '|---|---|', '| 1 | 2 |', ''].join('\n')
+  try {
+    fs.mkdirSync(path.join(root, 'specs'), { recursive: true })
+    fs.writeFileSync(path.join(root, 'specs', 'ledger.md'), good)
+    fs.mkdirSync(path.join(root, '.worktrees', 'swift9', 'specs'), { recursive: true })
+    fs.writeFileSync(path.join(root, '.worktrees', 'swift9', 'specs', 'ledger.md'), broken)
+    const first = markdownTableProblems({ rootDir: root })
+    assert.equal(first.files, 1, `扫描集合把未追踪的工作树拷贝数进来了（读到 ${first.files} 份）：同一棵树因为旁边有没有工作树而给出不同读数`);
+    assert.equal(first.problems.filter((p) => /\.worktrees\//.test(p)).length, 0,
+      `未追踪的工作树拷贝被判进了本仓表格形状：${JSON.stringify(first.problems)}`)
+    // 对照：仓库自己那份坏的必须照判（排除工作树不等于闭眼）。
+    fs.writeFileSync(path.join(root, 'specs', 'broken.md'), broken)
+    const again = markdownTableProblems({ rootDir: root })
+    assert.equal(again.files, 2, '仓库里那两份 markdown 应当都被数到')
+    assert.ok(again.problems.length > 0, '仓库里那份坏表格被漏掉了：排除工作树不该把真文档一起放过')
+    assert.ok(again.problems.some((p) => p.startsWith('specs/broken.md')),
+      `坏表格要从仓库那份点名报出：${JSON.stringify(again.problems)}`)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})

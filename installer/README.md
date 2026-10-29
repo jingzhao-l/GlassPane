@@ -17,7 +17,11 @@ npx glasspane-install
 
 # 2) Fetch, then run: install.sh clones the pinned release tag. Two steps on
 #    purpose — piped into `sh`, a curl that fails leaves stdin empty and the pipeline exits 0.
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
+#    The landing file comes from `mktemp`: `/tmp` is mode 1777, and the sticky bit only stops
+#    another account from deleting *your* file — it does not stop them from creating
+#    `/tmp/gp-install.sh -> ~/.bashrc` first, and `curl -o` follows that link and truncates
+#    the target as *you*.
+GP="$(mktemp "${TMPDIR:-/tmp/}gp-install.XXXXXXXX")" && curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o "$GP" && sh "$GP" && rm -f "$GP"
 
 # 3) From an existing checkout
 node installer/cli.js

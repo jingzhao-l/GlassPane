@@ -269,6 +269,18 @@ for (const sub of SUBDIRS) {
       continue
     }
     present.add(rel)
+    // The same `nonRegularKind()` probe the --record branches use, on the check side too (the
+    // 2026-10-28 fix put "detect-then-say-a-sentence" in the record path only). A pinned name that lands on a
+  //   DIRECTORY — a leftover `kernel/fixtures/c35/`, a directory someone made to stage files — used to
+  //   be met inside `sha256()`'s `readFileSync`, which throws ERR_FS_EISDIR with a stack and kills the
+  //   gate mid-loop: the remaining corpus files, the installed-package leg and the shell leg never ran,
+  //   and the reader got a trace instead of the one sentence this file's own rule demands ("一条拒该是
+  //   一句话，不是一个栈"). Name the kind, keep counting.
+    const kind = nonRegularKind(join(dir, name))
+    if (kind !== null) {
+      drift.push(`${rel}: the pin describes bytes here, but this path is a ${kind} — there is nothing to hash, and the Swift C35 leg reads it as a contract file. Move that ${kind} out of the mirror (deleting it from here is not this gate's call, same as --record), then re-run --record.`)
+      continue
+    }
     const actual = sha256(join(dir, name))
     if (actual !== expected.get(rel)) {
       drift.push(`${rel}: mirror ${actual.slice(0, 12)}… != pinned ${expected.get(rel).slice(0, 12)}…`)

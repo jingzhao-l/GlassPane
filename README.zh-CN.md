@@ -176,10 +176,13 @@ npx glasspane-install
 ```
 
 走脚本那条渠道是同样的一条命令（先取回脚本、再执行——刻意分两步。用管道给 `sh` 时，curl 自己失败会
-让 stdin 是空的，`sh` 直接 EOF 退 0：一次什么都没装的运行对外报的是成功）：
+让 stdin 是空的，`sh` 直接 EOF 退 0：一次什么都没装的运行对外报的是成功）。落点是 `mktemp` 造的一次性
+文件，而不是 `/tmp` 下的一个固定名字：那个目录是 1777 全员可写，sticky 位只挡住别人**删**你的文件，
+挡不住他先建一个 `/tmp/<那个名字> -> ~/.bashrc` 的符号链接——`curl -o` 会跟随它，并以**你**的 uid 截断
+覆写链接指向的文件。`install.sh` 自己用 `mktemp` 也是同一条理由：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
+GP_INSTALL_SH="$(mktemp "${TMPDIR:-/tmp/}gp-install.XXXXXXXX")" && curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o "$GP_INSTALL_SH" && sh "$GP_INSTALL_SH" && rm -f "$GP_INSTALL_SH"
 ```
 
 两条都拉取钉住的发布 tag，因此可复现；第三条与各自的代价见[安装渠道](#安装渠道)。
@@ -245,8 +248,10 @@ macOS 主版本由 LaunchServices 打开 bundle 时强制（`LSMinimumSystemVers
 npx glasspane-install
 
 # 2) 先取回脚本再执行，分两步：`curl … | sh` 那条管道里，curl 自己失败时 `sh` 读到的是空输入，
-#    整条管道照样退 0——而读退出码的正是不在场的 agent 与 CI，它必须是真的那个。
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
+#    整条管道照样退 0——而读退出码的正是不在场的 agent 与 CI，它必须是真的那个。落点用 `mktemp`
+#    造的一次性文件：`/tmp` 是全员可写的，写死一个名字等于把"覆写受害者可写文件"的原语交给同机的
+#    任意账号（他先在那个路径上放一个符号链接，`curl -o` 就跟着它截断）。
+GP_INSTALL_SH="$(mktemp "${TMPDIR:-/tmp/}gp-install.XXXXXXXX")" && curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o "$GP_INSTALL_SH" && sh "$GP_INSTALL_SH" && rm -f "$GP_INSTALL_SH"
 
 # 3) 自己管源码：`install.sh` 钉的是本次发布那一个 tag（它的 `GLASSPANE_RELEASE` 默认值，
 #    每次发版由 `scripts/set-version.mjs` 改写）——要装未发布的树才去 `main`。下面那个 tag 不靠人眼

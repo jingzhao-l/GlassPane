@@ -12,8 +12,11 @@ package alone does not give you a working verification engine.
 
 ```bash
 # Fetch install.sh, then run it — two steps on purpose: piped into `sh`, a curl that fails
-# leaves stdin empty and the pipeline exits 0 while nothing was installed.
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
+# leaves stdin empty and the pipeline exits 0 while nothing was installed. The landing file
+# comes from `mktemp`: `/tmp` is mode 1777 and the sticky bit does not stop another account
+# from creating `/tmp/gp-install.sh -> ~/.bashrc` first — `curl -o` follows that symlink and
+# truncates the target as *you*.
+GP="$(mktemp "${TMPDIR:-/tmp/}gp-install.XXXXXXXX")" && curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o "$GP" && sh "$GP" && rm -f "$GP"
 # 或：npx glasspane-install
 ```
 

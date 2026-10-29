@@ -91,9 +91,12 @@ const RUN_SCRIPT = new RegExp(
  * agree with itself rather than with CI, which is the shape this repository has been catching over and
  * over. One walk, two consumers.
  *
- * Returns `{ lines, jobKeys, jobs, runRefs, shells, hasTopPermissions }`:
+ * Returns `{ lines, jobKeys, jobs, runRefs, shells, hasTopPermissions, topKeys }`:
  *   `jobKeys` — every 2-space key under `jobs:` with its line, duplicates included (a parser would
  *               collapse them, and a collapsed duplicate is the defect rule 1 names);
+ *   `topKeys` — every column-0 key with its line, duplicates included. `jobKeys` cannot see a
+ *               second `jobs:` block (both blocks' jobs merge into one indented read, and the
+ *               duplicate is a *key-level* fact), which is rule 1a;
  *   `jobs`    — one record per job key: `{ name, line, runsOn, timeoutMinutes, runs }`, where
  *               `runs` holds the `run:` step bodies as this scanner sees them (block bodies arrive
  *               line by line);
@@ -113,6 +116,7 @@ const RUN_SCRIPT = new RegExp(
 function walkWorkflow(text) {
   const lines = text.split("\n")
   const jobKeys = []
+  const topKeys = []
   const jobs = []
   let current = null
   let section = null // top-level key we are inside of
@@ -154,6 +158,7 @@ function walkWorkflow(text) {
 
     if (top) {
       section = line.split(":")[0]
+      topKeys.push({ name: section, line: i + 1 })
       if (section === "permissions") hasTopPermissions = true
       current = null
       continue
@@ -203,7 +208,7 @@ function walkWorkflow(text) {
     }
   }
 
-  return { lines, jobKeys, jobs, runRefs, shells, hasTopPermissions }
+  return { lines, jobKeys, topKeys, jobs, runRefs, shells, hasTopPermissions }
 }
 
 /** The jobs of one workflow file, with `runs-on` and their `run:` bodies: what `--jobs` answers. */
@@ -215,7 +220,7 @@ function inspect(target) {
   const { dir, file } = target
   const base = path.join(dir, file)
   const text = readFileSync(base, "utf8")
-  const { lines, jobKeys, jobs: jobRecords, runRefs, shells, hasTopPermissions } = walkWorkflow(text)
+  const { lines, jobKeys, topKeys, jobs: jobRecords, runRefs, shells, hasTopPermissions } = walkWorkflow(text)
   const problems = []
   // Findings the rules would raise but this root may not be red for (see the scope note at 4a/4b).
   const advisories = []
@@ -225,6 +230,29 @@ function inspect(target) {
   for (const [name, at] of seen) {
     if (at.length > 1) {
       problems.push(`job "${name}" is defined ${at.length} times (lines ${at.join(", ")}) — a YAML mapping keeps only the last, so one of these checks never runs`)
+    }
+  }
+
+  // 1a. duplicate TOP-LEVEL keys — the same defect one level up, and invisible to rule 1.
+  //     `jobKeys` reads the `jobs:` section by indentation, so two `jobs:` blocks whose job names do
+  //     not overlap merge into one read: the file prints "clean; N job(s)" for N = the jobs of both
+  //     blocks. A YAML mapping, though, keeps only the LAST `jobs:` key, so every guard written in
+  //     the first block silently stops running — the 2026-09-25 accident that founded this tool, with
+  //     the duplication moved from a job name to a structural key. Measured before this rule existed:
+  //     a synthetic file with two `jobs:` blocks (build / release, disjoint names) was certified clean.
+  //     Any repeated column-0 key is the same class (`on:` twice = one trigger set is a fiction;
+  //     `permissions:` twice = one minimum is a fiction), so the rule is "a top-level key appears
+  //     once", not a denylist of four.
+  {
+    const at = new Map()
+    for (const k of topKeys) at.set(k.name, [...(at.get(k.name) ?? []), k.line])
+    for (const [name, where] of at) {
+      if (where.length < 2) continue
+      problems.push(
+        `top-level key "${name}:" is declared ${where.length} times (lines ${where.join(", ")}) — a YAML mapping keeps only the ` +
+          `last one, so whatever the earlier block(s) say (${name === "jobs" ? "every job in them" : "that setting"}) never takes effect ` +
+          `and this file no longer describes what CI runs. Merge the blocks into one, or rename the second key.`,
+      )
     }
   }
 
@@ -435,6 +463,27 @@ function inspect(target) {
         )
       }
     }
+  }
+
+  // 2e. a producer piped into a consumer that exits on the first match, inside a body that declares
+  //     `pipefail` (see `sigPipeExitProblems`). This repository has named this pit in four places —
+  //     release.yml:145-147, ci.yml:107-110 and 438-440, harness-contract.yml:108-111 — and every one
+  //     of those comments documents a step that was *fixed* by hand. Nothing stopped the fifth
+  //     occurrence, and the fifth was the release lane's "this tree is not tag-guaranteed" gate: it
+  //     died of 141 with no `::error::` text, i.e. a refusal gate that answers with a crash.
+  //     Measured (scratch, 2026-10-29): a 5000-line `LS` with the target on line 1,
+  //     `PEELED=$(printf '%s\n' "$LS" | awk … exit)` under `set -euo pipefail` exits 141 and prints
+  //     nothing at all — the operator sees a red step and no verdict.
+  if (target.primary) problems.push(...sigPipeExitProblems(lines, shells))
+  else advisories.push(...sigPipeExitAdvisories(lines, shells))
+
+  // 5. a job that publishes must serialise itself (see `publishConcurrencyFindings`). Primary root
+  //    only for the verdict: the fork subtree's release lane is another line's write scope, so it
+  //    gets the same count as a `△` hand-off (the 4a/4b precedent).
+  {
+    const found = publishConcurrencyFindings(lines, jobKeys, topKeys)
+    if (target.primary) problems.push(...publishConcurrencyProblems(found))
+    else advisories.push(...publishConcurrencyAdvisories(found))
   }
 
   // 3. a job gated on `inputs.x` that nobody declared is a job that never runs.
@@ -738,22 +787,34 @@ const GH_VERBS = new Set(["api", "release", "run", "secret", "workflow", "issue"
   "tag", "gist", "auth", "browse", "cache", "codespace", "config", "status", "ruleset", "delete",
   "create", "edit", "view", "upload", "download", "list", "set", "rerun", "cancel"])
 
+/**
+ * The command text at line `i`, or null when nothing on that line executes.
+ *
+ * Two shapes are prose, not commands: a `#` comment, and any line belonging to a logical command
+ * whose head is `echo`/`printf`/`cat`/`sed`/`awk`/`grep` — that head prints a sentence, and a command
+ * named inside it is an instruction for the human reading the red step. This is not a stylistic
+ * exemption: release.yml:193 and the fork subtree's 497 name `gh secret set` inside an `::error::`
+ * echo, and reddening those buys a deleted comment plus a command nobody checks — the same trade
+ * `ghJsonFieldProblems` refused for `#` lines. Head resolution walks back over `\` continuations,
+ * because a multi-line `echo "…" \` carries its gh call on a physical line the head does not.
+ */
+function commandTextAt(lines, i) {
+  const raw = lines[i]
+  if (/^\s*#/.test(raw)) return null
+  let head = i
+  while (head > 0 && /\\\s*$/.test(lines[head - 1].replace(/\s+$/, ""))) head--
+  const headLine = lines[head].replace(/^(\s*(?:-\s+)?)run:\s*/, "$1")
+  if (/^\s*(?:-\s+)?(?:echo|printf|cat|sed|awk|grep)\b/.test(headLine)) return null
+  // A YAML inline `- run: gh …` is a command; strip the key before matching.
+  return raw.replace(/^(\s*(?:-\s+)?)run:\s*/, "$1")
+}
+
 /** The gh invocations on these lines that a runner would actually execute, with line numbers. */
 function ghCallLines(lines) {
   const hits = []
   for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i]
-    if (/^\s*#/.test(raw)) continue
-    // One logical command can span physical lines through `\`. Its head says whether anything on
-    // those lines executes at all: a head of `echo`/`printf` is a sentence being printed, and the
-    // gh named inside it is an instruction for a human. release.yml:193 and the fork's 497 are
-    // exactly that shape, and reddening them buys a deleted comment plus an unchecked command.
-    let head = i
-    while (head > 0 && /\\\s*$/.test(lines[head - 1].replace(/\s+$/, ""))) head--
-    const headLine = lines[head].replace(/^(\s*(?:-\s+)?)run:\s*/, "$1")
-    if (/^\s*(?:-\s+)?(?:echo|printf|cat|sed|awk|grep)\b/.test(headLine)) continue
-    // A YAML inline `- run: gh …` is a command; strip the key before matching.
-    const text = raw.replace(/^(\s*(?:-\s+)?)run:\s*/, "$1")
+    const text = commandTextAt(lines, i)
+    if (text === null) continue
     GH_CALL.lastIndex = 0
     let m
     while ((m = GH_CALL.exec(text)) !== null) {
@@ -826,6 +887,253 @@ function ghTokenProblems(lines, jobKeys) {
     )
   }
   return out
+}
+
+/**
+ * Rule 2e — the `pipefail` half of every `run:` body, as line spans.
+ *
+ * The pipeline verdict this rule judges only exists when the body *declares* pipefail: Actions'
+ * default shell is `bash -e` with no pipefail, and then the step's status is the last stage's zero
+ * and an EPIPE-killed producer is invisible. With pipefail (which rule 4b makes every
+ * multi-statement body write) the status becomes the producer's 141 — so "does this body declare
+ * pipefail" is not scenery, it is the trigger. Spans are `[this run:, next run: - 1]`, which keeps a
+ * neighbour step's header out of this step's verdict.
+ */
+function pipefailSpans(shells) {
+  return shells.map((block, index) => {
+    const end = index + 1 < shells.length ? shells[index + 1].line - 1 : Number.POSITIVE_INFINITY
+    const pipefail = (block.lines ?? []).some((l) => {
+      const head = /^\s*set\s+[^;]*/.exec(l)
+      if (!head) return false
+      const flags = setGateFlags(head[0].trim())
+      return flags !== null && flags.has("pipefail")
+    })
+    return { start: block.line, end, pipefail }
+  })
+}
+
+// The producer half: a string/file writer whose bytes are already known to the shell (so a
+// large `$VAR` is a large, bounded, in-memory write — exactly what awk leaves mid-flight).
+const PIPE_PRODUCER = /(?:^|[\s;|&(])(?:printf|echo|cat)\b/
+// The consumer half, with its arguments: does it leave before reading to EOF?
+const CONSUMER_WORD = /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\s|]*\s+)*(awk|gawk|mawk|grep|egrep|fgrep|head)\b/
+
+/**
+ * The offsets in `text` where a `|` is a pipeline operator *to bash*.
+ *
+ * A hand-rolled tokenizer, not a `split('|')`, because the two shapes this rule must tell apart
+ * both contain a literal `|`: `echo "… printf … | gh secret set …"` pipes nothing (that bar is
+ * inside the quoted sentence a human reads), while `PEELED="$(printf '%s\n' "$LS" | awk … exit)"`
+ * pipes inside a command substitution *that happens to sit inside double quotes* — and bash runs
+ * that pipe. So single quotes, double quotes and `$(` / `)` are tracked, and a `|` counts only when
+ * it is bare and not part of `||`.
+ */
+function pipeOperatorOffsets(text) {
+  const out = []
+  let inSingle = false
+  let inDouble = false
+  const saved = [] // quote states as they were at each `$(`
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (!inSingle && text.startsWith("$(", i)) {
+      saved.push({ inSingle, inDouble })
+      i += 1
+      continue
+    }
+    if (!inSingle && inDouble && ch === '"') {
+      // `"` closes the double quote; an escaped `\"` does not.
+      let slashes = 0
+      for (let k = i - 1; k >= 0 && text[k] === "\\"; k--) slashes++
+      if (slashes % 2 === 0) inDouble = false
+      continue
+    }
+    if (inSingle) {
+      if (ch === "'") inSingle = false
+      continue
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = true
+      continue
+    }
+    if (inDouble) continue
+    if (ch === ")") {
+      const state = saved.pop()
+      if (state) {
+        inSingle = state.inSingle
+        inDouble = state.inDouble
+      }
+      continue
+    }
+    if (ch === "|") {
+      if (text[i + 1] === "|" || text[i - 1] === "|") {
+        i += 1
+        continue
+      }
+      out.push(i)
+    }
+  }
+  return out
+}
+
+/** The chunk of `text` a given pipe's producer occupies (what runs before it on this command). */
+function producerChunk(text, pipeAt) {
+  const before = text.slice(0, pipeAt)
+  let start = 0
+  for (const token of ["&&", "||", ";", "(", "$("]) {
+    const at = before.lastIndexOf(token)
+    if (at >= 0) start = Math.max(start, at + token.length)
+  }
+  return before.slice(start)
+}
+
+/** Which early-exit class this consumer belongs to, or null when it reads to EOF (and is safe). */
+function earlyExitConsumer(word, args) {
+  if (/^(?:g?awk|mawk)$/.test(word)) {
+    return /(?:^|[;&{}\s])exit\b|\bnext\b/.test(args) ? `${word} … exit` : null
+  }
+  if (/^(?:e?f?grep)$/.test(word)) {
+    if (/(?:^|\s)-(?:[a-z]*q|--quiet|--silent|--files-with-matches|-m\s*\d|--max-count)/.test(args)) return `${word} -q`
+    return null
+  }
+  if (word === "head") return "head"
+  return null
+}
+
+/** Every `producer | first-match consumer` pipeline on this shell line, with its class. */
+function earlyExitPipelines(text) {
+  const hits = []
+  for (const at of pipeOperatorOffsets(text)) {
+    const producer = producerChunk(text, at)
+    if (!PIPE_PRODUCER.test(producer)) continue
+    const next = pipeOperatorOffsets(text.slice(at + 1)).map((o) => o + at + 1)[0] ?? text.length
+    const consumer = text.slice(at + 1, next)
+    const word = CONSUMER_WORD.exec(consumer)
+    if (!word) continue
+    const kind = earlyExitConsumer(word[1], consumer.slice(word[0].length))
+    if (kind) hits.push({ kind, judged: false })
+  }
+  return hits
+}
+
+/**
+ * The pipelines this file kills with its own SIGPIPE.
+ *
+ * WHY (measured, then gated). `PEELED=$(printf '%s\n' "$LS" | awk -v r=… '$2==r{print $1; exit}')`
+ * in the release lane reads as "take the tag's line" and is a coin flip on the size of
+ * `git ls-remote --tags` output: awk exits the moment it matches, printf is still writing, dies of
+ * EPIPE, and under `set -euo pipefail` the pipeline's status is 141 — the step aborts mid-gate,
+ * printing nothing. The gate whose whole job is "refuse to publish a tree no tag guarantees" therefore
+ * answered with an anonymous crash instead of a named refusal, and an operator reading the run cannot
+ * tell "the tag is missing" from "the check could not finish". Re-produced in scratch on 2026-10-29:
+ * 5000 tag lines, target on line 1, `bash -euo pipefail` → exit 141, zero output.
+ *
+ * Two verdicts, because the two consequences differ:
+ *   - an assignment or a standalone command → the step dies (crash class);
+ *   - an `if`/`while`/`[ ]` condition → `set -e` stays silent and 141 is read as "no match", so a
+ *     value that IS there gets refused (inversion class — what harness-contract.yml:108-111
+ *     documents for `probe_tag`).
+ * Comments are skipped, and so is every `|` that bash does not read as a pipe: the remedy strings
+ * this repository prints (`echo "… printf '%s' <key> | gh secret set …"`) name the shape inside a
+ * quoted sentence, and a gate that reddens prose gets its prose deleted — the trade
+ * `ghJsonFieldProblems` already refused. See `pipeOperatorOffsets` for the tokenizer.
+ *
+ * Known limit, said out loud rather than hidden: the producer half is `printf`/`echo`/`cat`, the
+ * three in-memory writers this repository actually pipes. `git ls-remote --tags origin | awk … exit`
+ * would SIGPIPE `git` the same way and is not judged here; widening the producer set is a separate,
+ * measurable change, not an accident of this regex.
+ */
+function sigPipeExitFindings(lines, shells) {
+  const spans = pipefailSpans(shells)
+  const out = []
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i]
+    if (/^\s*#/.test(raw)) continue
+    const span = spans.find((s) => s.start <= i + 1 && i + 1 <= s.end)
+    if (!span || !span.pipefail) continue
+    const text = raw.replace(/^(\s*(?:-\s+)?)run:\s*/, "$1")
+    for (const hit of earlyExitPipelines(text)) {
+      // A condition (`if …`, `while …`, `[ … ]`, `! …`) swallows the 141 through `set -e` and turns
+      // it into a wrong *answer*; an assignment or a bare command turns it into a dead step.
+      const judged = /^\s*(?:if|elif|while|until|!)\b/.test(text) || /\[\[?\s/.test(text.slice(0, text.indexOf("|")))
+      out.push({ line: i + 1, kind: hit.kind, judged, text: raw.trim().slice(0, 90) })
+    }
+  }
+  return out
+}
+
+const SIGPIPE_REMEDY = "Feed the consumer from a here-string instead — `awk … <<<\"$VAR\"` — or match with `case`, which is what release.yml:145-147, ci.yml:438-440 and harness-contract.yml:108-111 already do."
+
+function sigPipeExitProblems(lines, shells) {
+  return sigPipeExitFindings(lines, shells).map((f) =>
+    f.judged
+      ? `line ${f.line}: a bounded producer is piped into a consumer that leaves on its first match (${f.kind}) inside a body that declares pipefail, and the pipeline sits in a *condition* — the producer's SIGPIPE makes the status 141, which the condition reads as "no match", so a value that is present gets refused by its own gate. ${SIGPIPE_REMEDY} Offending line: \`${f.text}\``
+      : `line ${f.line}: a bounded producer is piped into a consumer that leaves on its first match (${f.kind}) inside a body that declares pipefail — once the piped bytes pass the pipe buffer (~64 KB) the producer dies of EPIPE, the pipeline's status becomes 141 and ` +
+        `\`set -e\` aborts the whole step with no \`::error::\` text, so a reader cannot tell "refused" from "the check could not finish". ${SIGPIPE_REMEDY} Offending line: \`${f.text}\``)
+}
+
+function sigPipeExitAdvisories(lines, shells) {
+  const found = sigPipeExitFindings(lines, shells)
+  if (!found.length) return []
+  return [`${found.length} producer→first-match-consumer pipeline(s) under a pipefail body (lines ${found.map((f) => f.line).join(", ")}) ` +
+    "— the 141 class above; reported to that root's own gate, not enforced from here"]
+}
+
+/**
+ * Rule 5 — a job that publishes must declare `concurrency`.
+ *
+ * WHY: same-tag runs are not rare. Deleting a tag and re-pushing it, "Re-run failed jobs" after a
+ * half-finished release, or a push plus a dispatch can put two writers on one GitHub Release. The
+ * writes are not idempotent as a pair (`gh release upload --clobber` replaces assets, `gh release edit
+ * --target` moves the target commit), so the shipped bytes belong to whichever run finishes last —
+ * while the run that finished *first* printed a passing readback, because what it read back was true
+ * at that moment. `npm-publish` already declares a queue for exactly this reason; `github-release`
+ * was the one left unguarded (S10-6, 2026-10-29).
+ *
+ * A workflow-level `concurrency:` group satisfies it: it serialises whole runs on the same ref, which
+ * is a coarser version of the same promise. `cancel-in-progress: true` does NOT satisfy it — cancelling
+ * a publish mid-flight is how a half-uploaded release ships, so the rule asks for the queue.
+ */
+const PUBLISH_COMMAND = new RegExp("(?:^\\s*|[;&|]\\s*)(?:(?:npm|pnpm|yarn)\\s+publish\\b|gh\\s+release\\s+(?:create|upload|edit)\\b)")
+
+function publishConcurrencyFindings(lines, jobKeys, topKeys) {
+  if (topKeys.some((k) => k.name === "concurrency")) return []
+  const byJob = new Map()
+  for (let i = 0; i < lines.length; i++) {
+    const cmd = commandTextAt(lines, i)
+    if (cmd === null) continue
+    if (!PUBLISH_COMMAND.test(cmd)) continue
+    const { job } = enclosingRanges(lines, jobKeys, i + 1)
+    const key = jobKeys.filter((k) => k.line - 1 <= i).map((k) => k).pop()
+    if (!key) continue
+    if (byJob.has(key.line)) continue
+    const jobBlock = lines.slice(job[0], job[1]).join("\n")
+    byJob.set(key.line, {
+      name: key.name,
+      line: key.line,
+      publishLine: i + 1,
+      declared: /^ {4}concurrency:\s*$/m.test(jobBlock),
+      cancels: /^ {6}cancel-in-progress:\s*true\s*$/m.test(jobBlock),
+    })
+  }
+  return [...byJob.values()].filter((job) => !job.declared || job.cancels)
+}
+
+function publishConcurrencyProblems(found) {
+  return found.map((job) =>
+    job.declared
+      ? `job "${job.name}" (line ${job.line}) publishes (first at line ${job.publishLine}) with \`cancel-in-progress: true\` — ` +
+        `a cancelled publish leaves a release half-uploaded with the assets it had before the cut. Irreversible channels queue: set \`cancel-in-progress: false\`.`
+      : `job "${job.name}" (line ${job.line}) publishes (first at line ${job.publishLine}) and declares no job-level \`concurrency:\` — ` +
+        `two runs on the same ref (a retag-and-push, a "Re-run failed jobs") then write the same release, the shipped bytes end up the last writer's, ` +
+        `and the run that finished first still reports its own readback as a pass. Add ` +
+        `\`concurrency: { group: <lane>-\${{ github.ref_name }}, cancel-in-progress: false }\` — queue, do not cancel: ` +
+        `throwing away an in-flight publish is the failure this guards against too.`)
+}
+
+function publishConcurrencyAdvisories(found) {
+  if (!found.length) return []
+  return [`${found.length} publishing job(s) without a queue of their own (${found.map((j) => `${j.name}@${j.line}`).join(", ")}) ` +
+    "— same-tag writers overwrite one release; reported to that root's own gate, not enforced from here"]
 }
 
 function jobPolicyProblems(lines) {
@@ -1096,6 +1404,114 @@ jobs:
           "\n  build:\n    name: build the thing\n    runs-on: ubuntu-latest\n    steps: []\n  build:\n",
         ),
       expect: /defined 2 times/,
+    },
+    {
+      id: "two top-level `jobs:` blocks (rule 1 one level up: the key, not the job name)",
+      // The 2026-09-25 transplant shape with the duplication moved up a level. `jobKeys` merges both
+      // blocks' jobs into one indented read, so the file prints "clean; N job(s)" for the union while
+      // YAML keeps only the LAST `jobs:` — every guard in the first block stops existing. The two
+      // blocks below deliberately use disjoint job names, which is the case rule 1 cannot see.
+      apply: (t) =>
+        `${t}jobs:\n  release:\n    name: release gate\n    runs-on: ubuntu-latest\n    timeout-minutes: 10\n    steps:\n      - run: node scripts/check-version.mjs\n`,
+      expect: /top-level key "jobs:" is declared 2 times/,
+    },
+    {
+      id: "one top-level key per name stays silent (the counter-case rule 1a needs)",
+      // BASE itself: `name/on/permissions/jobs` each once. Without this case 1a could be satisfied by
+      // a rule that fires on every file, and a permanent red gets switched off.
+      apply: (t) => t,
+      absent: /top-level key .* is declared/,
+    },
+    {
+      id: "a producer piped into an awk that exits on the first match, under pipefail (S10-1)",
+      // The release lane's tag gate, verbatim in shape. `set -euo pipefail` + `printf … | awk … exit`
+      // means the step's verdict is printf's SIGPIPE (141) as soon as the piped bytes pass the pipe
+      // buffer — proven in scratch on 2026-10-29 with a 5000-line `LS`: exit 141, no output at all.
+      apply: (t) =>
+        t.replace(
+          "      - name: gated on a secret",
+          "      - name: the tag must exist\n" +
+            "        run: |\n" +
+            "          set -euo pipefail\n" +
+            '          LS=$(git ls-remote --tags origin)\n' +
+            `          PEELED=$(printf '%s\\n' "$LS" | awk -v r="refs/tags/v1^{}" '$2==r{print $1; exit}')\n` +
+            "          [ -n \"$PEELED\" ]\n" +
+            "      - name: gated on a secret",
+        ),
+      expect: /piped into a consumer that leaves on its first match/,
+    },
+    {
+      id: "the same verdict read from a here-string stays silent",
+      // The fix, on the text the red case just broke: no producer process, so no EPIPE and no 141 —
+      // `awk`'s own zero is the status. If this case ever goes red, the rule is judging the shape
+      // `printf | awk` cannot be told apart from the safe one and will get switched off.
+      apply: (t) =>
+        t.replace(
+          "      - name: gated on a secret",
+          "      - name: the tag must exist\n" +
+            "        run: |\n" +
+            "          set -euo pipefail\n" +
+            '          LS=$(git ls-remote --tags origin)\n' +
+            `          PEELED=$(awk -v r="refs/tags/v1^{}" '$2==r{print $1; exit}' <<<"$LS")\n` +
+            "          [ -n \"$PEELED\" ]\n" +
+            "      - name: gated on a secret",
+        ),
+      absent: /piped into a consumer that leaves on its first match/,
+    },
+    {
+      id: "a publishing job with no concurrency of its own (S10-6)",
+      // `github-release` shipped this shape: same-tag runs (retag-and-push, Re-run failed jobs) write
+      // one Release, the last writer's bytes ship, and the run that finished first still passes its
+      // own readback. The rule must name the job, not just the file.
+      apply: (t) =>
+        t.replace(
+          "      - name: gated on a secret",
+          "      - name: publish it\n" +
+            "        env:\n" +
+            "          GH_TOKEN: ${{ github.token }}\n" +
+            '        run: gh release create "$TAG" --draft\n' +
+            "      - name: gated on a secret",
+        ),
+      expect: /declares no job-level `concurrency:`/,
+    },
+    {
+      id: "that job once it queues instead of interleaving",
+      apply: (t) =>
+        t
+          .replace(
+            "      - name: gated on a secret",
+            "      - name: publish it\n" +
+              "        env:\n" +
+              "          GH_TOKEN: ${{ github.token }}\n" +
+              '        run: gh release create "$TAG" --draft\n' +
+              "      - name: gated on a secret",
+          )
+          .replace(
+            "  build:\n    name: build the thing\n    runs-on: ubuntu-latest\n",
+            "  build:\n    name: build the thing\n    runs-on: ubuntu-latest\n    concurrency:\n      group: release-${{ github.ref_name }}\n      cancel-in-progress: false\n",
+          ),
+      absent: /declares no job-level `concurrency:`/,
+    },
+    {
+      id: "a publishing job that cancels its own in-flight publish",
+      // Declaring `concurrency` is half the ask. `cancel-in-progress: true` on a publish kills an
+      // upload halfway through and leaves the release with whatever assets existed at the cut, so the
+      // queue — not the abort — is what the irreversible channel owes.
+      apply: (t) =>
+        t
+          .replace(
+            "      - name: gated on a secret",
+            "      - name: publish it\n" +
+              "        env:\n" +
+              "          GH_TOKEN: ${{ github.token }}\n" +
+              '        run: gh release create "$TAG" --draft\n' +
+              "      - name: gated on a secret",
+          )
+          .replace(
+            "  build:\n    name: build the thing\n    runs-on: ubuntu-latest\n",
+            "  build:\n    name: build the thing\n    runs-on: ubuntu-latest\n    concurrency:\n      group: release-${{ github.ref_name }}\n      cancel-in-progress: true\n",
+          ),
+      expect: /cancel-in-progress: true/,
     },
     {
       id: "no top-level permissions block",

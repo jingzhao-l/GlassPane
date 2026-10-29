@@ -145,10 +145,13 @@ npx glasspane-install
 
 The same install over the script channel (fetch, then run — two steps on purpose: piped into `sh`, a
 failed `curl` leaves stdin empty, `sh` reaches EOF and exits 0, so an install that did nothing reports
-success):
+success). The landing file is a `mktemp` one rather than a fixed name under `/tmp`: that directory is
+world-writable (mode 1777), and the sticky bit stops other accounts from *deleting* your file but not
+from planting `/tmp/<that name> -> ~/.bashrc` beforehand — `curl -o` follows the link and truncates
+the target as **you**. Same reason `install.sh` itself uses `mktemp`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
+GP_INSTALL_SH="$(mktemp "${TMPDIR:-/tmp/}gp-install.XXXXXXXX")" && curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o "$GP_INSTALL_SH" && sh "$GP_INSTALL_SH" && rm -f "$GP_INSTALL_SH"
 ```
 
 Either way it fetches the pinned release tag, so the build is reproducible; see
@@ -214,8 +217,10 @@ npx glasspane-install
 
 # 2) Fetch then run. Kept in two steps: with `curl … | sh`, a curl that fails leaves `sh` reading
 #    an empty stdin, and the pipeline exits 0 — the exit code is exactly what an absent-minded
-#    agent or CI reads, so it has to be the real one.
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
+#    agent or CI reads, so it has to be the real one. The landing file comes from `mktemp`: a fixed
+#    name under world-writable `/tmp` is a cross-account overwrite primitive (someone else's symlink
+#    at that path is what `curl -o` would truncate).
+GP_INSTALL_SH="$(mktemp "${TMPDIR:-/tmp/}gp-install.XXXXXXXX")" && curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o "$GP_INSTALL_SH" && sh "$GP_INSTALL_SH" && rm -f "$GP_INSTALL_SH"
 
 # 3) From a checkout you manage. `install.sh` pins one release tag (its `GLASSPANE_RELEASE` default,
 #    rewritten by `scripts/set-version.mjs` on every release) — clone that tag, not `main`, unless you

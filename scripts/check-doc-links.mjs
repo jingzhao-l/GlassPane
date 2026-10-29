@@ -20,6 +20,14 @@
  * (5) 是 2026-10-22 补的第五类：**形状禁令**——对外文档里以命令形状给出的安装行不许是
  * `curl … | sh` 那条被实测证明会谎报成功的管道（判据与它的两个豁免面见 `pipedInstallCommands`）。
  * 它和 (4) 一样是"句子对不对"而不是"文件在不在"，只是这一条没有真源可比，只有实测过的形状。
+ *
+ * (6) 是 2026-10-29 补的第六类：`curl … -o <落点>` 的那个子命令不许是 world-writable 目录里的
+ * 固定名字（判据见 `installLandingAudit`）——第五类管的是"结论拿不拿得到"，这一类管的是"拿得到
+ * 结论的那一步会不会把别人的文件覆写了"。
+ *
+ * `--self-test` 是 2026-10-29 补的：这道闸有三条判据（失效锚点的解码、`~~~` 围栏、安装落点）都是
+ * 只在"坏形状出现的那一天"才知道自己存不存在的，而它们此前只能靠人记得去手测。现在每一条都有一个
+ * 合成夹具档，红与静各打一遍（`check-workflows.mjs` 用的是同一个契约）。
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -149,6 +157,33 @@ export function headingsOf(text) {
 function read(rel, rootDir = ROOT) {
   return fs.readFileSync(path.join(rootDir, rel), 'utf8')
 }
+
+/**
+ * 百分号解码，但**不许它把整条闸带走**（S10-3，2026-10-29）。
+ *
+ * WHY。`decodeURIComponent` 对一个裸 `%`（散文里"50%"这种写法，或者手写的 `#funds-50%-covered`
+ * 锚点）抛的是 URIError，而它被调在文档循环的正中间：一处编码问题让这道闸带着栈退出，
+ * 剩下的文档、全部主张核对与全部表格形状那一轮**一条都没跑**——本仓的规矩是"一条拒该是
+ * 一句话，不是一个栈"（2026-10-28 的 check-kernel-corpus `--record` 修复写的就是这条）。
+ * 现在解码失败本身是一条具名问题，原始字符串继续参与能判的部分，其余文档照常过闸。
+ */
+function decodeRef(raw) {
+  try {
+    return { value: decodeURIComponent(raw), problem: null }
+  } catch {
+    return { value: raw, problem: '含裸 %（`%` 后面不是两位十六进制；要写成 %25）' }
+  }
+}
+
+/**
+ * 围栏行。``` 与 ~~~ 都算开栏，也都必须能闭栏。
+ *
+ * 这一个判据有三个读者（`headingsOf`、`shellResidue`、`markdownTableProblems`）。此前
+ * `shellResidue` 只认 ```，另外两个认两种，于是用 `~~~` 包住的示例命令被残渣闸误红，
+ * 而误红的补救文案——"要么放进 ``` 围栏"——对**已经在 `~~~` 里**的那一行自相矛盾（S10-5）。
+ * 三个读者共用一个式子，才不会再各写各的、各自漂移。
+ */
+export const isFenceLine = (line) => /^\s*(?:```|~~~)/.test(line)
 
 /** 从 mcp-shell 源码里数出真实工具数（不依赖构建产物）。 */
 function realToolCount(rootDir = ROOT) {
@@ -667,6 +702,7 @@ export function rulerProvenance({ rootDir = ROOT } = {}) {
 
 export function check({ rootDir = ROOT, docs = DOCS } = {}) {
   const problems = []
+  const advisories = []
   const present = docs.filter((d) => fs.existsSync(path.join(rootDir, d)))
   // 登记过却不在磁盘上的文档是**问题**，不是"本轮不归它管"。从前各支各自 `existsSync` 过滤，
   // 于是把一份文档（或整个 MAIN_DOCS）改名/删掉，这条闸会打出 `文档 0 份 … OK` 并退 0——
@@ -690,6 +726,9 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
   problems.push(...shellResidue({ rootDir, docs }))
   // 安装渠道：对外给出的那条一键命令必须是拿得到退出码的那一种写法（判据见 `pipedInstallCommands`）。
   problems.push(...pipedInstallCommands({ rootDir }))
+  // 落点：两步写法自己不许把脚本落在 world-writable 目录的一个固定名字上（判据见 `installLandingAudit`）。
+  problems.push(...installLandingProblems({ rootDir }))
+  advisories.push(...installLandingAdvisories({ rootDir }))
   // 可复算主张：对真源核一遍，再对另一语言核一遍。缺了这一步，"双语成对完整"只意味着
   // 文件都在，不意味着两份话说的是同一件事。
   problems.push(...claimDrift({ rootDir }))
@@ -718,11 +757,24 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
       if (/^https?:\/\//.test(url)) { external += 1; continue }
       links += 1
       const [rawTarget, rawAnchor] = url.split('#')
-      const target = decodeURIComponent(rawTarget)
+      // 解码失败是一句话，不是一个栈（见 `decodeRef`）。坏掉的那一条本轮不判存在性——
+      // 拿一个解不开的字符串去比对磁盘或锚点集，报出来的红只会把读者的注意力从"这里有个裸 %"
+      // 引到"这个文件不存在"上去。
+      const decodedTarget = decodeRef(rawTarget)
+      if (decodedTarget.problem) {
+        problems.push(`${doc}: 链接目标${decodedTarget.problem} → ${url}（这条本轮不判存在性；其余链接、主张与表格照常核对）`)
+        continue
+      }
+      const target = decodedTarget.value
       if (rawTarget === undefined || rawTarget === '') {
         // 同文档锚点
+        const decodedAnchor = decodeRef(rawAnchor)
+        if (decodedAnchor.problem) {
+          problems.push(`${doc}: 同文档锚点${decodedAnchor.problem} → #${rawAnchor}（GitHub 会把它渲染成另一个 slug；要写 %25，或把标题改掉后重写锚点）`)
+          continue
+        }
         const set = anchors.get(doc) ?? new Set()
-        if (!set.has(decodeURIComponent(rawAnchor))) {
+        if (!set.has(decodedAnchor.value)) {
           problems.push(`${doc}: 同文档锚点失效 → #${rawAnchor}`)
         }
         continue
@@ -749,15 +801,18 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
           }
           set = anchorCache.get(rel)
         }
-        if (set === null) {
+        const decodedAnchor = decodeRef(rawAnchor)
+        if (decodedAnchor.problem) {
+          problems.push(`${doc}: 跨文档锚点${decodedAnchor.problem} → ${url}（这条本轮不判存在性）`)
+        } else if (set === null) {
           problems.push(`${doc}: 锚点目标读不到 → ${url}`)
-        } else if (!set.has(decodeURIComponent(rawAnchor))) {
+        } else if (!set.has(decodedAnchor.value)) {
           problems.push(`${doc}: 跨文档锚点失效 → ${url}`)
         }
       }
     }
   }
-  return { docs: present.length, links, external, tables: shape.tables, mdFiles: shape.files, problems }
+  return { docs: present.length, links, external, tables: shape.tables, mdFiles: shape.files, problems, advisories }
 }
 
 /**
@@ -773,8 +828,10 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
  * 判据只认两种形状，故意不做广义"像不像代码"的判断（广义规则会把人话误判成残渣，然后被要求放宽）：
  * ① 一行恰好是 heredoc 结束标记；② 一行是**命令形状**的 shell 行——小写命令词开头、整行不含汉字、
  * 且带着只有命令行才有的东西（`$(`、第二个词以 `-` 或 `/` 开头、或紧跟引号）。两者都只在
- * **围栏之外**生效——``` 里面的 shell 记录是文档的正常内容（这一页就有好几段），把围栏也扫进去
- * 是一道永远会误红的闸。
+ * **围栏之外**生效——``` 与 `~~~` 里面的 shell 记录是文档的正常内容（这一页就有好几段），把围栏也扫进去
+ * 是一道永远会误红的闸。开/闭判定与 `markdownTableProblems`、`headingsOf` 共用 `isFenceLine`：
+ * 此前这里只认 ```，于是 `~~~` 围栏里的示例命令被误红，而误红文案教作者"放进 ``` 围栏"——
+ * 对已经在一个合法围栏里的行自相矛盾（S10-5，2026-10-29）。
  *
  * "整行不含汉字"这一半不是凑数：判据第一版只看命令词，于是
  * `harness/glasspane-harness/SYNCLOG.md:684` 那句人话（"grep 会把这种管道输入当"二进制"而停止
@@ -789,7 +846,7 @@ export function shellResidue({ rootDir = ROOT, docs = DOCS } = {}) {
     const text = read(doc, rootDir)
     let fenced = false
     text.split('\n').forEach((line, i) => {
-      if (line.trim().startsWith('```')) { fenced = !fenced; return }
+      if (isFenceLine(line)) { fenced = !fenced; return }
       if (fenced) return
       const trimmed = line.trim()
       if (HEREDOC_TERMINATORS.has(trimmed)) {
@@ -848,10 +905,134 @@ export function pipedInstallCommands({ rootDir = ROOT, docs = INSTALL_DOCS } = {
       if (!PIPED_INSTALL.test(line)) return
       problems.push(`${doc}:${i + 1} 把管道当成安装命令给出（${line.trim().slice(0, 100)}）——`
         + 'curl 自己失败时 `sh` 读到空输入直接 EOF 退 0，一次什么都没装的运行对外报成功。'
-        + '改成两步：`curl -fsSL <url> -o /tmp/gp-install.sh && sh /tmp/gp-install.sh`')
+        + `改成两步，落点用一次性文件：\`${SAFE_INSTALL_ONE_LINER}\`。`
+        + '落点为什么不能写 /tmp 里的固定名字，见 `installLandingAudit`。')
     })
   }
   return problems
+}
+
+/**
+ * 第六类（2026-10-29，S10-7）：`curl … -o <落点>` 的落点不许是 world-writable 目录里的固定名字。
+ *
+ * WHY（这是形状问题，不是风格问题）。README 教的一键安装从前是
+ * `curl -fsSL … -o /tmp/gp-install.sh && sh /tmp/gp-install.sh`。第五类修的是"这条管道拿不到结论"，
+ * 两步写法本身却引入了另一件事：`/private/tmp` 的 mode 是 1777，sticky 只挡住"别人删你的文件"，
+ * **不**挡住另一个账号抢先建 `/tmp/gp-install.sh -> ~/.bashrc` 这样的符号链接——`curl -o` 跟随它，
+ * 并以受害者的 uid 截断覆写那个文件。也就是说：把脚本落进一个所有人可写、名字可预测的目录，
+ * 等于任何同机账号在受害者点下回车之前都拿到了一次"覆写受害者可写文件"的原语。
+ *
+ * 本仓对同一个风险早就有规矩，只是没有一条闸把这条规矩推广到文档给出的那一行命令上：
+ * `install.sh` 的临时文件走 `mktemp`；bridge 建 socket 用 `O_CREAT|O_EXCL|O_NOFOLLOW`；
+ * `SocketDirectoryRule.leafSymlinkDefect` 明确拒绝跟随链接。这一条是同一判据的前门版本。
+ *
+ * 判据（`installLandingAudit`）只看两件事，故意不做广义的路径分类：
+ * ① 落点是**字面路径**且落在 world-writable 目录（`/tmp`、`/private/tmp`、`/var/tmp`）里 → 红；
+ * ② 落点是 `$VAR`/`${VAR}` 形状，但本行与前四行里看不到 `mktemp`、`$TMPDIR` 或 `$HOME` 的证据 → 红
+ *    （"看着像变量"不是保护，写得出来源才是；文档里给出的那一行必须自证）。
+ * 每用户私有目录（`$HOME/…`、`~/…`、`$TMPDIR/…`，macOS 的 TMPDIR 本来就是 0700）与 `mktemp`
+ * 造出来的一次性名字一律放过——否则这道闸的唯一修法就是把安装说明整段删掉。
+ *
+ * 写域：本仓的文档/脚本分属几条泳道，所以 `INSTALL_LANDING_ENFORCED` 里的文件判红，
+ * `INSTALL_LANDING_HANDOFF` 里的判据同样**测量并打印**（`△`，与 `check-workflows.mjs` 对 fork 子树
+ * 同一手法），而不是悄悄不看。移交清单是临时的：那三份文件改成 mktemp 落点后，它们的 `△` 自己消失，
+ * 届时应把它们并进 ENFORCED——一张只会变短的移交清单才是诚实的清单。
+ */
+const SAFE_INSTALL_ONE_LINER = 'GP="$(mktemp "${TMPDIR:-/tmp/}gp-install.XXXXXXXX")" && curl -fsSL <url> -o "$GP" && sh "$GP" && rm -f "$GP"'
+
+/** 这道闸判红的文件集合（本泳道写得动、且今天已经全部合规）。 */
+export const INSTALL_LANDING_ENFORCED = ['README.md', 'README.zh-CN.md', 'updater/README.md', 'install.sh',
+  // 2026-10-29 收口：移交清单里那三份已由安装器泳道改成 mktemp 落点，按本文件上面的约定
+  // "移交清单应当只会变短"并进判红集合——从此它们由这道闸直接判红，不再只是打印。
+  'installer/README.md', 'mcp-shell/README.md', 'installer/cli.js']
+/**
+ * 今天仍然带着旧形状、但归另一条泳道写域的文件。它们的读数照样量出来、照样打印（`△`），
+ * 只是不从这道闸判红——与 `check-workflows.mjs` 对 `harness/` 子树同一手法。
+ * 移交清单应当只会变短：某一份改好之后它的 `△` 自己消失，届时应把它并进 ENFORCED。
+ *
+ * 剩下的两条都是 fork 那棵树里的门面文档，它们给出的也是同一条 `curl -o /tmp/…`：
+ * 本线无权改 `harness/**`（那条线有 10:30 的独立任务），所以这里量出来并点名移交。
+ */
+export const INSTALL_LANDING_HANDOFF = ['harness/glasspane-harness/README.md', 'harness/glasspane-harness/README.zh-CN.md']
+
+const CURL_OUTPUT_FLAG = new RegExp('(?:^|[^\\w-])curl\\b[^|&;]*?\\s(?:-o|--output)(?:=|\\s+)(?:"([^"]*)"|\'([^\']*)\'|([^\\s|&;)]+))')
+const WORLD_WRITABLE = /^\/(?:tmp|private\/tmp|var\/tmp)\//
+const LANDING_EVIDENCE = /mktemp|TMPDIR|\$\{?HOME\}?|~\//
+
+function landingOf(line) {
+  const m = CURL_OUTPUT_FLAG.exec(line)
+  if (!m) return null
+  return m[1] ?? m[2] ?? m[3] ?? null
+}
+
+/** 这一行的落点是否可证明来自一次性文件 / 每用户私有目录（回看四行是文档的多行写法）。 */
+function landingReason({ lines, index, landing }) {
+  if (WORLD_WRITABLE.test(landing)) {
+    return `把安装脚本落到 world-writable 目录里的固定名字（${landing}）——/private/tmp 是 1777，sticky 挡不住别的账号先建一个同名符号链接，curl -o 会跟随它并以你的 uid 截断覆写目标文件`
+  }
+  if (/\$/.test(landing)) {
+    const window = lines.slice(Math.max(0, index - 4), index + 1)
+    if (LANDING_EVIDENCE.test(window.join('\n'))) return null
+    // 变量本身不是保护，它的**来源**才是。`GP=/tmp/gp-install.sh` 然后 `-o "$GP"` 是同一个洞换了个
+    // 写法，所以要就地解一次赋值；解不出来路（四行内既没有 mktemp 也没有私有目录）同样判红。
+    const varName = landing.match(/[A-Za-z_][A-Za-z0-9_]*/)?.[0] ?? null
+    if (varName !== null) {
+      const assign = new RegExp(`^\\s*(?:export\\s+)?${varName}=(?:"([^"]*)"|'([^']*)'|([^\\s|;&()]*))`)
+      const hit = window.map((l) => assign.exec(l)).find((m) => m !== null)
+      const resolved = hit ? (hit[1] ?? hit[2] ?? hit[3] ?? '') : ''
+      if (WORLD_WRITABLE.test(resolved)) {
+        return `把安装脚本落到 world-writable 目录里的固定名字（${landing} 在这里被赋成 ${resolved}）——/private/tmp 是 1777，sticky 挡不住别的账号先建一个同名符号链接，curl -o 会跟随它并以你的 uid 截断覆写目标文件`
+      }
+    }
+    return `落点写成 ${landing}，但本行与前四行里看不出它来自 mktemp、$TMPDIR 或 $HOME——"像个变量"不是保护，写得出来源才是`
+  }
+  return null
+}
+
+export function installLandingAudit({ rootDir = ROOT, files = [...INSTALL_LANDING_ENFORCED, ...INSTALL_LANDING_HANDOFF] } = {}) {
+  const unsafe = []
+  const unreadable = []
+  for (const rel of files) {
+    const abs = path.join(rootDir, rel)
+    if (!fs.existsSync(abs)) {
+      unreadable.push(rel)
+      continue
+    }
+    const lines = fs.readFileSync(abs, 'utf8').split('\n')
+    lines.forEach((line, i) => {
+      const landing = landingOf(line)
+      if (landing === null) return
+      const reason = landingReason({ lines, index: i, landing })
+      if (reason) unsafe.push({ file: rel, line: i + 1, landing, reason, text: line.trim().slice(0, 90) })
+    })
+  }
+  return { unsafe, unreadable }
+}
+
+/** 判红的那一半：本泳道写得动的文件。 */
+export function installLandingProblems({ rootDir = ROOT, files = INSTALL_LANDING_ENFORCED } = {}) {
+  const out = []
+  const audit = installLandingAudit({ rootDir, files })
+  for (const entry of audit.unsafe) {
+    out.push(`${entry.file}:${entry.line} ${entry.reason}。改成两步且落点自证：\`${SAFE_INSTALL_ONE_LINER}\`（本仓 install.sh 用 mktemp、bridge 用 O_CREAT|O_EXCL|O_NOFOLLOW、SocketDirectoryRule 拒绝跟随链接，对的是同一个风险）。原文：\`${entry.text}\``)
+  }
+  for (const rel of audit.unreadable) {
+    out.push(`${rel} 在 INSTALL_LANDING_ENFORCED 里登记了却读不到——落点的这道闸今天对它什么都没核（未观测，不是通过）`)
+  }
+  return out
+}
+
+/** 打印而不判的那一半：别的泳道的写域，测到了就说出来。 */
+export function installLandingAdvisories({ rootDir = ROOT, files = INSTALL_LANDING_HANDOFF } = {}) {
+  const audit = installLandingAudit({ rootDir, files })
+  const out = []
+  for (const entry of audit.unsafe) {
+    out.push(`${entry.file}:${entry.line} ${entry.reason}——那是另一条泳道的写域，移交而不是从这里判红（remedy 与 ENFORCED 侧同一条：${SAFE_INSTALL_ONE_LINER}）`)
+  }
+  for (const rel of audit.unreadable) {
+    out.push(`${rel} 在 INSTALL_LANDING_HANDOFF 里登记了却读不到：移交清单需要对一下它是不改名了（改完请把这一项并进 ENFORCED）`)
+  }
+  return out
 }
 
 /**
@@ -873,8 +1054,15 @@ export function pipedInstallCommands({ rootDir = ROOT, docs = INSTALL_DOCS } = {
  *    都会坏给同一批读者看。`harness/glasspane-harness/packages/**` 是上游 fork 的产品源码树：
  *    那里的文档归那条线（它有 10:30 的独立任务与独立尺子），把它们扫进来，就等于让一次上游
  *    bump 能红在本仓的闸上——而那种红的唯一修法是放宽本闸。
+ *
+ * `.worktrees` 与 `dist` 同族（2026-10-29 实测加入）：并行会话与每日任务会把隔离工作树开在
+ * 仓库目录**里面**，那是同一棵树的多份未追踪拷贝。本机实量：`.worktrees/` 下开出 5 份之后，
+ * 这道闸自己打印的扫描量从 122 份 markdown 涨到 1257 份、表格从 448 张涨到 3275 张——读的人
+ * 以为是本仓的文档涨了十倍，而它数的是别人正在写的半成品。把一次未追踪的 scratch 状态算进
+ * 判据，等于让这道闸对"仓库里有什么"失去可复现性：同一棵 main 的树，因为旁边有没有工作树而
+ * 给出不同的读数。排除它不是放宽判据，是把它本来就不该数的东西还给磁盘快照。
  */
-const MD_SKIP_DIRS = new Set(['node_modules', '.build', '.git', '.external', '.swiftpm', 'DerivedData', 'dist'])
+const MD_SKIP_DIRS = new Set(['node_modules', '.build', '.git', '.external', '.swiftpm', 'DerivedData', 'dist', '.worktrees'])
 const MD_SKIP_ROOTS = ['harness/glasspane-harness/packages/']
 const MD_MAX_DEPTH = 14
 const CELL_PLACEHOLDER = '\u0001'
@@ -923,7 +1111,7 @@ export function markdownTableProblems({ rootDir = ROOT } = {}) {
     let i = 0
     while (i < lines.length) {
       const line = lines[i]
-      if (/^\s*(?:```|~~~)/.test(line)) { fenced = !fenced; i += 1; continue }
+      if (isFenceLine(line)) { fenced = !fenced; i += 1; continue }
       if (fenced || !mdRow(line)) { i += 1; continue }
       const header = mdCells(line)
       const next = lines[i + 1] ?? ''
@@ -982,11 +1170,161 @@ function invokedAsEntrypoint() {
   }
 }
 
+if (process.argv.includes('--self-test')) {
+  // 与 `check-workflows.mjs --self-test` 同一契约：每条判据各打一档坏形状（必须被点名）与一档
+  // 合法形状（必须安静）。规则没见过红就等于没有规则；而"只会红"的规则明天的修法是删掉它。
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = fs
+  const os = await import('node:os')
+  const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'check-doc-links-selftest-'))
+
+  /** 写一份合成树：`files` 是 rel → 内容。 */
+  const write = (files) => {
+    for (const rel of Object.keys(files)) {
+      const abs = path.join(root, rel)
+      mkdirSync(path.dirname(abs), { recursive: true })
+      writeFileSync(abs, files[rel])
+    }
+  }
+  // 每一档从空树开始：上一档留下的 README.zh-CN.md / install.sh 会这一档的"登记却读不到"计数改掉，
+  // 而那正是这道闸自己要判的东西——档位之间必须互不污染。
+  const empty = () => {
+    rmSync(root, { recursive: true, force: true })
+    mkdirSync(root, { recursive: true })
+  }
+
+  const cases = [
+    {
+      id: '锚点里的裸 % 把整条闸带栈带走（S10-3）',
+      // 真实形状：散文里"50%"式的写法被抄进锚点。修复前 `decodeURIComponent('#funds-50%-covered')`
+      // 抛 URIError，这道闸在文档循环中途退出，后面的主张核对与表格形状一条都没跑。
+      files: { 'README.md': '# Funds\n\n[出资说明](#funds-50%-covered)\n' },
+      run: (rootDir) => check({ rootDir, docs: ['README.md'] }).problems,
+      expect: /同文档锚点含裸 %/,
+    },
+    {
+      id: '写得对的锚点不因这条判据变红（S10-3 的对照）',
+      files: { 'README.md': '# Funds\n\n[出资说明](#funds)\n' },
+      run: (rootDir) => check({ rootDir, docs: ['README.md'] }).problems,
+      absent: /含裸 %/,
+    },
+    {
+      id: '~~~ 围栏里的示例命令是文档内容，不是残渣（S10-5）',
+      // 同一个文件里 `headingsOf` 与 `markdownTableProblems` 都认两种围栏，只有残渣闸认 ```，
+      // 于是这条合法写法被误红，而误红文案叫作者"放进 ``` 围栏"——对已经在 `~~~` 里的行自相矛盾。
+      files: { 'README.md': '~~~bash\nwc -l "$(printf %s f)"\n~~~\n' },
+      run: (rootDir) => shellResidue({ rootDir, docs: ['README.md'] }),
+      absent: /裸露的 shell 命令行/,
+    },
+    {
+      id: '同一行搬到围栏之外必须是残渣（S10-5 的反向）',
+      files: { 'README.md': '正文一行：\nwc -l "$(printf %s f)"\n' },
+      run: (rootDir) => shellResidue({ rootDir, docs: ['README.md'] }),
+      expect: /裸露的 shell 命令行/,
+    },
+    {
+      id: '一键安装把落点交给 /tmp 里的固定名字（S10-7）',
+      // 今天 README 的形状。/private/tmp 是 1777，sticky 不禁止另一个账号先建同名符号链接，
+      // `curl -o` 跟随并以受害者的 uid 截断覆写。
+      files: {
+        'README.md': 'curl -fsSL https://example.com/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh\n',
+      },
+      run: (rootDir) => installLandingProblems({ rootDir, files: ['README.md'] }),
+      expect: /world-writable 目录里的固定名字/,
+    },
+    {
+      id: '落点来自 mktemp 的一键安装不许红（S10-7 的对照）',
+      // 否则这道闸的唯一修法就是把安装说明整段删掉——那比漏洞更糟。
+      files: {
+        'README.md': 'GP="$(mktemp "${TMPDIR:-/tmp/}gp-install.XXXXXXXX")" && curl -fsSL https://example.com/install.sh -o "$GP" && sh "$GP" && rm -f "$GP"\n',
+      },
+      run: (rootDir) => installLandingProblems({ rootDir, files: ['README.md'] }),
+      absent: /world-writable 目录里的固定名字/,
+    },
+    {
+      id: '落点写成 $VAR 却看不出它从哪来（S10-7 的第二半）',
+      // "看起来像变量"不是保护：`GP=/tmp/gp-install.sh` 然后 `-o "$GP"` 与写死的名字同一个洞。
+      files: {
+        'README.md': 'curl -fsSL https://example.com/install.sh -o "$GP_INSTALL_SH" && sh "$GP_INSTALL_SH"\n',
+      },
+      run: (rootDir) => installLandingProblems({ rootDir, files: ['README.md'] }),
+      expect: /看不出它来自 mktemp/,
+    },
+    {
+      id: '移交清单里的文件照样被测量，只是不从这道闸判红（△ 不是没看）',
+      files: {
+        'installer/cli.js': "  'curl -fsSL <install.sh> -o /tmp/gp-install.sh && sh /tmp/gp-install.sh',\n",
+      },
+      run: (rootDir) => installLandingAdvisories({ rootDir, files: ['installer/cli.js'] }),
+      expect: /installer\/cli\.js:1 world-writable|installer\/cli\.js:1 把安装脚本落到/,
+    },
+  ]
+
+  let failed = 0
+  for (const c of cases) {
+    empty()
+    write(c.files)
+    let answers
+    let crashed = null
+    try {
+      answers = c.run(root)
+    } catch (error) {
+      crashed = `${error.constructor.name}: ${error.message}`
+    }
+    if (crashed !== null) {
+      // 一条拒该是一句话，不是一个栈：判据自己抛 = 这一档没被测到，而且正是本条要修的缺陷。
+      console.error(`  ✗ self-test: ${c.id} 让判据带着栈退出（${crashed}）——这不是红，这是闸没运行`)
+      failed++
+      continue
+    }
+    const hit = c.absent ? !answers.some((p) => c.absent.test(p)) : answers.some((p) => c.expect.test(p))
+    if (hit) console.log(`  ok self-test: ${c.id} ${c.absent ? 'stays silent, as it must' : 'is caught'}`)
+    else {
+      console.error(
+        c.absent
+          ? `  ✗ self-test: ${c.id} was NOT silent — the rule fires where it has no object (${JSON.stringify(answers)})`
+          : `  ✗ self-test: ${c.id} was NOT caught (${answers.length} answer(s): ${JSON.stringify(answers)})`,
+      )
+      failed++
+    }
+  }
+  rmSync(root, { recursive: true, force: true })
+
+  if (failed > 0) {
+    console.error(`check-doc-links --self-test: ${failed} case(s) did not behave as declared.`)
+    process.exit(1)
+  }
+  const caught = cases.filter((c) => !c.absent).length
+  console.log(
+    `check-doc-links --self-test: ${cases.length} case(s) each verified to fail — ${caught} mutation(s) that had to be caught, ${cases.length - caught} legal shape(s) that had to stay silent`,
+  )
+  process.exit(0)
+}
+
+const unknownArgs = process.argv.slice(2).filter((a) => a !== '--self-test' && a !== '--help')
+if (unknownArgs.length) {
+  console.error(`check-doc-links: 不认识的参数 ${unknownArgs.join(', ')}——可用的只有 --self-test 与 --help`)
+  console.error('（不认识参数却照常跑完，等于 CI 里写错一个 flag 名以后那道闸做的事没人知道；与 check-workflows.mjs 同一条规矩）')
+  process.exit(2)
+}
+if (process.argv.includes('--help')) {
+  console.log(`usage: node scripts/check-doc-links.mjs [--self-test | --help]
+
+判的六类：仓库内相对链接可达 / 页内与跨文档锚点存在（含百分号解码，坏转义是一句话不是一个栈）/
+双语对偶两条腿都在位 / 抄写的可复算主张等于真源 / 围栏外的 shell 残渣与 markdown 表格格数 /
+对外给出的安装命令的形状（管道、以及 curl -o 的落点是不是 world-writable 目录里的固定名字）。
+
+退出码：0 干净 · 1 有问题 · 2 用法错或登记表读不到。`);
+  process.exit(0)
+}
+
 if (invokedAsEntrypoint()) {
-  const { docs, links, external, tables, mdFiles, problems } = check()
+  const { docs, links, external, tables, mdFiles, problems, advisories } = check()
   process.stdout.write(`文档 ${docs} 份 | 仓库内链接 ${links} 条 | 外链 ${external} 条（不请求）| markdown 表格 ${tables} 张（扫 ${mdFiles} 份 markdown）\n`)
+  // `△` ＝ 量到了、说出来了、但不从这道闸判红（那是另一条泳道的写域）。与 `check-workflows.mjs`
+  // 对 `harness/` 子树同一符号、同一理由：范围限制要每轮都出现在读的人眼前，而不是写在注释里。
+  for (const a of advisories ?? []) process.stdout.write(`  △ ${a}\n`)
   if (problems.length === 0) {
-    process.stdout.write('OK：无死链、无失效锚点、双语成对完整、可复算主张与真源一致、每张表格每行格数一致。\n')
+    process.stdout.write('OK：无死链、无失效锚点、双语成对完整、可复算主张与真源一致、每张表格每行格数一致、安装落点不是 world-writable 目录里的固定名字。\n')
     process.exit(0)
   }
   process.stderr.write(`发现 ${problems.length} 处问题：\n`)

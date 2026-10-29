@@ -8,9 +8,11 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { preflightIssues, usageText } from '../cli.js';
+import { installLandingAudit, INSTALL_LANDING_HANDOFF, installLandingProblems } from '../../scripts/check-doc-links.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const INSTALL_SH = path.join(HERE, '..', '..', 'install.sh');
+const REPO = path.resolve(HERE, '..', '..');
+const INSTALL_SH = path.join(REPO, 'install.sh');
 
 function stubBin(name, body) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `gp-stub-${name}-`));
@@ -38,9 +40,22 @@ test('curl | sh reports success when curl itself failed, which is why the usage 
 
   const usage = usageText();
   assert.doesNotMatch(usage, /\$\? 就是这里的结论/, 'usage 不许再承诺一条管道给不出的结论');
-  assert.match(usage, /-o \/tmp\/gp-install\.sh && sh \/tmp\/gp-install\.sh/,
-    '它要给的是那条真的能拿到结论的写法');
+  // 钉的是**判据**，不是那个 `/tmp` 名字（S10-7，2026-10-29）。这一句从前把"两步写法"与"落在
+  // world-writable 目录里一个所有人都猜得到的名字上"一起写成了契约：`/private/tmp` 是 1777，
+  // sticky 只挡住别人删你的文件，挡不住他先建一个 `/tmp/gp-install.sh -> ~/.bashrc`——`curl -o`
+  // 跟随符号链接并以调用者的 uid 截断覆写目标（本机实测过：预先占住那个名字的符号链接之后，
+  // 受害者文件的内容就变成了下载物的内容）。今天留住的契约是"分步、能拿到退出码"这一半；
+  assert.match(usage, /-o \S+ && sh \S+/, 'usage 给的那条能拿到真实退出码的两步写法不见了');
   assert.match(usage, /空输入|EOF/, '并且说清为什么管道会退 0');
+  // 落点这一半交给 `scripts/check-doc-links.mjs` 的同一条判据统一量，且 installer/cli.js 已在
+  // **判红**集合里（INSTALL_LANDING_ENFORCED，2026-10-29 从移交清单并过来）：这里不再接受
+  // "有人宣布了就行"，而是要求这份文件读不出任何一条 world-writable 固定落点。
+  const cliLanding = installLandingAudit({ rootDir: REPO, files: ['installer/cli.js'] });
+  assert.deepEqual(cliLanding.unsafe, [],
+    `installer/cli.js 的 usage 还在把安装脚本落在 ${cliLanding.unsafe.map((e) => `${e.landing}:${e.line}`).join(', ')}（world-writable 目录的固定名字）`);
+  assert.match(usage, /mktemp/, 'usage 给出的那条两步命令要自己说得出落点来源');
+  // 同一条判据对 README 那一侧是真判红：本泳道写得动的文件没有第二条路。
+  assert.deepEqual(installLandingProblems({ rootDir: REPO }), [], '对外文档里还有一条 world-writable 固定落点');
 });
 
 // MARK: - 平台闸排在 clone 之前

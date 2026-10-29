@@ -59,6 +59,16 @@ jobs:
     # detect 步走了"没配"那条分支，于是照常发了货、只是没有 .asc。环境本身无保护规则
     # （protection_rules 为空、can_admins_bypass），所以声明它不会给打 tag 增加人工审批。
     environment: release
+    # S10-6（2026-10-29）：同一个 tag 可以有两条 run 并存——删 tag 重推、Re-run failed jobs、
+    # 或 push 与 dispatch 各触发一次。这一条 job 是**对外不可逆**的那一条：`gh release upload
+    # --clobber` 与 `gh release edit --target` 都在原地改同一个 Release，两条 run 各带一份自己
+    # 构建的归档，归档字节与 target commit 由最后写胜的那一条决定，而先结束那一条的读回判据
+    # （287 行）在它自己的视野里全过——它读回的正是被后来者改掉之前的状态。npm-publish 早就为
+    # 同一件事声明了 concurrency（见那边 346 行附近的理由），这一条漏了。排队而不是取消：与 npm
+    # 那条同理，正在上传的归档不许被半路扔掉。
+    concurrency:
+      group: github-release-${{ github.ref_name }}
+      cancel-in-progress: false
     permissions:
       contents: write
       # `scripts/assert-ci-green.mjs` asks GitHub which CI runs exist for this commit. The
@@ -418,8 +428,14 @@ jobs:
           # tag 的存在与指向都问 origin：actions/checkout@v4 默认 fetch-depth=1 且不取 tag，
           # 本地 ref 列表在 CI 里基本是空的，拿 `git tag --points-at HEAD` 判会一律判成"没 tag"。
           LS=$(git ls-remote --tags origin)
-          PEELED=$(printf '%s\n' "$LS" | awk -v r="refs/tags/${WANT}^{}" '$2==r{print $1; exit}')
-          DIRECT=$(printf '%s\n' "$LS" | awk -v r="refs/tags/${WANT}" '$2==r{print $1; exit}')
+          # 判据走 here-string，不走 `printf | awk {exit}`：这条正文带着 pipefail，而 awk 命中那一行
+          # 就 exit——origin 的 tag 列表一旦超过约 64 KB（一个 buffer 的容量），目标行后面还有几万字节
+          # 没写完，printf 随即死在 EPIPE/SIGPIPE 上，整条管道的退出码成了 141。`set -e` 于是把这道
+          # "拒发没被 tag 担保的树"的前置闸洗成一次**没有任何 ::error:: 文本**的无名崩溃：读的人只
+          # 看到一步红了 141，看不到它拒的是哪件事。同一个坑本仓在 release.yml:145-147、
+          # ci.yml:107-110/438-440、harness-contract.yml:108-111 都记过名，唯独这两行漏改。
+          PEELED=$(awk -v r="refs/tags/${WANT}^{}" '$2==r{print $1; exit}' <<<"$LS")
+          DIRECT=$(awk -v r="refs/tags/${WANT}" '$2==r{print $1; exit}' <<<"$LS")
           # 附注 tag 用剥到底的那一行（`^{}` 才是 commit），裸 tag 只有 DIRECT。
           TAG_SHA="${PEELED:-$DIRECT}"
           [ -n "$TAG_SHA" ] || {
