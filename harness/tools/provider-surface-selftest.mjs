@@ -168,7 +168,8 @@ mustGoRed(
   '"overlap": 3',
   '"overlap": 2',
   1,
-  ["counts.overlap: 3 method(s) are registered on both surfaces, golden records 2"],
+  ["3 method(s) are registered on both surfaces, golden records 2"],
+  ["harness:glasspane-engine-ae/diagnose-pixel"],
 )
 
 // 7. per-method contract — `surfaces.*` was written by `--record` and read by nothing, so a
