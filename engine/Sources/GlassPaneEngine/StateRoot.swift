@@ -393,29 +393,159 @@ public enum StateRootArgument: Equatable {
     /// comparison because that is what `StateRoot(path:)` does with them: a refusal
     /// that only catches one spelling is a refusal the next typo walks past.
     public static func notADedicatedRoot(_ raw: String) -> String? {
+        switch dedicatedness(raw) {
+        case .dedicated:
+            return nil
+        case .filesystemRoot:
+            return "would be the filesystem root — the daemon tightens the root it is given to 0700, and it has no business changing the permissions of `/`. Name a directory this install owns, e.g. `--state-dir \(RemedyCommand.quote(NSHomeDirectory() + "/.glasspane"))`"
+        case .homeDirectory(let home):
+            // Deliberately NOT `ProcessInfo.environment["HOME"]`: `mcp-shell/test/path-consistency.test.mjs`
+            // pins that the daemon's home comes from the passwd entry and that a `HOME`
+            // override moves nothing, and the shell mirrors that rule. Consulting `$HOME` here
+            // would make the refusal depend on the environment while the root the daemon
+            // actually defaults to does not — one typo, two answers about where state lives.
+            return "would be the home directory itself — the daemon tightens the root it is given to 0700 and writes its socket, registry and archive under it, so this would re-permission everything in \(home) and scatter engine files beside the user's own. Name a directory for the engine's state, e.g. `--state-dir \(RemedyCommand.quote(home + "/.glasspane"))`"
+        }
+    }
+
+    /// The one measurement behind both refusals: is this path a location this
+    /// product owns, or is it home / the filesystem root?
+    ///
+    /// Split out of the sentences above because the *same hazard* now has two
+    /// entry points (`--state-dir`, and the parent directory of `--socket-path`
+    /// / `--probe-socket-path`) and those two must not own two copies of the
+    /// predicate — that is exactly the shape 2026-10-29 S4-3 found: `--state-dir ~`
+    /// was refused, `--socket-path "$HOME/engine.sock"` was not, and both end in
+    /// a `chmod(0700)`. Each entry point writes its own next step from this
+    /// verdict; the verdict itself has one home.
+    private static func dedicatedness(_ raw: String) -> Dedicatedness {
         var normalized = raw
         while normalized.count > 1, normalized.hasSuffix("/") {
             normalized.removeLast()
         }
-        if normalized == "/" {
-            return "would be the filesystem root — the daemon tightens the root it is given to 0700, and it has no business changing the permissions of `/`. Name a directory this install owns, e.g. `--state-dir \(RemedyCommand.quote(NSHomeDirectory() + "/.glasspane"))`"
-        }
-        // Deliberately NOT `ProcessInfo.environment["HOME"]`: `mcp-shell/test/path-consistency.test.mjs`
-        // pins that the daemon's home comes from the passwd entry and that a `HOME`
-        // override moves nothing, and the shell mirrors that rule. Consulting `$HOME` here
-        // would make the refusal depend on the environment while the root the daemon
-        // actually defaults to does not — one typo, two answers about where state lives.
+        if normalized == "/" { return .filesystemRoot }
         for home in Array(Set([
             NSHomeDirectory(),
             FileManager.default.homeDirectoryForCurrentUser.path,
         ])) {
             var root = home
             while root.count > 1, root.hasSuffix("/") { root.removeLast() }
-            if normalized == root {
-                return "would be the home directory itself — the daemon tightens the root it is given to 0700 and writes its socket, registry and archive under it, so this would re-permission everything in \(home) and scatter engine files beside the user's own. Name a directory for the engine's state, e.g. `--state-dir \(RemedyCommand.quote(home + "/.glasspane"))`"
-            }
+            if normalized == root { return .homeDirectory(home) }
         }
-        return nil
+        return .dedicated
+    }
+
+    private enum Dedicatedness {
+        case dedicated
+        case filesystemRoot
+        case homeDirectory(String)
+    }
+
+    /// Why `raw` cannot serve as a **socket** name: the listener chmods the
+    /// directory holding it to 0700 (`SocketServer.prepareSocketDirectory` →
+    /// `SocketDirectoryRule.enforce`), so a socket sitting directly in the home
+    /// directory or in `/` re-permissions a tree this engine does not own — the
+    /// identical hazard `notADedicatedRoot` already refuses for `--state-dir`,
+    /// measured on `deletingLastPathComponent` instead of on the root itself.
+    ///
+    /// `nil` when the parent is dedicated enough to receive a socket, which
+    /// includes the default layout (`~/.glasspane/engine.sock`: the parent is the
+    /// engine's own folder, not the home directory). Empty parent (a bare name) is
+    /// answered by `classify` — the absolute-path rule — and is not re-refused here.
+    public static func rejectionForSocketParent(of raw: String) -> String? {
+        let directory = (raw as NSString).deletingLastPathComponent
+        guard !directory.isEmpty else { return nil }
+        switch dedicatedness(directory) {
+        case .dedicated:
+            return nil
+        case .filesystemRoot:
+            return "would put the socket directly in `/` — this run brings the directory holding a socket to 0700 before it binds, and `/` is not this install's directory to re-permission. Put the socket inside a directory this install owns, e.g. let it default under --state-dir, or pass --socket-path \(RemedyCommand.quote(NSHomeDirectory() + "/.glasspane/engine.sock"))"
+        case .homeDirectory(let home):
+            return "would put the socket directly in the home directory \(home) — this run brings the directory holding a socket to 0700 before it binds, which would re-permission everything the user owns and drop engine files beside their own. Put the socket inside the engine's own directory, e.g. --socket-path \(RemedyCommand.quote(home + "/.glasspane/engine.sock")), or name --state-dir and let the socket default to living under it"
+        }
+    }
+}
+
+// MARK: - One value per run (2026-10-29 S4-1)
+
+/// The ledger of value-taking flags this run has already been handed, and the
+/// refusal when one of them arrives a second time.
+///
+/// WHY THIS EXISTS. `glasspaned --state-dir A --state-dir B --list-projects`
+/// measured on the shipped binary: exit 0, `A` dropped without a word, stderr
+/// zero bytes. `--project-remove idA --project-remove idB` removed (the attempt
+/// at) `idB` only, exit 3, and never mentioned `idA`. Neither answer was written
+/// down anywhere: "the last one wins" is what a second assignment to
+/// `options.stateDir` does by accident, and it contradicts this module's own
+/// opening sentence — `--state-dir` is the one named entry for the state root,
+/// one run resolves exactly one. A caller that believes it is working in a
+/// sandbox while the first root was discarded is one `--prune-evidence` away from
+/// deleting in somebody's real archive.
+///
+/// WHY IT LIVES HERE. `parseArguments` is top-level code in an executable target
+/// and no visibility reaches it (the same reason `StateRootArgument` exists), so
+/// without a judge in this module the refusing branch would be unexecutable in a
+/// test. `main.swift` asks this ledger at every value it accepts, and the flag
+/// list below is the only table it asks with — a test counts the table instead of
+/// restating it.
+///
+/// Membership rule: only flags that **carry a value** are here. A boolean flag
+/// spelled twice states the same thing twice and loses nothing; a value given
+/// twice is a value that was silently thrown away.
+public struct ValueFlagLedger: Equatable {
+
+    /// Flags a single run may be given exactly once, and the one thing each of
+    /// them resolves. Every entry must be a case label `parseArguments` reads a
+    /// value for — `DailyRound20261029Swift3` pins that pairing both ways.
+    public static let onePerRun: [String: String] = [
+        "--state-dir": "root",
+        "--socket-path": "engine socket path",
+        "--probe-socket-path": "probe socket path",
+        "--older-than": "day count",
+        "--project": "project scope",
+        "--project-remove": "project id",
+        "--active-project": "project id",
+        "--recipe-validate": "recipe path",
+        "--request-permission": "permission seat",
+    ]
+
+    /// The value already recorded for each flag, in the spelling the caller used.
+    public private(set) var seen: [String: String] = [:]
+
+    public init() {}
+
+    /// Record `value` for `flag`, or return the refusal when this run already
+    /// named that flag. Flags outside `onePerRun` are not this ledger's business
+    /// and are recorded nowhere.
+    ///
+    /// The refusal is returned **instead of** keeping the later value: the whole
+    /// point is that this run cannot decide which of the two the caller meant, so
+    /// answering one of them would be the defect wearing a message.
+    public mutating func note(flag: String, value: String) -> String? {
+        guard let noun = Self.onePerRun[flag] else { return nil }
+        guard let prior = seen[flag] else {
+            seen[flag] = value
+            return nil
+        }
+        return Self.rejection(flag: flag, noun: noun, prior: prior, value: value)
+    }
+
+    /// The sentence itself, split out so a test can read both branches (the two
+    /// values differ; the caller repeated the same value) without going through
+    /// argv. Names **both** values, because "which one won" is exactly the half a
+    /// caller cannot see, and ends with the edit that fixes the invocation.
+    public static func rejection(flag: String, noun: String, prior: String, value: String) -> String {
+        var message = "\(flag) given twice (\(prior) / \(value)) — one run resolves exactly one \(noun), "
+        if prior == value {
+            message += "and this invocation only states it twice. Nothing was lost, but the run would "
+                + "have picked one of the two silently, so it answers nothing here. Next step: pass "
+                + "\(flag) once, with the \(noun) you want."
+        } else {
+            message += "and the last spelling wins only by being last: nothing the first one asked for "
+                + "would have happened, and nothing said so. Next step: pass \(flag) once, with the "
+                + "\(noun) this run should use."
+        }
+        return message
     }
 }
 

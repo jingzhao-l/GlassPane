@@ -130,6 +130,11 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
         arguments.append(String(argument[argument.index(after: cut)...]))
     }
     var options = Options()
+    // 每一枚取值旗在这一串 argv 里见过没有（S4-1）。判据本体在
+    // `ValueFlagLedger`（`--state-dir A --state-dir B` 从前 rc 0、A 被静默丢弃、stderr 零
+    // 字节——"后来者胜"从来没被谁写下过，它只是第二次赋值的结果）。这里只负责**在每个
+    // 取值点问一次**：值先要能用，然后再问这一串里是不是给了两次。
+    var valueFlags = ValueFlagLedger()
     var index = 1
     while index < arguments.count {
         let argument = arguments[index]
@@ -182,6 +187,9 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
             guard let kind = PermissionKind.from(cliValue: cliValue) else {
                 return .error("--request-permission unknown kind: \(cliValue)")
             }
+            if let refusal = valueFlags.note(flag: "--request-permission", value: cliValue) {
+                return .error(refusal)
+            }
             options.requestPermission = kind
         case "--check-developer-tools":
             options.checkDeveloperTools = true
@@ -203,12 +211,22 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
             // `--socket-path ./s.sock` from ~/Documents tightens ~/Documents and
             // keeps it tightened even when the bind later fails and this run
             // exits.
-            if let reason = StateRootArgument.rejection(
-                for: index + 1 < arguments.count ? arguments[index + 1] : nil
-            ) {
+            let probeSocketRaw = index + 1 < arguments.count ? arguments[index + 1] : nil
+            if let reason = StateRootArgument.rejection(for: probeSocketRaw) {
+                return .error("--probe-socket-path \(reason)")
+            }
+            // S4-3：同一危害的第二个入口。探针监听者和 engine 监听者共用 `SocketDirectoryRule`，
+            // 而那条规则 chmod 的是 socket 的**父目录**——`--state-dir ~` 早就被同一条判据拒了，
+            // `--probe-socket-path "$HOME/probe.sock"` 却没有，于是它把家目录收成 0700 并把引擎
+            // 文件放在用户的东西旁边。判据仍住在 `StateRootArgument` 里，这里换的只是测量对象
+            // （父目录），因为两处危害是同一件：动别人不该动的目录。
+            if let raw = probeSocketRaw, let reason = StateRootArgument.rejectionForSocketParent(of: raw) {
                 return .error("--probe-socket-path \(reason)")
             }
             index += 1
+            if let refusal = valueFlags.note(flag: "--probe-socket-path", value: arguments[index]) {
+                return .error(refusal)
+            }
             options.probeSocketPath = arguments[index]
         case "--force-socket":
             options.forceSocket = true
@@ -223,8 +241,14 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
             // route: message to stderr, usage printed, exit 64.
             switch StateRootArgument(raw: index + 1 < arguments.count ? arguments[index + 1] : nil) {
             case .named(let root):
-                options.stateDir = root
                 index += 1
+                // S4-1：值能用不代表这串 argv 成立。`--state-dir A --state-dir B` 从前把 A
+                // 丢了、一个字不说地按 B 跑出去（实测 rc 0 + stderr 零字节），而本文件开头写的
+                // 是"一次运行只解析一个根"。
+                if let refusal = valueFlags.note(flag: "--state-dir", value: arguments[index]) {
+                    return .error(refusal)
+                }
+                options.stateDir = root
             case .rejected(let reason):
                 return .error("--state-dir \(reason)")
             }
@@ -240,6 +264,9 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
             }
             guard case .value(let projectId) = projectIdValue else { return .error("--active-project requires a project ID") }
             index += 1
+            if let refusal = valueFlags.note(flag: "--active-project", value: projectId) {
+                return .error(refusal)
+            }
             options.activeProjectId = projectId
         case "--project-prune":
             options.projectPrune = true
@@ -255,6 +282,11 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
             }
             guard case .value(let removeId) = removeValue else { return .error("--project-remove requires a project ID") }
             index += 1
+            // S4-1：`--project-remove idA --project-remove idB` 从前只处理 idB（rc 3，idA 一个字
+            // 没提）。删注册项是一次写盘动作，"哪一个 id 被删了"不许由赋值顺序决定。
+            if let refusal = valueFlags.note(flag: "--project-remove", value: removeId) {
+                return .error(refusal)
+            }
             options.projectRemoveId = removeId
         case "--recipe-validate":
             let recipeValue = ArgumentValue.follow(arguments, after: index)
@@ -265,6 +297,9 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
             }
             guard case .value(let recipePath) = recipeValue else { return .error("--recipe-validate requires a file path") }
             index += 1
+            if let refusal = valueFlags.note(flag: "--recipe-validate", value: recipePath) {
+                return .error(refusal)
+            }
             options.recipeValidate = recipePath
         case "--approval-audit":
             options.approvalAudit = true
@@ -291,6 +326,9 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
                 // 2 段说的就是这一档）。
                 return .errorCode("--older-than requires a positive integer (days), got: \(daysToken)", 2)
             }
+            if let refusal = valueFlags.note(flag: "--older-than", value: daysToken) {
+                return .error(refusal)
+            }
             options.pruneOlderThanDays = days
         case "--project":
             let projectValue = ArgumentValue.follow(arguments, after: index)
@@ -301,6 +339,9 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
             }
             guard case .value(let projectId) = projectValue else { return .error("--project requires a project ID") }
             index += 1
+            if let refusal = valueFlags.note(flag: "--project", value: projectId) {
+                return .error(refusal)
+            }
             options.maintenanceProjectId = projectId
         case "--dry-run":
             options.pruneDryRun = true
@@ -315,12 +356,22 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
             // file name skipped the 0700-parent enforcement entirely because
             // `deletingLastPathComponent` was empty. Both go through the shared
             // validator now, so the two spellings cannot disagree.
-            if let reason = StateRootArgument.rejection(
-                for: index + 1 < arguments.count ? arguments[index + 1] : nil
-            ) {
+            let socketRaw = index + 1 < arguments.count ? arguments[index + 1] : nil
+            if let reason = StateRootArgument.rejection(for: socketRaw) {
+                return .error("--socket-path \(reason)")
+            }
+            // S4-3 的第二个入口，与上面 `--probe-socket-path` 同一判据、同一次测量对象：
+            // `prepareSocketDirectory()` 拿 `deletingLastPathComponent` 去 `chmod(0700)`，
+            // 所以 `--socket-path "$HOME/engine.sock"` 动的就是家目录本身——而这件事从前只在
+            // `--state-dir` 上有闸。`SocketDirectoryRule.enforce` 现在也自己兜底，但那条是
+            // 兜底，命令行要在**一个目录都没动之前**就把话说清楚。
+            if let raw = socketRaw, let reason = StateRootArgument.rejectionForSocketParent(of: raw) {
                 return .error("--socket-path \(reason)")
             }
             index += 1
+            if let refusal = valueFlags.note(flag: "--socket-path", value: arguments[index]) {
+                return .error(refusal)
+            }
             options.socketPath = arguments[index]
         default:
             // Every `--key=value` spelling was already split at the top of this
@@ -332,9 +383,9 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
     return .parsed(options)
 }
 
-// MARK: - One-shot form: which modifier flags this invocation actually honours
+// MARK: - Which modifier flags this invocation actually honours
 
-/// 一次性子命令形态下，一枚修饰旗标**归不归这条命令读**的表。
+/// 一次运行（**两种形态都算**）里，一枚修饰旗标**归不归这一趟读**的表。
 ///
 /// 为什么需要这张表：`--state-dir X --list-projects --older-than 7` 这类调用（HEAD 上实测
 /// rc=0、一个字不提示）把两副形态混在了一条 argv 里——分发段是那条 first-match 的 `if` 链，
@@ -342,11 +393,29 @@ private func parseArguments(_ rawArguments: [String]) -> ParseResult {
 /// `Dispatcher.acceptedParamKeys` + `requireOnlyKnownKeys` 把 params 里读不到的键判成缺陷，
 /// CLI 面却留着"一表达过意图的旗标被静默吃掉"。这里把 CLI 面补齐，判据与那条链同源：
 /// 只列分发段**真的读**的那几枚。
+///
+/// 2026-10-29 S4-2 补的是**另一侧**：同一枚 `--older-than` 配 `--list-projects` 是 64 + 整块
+/// usage，而 `--state-dir X --older-than 7 --dry-run`（不给任何一次性命令）却真的把 daemon 起
+/// 来、打了 `listening on`、SIGTERM 后 rc 0、stderr 零字节——三条问的都是"按年龄删多久以前的
+/// 证据"，没有任何代码读它们。范围检查从前写在 `if let oneShotCommand` 里面，所以只有"命名了
+/// 一条命令"的运行才有资格被检查。现在两种形态共用同一条链：命令形态问
+/// `allowedModifiers(for:)`，服务形态问 `serviceFormModifiers`。
 private enum OneShotFlagScope {
     /// 会改变一次运行行为的修饰旗标全集（服务形态的那批 + 维护命令的取值旗标）。
     /// `--state-dir` 与 `-v/--verbose` 不在这里：见 `stateNotice` 与 `verboseNotice`。
     static let modifiers: Set<String> = [
         "--dry-run", "--older-than", "--project",
+        "--socket-path", "--probe-socket-path", "--force-socket", "--force-probe-socket",
+        "--no-probe", "--no-c33", "--unattended-window",
+    ]
+
+    /// 这一趟不起任何一次性命令、而是把 socket 服务起来时，真的被读的修饰旗标（判据同
+    /// `allowedModifiers`：只列分发段之后那些代码真的碰到的键——`options.socketPath`、
+    /// `options.probeSocketPath`、`options.forceSocket`、`options.forceProbeSocket`、
+    /// `options.probeEnabled`、`options.c33Enabled`、`options.unattendedWindowDeclared`）。
+    /// 不在这一列里的（`--dry-run`、`--older-than`、`--project`）只有**某条**一次性命令才读，
+    /// 所以这一趟没跑那条命令时它们一个字都不会生效。
+    static let serviceFormModifiers: Set<String> = [
         "--socket-path", "--probe-socket-path", "--force-socket", "--force-probe-socket",
         "--no-probe", "--no-c33", "--unattended-window",
     ]
@@ -376,11 +445,13 @@ private enum OneShotFlagScope {
         "--recipe-validate",
     ]
 
-    /// 这一趟该拒绝的旗标（点了名却不归这条命令读）。
-    static func refused(options: Options, command: String) -> [String] {
+    /// 这一趟该拒绝的旗标：出现过、归全集管、却不为这一趟所读的（命令形态或服务形态）。
+    /// 范围按**这一趟的形态**算，不按旗标算——同一枚 `--older-than` 在 `--prune-evidence`
+    /// 上是合法参数，在 `--list-projects` 旁边与单独起服务时都是这一串 argv 不成立。
+    static func refused(options: Options, allowed: Set<String>) -> [String] {
         options.appearedModifiers
             .intersection(modifiers)
-            .subtracting(allowedModifiers(for: command))
+            .subtracting(allowed)
             .sorted()
     }
 }
@@ -626,11 +697,28 @@ private func printUsage() {
                 modifier flag that the named subcommand does not read appearing
                 alongside it (`--list-projects --older-than 7` asks for a day count
                 nothing can use — the flag is named on stderr and the run executes
-                nothing, because the argv itself is malformed); a missing value for
+                nothing, because the argv itself is malformed); the same, when **no**
+                subcommand was named at all — a run that only serves the socket reads
+                none of --older-than, --project and --dry-run, so naming one of them
+                asks for a maintenance pass nothing will run (`--state-dir X --older-than
+                7` used to start the daemon, print its socket line and exit 0, while the
+                identical flag beside --list-projects was a usage error); a value-taking
+                flag given **twice** in one invocation — one run resolves exactly one
+                value per flag, and the last spelling used to win in silence, so both
+                values are named on stderr (--state-dir, --socket-path,
+                --probe-socket-path, --older-than, --project, --project-remove,
+                --active-project, --recipe-validate, --request-permission; a repeated
+                flag whose two values agree is refused for the same reason: which one
+                won is still not something this run can say); a missing value for
                 any value-taking flag — --state-dir, --socket-path,
                 --probe-socket-path, --active-project, --project, --project-remove,
                 --older-than, --recipe-validate, --request-permission (a missing or
-                malformed kind included); an unknown `--request-permission` kind
+                malformed kind included); an unknown `--request-permission` kind;
+                --socket-path or --probe-socket-path naming a socket whose **parent
+                directory** is the home directory or `/` — a listener brings the
+                directory holding its socket to 0700 before binding, which is the same
+                harm `--state-dir ~` was already refused for, so the two entry points
+                now share one rule and refuse before touching any directory
         65   a live instance already owns the socket (refuse to displace it)
 
     PROTOCOL:
@@ -1006,34 +1094,62 @@ if requestedCommandNames.count > 1 {
 // 起服务时没有命令名，保持 `glasspaned`）。
 cliCommandLabel = requestedCommandNames.first ?? "glasspaned"
 
-// 一次性形态 + 服务形态旗标同现：那几枚旗标在这条 `if` 链里没有任何读者，从前一个字
-// 都不提示就退 0。这里逐条点名并拒绝（用法错误 64 + 整块 usage，与上面"一次要两条
+// 一枚修饰旗标归谁读——两种形态共用同一份去处说明，写两遍就会漂成两套答案。
+private enum FlagOwnership {
+    /// 维护类修饰旗标 ↔ 那条真的读它们的命令。
+    static let maintenance = "--older-than and --project belong to --prune-evidence, "
+        + "--dry-run to --project-prune/--project-remove/--prune-evidence"
+    /// 服务形态那批旗标 ↔ "这一趟得真的在起服务"。
+    static let serviceOnly = "--no-probe, --no-c33, --socket-path, --probe-socket-path, "
+        + "--force-socket, --force-probe-socket and --unattended-window only mean something "
+        + "when this run serves the socket"
+}
+
+// 范围检查现在对**两种形态**都跑。从前它整支写在 `if let oneShotCommand` 里面，于是"没有
+// 命名任何一次性命令"的那一趟（也就是 daemon 形态）从来没有资格被检查：本机实测
+// `glasspaned --state-dir X --older-than 7 --dry-run` 起了服务、打了 `listening on`、SIGTERM
+// 后 rc 0、stderr 零字节，而同一枚 `--older-than` 配 `--list-projects` 是 64 + 整块 usage。
+// 三条问的都是"按年龄删多久以前的证据"，两条入口两套答案——按 rc 分叉的调用方只能猜。
+let oneShotCommand = requestedCommandNames.first
+let allowedForThisRun: Set<String>
+let scopeSubject: String
+if let oneShotCommand {
+    allowedForThisRun = OneShotFlagScope.allowedModifiers(for: oneShotCommand)
+    scopeSubject = oneShotCommand
+} else {
+    allowedForThisRun = OneShotFlagScope.serviceFormModifiers
+    scopeSubject = "this run (it names no subcommand, so it serves the socket)"
+}
+// 一次性形态 + 服务形态旗标同现，或服务形态里混进只有某条命令才读的旗标：那几枚在这趟
+// 里没有任何读者。这里逐条点名并拒绝（用法错误 64 + 整块 usage，与上面"一次要两条
 // 命令"那支同一口径：都是这一串 argv 本身不成立，而它一条也没跑）。
-if let oneShotCommand = requestedCommandNames.first {
-    let refused = OneShotFlagScope.refused(options: options, command: oneShotCommand)
-    if !refused.isEmpty {
-        let allowed = OneShotFlagScope.allowedModifiers(for: oneShotCommand).sorted()
-        // 这一整段是一句话，逐段 `+=` 只是为了让类型检查在预算内走完：前面那一支十几个
-        // `+` 连成的式子在本仓的 Swift 6.2 工具链上是 "unable to type-check this expression
-        // in reasonable time"（`swift build --package-path engine` 在 glasspaned 那一步直接
-        // 失败），整包编译不过。措辞逐字未动。
-        var message = "glasspaned: \(refused.joined(separator: ", ")) "
-        message += (refused.count == 1 ? "is" : "are") + " not read by \(oneShotCommand) — this "
-        message += "invocation mixes a one-shot subcommand with service-form or "
-        message += "other-command modifiers, so nothing those flags ask for would have happened, "
-        message += "and it ran none of them. \(oneShotCommand) reads "
-        message += (allowed.isEmpty ? "no modifier flags at all" : "only " + allowed.joined(separator: ", "))
-        message += " besides these. Next step: drop "
-        message += refused.joined(separator: ", ") + ", or name the command that does read "
-        message += "them (e.g. --older-than and --project belong to --prune-evidence, "
-        message += "--dry-run to --project-prune/--project-remove/--prune-evidence; --no-probe, "
-        message += "--no-c33, --socket-path, --probe-socket-path, --force-socket, "
-        message += "--force-probe-socket and --unattended-window only mean something when this "
-        message += "run serves the socket)."
-        FileHandle.standardError.write(Data(message.utf8 + Data("\n".utf8)))
-        printUsage()
-        exit(64)
+let refused = OneShotFlagScope.refused(options: options, allowed: allowedForThisRun)
+if !refused.isEmpty {
+    let allowed = allowedForThisRun.sorted()
+    // 这一整段是一句话，逐段 `+=` 只是为了让类型检查在预算内走完：前面那一支十几个
+    // `+` 连成的式子在本仓的 Swift 6.2 工具链上是 "unable to type-check this expression
+    // in reasonable time"（`swift build --package-path engine` 在 glasspaned 那一步直接
+    // 失败），整包编译不过。措辞逐字未动。
+    var message = "glasspaned: \(refused.joined(separator: ", ")) "
+    message += (refused.count == 1 ? "is" : "are") + " not read by \(scopeSubject) — "
+    if let oneShotCommand {
+        message += "this invocation mixes a one-shot subcommand with service-form or "
+            + "other-command modifiers, so nothing those flags ask for would have happened, "
+            + "and it ran none of them. \(oneShotCommand) reads "
+    } else {
+        message += "this invocation names no subcommand at all, so nothing that reads "
+            + "those flags is going to run: the daemon would come up and none of what they "
+            + "ask for would happen. A run that only serves the socket reads "
     }
+    message += (allowed.isEmpty ? "no modifier flags at all" : "only " + allowed.joined(separator: ", "))
+    message += " besides these. Next step: drop "
+    message += refused.joined(separator: ", ") + ", or name the command that does read "
+    message += "them (e.g. \(FlagOwnership.maintenance); \(FlagOwnership.serviceOnly))."
+    FileHandle.standardError.write(Data(message.utf8 + Data("\n".utf8)))
+    printUsage()
+    exit(64)
+}
+if let oneShotCommand {
     if OneShotFlagScope.stateFreeCommands.contains(oneShotCommand), options.stateDir != nil {
         FileHandle.standardError.write(Data((
             "glasspaned: note — \(oneShotCommand) reads no state, so the --state-dir root "
@@ -1555,6 +1671,31 @@ if options.approvalAudit || options.approvalVerify {
 
 // MARK: - P5 evidence maintenance CLI (spec v5.0 §12)
 
+/// `--evidence-stats` 上"这个档案柜会不会按年龄到期"那一句的读法（每日 2026-10-29 泳道 2
+/// 交接的那一格：S2-3 把值备在了 `EvidenceArchiveStats.ageRetention` 里，这一面负责把它
+/// **发出去**——`stats()` 有值而载荷里没有那个键，等于事实说到了半路）。
+///
+/// 为什么这一句必须发出来：`maxAgeDays` 在 daemon 的 CLI 上从来没有入口（`--older-than` 是
+/// `--prune-evidence` 的一次性参数，不是留存配置），所以每次写都跑的那趟按年龄清理在生产里
+/// 恒为空操作。`{count, totalBytes}` 两读数配上模块头那句"older than N day(s)"，读者就当成
+/// 档案会按年龄自己到期——一条没人设置过的承诺。这里把唯一说得出这条的主体（这个 store
+/// 实例此刻有没有年龄闸）折算成一句话，没设年龄闸时**不许**出现"多少天以后到期"。
+///
+/// 合并说明（给主代理）：分支 `daily/main-20261029-swift1`（f49f8341）已把同一句存成
+/// `EvidenceStore.ageRetentionNotEnforced` 并由 `stats().ageRetention` 发出；本分支还没有那
+/// 一条，所以这里按同一语义、同一字面量自己接。合并后本函数删掉，载荷那一行直接转读
+/// `stats.ageRetention`——判据不留两处拼写。
+private func evidenceAgeRetentionReading(_ store: EvidenceStore) -> String {
+    // 这一句是"没有年龄闸"时唯一的实话，也是设了闸时那半句的尾巴：一处拼写，两处使用。
+    let onlyAgePath = "--prune-evidence --older-than <days> is the only age path"
+    guard let maxAgeDays = store.maxAgeDays else {
+        return "not enforced by the daemon; \(onlyAgePath)"
+    }
+    return "age gate of \(maxAgeDays) day(s) set in this process by a caller of EvidenceStore — "
+        + "no daemon flag and no configuration path sets one, so a daemon started from the CLI runs "
+        + "with age retention not enforced; \(onlyAgePath)"
+}
+
 if options.pruneEvidence || options.evidenceStats {
     // 目录解析与批三 pruneEvidence 同口径：项目维度查 registry →
     // evidenceStoragePath（缺失或不合法即拒绝，不回落共享档案）；
@@ -1691,7 +1832,10 @@ if options.pruneEvidence || options.evidenceStats {
             "totalBytes": unreadable ? NSNull() : stats.totalBytes,
             "listFailure": stats.listFailure ?? NSNull(),
             "project": options.maintenanceProjectId ?? NSNull(),
-            "dir": dir
+            "dir": dir,
+            // 泳道 2 交接（S2-3）：值在引擎那一侧，这一面负责把它发出去。读不到归档时
+            // 它同样要说实话——"没测出条数"与"没有年龄闸"是两件不同的事实。
+            "ageRetention": evidenceAgeRetentionReading(store)
         ]
         writeJSON(payload)
         // `--prune-evidence` 20 行之前对同一个事实（`listFailure != nil`）回的是 1，
