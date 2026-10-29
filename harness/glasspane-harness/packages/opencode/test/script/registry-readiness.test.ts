@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 
-import { servedProbe, waitForRegistryVersion } from "../../script/registry-readiness"
+import { npmAnswer, servedProbe, waitForRegistryVersion } from "../../script/registry-readiness"
 
 /**
  * Fixed points for the registry-readiness wait in the publish lane.
@@ -352,5 +352,53 @@ describe("servedProbe: metadata is not the artifact", () => {
     expect(readiness.ok).toBe(false)
     if (!readiness.ok) expect(readiness.reason).toBe("not-observed")
     expect(notes.some((line) => line.includes("not in") && line.includes("yet"))).toBe(true)
+  })
+})
+
+// `script/publish.ts` asks the registry "is this version already out there?" immediately before it
+// runs an IRREVERSIBLE `npm publish`. It used to answer that with `exitCode === 0`, so every
+// non-zero — ECONNRESET, EAI_AGAIN, a 429, a proxy that returned HTML, npm not being installed — read
+// as "not published" and fell through to publishing. `npmAnswer` is the three-state classifier, now
+// defined once and shared with `verify-published.ts`. These cases are the difference between a
+// release that pauses and a release that guesses.
+describe("npmAnswer distinguishes 'absent' from 'could not ask'", () => {
+  const npmErr = (text: string) => `npm WARN\nnpm error code ${text}\nnpm error ${text}\n`
+
+  test("exit 0 is an answer", () => {
+    expect(npmAnswer(0, "0.12.4\n", "")).toEqual({ state: "answered", value: "0.12.4" })
+  })
+
+  test("the registry's own 404 is absence — the only non-zero that may license a publish", () => {
+    for (const text of ["E404 Not Found - GET https://registry.npmjs.org/glasspane-harness-0.12.4", "code E404"]) {
+      const read = npmAnswer(1, "", text)
+      expect(read.state).toBe("absent")
+    }
+  })
+
+  test("a transport failure is not absence", () => {
+    for (const text of [
+      npmErr("ECONNRESET"),
+      npmErr("EAI_AGAIN"),
+      npmErr("ENOTFOUND registry.npmjs.org"),
+      npmErr("E429 429 Too Many Requests"),
+      npmErr("CERT_HAS_EXPIRED"),
+      "npm error command sh -c node-gyp rebuild",
+    ]) {
+      const read = npmAnswer(1, "", text)
+      expect(read.state).toBe("unaskable")
+      expect(read.value.length).toBeGreaterThan(0)
+    }
+  })
+
+  test("a silent non-zero still says which command could not answer", () => {
+    const read = npmAnswer(127, "", "")
+    expect(read.state).toBe("unaskable")
+    expect(read.value).toContain("127")
+  })
+
+  test("and nothing in the unaskable set is ever reported as absent", () => {
+    // The single property the publish lane depends on: `absent` may proceed, `unaskable` may not.
+    const causes = ["ECONNRESET", "EAI_AGAIN", "ENOTFOUND", "E429", "EACCES", "ENOENT", "SELF_SIGNED_CERT_IN_CHAIN"]
+    for (const cause of causes) expect(npmAnswer(1, "", npmErr(cause)).state).not.toBe("absent")
   })
 })

@@ -65,7 +65,35 @@ jobs:
 
       - name: Fixed-point tests (glasspane tool surface, ledger, compaction, rendering)
         working-directory: packages/opencode
-        run: bun test --timeout 30000 test/tool/glasspane-surface.test.ts test/tool/glasspane-kernel.test.ts test/plugin/glasspane-decision-log.test.ts test/plugin/glasspane-compaction.test.ts test/script/publish-shape.test.ts test/config/glasspane-project-plugin-trust.test.ts test/tool/glasspane-provider-registration.test.ts test/script/registry-readiness.test.ts test/script/patched-artifact.test.ts
+        # This step used to be a hand-written list of nine paths in a monorepo that carries
+        # eighteen fixed-point files. The nine it named were the nine written earliest, so every
+        # file added after them ran nowhere — and the hole is not "untested" but "unfailing":
+        # `test/server/auth.test.ts` had a red assertion for it the whole time and no lane ever
+        # read it. The list is now derived from the directories our fixed points live in, so a new
+        # file is picked up by the glob instead of by someone remembering to edit YAML.
+        # The floor is the other half: a glob that stops matching expands to nothing, `bun test`
+        # with no paths runs the whole package (upstream's timing-sensitive suite, which is why
+        # this lane names files at all), and neither of those is a red. So count first.
+        run: |
+          set -euo pipefail
+          files=(
+            test/tool/glasspane-*.test.ts
+            test/plugin/glasspane-*.test.ts
+            test/script/*.test.ts
+            test/config/glasspane-*.test.ts
+            test/server/auth.test.ts
+          )
+          missing=0
+          for f in "${files[@]}"; do
+            [ -f "$f" ] || { echo "::error::$f matched nothing — a fixed-point directory moved or its files were renamed"; missing=1; }
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          echo "fixed-point files: ${#files[@]}"
+          if [ "${#files[@]}" -lt 18 ]; then
+            echo "::error::the derived list resolved to ${#files[@]} file(s); this package carries 18 fixed-point files, so a pattern went dead rather than the count dropping honestly"
+            exit 1
+          fi
+          bun test --timeout 30000 "${files[@]}"
 
       # The rule that keeps this fork from publishing into someone else's npm scope lives in
       # `harness/tools/product-surface.mjs`, which is in the parent repository and therefore NOT

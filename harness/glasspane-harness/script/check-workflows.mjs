@@ -54,6 +54,19 @@ const root = (() => {
 const asJson = args.includes("--json")
 const wantList = args.includes("--list")
 
+// Unknown flags are refused, not ignored. The parent repository's `scripts/check-workflows.mjs` has a
+// `--self-test` mode; this fork's copy does not, and `node script/check-workflows.mjs --self-test`
+// answered "4 workflow file(s) clean" with exit 0 while running zero cases. A flag that silently does
+// nothing turns the person who typed it into the author of a false green — and the command they typed
+// is the one they will put in a workflow. `--dir VALUE` consumes its argument, so only a standalone
+// `--…` counts as a flag here.
+const KNOWN_FLAGS = new Set(["--json", "--list"])
+const unknown = args.filter((arg, i) => arg.startsWith("--") && !KNOWN_FLAGS.has(arg) && arg !== "--dir" && args[i - 1] !== "--dir")
+if (unknown.length) {
+  console.error(`check-workflows: unknown flag(s) ${unknown.join(", ")} — this tool has no such mode. It read ${root} and did exactly what --dir/--json/--list say; anything else it cannot do, it refuses rather than prints a pass for.`)
+  process.exit(2)
+}
+
 const SHA_REF = /^[0-9a-f]{40}$/
 const GATES = ["e", "u", "pipefail"]
 // A body whose first real statement is one of these is a program in another language; `set` in
@@ -75,11 +88,30 @@ if (!existsSync(workflowDir)) {
   console.error(`check-workflows: no .github/workflows under ${root} — refusing to call an absent scan a pass`)
   process.exit(2)
 }
-const files = readdirSync(workflowDir)
+const workflowFiles = readdirSync(workflowDir)
   .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
   .sort()
-if (!files.length) {
-  console.error(`check-workflows: ${workflowDir} holds no workflow file — refusing to certify an empty set`)
+// Composite actions are scanned too. `.github/actions/setup-bun/action.yml` is `uses:`-d by every
+// job in both workflows, including the ones that hold `id-token: write` and the release `GPG_PRIVATE_KEY`,
+// and it downloads bun from a URL it computes at runtime. Reading only `readdirSync(workflows)` meant
+// the one file that runs inside every privileged job was never asked whether its own `uses:` are
+// SHA-pinned or whether its multi-statement bodies declare a shell gate — a retagged nested action is
+// code nobody reviewed, executed with these credentials, and no lane would have said so.
+const actionsDir = path.join(root, ".github", "actions")
+const actionFiles = []
+const collectActions = (dir) => {
+  if (!existsSync(dir)) return
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const abs = path.join(dir, entry.name)
+    if (entry.isDirectory()) collectActions(abs)
+    else if (entry.isFile() && /^action\.ya?ml$/.test(entry.name)) actionFiles.push(abs)
+  }
+}
+collectActions(actionsDir)
+actionFiles.sort()
+const files = [...workflowFiles.map((f) => path.join(workflowDir, f)), ...actionFiles]
+if (!workflowFiles.length && !actionFiles.length) {
+  console.error(`check-workflows: ${workflowDir} holds no workflow file and ${actionsDir} holds no action.yml — refusing to certify an empty set`)
   process.exit(2)
 }
 
@@ -228,7 +260,7 @@ function parse(filePath) {
   return { label, jobs, envKeys, npmInstalls, refs, bodies, gated }
 }
 
-const parsed = files.map((f) => parse(path.join(workflowDir, f)))
+const parsed = files.map((abs) => parse(abs))
 
 // Rule 4, over the whole file rather than line by line: one definition, and every install reads it.
 for (const info of parsed) {

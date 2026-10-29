@@ -399,7 +399,13 @@ jobs:
           set -euo pipefail
           # Read the target matrix before descending into the working directory, so this is
           # the repo root's product.json and not a path guessed from a child directory.
-          wanted="$(node -e 'const p=require("./product.json");for(const t of p.platformTargets)console.log(`${p.name}-${t.os}-${t.arch}${t.abi?"-"+t.abi:""}`)')"
+          # One naming rule for the whole file: `name-os-arch[-baseline][-abi]`, the same expression
+          # `script/build.ts` uses to make the directory and `script/publish.ts` uses to make the
+          # npm package name. This line used a shorter one (`${abi ? "-" + abi : ""}`, no `baseline`),
+          # so the day a baseline target comes back the checksum manifest would ask for a name no
+          # build ever produced and the two-way set equality below would fail — or, worse, name an
+          # asset that is not the one the release carries.
+          wanted="$(node -e 'const p=require("./product.json");const n=(t)=>[p.name,t.os==="win32"?"windows":t.os,t.arch,t.avx2===false?"baseline":undefined,t.abi].filter(Boolean).join("-");for(const t of p.platformTargets)console.log(n(t))')"
           # The scratch dir must NOT be a repo-relative `assets/`: this repository already
           # tracks a directory by that name (the product's logo.svg / banner.svg), so
           # `mkdir -p assets && cd assets` was a no-op that landed inside the checkout and
@@ -535,6 +541,35 @@ jobs:
           printf '%s\n' "allow-loopback-pinentry" >> "$HOME/.gnupg/gpg-agent.conf"
           gpgconf --kill gpg-agent
           printf '%s\n' "$GPG_INPUT_KEY" | gpg --batch --yes --import
+          # The key that signs has to be the key the installer is configured to trust.
+          # `scripts/install.sh` names one fingerprint (`GLASSPANE_HARNESS_SIGNING_FPR`) and refuses
+          # a `VALIDSIG` from any other, so a rotation that edits the secret and not the script turns
+          # the fallback channel into "every release is refused", and — the worse direction — a secret
+          # replaced by someone who can reach the environment would sign assets the installer keeps
+          # trusting only if the script were also edited. Either way the two halves are one contract
+          # and nothing here checked them against each other. Read it out of the file rather than
+          # pasting a constant into this job: a second copy is a second thing that can go stale.
+          want_fpr="$(sed -n 's/^GLASSPANE_HARNESS_SIGNING_FPR="\(.*\)"/\1/p' "$GITHUB_WORKSPACE/scripts/install.sh")"
+          if [ -z "$want_fpr" ]; then
+            echo "::error::could not read GLASSPANE_HARNESS_SIGNING_FPR out of scripts/install.sh — the installer's trust anchor moved shape and this job can no longer compare the two halves"
+            exit 1
+          fi
+          have_fpr="$(gpg --batch --with-colons --list-secret-keys | awk -F: '/^sec/{print $5; exit}')"
+          # `sec` gives the primary's keygrip-less long id in field 5 for `--with-colons` on v2 keys;
+          # the fingerprint is what the installer matches, so both spellings are collected.
+          all_fpr="$(gpg --batch --with-colons --list-keys | awk -F: '/^fpr/{print toupper($10)}' | tr '\n' ' ')"
+          case " $all_fpr " in
+            *" $want_fpr "*) echo "signing key fingerprint matches the installer's trust anchor: $want_fpr" ;;
+            *)
+              echo "::error::the GPG_PRIVATE_KEY in the 'release' environment is NOT the key scripts/install.sh trusts."
+              echo "::error::  installer trusts: $want_fpr"
+              echo "::error::  this key carries: ${all_fpr:-none readable}"
+              echo "::error::remedy: either restore the matching private key (printf '%s' <armored key> | gh secret set GPG_PRIVATE_KEY --env release --repo $GITHUB_REPOSITORY)" \
+                "or rotate deliberately — and then the installer's embedded block AND its fingerprint constant change in the same commit, because a signed release nobody's installer will accept is a broken release."
+              exit 1
+              ;;
+          esac
+          [ -n "$have_fpr" ] || echo "note: no primary key id read from the secret keyring; the fingerprint set above is what the check compared"
           # Each sidecar is `$f.asc`, which is exactly what the installer fallback
           # (scripts/install.sh) looks for next to the tarball it downloads.
           for f in ./* SHA256SUMS.txt; do
@@ -752,10 +787,51 @@ jobs:
           # not say. `--provenance` happens to reject hosts other than the npm public registry, which
           # is a coincidence doing security work that a flag should do.
           reg="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).registry" "$PRODUCT_JSON")"
-          pkg="$(node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));const t=p.platformTargets.find(t=>`${t.os==="win32"?"windows":t.os}-${t.arch}`===process.argv[1]);console.log(`${p.name}-${process.argv[1]}${t?.abi?"-"+t.abi:""}`)' '${{ matrix.target }}' "$PRODUCT_JSON")"
+          # The asset name is derived from the WHOLE matched target, not from three of its five
+          # components re-spelled here. `find(t => \`${t.os}-${t.arch}\` === target)` answers with the
+          # first entry whose os-arch matches, and `product.json`'s own comment says the matrix may
+          # carry two entries on one os-arch again (glibc/musl, avx2/baseline) — the day it does, this
+          # line names one directory while `build.ts` wrote another, `cd dist/$pkg` follows the wrong
+          # one, and `npm publish` ships a binary labelled for a target it is not. Ambiguity here is
+          # therefore a refusal, not a default. The `abi`/`suffix` components are read the same way
+          # the `checksums` lane reads them, so the two lanes cannot name the same asset differently.
+          pkg="$(node -e '
+            const fs = require("fs")
+            const p = JSON.parse(fs.readFileSync(process.argv[2], "utf8"))
+            const want = process.argv[1]
+            const key = (t) => `${t.os === "win32" ? "windows" : t.os}-${t.arch}`
+            const matched = p.platformTargets.filter((t) => key(t) === want)
+            if (matched.length !== 1) {
+              console.error(`product.json platformTargets: ${matched.length} entry(ies) key to "${want}" (${matched.map((t) => JSON.stringify(t)).join(", ") || "none"}) — this job cannot name one asset from an ambiguous or empty matrix`)
+              process.exit(1)
+            }
+            const t = matched[0]
+            // `script/build.ts:110-116` and `script/publish.ts:273` name the artifact
+            // `name-os-arch[-baseline][-abi]`; the directory this job must `cd` into is whatever
+            // build.ts made, so re-spelling the rule with fewer components here names a directory
+            // that does not exist (or, with two entries on one os-arch, the wrong one).
+            console.log([p.name, t.os === "win32" ? "windows" : t.os, t.arch, t.avx2 === false ? "baseline" : undefined, t.abi].filter(Boolean).join("-"))
+          ' '${{ matrix.target }}' "$PRODUCT_JSON")"
           ver="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).version" "$PRODUCT_JSON")"
           echo "publishing $pkg@$ver"
           cd "dist/$pkg"
+          # Publish the archive this job can name, not the directory. `script/publish.ts` — the gate
+          # that reads the pack shape, the bin exec bits, the `optionalDependencies` == target-matrix
+          # equality and the os/cpu gate — packs with `bun pm pack` and validates
+          # `${name}-${version}.tgz`. `npm publish .` re-packs the same directory through a different
+          # packer, so the bytes that were checked and the bytes that ship were never the same object.
+          # This file already documents that the two packings differ (the duplicate-version branch
+          # below prints two different sha512s for one version), which is exactly why the publish has
+          # to name the tarball it packed instead of pointing npm at a folder.
+          npm pack --silent
+          tarball="$pkg-$ver.tgz"
+          if [ ! -f "$tarball" ]; then
+            echo "::error::npm pack produced no $tarball in dist/$pkg — refusing to publish a directory the pack gate never validated"
+            ls -1
+            rm -f "$log"
+            exit 1
+          fi
+          echo "publishing from the packed archive: $tarball ($(shasum -a 256 "$tarball" | cut -c1-12)…)"
           # The fallback used to be an unconditional `||`: E401, E404, a registry 5xx,
           # a tarball problem and the E409 duplicate-version shape that burned 0.5.0 all
           # took the same branch and printed a notice naming a cause that was not true —
@@ -765,7 +841,7 @@ jobs:
           # Anything else is a failure, and it has to stay a failure.
           log="$(mktemp)"
           rc=0
-          npm publish --provenance --access public --registry "$reg" >"$log" 2>&1 || rc=$?
+          npm publish "$tarball" --provenance --access public --registry "$reg" >"$log" 2>&1 || rc=$?
           cat "$log"
           if [ "$rc" -ne 0 ]; then
             if grep -qiE "staged publishing|only allowed through (the )?oidc|trusted publisher|publishing directly is not allowed" "$log"; then
@@ -1023,12 +1099,22 @@ jobs:
           # "already published" and we would learn nothing about the OIDC exchange —
           # which is the whole question. A prerelease carrying the run number can
           # never collide and is never published: we reject it in the next step.
+          #
+          # The rewrite has to move the DIST TAG too. `publish.ts` writes
+          # `publishConfig.tag = distTag`, and for a released version that is `latest` — the field
+          # npm reads when a staged publish is approved. So the probe's only protection was the
+          # human in the next step: this job cannot reject its own stage (interactive auth), and it
+          # prints `npm stage approve <id>` as the alternative reading of the same line. One
+          # mistyped approve and `latest` points at a probe build, which is what every
+          # `npm install -g glasspane-harness` and the installer's npm leg resolve next. A probe
+          # must be unable to reach a consumer-facing tag even by accident.
           node -e '
             const fs = require("fs")
             const p = JSON.parse(fs.readFileSync("package.json", "utf8"))
             p.version = `${p.version}-oidc-probe.${process.env.GITHUB_RUN_NUMBER}`
+            p.publishConfig = { ...(p.publishConfig ?? {}), tag: "oidc-probe" }
             fs.writeFileSync("package.json", JSON.stringify(p, null, 2))
-            console.log("probe version:", p.version)
+            console.log("probe version:", p.version, "| probe dist-tag:", p.publishConfig.tag)
           '
           # Same pinning as the two publish lanes: this probe is the job that proves the OIDC
           # trusted publisher works, and a probe aimed at an ambient mirror would prove the mirror.

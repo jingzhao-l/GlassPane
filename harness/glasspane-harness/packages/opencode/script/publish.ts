@@ -4,6 +4,7 @@ import pkg from "../package.json"
 import product from "../../../product.json"
 import { Script } from "@opencode-ai/script"
 import { validatePackageIdentity } from "./publish-shape"
+import { npmAnswer } from "./registry-readiness"
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -52,8 +53,22 @@ process.on("exit", () => {
  */
 const registry = product.registry
 
-async function published(name: string, version: string) {
-  return (await $`npm view ${name}@${version} version --registry ${registry}`.nothrow()).exitCode === 0
+/**
+ * "Is this version already on the registry?" has three answers, and this used to have two.
+ *
+ * `npm view` exits non-zero for the registry saying 404 AND for ECONNRESET, ENOTFOUND, EAI_AGAIN, a
+ * 429, a proxy that answered something else, and npm itself being missing. Collapsing all of those
+ * into "not published" meant a transport hiccup during a release dispatched against a real tag would
+ * fall straight through to `npm publish` — which is the one path where a wrong answer is irreversible,
+ * and the shape `verify-published.ts:82-103` already refuses to have. So: only an actual 404 may
+ * proceed to publish. Anything the registry did not answer is a refusal, with the reason.
+ */
+async function published(name: string, version: string): Promise<"published" | "absent" | "unaskable"> {
+  const seen = await $`npm view ${name}@${version} version --registry ${registry}`.nothrow()
+  const answer = npmAnswer(seen.exitCode, seen.stdout.toString(), seen.stderr.toString())
+  if (answer.state === "unaskable") console.error(`  CANNOT ASK whether ${name}@${version} is published: ${answer.value}`)
+  if (answer.state === "answered") return "published"
+  return answer.state
 }
 
 // Stable releases go to `latest`; anything on a non-latest channel goes to `next`,
@@ -93,9 +108,18 @@ async function publish(dir: string, name: string, version: string) {
     console.log(`  ok ${name}@${version} packs cleanly (not published: --dry-run)`)
     return
   }
-  if (await published(name, version)) {
+  const answer = await published(name, version)
+  if (answer === "published") {
     console.log(`  already published ${name}@${version} — this call published nothing`)
     return
+  }
+  // `unaskable` is not `absent`. Publishing into a registry this script could not read means a
+  // duplicate-version refusal, an overwritten channel, or a half-publish — all discovered later by
+  // whoever installs it. Stop here while stopping is still cheap.
+  if (answer === "unaskable") {
+    console.error(`publish: the registry did not answer about ${name}@${version}, and "did not answer" is not "not published" — refusing to publish blind.`)
+    console.error("remedy: re-run once the registry is reachable (npm view " + `${name}@${version}` + " version --registry " + registry + " must answer), then re-dispatch this tag.")
+    process.exit(2)
   }
   // Two literal command lines, not one built by interpolation. Bun quotes every `${}` as a
   // single argv entry, so a `" --provenance"` suffix riding next to another value arrives as

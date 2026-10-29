@@ -128,14 +128,13 @@ async function showRemovalSummary(targets: RemovalTargets, method: Installation.
   }
 
   if (method !== "curl" && method !== "unknown") {
+    // [gp] Product: only the channels `Installation.UpdateChannels` names minus `curl`, which is
+    // handled by the binary branch below. This product publishes no brew/choco/scoop package, so
+    // printing one of those commands would hand the user a remedy for an install it cannot make.
     const cmds: Record<string, string> = {
       npm: "npm uninstall -g glasspane-harness",
       pnpm: "pnpm uninstall -g glasspane-harness",
       bun: "bun remove -g glasspane-harness",
-      yarn: "yarn global remove glasspane-harness",
-      brew: "brew uninstall glasspane-harness",
-      choco: "choco uninstall glasspane-harness",
-      scoop: "scoop uninstall glasspane-harness",
     }
     prompts.log.info(`  ✓ Package: ${cmds[method] || method}`)
   }
@@ -179,30 +178,22 @@ async function executeUninstall(method: Installation.Method, targets: RemovalTar
   }
 
   if (method !== "curl" && method !== "unknown") {
+    // [gp] Product: the same three channels the summary lists — see the note there.
     const cmds: Record<string, string[]> = {
       npm: ["npm", "uninstall", "-g", "glasspane-harness"],
       pnpm: ["pnpm", "uninstall", "-g", "glasspane-harness"],
       bun: ["bun", "remove", "-g", "glasspane-harness"],
-      yarn: ["yarn", "global", "remove", "glasspane-harness"],
-      brew: ["brew", "uninstall", "glasspane-harness"],
-      choco: ["choco", "uninstall", "glasspane-harness"],
-      scoop: ["scoop", "uninstall", "glasspane-harness"],
     }
 
     const cmd = cmds[method]
     if (cmd) {
       spinner.start(`Running ${cmd.join(" ")}...`)
-      const result = await Process.run(method === "choco" ? ["choco", "uninstall", "glasspane-harness", "-y", "-r"] : cmd, {
+      const result = await Process.run(cmd, {
         nothrow: true,
       })
       if (result.code !== 0) {
         spinner.stop(`Package manager uninstall failed: exit code ${result.code}`, 1)
-        const text = `${result.stdout.toString("utf8")}\n${result.stderr.toString("utf8")}`
-        if (method === "choco" && text.includes("not running from an elevated command shell")) {
-          prompts.log.warn(`You may need to run '${cmd.join(" ")}' from an elevated command shell`)
-        } else {
-          prompts.log.warn(`You may need to run manually: ${cmd.join(" ")}`)
-        }
+        prompts.log.warn(`You may need to run manually: ${cmd.join(" ")}`)
       } else {
         spinner.stop("Package removed")
       }

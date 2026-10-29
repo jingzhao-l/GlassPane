@@ -106,9 +106,13 @@ otherwise last batch's conclusion.
 
 Not publishing was a **recorded decision**, not an unfinished task:
 
-- **P6 §13** (a directive executed 2026-09-21): the kernel is not published separately; a
-  `file:` dependency leaks out of a published manifest, so the build-local shell inlines the
-  bytes. **P4 §33.2**: registry publishing follows the iterate monorepo's own release policy.
+- The kernel was not published separately, and the reason is checkable from here: a `file:`
+  dependency carried into a published manifest names a path no consumer has, so the bytes lived
+  in the consumer's own tree (`packages/opencode/vendor/kernel/`) until `script/kernel-pin.mjs`
+  could insist on a registry resolution — it fails on any non-empty `bun.lock` specifier for
+  `iterate-kernel`. Publishing was the kernel package's own call too: the fork asks the registry
+  what exists (`script/kernel-pin.mjs --probe`, `npm view iterate-kernel version`) instead of
+  deciding a version from here.
 - The fork could not use a relative `../../kernel` import either: it ships as a
   **subtree-split repository**, so that path breaks on the first release. That left vendoring
   or npm, and npm was not published — so vendoring.

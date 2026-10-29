@@ -58,6 +58,15 @@ import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { McpCatalog } from "@/mcp/catalog"
 
+// [gp] Product boundary. Upstream (v1.18.32, `registry.ts:59-66`) also returns true for
+// `ProviderV2.ID.opencode` and `ProviderV2.ID.make("opencode-go")`: those are opencode's own
+// first-party gateways, and their web search is a feature of that account, not of a key the user
+// brought. This product deletes the first-party account face and filters `opencode` out of the
+// catalog at `provider.ts:1389`, so neither id can be reached here — a disjunct that can only be
+// true for a provider this build refuses to load is not a capability, it is dead code that reads
+// like one. `providerID` therefore stays in the signature because upstream's caller passes it, and
+// the third-party `exa` / `parallel` flags are the only remaining door.
+// Fixed-point test: `test/tool/glasspane-websearch-boundary.test.ts`.
 export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false, parallel: false }) {
   return (
     flags.exa ||

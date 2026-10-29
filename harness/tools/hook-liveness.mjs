@@ -483,6 +483,26 @@ if (JSON.stringify(stillDead) !== JSON.stringify(expectedDead)) {
   drift++
 }
 
+// `fireSites` is the evidence behind `kind: "live"`, and until now `--check` never read it. A hook
+// stayed "live" as long as ANY regex-satisfying mention existed — so upstream could move every
+// recorded dispatch site out of the engine path (into a package this fork does not build, behind a
+// different call shape that still matches the trigger pattern) and this lane would print
+// "checked 21 hooks: no drift" while the two hooks this product binds to no longer fire where the
+// record says they fire. Kind is a count; the file set is the fact.
+for (const now of observed) {
+  const was = golden.hooks.find((h) => h.name === now.name)
+  if (!was || !Array.isArray(was.fireSites)) continue
+  const before = [...new Set(was.fireSites.map((s) => s.file))].sort()
+  const after = [...new Set((now.fireSites || []).map((s) => s.file))].sort()
+  if (JSON.stringify(before) === JSON.stringify(after)) continue
+  const gone = before.filter((f) => !after.includes(f))
+  const added = after.filter((f) => !before.includes(f))
+  console.error(`  ✗ ${now.name}: the dispatch sites moved — golden [${before.join(", ") || "none"}] now [${after.join(", ") || "none"}]`)
+  if (gone.length) console.error(`     left: ${gone.join(", ")} — a hook whose recorded site is gone is not evidence that it still fires`)
+  if (added.length) console.error(`     new:  ${added.join(", ")} — deliberate work; re-record so the site travels with the claim`)
+  drift++
+}
+
 console.log(`checked ${observed.length} hooks against ${pin.repo}@${pin.tag}: ${drift === 0 ? "no drift" : drift + " drift"}`)
 if (drift > 0) {
   console.error("Attribution per 综述 R34: this is 上游坏 (upstream changed the plugin floor). Freeze the upgrade, do not patch around it here.")

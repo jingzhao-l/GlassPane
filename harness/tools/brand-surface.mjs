@@ -460,7 +460,18 @@ function scan() {
     const text = readFileSync(abs, "utf8")
     occurrences += (text.replace(/packages\/opencode\b/gi, "packages/<fork>").match(/opencode/gi) ?? []).length
   }
-  return { hits, skillDocs: skillDocs.map((doc) => `packages/core/src/plugin/skill/${doc}`), lineage: { occurrences, filesScanned: files.length } }
+  return {
+    hits,
+    skillDocs: skillDocs.map((doc) => `packages/core/src/plugin/skill/${doc}`),
+    lineage: { occurrences, filesScanned: files.length },
+    // The shipped-code scan set, remembered as a number. `walkSrc` returns early when a directory
+    // is gone, so pointing `SHIPPED_SRC` at a name that does not exist produced an empty `shippedFiles`
+    // and a green run: the four shipped-code rules plus `removed-tree` measured nothing, and the
+    // only zero-scan refusal in this file was on `lineage.filesScanned`. Growth and shrinkage are
+    // both asserted in `--check` — this is the same caliber hole `productFiles` was fixed for.
+    shippedFiles: shippedFiles.length,
+    shippedSrc: SHIPPED_SRC.length,
+  }
 }
 
 /** Coverage, stated every run. The lineage number is a SUM, so it only means
@@ -531,13 +542,28 @@ function reportSkillDocs(golden) {
 const observed = {
   observedAt: new Date().toISOString().slice(0, 10),
   source: "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
-  rules: [...RULES.map((r) => ({ id: r.id, why: r.why })), { id: "doc-line-without-lineage", why: "a README line that says opencode must also say fork/upstream/anomalyco/MIT/上游/血缘" }],
+  // Every rule this tool actually runs, not only the four that live in `RULES`. The shipped-code
+  // rules below (`first-party-gateway`, `wire-identity`, `foreign-schema-write`, `product-file-name`,
+  // each applied in the loop over `shippedFiles`) and `removed-tree` were emitted into `hits` but
+  // never named here, so the rule-set comparison could not see one being deleted: removing the loop
+  // made its rule's hits vanish, the hit loop had nothing to complain about, and `--check` printed
+  // a green line over a ruler that had lost four marks. A rule that is not in the record cannot be
+  // missed by the record.
+  rules: [
+    ...RULES.map((r) => ({ id: r.id, why: r.why })),
+    { id: "doc-line-without-lineage", why: "a README line that says opencode must also say fork/upstream/anomalyco/MIT/上游/血缘" },
+    { id: "first-party-gateway", why: "shipped code must not offer or link a first-party gateway this product has no account for" },
+    { id: "wire-identity", why: "identifiers sent to third-party services must name this product, not upstream" },
+    { id: "foreign-schema-write", why: "never write a third party's $schema URL into a user's file" },
+    { id: "product-file-name", why: "the user's own files are named for the product" },
+    { id: "removed-tree", why: "an upstream tree this product deleted must not be referenced again" },
+  ],
   productFiles: PRODUCT_FILES.length,
   docFiles: DOC_FILES,
   ...scan(),
 }
 
-console.log(`brand-surface — ${observed.productFiles} product file(s) + ${DOC_FILES.length} doc(s); ${observed.hits.length} hit(s); lineage ${observed.lineage.occurrences} occurrence(s) across ${observed.lineage.filesScanned} file(s)`)
+console.log(`brand-surface — ${observed.productFiles} product file(s) + ${DOC_FILES.length} doc(s); ${observed.shippedFiles} shipped-code file(s); ${observed.hits.length} hit(s); lineage ${observed.lineage.occurrences} occurrence(s) across ${observed.lineage.filesScanned} file(s)`)
 for (const hit of observed.hits) console.log(`    ${hit.rule} ×${hit.count}  ${hit.file}`)
 
 if (mode === "record") {
@@ -547,8 +573,8 @@ if (mode === "record") {
   // here, and the `execFileSync` import at the top of this file was the fossil of it). A golden
   // that blesses bytes no commit contains goes green on the commit and red on someone else's
   // machine, which reads as an unrelated regression.
-  const dirty = execFileSync("git", ["diff", "--name-only", "HEAD"], { cwd: repoRoot, encoding: "utf8" })
-    .split("\n")
+  const dirty = execFileSync("git", ["-c", "core.quotepath=off", "diff", "--name-only", "HEAD", "-z"], { cwd: repoRoot, encoding: "utf8" })
+    .split("\0")
     .filter((rel) => rel && rel.startsWith("harness/glasspane-harness/"))
     .sort()
   if (dirty.length) {
@@ -642,6 +668,23 @@ if (golden.productFiles !== observed.productFiles) {
 }
 if (!Array.isArray(golden.docFiles) || golden.docFiles.join("\u0000") !== DOC_FILES.join("\u0000")) {
   problems.push(`doc-file scan set moved: the golden records ${JSON.stringify(golden.docFiles)} and this run reads ${JSON.stringify(DOC_FILES)} — a README that leaves this list stops being judged line by line, and only the tree-wide bloodline count would notice, which is the backstop this file's own history says cannot replace the named rule`)
+}
+// The shipped-code scan set, asserted the same way `productFiles` is. `walkSrc` skips a directory
+// that is not there instead of refusing, so a renamed or deleted entry in `SHIPPED_SRC` silently
+// removed every file under it from four rules — and `removed-tree`/`shippedFiles` were the two
+// figures no reader consulted at all. Both directions move: shrink is a rule losing its subject,
+// growth is either new code or a widened caliber, and neither may be absorbed without a record.
+if (!Number.isFinite(golden.shippedFiles)) {
+  problems.push(`shipped-file scan count: the golden does not carry it (recorded ${JSON.stringify(golden.shippedFiles)}), so "the shipped-code rules opened N files" has no baseline — this run read ${observed.shippedFiles}`)
+} else if (golden.shippedFiles !== observed.shippedFiles) {
+  problems.push(`shipped-code scan set moved: the golden records ${golden.shippedFiles} file(s) and this run reads ${observed.shippedFiles} (${observed.shippedFiles < golden.shippedFiles ? "files stopped being checked by first-party-gateway / wire-identity / foreign-schema-write / product-file-name" : "the scan grew, which is deliberate work: re-record so the caliber travels with it"})`)
+}
+if (!Number.isFinite(golden.shippedSrc) || golden.shippedSrc !== observed.shippedSrc) {
+  problems.push(`shipped-source directory list moved: the golden records ${JSON.stringify(golden.shippedSrc)} and this run reads ${observed.shippedSrc} — a directory leaving that list takes every file under it out of four rules at once`)
+}
+if (observed.shippedFiles === 0 || observed.shippedSrc === 0) {
+  console.error(`brand-surface: CANNOT MEASURE — the shipped-code scan opened ${observed.shippedFiles} file(s) from ${observed.shippedSrc} source director(ies), so first-party-gateway / wire-identity / foreign-schema-write / product-file-name judged nothing. ${SHIPPED_SRC.join(", ")}`)
+  process.exit(2)
 }
 const skillDocProblem = skillDocsProblem(golden)
 if (skillDocProblem) problems.push(skillDocProblem)

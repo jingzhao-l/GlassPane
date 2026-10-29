@@ -727,6 +727,67 @@ describe("what the capability gate says when hello could not answer", () => {
   })
 })
 
+describe("the seat report is read, not asserted", () => {
+  // `probeCapabilities` used to end with `permissions: (report.permissions ?? {}) as Record<string, string>`.
+  // An `as` on a daemon reply is this surface claiming knowledge the engine did not give it, and the
+  // object it produces is printed straight into `gp_probe_status` for the model to read as the
+  // engine's permission state. A seat carrying `1`, `null` or `{state:"granted"}` therefore reached
+  // the transcript as if it were a verdict — which is the fork's first rule inverted.
+  const seatHello = (permissions: unknown) => {
+    const dir = mkdtempSync(path.join(tmpdir(), "gp-m1-seats-"))
+    const socket = path.join(dir, "engine.sock")
+    const server = net.createServer((conn) => {
+      conn.once("data", () => {
+        conn.write(`${JSON.stringify({ id: 1, result: { version: "1.23.0", protocolVersion: "1", capabilities: ["observe"], permissions } })}\n`)
+      })
+    })
+    return { dir, socket, serve: () => new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socket, resolve) }), stop: () => server.close() }
+  }
+
+  test("a string seat passes through untouched", async () => {
+    const peer = seatHello({ accessibility: "granted", developerTools: "unverifiable" })
+    await peer.serve()
+    const previous = process.env.GLASSPANE_SOCKET
+    process.env.GLASSPANE_SOCKET = peer.socket
+    try {
+      const probe = await Effect.runPromise(Daemon.probeCapabilities())
+      expect(probe.ok).toBe(true)
+      if (!probe.ok) return
+      expect(probe.report.permissions).toEqual({ accessibility: "granted", developerTools: "unverifiable" })
+    } finally {
+      if (previous === undefined) delete process.env.GLASSPANE_SOCKET
+      else process.env.GLASSPANE_SOCKET = previous
+      peer.stop()
+      rmSync(peer.dir, { recursive: true, force: true })
+    }
+  })
+
+  test("a non-string seat keeps its name and says it could not be read", async () => {
+    const peer = seatHello({ accessibility: 1, developerTools: null, screenCapture: { state: "granted" }, input: ["a", "b"] })
+    await peer.serve()
+    const previous = process.env.GLASSPANE_SOCKET
+    process.env.GLASSPANE_SOCKET = peer.socket
+    try {
+      const probe = await Effect.runPromise(Daemon.probeCapabilities())
+      expect(probe.ok).toBe(true)
+      if (!probe.ok) return
+      const seats = probe.report.permissions
+      // Every named seat survives — deleting it would make the report claim the engine has fewer
+      // seats than it adverted, which is a different false statement, not a lesser one.
+      expect(Object.keys(seats).sort()).toEqual(["accessibility", "developerTools", "input", "screenCapture"])
+      for (const seat of Object.keys(seats)) {
+        expect(seats[seat]).toStartWith("unreadable:")
+        expect(seats[seat]).not.toContain("granted")
+      }
+    } finally {
+      if (previous === undefined) delete process.env.GLASSPANE_SOCKET
+      else process.env.GLASSPANE_SOCKET = previous
+      peer.stop()
+      rmSync(peer.dir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe("bounds the surface puts on itself", () => {
   test("an over-sized engine frame is refused in-band with a remedy — never a raised defect", async () => {
     // A real unix-socket peer is used on purpose: the cap is enforced in the

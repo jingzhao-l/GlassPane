@@ -45,7 +45,7 @@ const refDir = path.join(repoRoot, ".external", "opencode")
 
 const GUARD_RANGES = ["harness/contracts/", "harness/glasspane-harness/", ".external/"]
 {
-  const dirty = git("diff", "--name-only", "HEAD").split("\n").filter((rel) => rel && GUARD_RANGES.some((p) => rel.startsWith(p)))
+  const dirty = git("-c", "core.quotepath=off", "diff", "--name-only", "HEAD", "-z").split("\0").filter((rel) => rel && GUARD_RANGES.some((p) => rel.startsWith(p)))
   if (dirty.length) {
     for (const rel of dirty.slice(0, 10)) console.error(`  ✗ ${rel}`)
     console.error("rulers-selftest: refusing to start — this battery mutates tracked files and the worktree is not clean.")

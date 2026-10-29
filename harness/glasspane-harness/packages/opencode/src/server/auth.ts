@@ -14,9 +14,23 @@ export type DecodedCredentials = {
   readonly password: Redacted.Redacted
 }
 
+// Both names are read here, product name first. `Flag.OPENCODE_SERVER_PASSWORD` — which is what
+// `cli/cmd/serve.ts` consults before it prints "server is unsecured", and what `header()` below
+// uses to build the credential it sends — resolves `GLASSPANE_HARNESS_SERVER_PASSWORD` first and
+// then the legacy spelling. This class did not, because `ConfigService`'s layer is provided without
+// `runtime-flags.ts`'s resolver layer, so Effect read the literal `OPENCODE_*` name off
+// `process.env`. The two sides therefore disagreed about one specific and very bad case: an operator
+// who exported only the product name saw the warning disappear while `required()` still answered
+// false and every route stayed open. Enforcement must read the knob the presentation reads.
 export class Config extends ConfigService.Service<Config>()("@opencode/ServerAuthConfig", {
-  password: EffectConfig.string("OPENCODE_SERVER_PASSWORD").pipe(EffectConfig.option),
-  username: EffectConfig.string("OPENCODE_SERVER_USERNAME").pipe(EffectConfig.withDefault("glasspane-harness")),
+  password: EffectConfig.string("GLASSPANE_HARNESS_SERVER_PASSWORD").pipe(
+    EffectConfig.orElse(() => EffectConfig.string("OPENCODE_SERVER_PASSWORD")),
+    EffectConfig.option,
+  ),
+  username: EffectConfig.string("GLASSPANE_HARNESS_SERVER_USERNAME").pipe(
+    EffectConfig.orElse(() => EffectConfig.string("OPENCODE_SERVER_USERNAME")),
+    EffectConfig.withDefault("glasspane-harness"),
+  ),
 }) {}
 
 export type Info = Context.Service.Shape<typeof Config>

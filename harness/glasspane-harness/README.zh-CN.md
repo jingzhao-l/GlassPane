@@ -135,10 +135,12 @@ Azure、OpenRouter 等等全在——几百个模型——每一个都用**你�
 ```bash
 npm install -g glasspane-harness     # 推荐
 bun add -g glasspane-harness
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.3/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.4/scripts/install.sh | bash
 ```
 
-会装出两个命令：**`glasspane-harness`** 与短别名 **`gp-harness`**。
+会装出两个命令：**`glasspane-harness`** 与短别名 **`gp-harness`**。npm 与 bun 从 wrapper 的
+`bin` 映射拿到这个别名；发布资产里只有一个二进制，所以一键通道由 `scripts/install.sh` 在它旁边
+创建这个别名，并且那个名字不可执行时就拒绝这次安装。
 
 有的包管理器默认不跑安装脚本，而把真二进制放到位的正是 wrapper 的 `postinstall`。
 0.7.0 实测：npm 这条路是好的（npm 11+ 首次安装会打一条 `allow-scripts` 提示，命令照样能跑）；

@@ -12,6 +12,151 @@ contract does not).
 
 （空。本轮收口后没有未归号的条目。）
 
+## [0.12.4] — 2026-10-29
+
+**版本判断：patch。** pre-1.0 的口径是"产品面/CLI 形状变动 = minor，纯修复 = patch"。本版没有新增命令、
+没有新增参数、`product.json` 的目标矩阵一字未动；改的全是"闸在说谎"或"代码与它自己的文案不一致"这一类
+缺陷。唯一一处用户可见的形状变化是把一条已经声明过却没兑现的能力补上（别名 `gp-harness` 在一键通道上
+真的装出来），那是让声明为真，不是扩面。
+
+本轮四条审查泳道一共交回 31 条发现，逐条回代码复核后的处置：**26 条确认为缺陷并全部修完**、
+**2 条用实测否证**（见下）、**3 条判为维持现状并写下依据**。发现数与修复数对得上。
+
+修掉的（每条都配固定点测试，且测试驱动的是生产路径而不是它自己的副本）：
+
+- **`GLASSPANE_HARNESS_SERVER_PASSWORD` 此前只关警告、不开鉴权**。呈现侧读 `Flag`（产品名优先、
+  上游名其次），判定侧的 `ServerAuth.Config` 走 Effect 默认 ConfigProvider，只认字面量
+  `OPENCODE_SERVER_PASSWORD`。两侧对同一个旋钮读法不同 ⇒ 只导出产品名的操作者看到警告消失、
+  服务器仍然全开。修法：`server/auth.ts` 的名字解析改为产品名 `orElse` 上游名，与 `Flag` 同源。
+  固定点：`test/server/auth.test.ts` 新增 7 条（产品名单独生效、上游名仍生效、两者同现时产品名赢、
+  都没设时不宣称鉴权、用户名两读法、以及"我自己发的 header 我自己接得住"的往返）。
+- **fork 自己的 CI 只跑 18 个固定点文件里的 9 个**。名单是手写的，写的是最早落的那 9 个，此后新增的
+  一个都没进过任何 lane——`test/server/auth.test.ts` 里那条断言因此红着没人看见。修法：`ci.yml`
+  的步骤改为按目录 glob 派生名单，先断言每条 glob 非空、再断言总数下限。本轮实测 **19 个文件 /
+  324 条用例 / 0 失败 / 1511 次 `expect()`**（上一轮同一套的可跑部分是 172 条）。
+- **OIDC 探针可以被一次误批打进 `latest`**。`verify-trusted-publisher` 只改版本号、不改
+  `publishConfig.tag`，而 `publish.ts` 给正式版写的是 `latest`；这一 job 又自陈"拒绝不了自己的 stage"
+  并打印 `npm stage approve`。修法：探针重写同时把 dist-tag 钉到 `oidc-probe`。固定点：
+  `test/script/workflow-gates.test.ts` 三条（同一改写块里必须同时出现两者、且人类可读的补救行仍打印）。
+- **E7 台账泳道从未真正跑通过**。`glasspane-e7-ledger.ts` 手搓的 `metadata` 不带
+  `Daemon.DAEMON_ORIGIN`，于是 `recordToolExecution` 对第 4/6/7 步一律回 `skipped`——三条"真引擎包进了链"
+  永远不可能绿，而第 5 步"无包的回复被跳过"以**错误的原因**通过（它测的是包，被拒的却是出处）。
+  改成喂 daemon 自己回的那一帧，并新增一条"回放出来的包与归档字节逐字相等"。本轮在**真 daemon** 上
+  实跑：18 条全 PASS、链上两条 entry 的 `prevEntryHash` 相接、`operationId` 是引擎自己的 ULID、
+  归档字节 sha256 `243c93ecdcc2…` 两侧相等。
+- **`brand-surface` 有五把标尺记在自己身上、却没人核对**：`first-party-gateway` / `wire-identity` /
+  `foreign-schema-write` / `product-file-name` / `removed-tree` 会进 `hits`，却不在 `observed.rules`
+  里，删掉整个循环也不会让规则集对不上；且 `walkSrc` 对不存在的目录直接返回，扫描集可以是 0。
+  修法：五条规则进记录、`shippedFiles`/`shippedSrc` 进金样并双向核对、为 0 时 exit 2。
+- **`hook-liveness` 的 `fireSites` 只写不读**：`--check` 只比 `kind` 与死钩子集，所以"上游把派发点搬走、
+  但树里还剩一处能满足正则的提及"仍然是绿。修法：把记录的文件集合与本回合观测的文件集合当身份比，
+  移动即漂移。实测仍 `checked 21 hooks: no drift`、`bound hooks 2/2`。
+- **`provider-surface` 的计数是可选的**：`if (goldenCount !== undefined && …)` 意味着删掉
+  `counts` 对象就让两条断言集体失效；而逐方法的 `surfaces.*`（requires/kind/origin）写了却没人读。
+  修法：计数与 overlap 缺失一律红、新增第三把尺"逐方法契约表按 key 比身份"。
+- **`surface-semantics` 的对照没走生产管线，覆盖率只比数量**：正对照把样本直接喂给 `rule.count()`，
+  绕过了生产侧先做的 `stripComments`；覆盖率只比 `filesScanned` 的数，因此"换成同样长度的别处文件"
+  是绿的。修法：对照与生产共用同一个 `prepare()`，新增"注释化的对照必须不发射"的反对照，
+  并把扫描文件**名单**钉进金样。反对照当场抓出一条真缺陷（`verdict-synthesis` 在注释形态下也发射）。
+- **路径清单不吃非 ASCII**。`fork-diff` 的两条 `ls-tree`/`ls-files`、`release-artifact` 的 `ls-tree`
+  与四把尺子的 `git diff --name-only HEAD` 脏树守卫都按行切且未关 `core.quotepath`——本仓今天就有
+  中文文件名，被引用成 `"\351\241\271…"` 后，脏树守卫的前缀匹配失效，`--record` 会把别人的未提交行
+  洗进金样。修法：全部改 `-c core.quotepath=off` + `-z`，并按 NUL 切；参照侧的剥引号补丁随之删除。
+- **一键通道没有 `gp-harness`**。`product.json` 声明两个 bin、npm/bun 从 wrapper 的 `bin` 映射拿到两个
+  名字，而 `build.ts` 只往 `dist/<target>/bin/` 放一个二进制，`install.sh` 也只 chmod 那一个——
+  两份 README 与 `docs/install.md` 却对三条通道都写"两个命令都会装出来"。修法：装完创建别名并
+  **要求它可执行**，否则拒绝这次安装；两份 README 各补一句说明三条通道各自怎么得到第二个名字。
+- **安装器的 `--version` 不做形状校验**。API 解析那一支校验了 `[0-9]*.[0-9]*`，旗标那一支没有；
+  而 `$VERSION` 会进 URL、进资产名、更进两条**印给人或 agent 粘贴回 shell** 的 remedy 行。
+  修法：解析完立刻按 `X.Y.Z` 收窄，非 `0-9.` 一律拒。实测 `--version '1.0$(id)'` 与
+  `--version '../../x'` 各退 1 并点名原因，`--version 0.12.3` 仍走 dry-run 退 0。
+- **`publish.ts` 把"问不到"当成"没发过"**。它用 `exitCode === 0` 回答"这个版本在 registry 上吗"，
+  于是 ECONNRESET / EAI_AGAIN / 429 / 自签代理 / npm 不在 PATH 全部落成"没发过"，直接落到不可逆的
+  `npm publish`。修法：三态分类器收进 `registry-readiness.ts` 一处（`verify-published.ts` 那份同源
+  拷贝一并删掉，避免两份判决各自漂移），只有真 404 可以继续，问不到 ⇒ exit 2。
+  固定点：`test/script/registry-readiness.test.ts` 新增 5 条，含"六个传输成因都不得被判成 absent"。
+- **`verify-published.ts` 把任何安装失败判成坏发布**，违反这个文件自己第 82-103 行写的三态规则。
+  修法：按 stderr 分流——E404/ETARGET/包名非法是发布物的事实、退 1；其余走 `cannotObserve` + exit 2，
+  并明说"本轮对这一版什么都没确立"。
+- **发布的是"没过闸的那份字节"**。`publish.ts --dry-run` 验的是 `bun pm pack` 出来的
+  `${name}-${version}.tgz`，而 `release.yml` 随后 `npm publish .` 让 npm **重新打包同一个目录**。
+  这个文件自己都记账了两次打包的 sha512 不同，因此"闸验过的字节 == 发出去的字节"此前不成立。
+  修法：先 `npm pack`，再点名那个 tarball 发布（staged 那支同样点名）；tarball 不在就退 1。
+- **资产名的推导规则在一个文件里被写了三遍且互不相同**：`checksums` 用 `${os}-${arch}${abi?…}`、
+  wrapper 那一支用 `[name, os, arch, avx2===false?"baseline", abi]`、平台那一支还额外 `find()` 首个匹配。
+  真源在 `build.ts:110-116` / `publish.ts:273`。修法：三处统一成同一条模板，`find()` 改为
+  必须**恰好命中一条**，命中 0 或 ≥2 条都拒绝，因为那意味着 `cd dist/$pkg` 会指向一个不存在或写错的目录。
+- **签名 key 与安装器信任的 key 没人对齐**。`install.sh` 内联了 armored 公钥与
+  `GLASSPANE_HARNESS_SIGNING_FPR`，并拒任何别的 `VALIDSIG`；而 release 的签名 job 只 import
+  secret、从不比对。换 key 不换脚本 ⇒ 兜底通道拒收每一个发布。修法：签名前从 install.sh 里
+  **读出**常数（不复制第二份），与 `gpg --list-keys` 的 fpr 集合比对，不等就退 1 并给两条 remedy。
+- **`check-workflows.mjs` 从不看复合动作**。`.github/actions/*/action.yml` 被两个 workflow 的每个 job
+  `uses:`，其中含 `id-token: write` 与发布签名 key 的那几个；只 `readdirSync(workflows)` 意味着这份
+  在每个特权 job 里跑的文件从未被问过"你自己的 `uses:` 钉了 SHA 吗、多语句正文声明 shell 闸了吗"。
+  修法：把 `.github/actions/**/action.yml` 纳入同一套规则。**这条闸上线当场就抓出 3 处真有问题的
+  多语句正文**（`setup-bun` 两处、`setup-git-committer` 一处），已补 `set -euo pipefail`；
+  refs 由 18→23、files 由 2→4。
+- **一个工具不认识的旗标会被静默接受**。`node script/check-workflows.mjs --self-test` 打印
+  "4 workflow file(s) clean" 并退 0，而它跑了 0 条用例——父仓那份同名工具**有** `--self-test`，
+  于是这条命令被抄进 fork 时就成了一句假绿。修法：除 `--dir/--json/--list` 外的旗标一律 exit 2。
+- **注册表里一处没有 `[gp]` 标记的上游删行**。`webSearchEnabled` 去掉了上游对
+  `ProviderV2.ID.opencode` / `opencode-go` 的两个析取支，却没留任何理由——它不是 bug（本产品按
+  `models.removedFirstParty` 删掉第一方账号面并在 `provider.ts:1389` 过滤目录），但"fork 改了上游一行
+  而树里没有任何记号"这条纪律被违反了。修法：就地写 `[gp]` 边界说明，并补
+  `test/tool/glasspane-websearch-boundary.test.ts` 5 条（第一方 id 单独不构成开启、恢复任一析取支即红、
+  exa/parallel 仍各自开启、默认关闭）。
+- **`e8` 压缩泳道的一处诊断会自己炸掉**。"serve 从未 ready"这一支去 `readFileSync(serveLog)`，
+  而该文件只在 pump 收到第一个字节后才存在；`serve` 秒退时，本该解释失败的这句话以 ENOENT 抛出。
+  同一类的缺陷此前已为 `requestLog` 修过一次、漏了这一处。修法：读 pump 实际收到的 `logText`。
+- **`hello` 的权限席位被 `as` 洗成事实**。`permissions: (report.permissions ?? {}) as Record<string, string>`
+  把 `unknown` 断言成结论，而这份对象就是 `gp_probe_status` 交给模型读的引擎席位报告。
+  修法：逐席位于字符串才透传，非字符串**保留席位名**并写明"引擎回的是 X，不是状态字符串"——
+  删席位会让它宣称的座位数变少，那是另一种假话。固定点：`test/tool/glasspane-surface.test.ts`
+  新增 2 条，走真 unix socket 起桩 daemon。
+- **uninstall 的文案超售，且带着本产品不存在的通道的弹药**。`docs/install.md` 说
+  `glasspane-harness uninstall` "移除 CLI 与其本地状态"，而 curl 那一支只删状态、打印二进制路径
+  不删文件；`uninstall.ts` 还留着 `brew`/`choco`/`scoop`/`yarn` 四支命令，而 `installation/index.ts:87`
+  对用户明说"本产品的发布物里没有 brew 包"、`product.json` 的 `platform.dropped` 记着 Windows
+  安装器已删。修法：删掉那四支不可达 remedy 与随之不可达的 `method === "choco"` 分支和提权警告；
+  文档按代码逐通道重写（含"curl 通道删状态、把二进制那一行打印给你"这一实测差别）。
+- **两处内部记号漏进用户面**：`docs/kernel-integration.md` 用"P6 §13 / P4 §33.2"当论据（本项目规则：
+  诚实由行为保证，文案里不写 §引用），`glasspane-preflight.sh` 的 remedy 是"fix network first"——
+  一句没有命令的补救。修法：论据改为点名 `script/kernel-pin.mjs` 的判据与 `--probe` 的回答；
+  补救改为可执行的 `curl -fsSI` + `--http1.1` 重试 + `export NODE_EXTRA_CA_CERTS=…` 再 `bun install`
+  这一条完整链路，依赖名只在 `bun add` 参数里出现。
+- **安装器首屏 box 的三条边不齐**（`│ … │` 分别 60/61/60 个内部字符对 59 的边框）。文案本身合规，
+  已就的是排版。
+
+否证的两条（留在这里是因为它们看起来都像缺陷）：
+
+- "`daemon.ts` 的 close/end 会丢掉一帧没有换行结尾的完整 JSON"：不成立。判定性一侧
+  `Dispatcher.swift:316` 在**每一条**返回路径上都 `data + Data([0x0A])`（含 `lastResortErrorFrame`
+  那支兜底），`SocketServer.swift:357` 原样写出；`FrameCodec` 两端都是 newline-delimited，Swift 侧
+  对半行有自己的超时（`:455`）。给一个生产发不出的形状加解析分支，是把"帧以换行为界"这条保证写弱。
+- "`resolveSocket` 返回未归一化的 `stateRoot`，可以让 `insideStateRoot` 放过引擎树内的台账"：
+  实测不成立。`GLASSPANE_SOCKET=<root>/nope/../engine.sock` + `GLASSPANE_DECISION_LOG=<root>/projects.json`
+  仍然被拒（`GP_E_DECISION_LOG_PATH`，且 remedy 点名它测到的那个根）。`physicalPath` 走
+  `path.join(realpathSync(最深存在祖先), …)`，而 `path.join` 自己就把 `..` 折掉了，所以物理那一支兜住了
+  词法那一支漏掉的情形。
+
+维持现状的三条，依据与代价：
+
+- 没有 `status` 这类"不经过模型就能读引擎连通性"的命令。加一条命令 = CLI 形状变动 = minor，
+  而且要连 docs 双语、brand/product 闸一起改；而本轮实测 daemon 在跑时，任何一次 `gp_*` 调用失败
+  回的就是 `{code, message, remedy}` 且 remedy 是 `launchctl kickstart/print` 这一类可直接执行的命令
+  （今天真机读到的一条是 `GP_E_BAD_REQUEST` + "fix the JSON payload and resend the frame"）。
+  判为"现状可接受"，不是"下一轮再看"。
+- `--help` 走 stderr 是上游 yargs 的行为，两条 bin 同源、退出码 0 不变。真正错的是
+  `install.sh` 把 `$PRODUCT --help` 写成"验证安装"的补救——管道里它读不到任何字节。已按补救本身修正
+  为 `--version`（stdout），不改流的语义。
+- `script/beta.ts` / `script/version.ts` 是上游的开发期工具（与 pin 逐字节相同），本产品没有
+  `beta` 分支、也不用 `gh release create`。删除它们会移动 `fork-diff` 的 deleted 计数，收益只有
+  "少两个没人点的文件"。改为把它**钉成一条闸**：`workflow-gates.test.ts` 断言两个 workflow、两份
+  package.json 与 `publish.ts` 都不引用它们，一旦被接上就红。
+
+本版还含版本线 8 处（`product.json` 两行、`packages/opencode/package.json`、`scripts/install.sh`
+一行、`docs/install.md` 两处、两份 README 各一处），全部同行改写。
+
 ## [0.12.3] — 2026-10-27
 
 **版本判断：patch。** 这一天第三次，同一条尺子、同一个形状：父仓 `harness/tools/release-artifact.mjs`

@@ -18,7 +18,10 @@
 set -uo pipefail
 
 DEP_HOST=objects.githubusercontent.com
-DEP_URL_HINT="github:anomalyco/ghostty-web (pinned by upstream packages/app/package.json)"
+# The git dependency this host decides, read from packages/app's own manifest rather than
+# restated here: the command below is only a remedy if it pins what the manifest pins.
+app_manifest="${0%/*}/../../app/package.json"
+dep_spec=$(sed -n 's/.*"ghostty-web": *"\([^"]*\)".*/\1/p' "$app_manifest" 2>/dev/null | head -1)
 fail=0
 say() { printf '%-26s %s\n' "$1" "$2"; }
 
@@ -31,7 +34,17 @@ fi
 
 chain=$(echo | openssl s_client -connect "$DEP_HOST:443" -servername "$DEP_HOST" -showcerts 2>/dev/null)
 if [ -z "$chain" ]; then
-  say "$DEP_HOST" "unreachable — build will fail regardless; fix network first"
+  say "$DEP_HOST" "unreachable — build will fail regardless"
+  cat >&2 <<EOF
+
+  Remedy — ask whether the host answers at all (reads nothing, disables no check):
+    curl -fsSI --max-time 20 https://$DEP_HOST/
+  If that fails, egress to $DEP_HOST is blocked or unresolved here: no build flag repairs
+  it, so stop before spending 10 minutes of Vite. If it succeeds, the failure is TLS-shaped
+  — retry the probe the way scripts/install.sh retries an intercepted asset stream:
+    curl --http1.1 -fsSI https://$DEP_HOST/
+  Then re-run this preflight.
+EOF
   exit 1
 fi
 leaf_issuer=$(echo | openssl s_client -connect "$DEP_HOST:443" -servername "$DEP_HOST" 2>/dev/null | grep -m1 "i:" | sed 's/.*CN=//')
@@ -44,18 +57,28 @@ if [ -z "$bundle" ]; then
 
   This host's TLS trust for $DEP_HOST comes from a locally installed root
   (issuer above), which bun does not read from the macOS keychain. Without the
-  bundle, '$DEP_URL_HINT' fails after the 10-minute Vite phase.
+  bundle, the install dies with UNABLE_TO_VERIFY_LEAF_SIGNATURE after the
+  10-minute Vite phase.
 
   Remedy (does NOT disable verification — it hands bun the roots this machine
-  already trusts):
+  already trusts). Run from the repository root:
     mkdir -p /var/tmp/glasspane-harness
     security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain \\
       >  /var/tmp/glasspane-harness/ca-bundle.pem
     security find-certificate -a -p /Library/Keychains/System.keychain          \\
       >> /var/tmp/glasspane-harness/ca-bundle.pem
     export NODE_EXTRA_CA_CERTS=/var/tmp/glasspane-harness/ca-bundle.pem
-  Then re-run this preflight, then 'bun run build'.
+    bun install
 EOF
+  if [ -n "$dep_spec" ]; then
+    cat >&2 <<EOF
+
+  To resolve just the git dependency, from packages/app:
+    bun add ghostty-web@$dep_spec
+EOF
+  fi
+  echo "" >&2
+  echo "  Then re-run this preflight, then 'bun run build' (from packages/opencode)." >&2
   exit 1
 fi
 [ -r "$bundle" ] || { say "bundle" "unreadable: $bundle"; exit 1; }

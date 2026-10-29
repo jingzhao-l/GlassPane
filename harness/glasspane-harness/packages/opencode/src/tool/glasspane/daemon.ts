@@ -536,7 +536,19 @@ export function probeCapabilities() {
         version: typeof report.version === "string" ? report.version : "unknown",
         protocolVersion: typeof report.protocolVersion === "string" ? report.protocolVersion : "unknown",
         capabilities: report.capabilities.filter((item): item is string => typeof item === "string"),
-        permissions: (report.permissions ?? {}) as Record<string, string>,
+        // The daemon's permission seats are strings ("granted" / "denied" / "unverifiable"), and
+        // `gp_probe_status` hands this object straight to the model as the engine's seat report.
+        // `as Record<string, string>` asserted that shape instead of reading it: a seat carrying a
+        // number, a nested object or an array reached the transcript looking like a verdict, which
+        // is the one thing this surface must not do — decide what a permission state means.
+        // A seat this layer cannot read keeps its NAME (dropping it would make the report say the
+        // engine has fewer seats than it adverted) and gets a value that says what went wrong.
+        permissions: Object.fromEntries(
+          Object.entries(report.permissions ?? {}).map(([seat, state]) => [
+            seat,
+            typeof state === "string" ? state : `unreadable: the engine sent ${state === null ? "null" : typeof state}, not a state string`,
+          ]),
+        ) as Record<string, string>,
       },
     }
   })

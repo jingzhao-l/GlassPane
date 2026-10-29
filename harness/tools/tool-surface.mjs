@@ -672,8 +672,8 @@ if (mode === "record") {
   // run from any other directory, git would read whatever repository (if any) surrounds the
   // invocation and the refusal below would describe the wrong tree — or throw outside one.
   // Same rule fork-diff.mjs applies to its git reads.
-  const dirty = execFileSync("git", ["diff", "--name-only", "HEAD"], { cwd: repoRoot, encoding: "utf8" })
-    .split("\n")
+  const dirty = execFileSync("git", ["-c", "core.quotepath=off", "diff", "--name-only", "HEAD", "-z"], { cwd: repoRoot, encoding: "utf8" })
+    .split("\0")
     .filter((rel) => rel && dirtyScope.some((prefix) => rel.startsWith(prefix)))
     .sort()
   if (dirty.length) {

@@ -7,10 +7,14 @@ All channels are macOS-only (see [Platform support](index.md#platform-support)).
 ```bash
 npm install -g glasspane-harness     # recommended; installs the wrapper + your Mac's package
 bun add -g glasspane-harness
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.3/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.4/scripts/install.sh | bash
 ```
 
-Both commands are available afterwards: `glasspane-harness` and `gp-harness`.
+Both commands are available afterwards: `glasspane-harness` and `gp-harness`. The npm and bun
+channels get the second name from the wrapper's `bin` map (`packages/opencode/script/publish.ts`
+points both entries at the same file); the release asset carries one binary, so on the one-click
+channel `scripts/install.sh` creates the alias beside it and refuses the install when that name is
+not executable.
 
 One caveat that is the package manager's, not the product's: the wrapper's `postinstall`
 is what copies the real binary into place, and some managers do not run install scripts
@@ -101,7 +105,7 @@ does with a nonzero success is add `|| true`, which is how an honest signal beco
 Only you can decide to install anyway, and saying so is an explicit act:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.3/scripts/install.sh | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.4/scripts/install.sh | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash
 ```
 
 The override has to be set for the shell that reads the script, not for `curl`: a leading
@@ -128,9 +132,26 @@ process (a build made with `--skip-embed-web-ui` starts and says the UI is absen
 ## Uninstall
 
 ```bash
-glasspane-harness uninstall        # removes the CLI and its local state
+glasspane-harness uninstall        # removes local state; removes the package where a
+                                   # package manager owns it
 npm uninstall -g glasspane-harness # or remove the package directly
 ```
+
+What the command does is per channel, and `packages/opencode/src/cli/cmd/uninstall.ts` is the
+authority for it:
+
+- **npm / pnpm / bun**: deletes the local-state roots named below, then runs that package
+  manager's own removal — `npm uninstall -g glasspane-harness`,
+  `pnpm uninstall -g glasspane-harness` or `bun remove -g glasspane-harness`.
+- **curl / self-installed binary** (an executable whose path contains `.glasspane-harness/bin`
+  or `.local/bin`): deletes the same local-state roots and strips the installer's PATH line out
+  of the shell rc file it recognizes, but it does not delete the binary. It prints the two lines
+  that do — `rm "<that binary>"`, and, when that directory is a `.glasspane-harness` or
+  `.opencode` one, `rmdir "<that bin dir>" 2>/dev/null`. On this channel the command is still on
+  PATH until you run them.
+
+`--dry-run` prints the same plan and changes nothing. `--keep-data` and `--keep-config` hold back
+those two roots; cache and state are removed on every channel.
 
 Local state lives under the four XDG roots that `packages/core/src/global.ts` names —
 `~/.local/share/glasspane-harness` (data), `~/.cache/glasspane-harness` (cache),

@@ -30,7 +30,7 @@ import { fileURLToPath } from "node:url"
 import product from "../../../product.json"
 import { provenanceFromMetadata, parseRegistryMetadata } from "./provenance-verdict"
 import { pullExactnessProblems, type PullResolution } from "./pull-exactness"
-import { REGISTRY_READINESS_BUDGET_MS, servedProbe, waitForRegistryVersion } from "./registry-readiness"
+import { REGISTRY_READINESS_BUDGET_MS, npmAnswer, servedProbe, waitForRegistryVersion } from "./registry-readiness"
 
 // `--prefix` is a flag with a value, so it must not be read as the version. Everything
 // positional that is not the flag's argument is the version, and a second one is refused:
@@ -80,27 +80,12 @@ const cannotObserve = (label: string, detail: string) => {
 }
 
 /**
- * What one `npm view` read actually established. npm exits non-zero for "the registry says this
- * version is not there" AND for ECONNRESET / ENOTFOUND / EAI_AGAIN / 429 / a proxy that answered
- * something else, so `if (seen.exitCode !== 0) missing.push(...)` was adjudicating a transport
- * failure as a bad release — the inverse of the three-state rule this file states at the top of
- * the block and already honours for the web-app check. Only `absent` may fail a release;
- * `unaskable` goes through exit 2 with its reason.
- *
- * The classification reads the registry's own answer from the error text rather than npm's exit
- * code, because the exit code is the same for all of them. E404 is the only one that is a fact
- * about the artifact.
+ * What one `npm view` read actually established — now defined once, in `registry-readiness.ts`, and
+ * imported above. It lived here as a local `const` until `script/publish.ts` grew a second copy of
+ * the same question with only two of the three states, which is how a transport failure ended up
+ * licensing an irreversible `npm publish`. The full reasoning (why the exit code cannot carry the
+ * verdict, and why only E404 is a fact about the artifact) travels with the definition.
  */
-const npmAnswer = (
-  exitCode: number,
-  stdout: string,
-  stderr: string,
-): { state: "answered" | "absent" | "unaskable"; value: string } => {
-  if (exitCode === 0) return { state: "answered", value: stdout.trim() }
-  if (/code E404|404 Not Found/.test(stderr)) return { state: "absent", value: "the registry answers 404 for this version" }
-  const lines = stderr.split("\n").filter((line) => line.trim() !== "")
-  return { state: "unaskable", value: lines.length > 0 ? lines.slice(-2).join(" / ") : `npm exited ${exitCode} without a message` }
-}
 
 if (process.platform !== "darwin") {
   // This used to assert `install.exitCode !== 0` and call that "npm refuses because of
@@ -294,8 +279,26 @@ try {
     // the comment exists.)
     const install = await $`npm install -g --registry ${registry} --prefix ${prefix} ${product.name}@${version}`.nothrow()
     if (install.exitCode !== 0) {
-      check("npm install of the published package", false, install.stderr.toString().split("\n").slice(-3).join(" "))
-      throw new Error("install failed")
+      const tail = install.stderr.toString().split("\n").filter((line) => line.trim() !== "").slice(-3).join(" ")
+      // `npm install` failing is three different sentences, and this file already says so about every
+      // other read (`cannotObserve`, and the classifier below). Adjudicating any non-zero exit as
+      // "the release is NOT good" made a host fault — ECONNRESET, EAI_AGAIN, ENOTFOUND behind a proxy,
+      // ENOSPC on a full volume, EACCES on a prefix the user does not own, npm missing (127) — print
+      // a red verdict about bytes that were never touched. Only the shapes that are facts about the
+      // artifact may fail a release: the version not existing, its name not resolving, its tarball
+      // being unreadable.
+      const err = install.stderr.toString()
+      const aboutTheArtifact = /code E404|404 Not Found|ETARGET|No matching version|EINVALIDPACKAGENAME|cannot read package|Unknown package/i.test(err)
+      if (aboutTheArtifact) {
+        check(`npm install of the published ${product.name}@${version}`, false, tail)
+        throw new Error(`the published package cannot be installed: ${tail}`)
+      }
+      cannotObserve(
+        "npm install of the published package",
+        `exit ${install.exitCode} for a reason that is not about the artifact (${tail}). This run established NOTHING about ${version}; re-run once the host and the registry are reachable — the release is neither confirmed nor refused.`,
+      )
+      console.error(`verify-published: cannot measure — the install step could not be attempted. ${failures.length} check(s) passed, ${unobserved.length + 1} unobserved.`)
+      process.exit(2)
     }
     check("npm install of the published package", true)
   } else {

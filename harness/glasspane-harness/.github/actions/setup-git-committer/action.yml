@@ -27,6 +27,7 @@ runs:
 
     - name: Configure git user
       run: |
+        set -euo pipefail
         slug="${{ steps.apptoken.outputs.app-slug }}"
         git config --global user.name "${slug}[bot]"
         git config --global user.email "${slug}[bot]@users.noreply.github.com"

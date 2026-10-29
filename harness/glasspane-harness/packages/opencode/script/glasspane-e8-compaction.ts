@@ -241,7 +241,12 @@ const waitFor = async (label: string, probe: () => Promise<boolean>, attempts: n
     await Bun.sleep(waitMs)
   }
   console.error(`serve never became ready for ${label}; log tail:`)
-  console.error(readFileSync(serveLog, "utf8").split("\n").slice(-15).join("\n"))
+  // `serveLog` only exists once a pump has received a byte. A `serve` that dies on its first
+  // statement — the exact case this branch is for — therefore made the graceful diagnostic throw
+  // ENOENT out of the middle of a check, which is the same defect `requestText()` below already
+  // fixed for the request log and missed here. `logText` is what the pumps actually received, so it
+  // answers with the same bytes when there are any and with "" when there are none.
+  console.error(logText.split("\n").slice(-15).join("\n"))
   return false
 }
 

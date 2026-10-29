@@ -88,12 +88,17 @@ function walk(dir, base = dir, out = []) {
  * subtrees are pruned. A *tracked* file is never in this set by construction.
  */
 const ignoredDirs = new Set(
-  execFileSync("git", ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "--", forkRel], {
+  execFileSync("git", ["-c", "core.quotepath=off", "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z", "--", forkRel], {
     cwd: repoRoot,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
   })
-    .split("\n")
+    // `-z`, not newlines. This repository tracks a filename with Chinese characters in it
+    // (`specs/GlassPane_每日…_发现台账.md`), and git quotes non-ASCII out of every line-based listing
+    // as `"\351\241\271…"` unless `core.quotepath` is off. Prefix matching then compares a quoted
+    // string against an unquoted constant, which never matches — so a dirty-tree guard reading these
+    // paths blesses another lane's uncommitted bytes instead of refusing them.
+    .split("\0")
     .filter(Boolean)
     .map((p) => (p.startsWith(forkPrefix) ? p.slice(forkPrefix.length) : p).replace(/\/$/, "")),
 )
@@ -129,10 +134,10 @@ function observeFork() {
  * place a release reads from: the committed tree.
  */
 function observeForkCommitted() {
-  const raw = execFileSync("git", ["ls-tree", "-r", "HEAD", "--", forkRel], { cwd: repoRoot, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 })
+  const raw = execFileSync("git", ["-c", "core.quotepath=off", "ls-tree", "-r", "-z", "HEAD", "--", forkRel], { cwd: repoRoot, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 })
   const prefix = forkRel.replace(/\/$/, "") + "/"
   const map = new Map()
-  for (const line of raw.split("\n")) {
+  for (const line of raw.split("\0")) {
     if (!line) continue
     const match = /^(\d+)\s+blob\s+([0-9a-f]{40})\t(.*)$/.exec(line)
     if (!match) continue
@@ -153,16 +158,16 @@ function observeReference() {
   // built on. Cleanliness is asserted, not assumed.
   const refDirt = execFileSync("git", ["-C", refDir, "status", "--porcelain"], { encoding: "utf8" }).trim()
   if (refDirt) die(2, `reference clone at ${pin.tag} is not clean — refusing to measure divergence against bytes that are not upstream's (first entries: ${refDirt.split("\n").slice(0, 3).join(" | ")})`)
-  const raw = execFileSync("git", ["-C", refDir, "ls-files", "-s"], { encoding: "utf8" })
+  const raw = execFileSync("git", ["-C", refDir, "-c", "core.quotepath=off", "ls-files", "-s", "-z"], { encoding: "utf8" })
   const map = new Map()
-  for (const line of raw.split("\n")) {
+  for (const line of raw.split("\0")) {
     if (!line) continue
     const [meta, ...rest] = line.split("\t")
     const [md, hash] = meta.split(" ")
     const rel = rest.join("\t")
     // git stores symlinks as mode 120000 with the blob of their target string,
     // which is exactly what blobHash() reproduces above.
-    map.set(rel.replace(/^"|"$/g, ""), { hash, mode: md })
+    map.set(rel, { hash, mode: md })
   }
   // The fork side refuses an empty set (`observeForkCommitted` dies at `!map.size`); the
   // reference side used to return an empty map happily, and `--record` over it would stamp every

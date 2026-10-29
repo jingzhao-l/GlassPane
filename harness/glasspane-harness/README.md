@@ -157,10 +157,13 @@ npm install -g glasspane-harness
 bun add -g glasspane-harness
 
 # or one-click (npm first, GitHub release asset as fallback)
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.3/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.4/scripts/install.sh | bash
 ```
 
-Two commands are installed: **`glasspane-harness`** and the short alias **`gp-harness`**.
+Two commands are installed: **`glasspane-harness`** and the short alias **`gp-harness`**. npm and
+bun get the alias from the wrapper's `bin` map; the release asset carries one binary, so on the
+one-click channel `scripts/install.sh` creates the alias beside it and refuses the install if that
+name is not executable.
 
 Some package managers do not run install scripts by default, and the wrapper's
 `postinstall` is what places the real binary. Measured on 0.7.0: npm installs fine (npm 11+

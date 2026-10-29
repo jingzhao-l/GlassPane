@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
@@ -242,6 +242,201 @@ describe("rule 4 — the npm pin has exactly one definition", () => {
 
   test("a file with no npm step is not this rule's business", () => {
     withFixture({ "a.yml": CLEAN.replace('      - name: folded gates\n        run: |\n          set -euo pipefail\n          npm install -g "npm@$NPM_PUBLISH_VERSION"\n          echo "npm here: $(npm --version)"\n', '      - run: |\n          set -euo pipefail\n          bun test\n          echo ok\n') }, (dir) => expect(run(dir).code).toBe(0))
+  })
+})
+
+describe("the OIDC probe cannot reach a consumer-facing dist tag", () => {
+  // `verify-trusted-publisher` stages a probe version because staging the real one would be refused
+  // as already-published. It then CANNOT clean up: rejecting a stage needs interactive auth, which
+  // OIDC deliberately does not carry, so the job prints `npm stage <verb> <id>` for a human. That
+  // makes the probe's safety a property of its own manifest, not of the step after it — and
+  // `publish.ts` writes `publishConfig.tag = "latest"` for any released version, which is exactly
+  // the field npm reads when a human approves the stage. One mistyped approve would repoint
+  // `latest` at a probe build, and every `npm install -g glasspane-harness` since then resolves it.
+  const releaseYml = () => Bun.file(path.join(REAL_ROOT, ".github/workflows/release.yml")).text()
+
+  test("the probe rewrite moves the dist tag, not only the version", async () => {
+    const text = await releaseYml()
+    const probe = text.slice(text.indexOf("-oidc-probe."))
+    expect(probe).toContain('tag: "oidc-probe"')
+    expect(probe.slice(0, 600)).toContain("publishConfig")
+  })
+
+  test("and the rewrite still names the probe version it is staging", async () => {
+    // Without this half, the assertion above could be satisfied by an unrelated `publishConfig`
+    // edit somewhere else in the file. Both statements have to be in the SAME rewrite block.
+    const text = await releaseYml()
+    const start = text.indexOf("-oidc-probe.")
+    const block = text.slice(start, start + 700)
+    expect(block).toContain("-oidc-probe.")
+    expect(block).toContain('tag: "oidc-probe"')
+  })
+
+  test("the job that prints the human remedy also prints what the probe is tagged to", async () => {
+    const text = await releaseYml()
+    expect(text).toContain("npm stage reject")
+    expect(text).toContain("probe dist-tag")
+  })
+})
+
+describe("the scan covers composite actions, not only workflows", () => {
+  // `.github/actions/*/action.yml` is `uses:`-d by every job in both workflows, including the ones
+  // holding `id-token: write` and the release signing key. Reading only `readdirSync(workflows)` left
+  // that file unasked about its own nested `uses:` and its shell gates — and on the day this rule was
+  // added it found three un-gated multi-statement bodies in the two real actions immediately, which
+  // is what an unscanned file looks like.
+  const ACTION = `name: setup-x
+description: x
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: two statements, gated
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo a
+        echo b
+`
+
+  function withActionTree(action: string): string {
+    const dir = mkdtempSync(path.join(tmpdir(), "gp-workflow-actions-"))
+    mkdirSync(path.join(dir, ".github", "workflows"), { recursive: true })
+    mkdirSync(path.join(dir, ".github", "actions", "setup-x"), { recursive: true })
+    writeFileSync(path.join(dir, ".github", "workflows", "a.yml"), CLEAN)
+    writeFileSync(path.join(dir, ".github", "actions", "setup-x", "action.yml"), action)
+    return dir
+  }
+
+  test("an unpinned action inside a composite action is named", () => {
+    const dir = withActionTree(ACTION.replace("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", "actions/checkout@v4"))
+    dirs.push(dir)
+    const read = run(dir)
+    expect(read.code).toBe(1)
+    expect(read.out).toContain("setup-x/action.yml")
+    expect(read.out).toContain("40-hex commit SHA")
+  })
+
+  test("and an un-gated multi-statement body there is named too", () => {
+    const dir = withActionTree(ACTION.replace("        set -euo pipefail\n", ""))
+    dirs.push(dir)
+    const read = run(dir)
+    expect(read.code).toBe(1)
+    expect(read.out).toContain("setup-x/action.yml")
+    expect(read.out).toContain("never declares -e/-u/pipefail")
+  })
+
+  test("the clean action contributes refs and bodies, so a scan that skipped it would show", () => {
+    const dir = withActionTree(ACTION)
+    dirs.push(dir)
+    const read = run(dir)
+    expect(read.code).toBe(0)
+    // CLEAN alone measures 2 refs / 2 bodies in 1 file; the composite adds 1 ref and 1 body, so the
+    // three numbers below are what proves the action was opened at all. Without it: 1 file, 2 refs,
+    // 2 bodies — and "no problem reported" would mean nothing.
+    expect(read.totals?.files).toBe(2)
+    expect(read.totals?.refs).toBe(3)
+    expect(read.totals?.bodies).toBe(3)
+  })
+
+  test("the real tree is read through both roots", () => {
+    const stdout = execFileSync("node", [GATE, "--json"], { cwd: REAL_ROOT, encoding: "utf8" })
+    const read = JSON.parse(stdout) as { totals: Record<string, number> }
+    // 2 workflows + 2 composite actions, and the action refs are now part of the pinned count.
+    expect(read.totals.files).toBeGreaterThanOrEqual(4)
+    expect(read.totals.refs).toBeGreaterThanOrEqual(23)
+  })
+})
+
+describe("a flag this tool has no mode for is refused, not ignored", () => {
+  // The gate is pointed at the REAL tree here, not a fixture: the failure this rule exists for is
+  // "the command printed the clean line", and that line only exists when there is a tree to call clean.
+  const at = (flags: string[]) => {
+    try {
+      return { code: 0, stdout: execFileSync("node", [GATE, ...flags], { cwd: REAL_ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }), stderr: "" }
+    } catch (error) {
+      const e = error as { status?: number; stdout?: string; stderr?: string }
+      return { code: e.status ?? -1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" }
+    }
+  }
+
+  test("--self-test exits 2 instead of printing the clean line", () => {
+    const res = at(["--self-test"])
+    expect(res.code).toBe(2)
+    expect(res.stderr).toContain("unknown flag")
+    expect(`${res.stdout}${res.stderr}`).not.toContain("clean")
+  })
+
+  test("while the real modes still work on the real tree", () => {
+    expect(at(["--json"]).code).toBe(0)
+    expect(at([]).code).toBe(0)
+    expect(at(["--list"]).code).toBe(0)
+  })
+
+  test("--dir still consumes its argument and is not called a stray flag", () => {
+    const res = at(["--dir", REAL_ROOT])
+    expect(res.code).toBe(0)
+  })
+})
+
+describe("the two halves of the signing contract name the same key", () => {
+  // `scripts/install.sh` embeds an armored public key AND a `GLASSPANE_HARNESS_SIGNING_FPR` constant,
+  // and refuses a `VALIDSIG` from any other fingerprint. `release.yml`'s signing job imports whatever
+  // `GPG_PRIVATE_KEY` the `release` environment holds and never compared it to either. So a key
+  // rotation that updates the secret and not the script produces signed releases the installer refuses
+  // — and the check had to read the constant out of the script rather than duplicate it, because a
+  // second copy in the workflow is a second thing that can silently go stale.
+  test("the signing job compares the imported key against the installer's constant", async () => {
+    const release = await Bun.file(path.join(REAL_ROOT, ".github/workflows/release.yml")).text()
+    const installer = await Bun.file(path.join(REAL_ROOT, "scripts/install.sh")).text()
+    expect(installer).toContain("GLASSPANE_HARNESS_SIGNING_FPR=")
+    expect(release).toContain("GLASSPANE_HARNESS_SIGNING_FPR")
+    expect(release).toContain("scripts/install.sh")
+    // A missing constant is a refusal, not a skipped comparison.
+    expect(release).toContain("could not read GLASSPANE_HARNESS_SIGNING_FPR")
+  })
+
+  test("and a mismatch exits 1 instead of signing anyway", async () => {
+    const release = await Bun.file(path.join(REAL_ROOT, ".github/workflows/release.yml")).text()
+    const anchor = release.indexOf("signing key fingerprint matches")
+    expect(anchor).toBeGreaterThan(0)
+    // The import, the comparison and the refusal all sit between the key import and the sign loop.
+    const signLoop = release.indexOf("--detach-sign --armor")
+    expect(signLoop).toBeGreaterThan(anchor)
+    expect(release.slice(anchor - 3000, anchor)).toContain("--batch --yes --import")
+  })
+})
+
+describe("upstream's dev-only mutators stay unwired in this fork", () => {
+  // `script/beta.ts` (`git push origin beta --force --no-verify`) and `script/version.ts`
+  // (`gh release create` with no `--repo`) are upstream's own release tooling, byte-identical to the
+  // pin. They are not this product's release path and this fork does not have a `beta` branch, so the
+  // only honest posture is "nothing in our lanes calls them" — asserted, because a file that is inert
+  // today is one `package.json` script away from being reachable, and `--no-verify` in a force-push is
+  // precisely the thing this repository's hooks exist to catch.
+  test("no workflow, manifest script or publish lane references them", async () => {
+    // Read from the tree rather than asserted from memory: if either file is ever edited, it stops
+    // being "inert upstream tooling" and becomes ours to gate.
+    const sources: Record<string, string> = {
+      "ci.yml": await Bun.file(path.join(REAL_ROOT, ".github/workflows/ci.yml")).text(),
+      "release.yml": await Bun.file(path.join(REAL_ROOT, ".github/workflows/release.yml")).text(),
+      "root package.json": await Bun.file(path.join(REAL_ROOT, "package.json")).text(),
+      "opencode package.json": await Bun.file(path.join(REAL_ROOT, "packages/opencode/package.json")).text(),
+      "opencode publish.ts": await Bun.file(path.join(REAL_ROOT, "packages/opencode/script/publish.ts")).text(),
+    }
+    for (const [name, text] of Object.entries(sources)) {
+      if (text.includes("script/beta.ts") || text.includes("script/version.ts")) {
+        throw new Error(`${name} references an upstream dev-only mutator (script/beta.ts force-pushes --no-verify; script/version.ts runs gh release create with no --repo) — that file is not this product's release path`)
+      }
+    }
+  })
+
+  test("and both files are present and byte-identical to the pin", () => {
+    for (const rel of ["script/beta.ts", "script/version.ts"]) {
+      expect(existsSync(path.join(REAL_ROOT, rel))).toBe(true)
+    }
+    const listed = execFileSync("git", ["-C", path.join(REAL_ROOT, "../.."), "diff", "--name-only", "HEAD", "--", `harness/glasspane-harness/${"script/beta.ts"}`, `harness/glasspane-harness/script/version.ts`], { encoding: "utf8" })
+    expect(listed.trim()).toBe("")
   })
 })
 

@@ -212,15 +212,20 @@ const treeAt = (name) => gitIn(scratchRepo, "rev-parse", `refs/artifact/${name}^
 
 // A path listing per side: an object store that holds one tree also holds every blob under it, so
 // `ls-tree -r` answers "which paths, with which content" without a checkout.
+// `-z` with `core.quotepath=off`: the default line form quotes a non-ASCII filename as
+// `"\351\241\271…"`, and this map's keys are then compared against the other side's keys — a quoted
+// path on one side and a plain one on the other reads as "trunk has it, the artifact does not",
+// which is exactly the false divergence this ruler would report as a release defect. The parent repo
+// tracks such filenames today.
 const listing = (dir, tree) => {
-  const raw = gitIn(dir, "ls-tree", "-r", tree)
+  const raw = gitIn(dir, "-c", "core.quotepath=off", "ls-tree", "-r", "-z", tree)
   if (raw === null) return null
   const map = new Map()
-  for (const line of raw.split("\n")) {
+  for (const line of raw.split("\0")) {
     if (line === "") continue
-    const [meta, file] = line.split("\t")
+    const [meta, ...rest] = line.split("\t")
     const fields = meta.split(" ")
-    map.set(file, fields[2])
+    map.set(rest.join("\t"), fields[2])
   }
   return map
 }

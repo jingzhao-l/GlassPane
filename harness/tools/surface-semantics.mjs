@@ -185,17 +185,45 @@ const CONTROLS = [
   { id: "evidence-field-compare", judgement: "if (pack.changedPixelRatio >= 0.5) return" },
 ]
 
+/**
+ * The two views of one file's bytes that every rule is judged against, in one place.
+ *
+ * The positive controls used to compose these themselves — `stripStrings(control.judgement)` for the
+ * arithmetic rules and the raw sample for the code rules — so a control proved the predicate could
+ * fire on a string the production scan would never hand it. A comment containing `> 0.9` is exactly
+ * that case: `stripComments` removes it in the real path, and the control never went through
+ * `stripComments` at all, so the control could stay green while the rule fired only on comments.
+ * Sharing the function is the fix; a second copy of the composition would drift the same way.
+ */
+function prepare(raw) {
+  const code = stripComments(raw)
+  return { code, arithmetic: stripStrings(code) }
+}
+
 function assertRulesCanFire() {
   for (const rule of RULES) {
     const control = CONTROLS.find((candidate) => candidate.id === rule.id)
     if (!control)
       die(2, `positive control: rule "${rule.id}" carries no known-judgement sample — nothing has shown it can fire`)
-    const fired = rule.count(rule.scope === "code" ? control.judgement : stripStrings(control.judgement))
+    const { code, arithmetic } = prepare(control.judgement)
+    const fired = rule.count(rule.scope === "code" ? code : arithmetic)
     if (fired === 0)
       die(
         2,
         `positive control: rule "${rule.id}" does not fire on ${JSON.stringify(control.judgement)} — a rule that cannot go red cannot clear anything`,
       )
+    // The control must ALSO survive the anti-control: the same sample wrapped in a comment must NOT
+    // fire, because production strips comments before any rule reads the bytes. Without this half a
+    // rule whose pattern ignores comment markers would report hits on a `[gp]` note that only
+    // *explains* a removal — the failure shape this tool's own history names "flagging its own
+    // explanation", and it is invisible to the positive control above.
+    const commented = prepare(`// ${control.judgement}\n`).code
+    if (rule.scope === "code" && rule.count(commented) > 0) {
+      die(
+        2,
+        `positive control: rule "${rule.id}" fires on a commented-out judgement — production strips comments first, so this rule counts text no engine ever executes, and a [gp] note explaining a removal would read as a live violation`,
+      )
+    }
   }
   console.log(
     `surface-semantics — positive controls: ${RULES.length}/${RULES.length} rule(s) fired on a known judgement`,
@@ -213,14 +241,13 @@ function scan() {
     const hits = []
     for (const file of surface.files) {
       const raw = readFileSync(file, "utf8")
-      const code = stripComments(raw)
-      const arithmetic = stripStrings(code)
+      const { code, arithmetic } = prepare(raw)
       for (const rule of RULES) {
         const count = rule.count(rule.scope === "code" ? code : arithmetic)
         if (count > 0) hits.push({ file: path.relative(repoRoot, file), rule: rule.id, count })
       }
     }
-    out[name] = { caliber: surface.caliber, filesScanned: surface.files.length, hits }
+    out[name] = { caliber: surface.caliber, filesScanned: surface.files.length, files: [...surface.files].sort(), hits }
   }
   return out
 }
@@ -250,8 +277,8 @@ if (mode === "record") {
   // laundering another lane's uncommitted `ok ? "pass" : "fail"` through `--record` makes the
   // committed tree permanently green for a judgement that is not in any commit. `fork-diff` and
   // `tool-surface` refuse on tracked-but-modified input; this rule reads the same working tree.
-  const dirty = execFileSync("git", ["diff", "--name-only", "HEAD"], { cwd: repoRoot, encoding: "utf8" })
-    .split("\n")
+  const dirty = execFileSync("git", ["-c", "core.quotepath=off", "diff", "--name-only", "HEAD", "-z"], { cwd: repoRoot, encoding: "utf8" })
+    .split("\0")
     .filter((rel) => rel && (rel.startsWith("mcp-shell/src/") || rel.startsWith("harness/glasspane-harness/")))
     .sort()
   if (dirty.length) {
@@ -293,6 +320,23 @@ for (const [name, surface] of Object.entries(observed.surfaces)) {
   if (typeof was.filesScanned !== "number") coverage.push(`${name}: the golden records no filesScanned, so this rule cannot prove it scanned anything`)
   else if (surface.filesScanned < was.filesScanned)
     coverage.push(`${name}: ${was.filesScanned} file(s) were open when the baseline was taken, ${surface.filesScanned} are open now — "no hits" can only clear files this rule actually read`)
+  // A COUNT cannot detect a substitution. Rewriting a surface's file list to same-length foreign
+  // paths — a glob pointed at another package, a directory renamed out from under the caliber — keeps
+  // `filesScanned` exactly where it was and reports 0 hits, which is indistinguishable from clean.
+  // The names are the claim; the number is only its shadow.
+  if (Array.isArray(was.files)) {
+    const now = [...surface.files].sort()
+    const before = [...was.files].sort()
+    if (JSON.stringify(before) !== JSON.stringify(now)) {
+      const gone = before.filter((f) => !now.includes(f))
+      const added = now.filter((f) => !before.includes(f))
+      coverage.push(
+        `${name}: the scan set changed identity while its size held at ${now.length} — ${gone.length ? `no longer read: ${gone.slice(0, 6).join(", ")}${gone.length > 6 ? ` (+${gone.length - 6} more)` : ""}` : "nothing dropped"}${added.length ? `; newly read: ${added.slice(0, 6).join(", ")}${added.length > 6 ? ` (+${added.length - 6} more)` : ""}` : ""}. Judge a different file set only by re-recording it, in the commit that moved it.`,
+      )
+    }
+  } else {
+    coverage.push(`${name}: the golden carries no file-name list, so a same-count substitution of this surface's inputs would read as clean — re-record to pin which files were judged`)
+  }
 }
 const ruleIds = RULES.map((rule) => rule.id).join(", ")
 const goldenIds = (golden.rules ?? []).map((rule) => rule.id).join(", ")

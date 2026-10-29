@@ -159,3 +159,26 @@ export function servedProbe(input: ServedProbeInput): () => Promise<string | und
     throw new Error(`fetching ${input.pkg}@${input.version}'s tarball answered HTTP ${status} (${url})`)
   }
 }
+
+/**
+ * What one `npm view` read actually established: `answered`, `absent`, or `unaskable`.
+ *
+ * This was written twice. `verify-published.ts` carried a classifier with this exact three-state
+ * shape, and `script/publish.ts` — the file that decides whether to run an IRREVERSIBLE `npm publish`
+ * — asked the same question with `exitCode === 0`. npm exits non-zero both when the registry answers
+ * 404 and on ECONNRESET / ENOTFOUND / EAI_AGAIN / a 429 / a proxy that returned something else, so a
+ * transient read failure read as "not published" and the release fell straight through to publishing
+ * into a registry it had not managed to look at. Two copies of one judgment is how the two drift;
+ * this file is where the registry's answer is already defined, so both callers now read it here.
+ *
+ * Classification is from the registry's own words, not npm's exit code, because the code is the same
+ * for every cause. E404 is the only answer that is a fact about the artifact.
+ */
+export type NpmViewAnswer = { state: "answered" | "absent" | "unaskable"; value: string }
+
+export function npmAnswer(exitCode: number, stdout: string, stderr: string): NpmViewAnswer {
+  if (exitCode === 0) return { state: "answered", value: stdout.trim() }
+  if (/code E404|404 Not Found/.test(stderr)) return { state: "absent", value: "the registry answers 404 for this version" }
+  const lines = stderr.split("\n").filter((line) => line.trim() !== "")
+  return { state: "unaskable", value: lines.length > 0 ? lines.slice(-2).join(" / ") : `npm exited ${exitCode} without a message` }
+}

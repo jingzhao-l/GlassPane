@@ -157,11 +157,11 @@ if (mode === "record") {
   // Same discipline as fork-diff: a golden written from uncommitted bytes is a contract no commit
   // satisfies, and two lanes editing providers.ts concurrently would wash one lane's work into
   // the other's baseline.
-  const dirty = execFileSync("git", ["diff", "--name-only", "HEAD", "--", ...Object.values(SURFACE_FILES)], {
+  const dirty = execFileSync("git", ["-c", "core.quotepath=off", "diff", "--name-only", "HEAD", "-z", "--", ...Object.values(SURFACE_FILES)], {
     cwd: repoRoot,
     encoding: "utf8",
   })
-    .split("\n")
+    .split("\0")
     .filter(Boolean)
   if (dirty.length > 0) {
     die(1, ["refusing to record while a provider file carries uncommitted edits:", ...dirty.map((file) => `  ✗ ${file}`)].join("\n") +
@@ -188,12 +188,53 @@ if (goldenOneSided.join(",") !== oneSided.join(",")) {
   )
 }
 for (const surface of ["harness", "shell"]) {
+  // `!== undefined &&` made both count assertions evaporate the moment the golden stopped
+  // carrying `counts`: deleting the object turned "a judgment method disappeared from BOTH surfaces"
+  // and "the overlap shrank" into a green run, because there was no recorded number left to
+  // disagree with. A missing baseline is the ruler losing its marks, not the subject getting
+  // cleaner — the same reading `brand-surface`'s lineage floor and `fork-diff`'s counts apply.
   const goldenCount = golden?.counts?.[`${surface}Methods`]
-  if (goldenCount !== undefined && goldenCount !== snapshot.counts[`${surface}Methods`]) {
+  if (!Number.isFinite(goldenCount)) {
+    problems.push(
+      `counts.${surface}Methods: the golden does not carry a number (recorded ${JSON.stringify(goldenCount)}), so this surface's method count cannot be compared. remedy: re-record (${NOTE_CHECK}).`,
+    )
+    continue
+  }
+  if (goldenCount !== snapshot.counts[`${surface}Methods`]) {
     problems.push(
       `asymmetry-ledger: ${surface} declares ${snapshot.counts[`${surface}Methods`]} method(s), golden records ${goldenCount}. ` +
         "Whichever side moved, this golden is the place the count is reviewed.",
     )
+  }
+}
+// The overlap number is the third one this tool exists to protect: two surfaces can each keep
+// their own count while the method they SHARE changes underneath them, and neither count moves.
+if (!Number.isFinite(golden?.counts?.overlap)) {
+  problems.push(`counts.overlap: the golden does not carry a number (recorded ${JSON.stringify(golden?.counts?.overlap)}), so the shared-method count cannot be compared. remedy: re-record (${NOTE_CHECK}).`)
+} else if (golden.counts.overlap !== snapshot.counts.overlap) {
+  problems.push(`asymmetry-ledger: ${snapshot.counts.overlap} method(s) are registered on both surfaces, golden records ${golden.counts.overlap}. A method that stops being shared stops being cross-checked.`)
+}
+// Per-method contract, not just per-surface count. Both surfaces can drop `ax-event` from the same
+// method in the same commit and every number above still matches — agreement is preserved, the
+// contract is not, and "requires" is the sentence the engine's prerequisites are actually written
+// in. This compares the recorded tables against the ones the two real modules just produced.
+for (const surface of ["harness", "shell"]) {
+  const was = golden?.surfaces?.[surface]
+  if (!was || typeof was !== "object") {
+    problems.push(`surfaces.${surface}: the golden carries no per-method table (recorded ${JSON.stringify(was)}), so method identity, kind and prerequisites are unchecked. remedy: re-record (${NOTE_CHECK}).`)
+    continue
+  }
+  const now = snapshot.surfaces[surface]
+  const gone = Object.keys(was).filter((key) => !(key in now))
+  const added = Object.keys(now).filter((key) => !(key in was))
+  const moved = Object.keys(now).filter((key) => key in was && JSON.stringify(was[key]) !== JSON.stringify(now[key]))
+  if (gone.length || added.length || moved.length) {
+    const detail = [
+      gone.length ? `recorded but not registered now: ${gone.join(", ")}` : "",
+      added.length ? `registered now but never recorded: ${added.join(", ")}` : "",
+      moved.length ? moved.map((key) => `changed: ${key}\n        golden ${JSON.stringify(was[key])}\n        now    ${JSON.stringify(now[key])}`).join("\n") : "",
+    ].filter(Boolean).join("; ")
+    problems.push(`per-method contract moved on ${surface} — ${detail}. remedy: if intended, re-record this golden in the same commit as the registration (${NOTE_CHECK}).`)
   }
 }
 

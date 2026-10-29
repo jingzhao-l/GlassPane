@@ -141,14 +141,54 @@ if (!noId.ok && !withId.ok) {
 }
 
 // 4. the frame the engine wrote must transcribe into the chain, unchanged
-const envelope = { evidencePack: packBytes }
+//
+// The envelope is the daemon's OWN reply to `last_evidence`, not the archive bytes re-read from
+// disk. `glasspane-decision-log.ts` admits a `gp_*` reply into the chain only when it carries the
+// provenance marker `Daemon.call` stamps, and for the right reason: `tool/registry.ts` auto-imports
+// a project's own `{tool,tools}/*.{js,ts}`, so a repo-committed file could hand back a kernel-shaped
+// pack and shape alone cannot tell the two apart.
+//
+// This script used to hand-assemble the metadata instead — no marker, and an `as never` on the call
+// that hid the type error which would have said so. The consequence was worse than a broken line:
+// `recordToolExecution` answered `skipped` for every one of steps 4, 6 and 7, so the three checks
+// that exist to prove "a real engine pack produced a decision entry" could never pass, and step 5's
+// check passed for a reason unrelated to its label (it was refused for provenance, not for the
+// missing pack it claims to be testing). When the only honest source of a marked frame is a reply
+// that did not arrive, this says so and stops.
+if (!withId.ok) {
+  refuse("a daemon-replayed evidence pack", {
+    code: withId.error.code,
+    message: `gp_last_evidence(${operationId}) did not hand back a frame: ${withId.error.message}`,
+    remedy: `${withId.error.remedy} — steps 4-7 need a reply from the daemon itself; this script will not assemble a provenance-marked frame from archive bytes to keep its line count up`,
+  })
+}
+// The reply IS the frame: `Dispatcher.swift:156` has `last_evidence` answer with
+// `{evidencePack: {…}}`, and `kernel.ts`'s `readEvidenceFrame` reads `result.evidencePack`. Wrapping
+// the reply one more time here produced `{evidencePack: {evidencePack: {…}}}`, which the kernel
+// rejected with `<root>: Unrecognized key: "evidencePack"` — a shape error in this script that read
+// exactly like a Swift/TypeScript contract drift, the one thing its remedy line tells you to go check.
+const envelope = withId.result
+const replayedPack = (withId.result as { evidencePack?: unknown }).evidencePack
 const out1 = {
   title: "gp_last_evidence",
   output: "engine evidence handed back",
-  metadata: { ok: true, method: "last_evidence", code: null, message: null, remedy: null, result: envelope },
+  metadata: {
+    ok: true,
+    method: "last_evidence",
+    code: null,
+    message: null,
+    remedy: null,
+    result: envelope,
+    [Daemon.DAEMON_ORIGIN]: true,
+  },
 }
 const textBefore1 = out1.output
-const logged = recordToolExecution({ tool: "gp_last_evidence", sessionID: "ses_e7", callID: "call_e7_1" }, out1 as never, env)
+check(
+  "the replayed pack is the archived bytes, not a re-serialisation of them",
+  JSON.stringify(replayedPack) === JSON.stringify(packBytes),
+  `${sha256(JSON.stringify(replayedPack)).slice(0, 12)}… vs archived ${packDigest.slice(0, 12)}…`,
+)
+const logged = recordToolExecution({ tool: "gp_last_evidence", sessionID: "ses_e7", callID: "call_e7_1" }, out1, env)
 check("a real engine pack produced a decision entry", logged?.status === "logged", JSON.stringify(logged))
 check("logging never rewrote what the model reads", out1.output === textBefore1)
 if (logged?.status === "logged") {
@@ -164,16 +204,26 @@ const out2 = {
   title: "gp_probe_status",
   output: "engine self-report",
   metadata: probe.ok
-    ? { ok: true, method: "probe_status", code: null, message: null, remedy: null, result: probe.result }
-    : { ok: false, method: "probe_status", code: probe.error.code, message: probe.error.message, remedy: probe.error.remedy, result: null },
+    ? { ok: true, method: "probe_status", code: null, message: null, remedy: null, result: probe.result, [Daemon.DAEMON_ORIGIN]: true }
+    : { ok: false, method: "probe_status", code: probe.error.code, message: probe.error.message, remedy: probe.error.remedy, result: null, [Daemon.DAEMON_ORIGIN]: true },
 }
-const skipped = recordToolExecution({ tool: "gp_probe_status", sessionID: "ses_e7", callID: "call_e7_2" }, out2 as never, env)
+const skipped = recordToolExecution({ tool: "gp_probe_status", sessionID: "ses_e7", callID: "call_e7_2" }, out2, env)
 check("an engine reply with no evidencePack is skipped", skipped?.status === "skipped", JSON.stringify(skipped))
+// The skip has to be the one this label describes. A provenance refusal is the same status string
+// reached by a different door — and before this script carried the marker, that was the door it
+// actually came out of, so the check passed while testing nothing. Name the reason that would mean
+// the label is not being tested.
+const skipReason = skipped && skipped.status === "skipped" ? skipped.reason : ""
+check(
+  "and it was skipped for the missing frame, not for provenance",
+  skipReason !== "a gp_-named reply that did not come from this surface's daemon call",
+  JSON.stringify(skipped),
+)
 check("skipped really means the chain did not grow", verifyLedger(ledger).entries === 1, JSON.stringify(verifyLedger(ledger)))
 
 // 6. the second entry joins the same chain; the file stays private; the archive untouched
 const out3 = { ...out1, metadata: { ...out1.metadata } }
-const second = recordToolExecution({ tool: "gp_last_evidence", sessionID: "ses_e7", callID: "call_e7_3" }, out3 as never, env)
+const second = recordToolExecution({ tool: "gp_last_evidence", sessionID: "ses_e7", callID: "call_e7_3" }, out3, env)
 check("the second frame joined the same chain", second?.status === "logged" && second.sequence === 1, JSON.stringify(second))
 const lines = readFileSync(ledger, "utf8").trimEnd().split("\n")
 check("entry 2 links to entry 1 by hash", JSON.parse(lines[1]).prevEntryHash.length === 64)
@@ -200,10 +250,10 @@ writeFileSync(ledger, `${lines.join("\n")}\n{"entryId":"truncat`)
 const out4 = {
   title: "gp_last_evidence",
   output: "an unchanged conclusion",
-  metadata: { ok: true, method: "last_evidence", code: null, message: null, remedy: null, result: envelope },
+  metadata: { ok: true, method: "last_evidence", code: null, message: null, remedy: null, result: envelope, [Daemon.DAEMON_ORIGIN]: true },
 }
 const textBefore4 = out4.output
-const refused = recordToolExecution({ tool: "gp_last_evidence", sessionID: "ses_e7", callID: "call_e7_4" }, out4 as never, env)
+const refused = recordToolExecution({ tool: "gp_last_evidence", sessionID: "ses_e7", callID: "call_e7_4" }, out4, env)
 check("a damaged ledger refuses the next entry", refused?.status === "failed", JSON.stringify(refused))
 check("the refusal names the damaged line", refused?.status === "failed" && refused.message.includes("line 3"), refused?.status === "failed" ? refused.message : "")
 check("a failed ledger never rewrites the model's text", out4.output === textBefore4)
