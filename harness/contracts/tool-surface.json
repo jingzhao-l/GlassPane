@@ -14,7 +14,7 @@
     "mcpShell": {
       "loc": 12325,
       "files": 16,
-      "ratio": 0.2171,
+      "ratio": 0.2162,
       "byFile": {
         "mcp-shell/src/tools.ts": 3120,
         "mcp-shell/src/engine-client.ts": 2057,
@@ -35,22 +35,22 @@
       }
     },
     "fork": {
-      "loc": 11750,
+      "loc": 11990,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
           "kind": "added",
-          "lines": 215
+          "lines": 265
         },
         {
           "file": "packages/opencode/script/glasspane-e8-compaction.ts",
           "kind": "added",
-          "lines": 359
+          "lines": 364
         },
         {
           "file": "packages/opencode/script/glasspane-preflight.sh",
           "kind": "added",
-          "lines": 93
+          "lines": 116
         },
         {
           "file": "packages/opencode/script/installer-selftest.sh",
@@ -75,7 +75,7 @@
         {
           "file": "packages/opencode/script/registry-readiness.ts",
           "kind": "added",
-          "lines": 161
+          "lines": 184
         },
         {
           "file": "packages/opencode/script/release-assets.ts",
@@ -85,7 +85,7 @@
         {
           "file": "packages/opencode/script/verify-published.ts",
           "kind": "added",
-          "lines": 564
+          "lines": 567
         },
         {
           "file": "packages/opencode/src/plugin/glasspane-compaction.ts",
@@ -100,7 +100,7 @@
         {
           "file": "packages/opencode/src/tool/glasspane/daemon.ts",
           "kind": "added",
-          "lines": 554
+          "lines": 566
         },
         {
           "file": "packages/opencode/src/tool/glasspane/index.ts",
@@ -130,7 +130,7 @@
         {
           "file": "script/check-workflows.mjs",
           "kind": "added",
-          "lines": 302
+          "lines": 334
         },
         {
           "file": "script/gpg-signing.sh",
@@ -155,7 +155,7 @@
         {
           "file": "scripts/install.sh",
           "kind": "added",
-          "lines": 739
+          "lines": 777
         },
         {
           "file": "packages/app/src/components/dialog-connect-provider.stories.tsx",
@@ -715,7 +715,7 @@
         {
           "file": "packages/opencode/script/publish.ts",
           "kind": "edited",
-          "lines": 396
+          "lines": 422
         },
         {
           "file": "packages/opencode/src/acp/service.ts",
@@ -825,7 +825,7 @@
         {
           "file": "packages/opencode/src/cli/cmd/uninstall.ts",
           "kind": "edited",
-          "lines": 20
+          "lines": 23
         },
         {
           "file": "packages/opencode/src/cli/cmd/upgrade.ts",
@@ -960,7 +960,7 @@
         {
           "file": "packages/opencode/src/server/auth.ts",
           "kind": "edited",
-          "lines": 0
+          "lines": 16
         },
         {
           "file": "packages/opencode/src/server/mdns.ts",
@@ -1040,7 +1040,7 @@
         {
           "file": "packages/opencode/src/tool/registry.ts",
           "kind": "edited",
-          "lines": 9
+          "lines": 18
         },
         {
           "file": "packages/opencode/src/tool/webfetch.ts",
@@ -1183,14 +1183,14 @@
           "lines": 0
         }
       ],
-      "ratio": 0.207,
+      "ratio": 0.2103,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
       },
       "testsExcluded": {
-        "files": 46,
-        "lines": 6199
+        "files": 48,
+        "lines": 6625
       },
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {
@@ -1199,7 +1199,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 24075,
+  "totalToolSurfaceLoc": 24315,
   "note": null,
   "carried": null
 }
