@@ -34,7 +34,7 @@ import { spawnSync } from 'node:child_process'
 import { CODES } from './codes.js'
 import { binaryNotExecutableDetail, binaryNotFoundDetail, candidateDirsFor, childSpawnEnv, interpreterMissingDetail, isInterpreterMissing, isSearchedCommand, resolveBinary } from './binaries.js'
 import { sha256Bytes, sha256File, sha256FileSync } from './digest.js'
-import { UpdaterError, canonicalPath, ensurePrivateDir, removeTreeWithin, resolveWithin, tightenMode, writableRoots, writePrivateFile } from './fsutil.js'
+import { UpdaterError, canonicalPath, ensurePrivateDir, removeTreeWithin, resolveWithin, sameRuntimePath, tightenMode, writableRoots, writePrivateFile } from './fsutil.js'
 import { probeIdle } from './idle.js'
 import { kickstartJob, readRunningJob } from './launchd.js'
 import { mcpToolsList } from './mcp.js'
@@ -136,7 +136,7 @@ function firstDifferences(a, b, limit = 5) {
  * `backup-failed` otherwise — the caller must not touch the live bundles when it
  * does.
  */
-export function backupBundles({ appsDir, backupRoot, bundles = DEFAULT_BUNDLES, stamp = new Date().toISOString().replace(/[:.]/g, '-'), copyFn = defaultCopy, marker = {} }) {
+export function backupBundles({ appsDir, backupRoot, bundles = DEFAULT_BUNDLES, stamp = new Date().toISOString().replace(/[:.]/g, '-'), copyFn = defaultCopy, marker = {}, copyNotes = null }) {
   const root = canonicalPath(backupRoot)
   ensurePrivateDir(root)
   const dest = resolveWithin(root, path.join(root, stamp), 'backup directory')
@@ -155,7 +155,7 @@ export function backupBundles({ appsDir, backupRoot, bundles = DEFAULT_BUNDLES, 
       )
     }
     const target = path.join(dest, bundle.name)
-    copyFn(source, target)
+    copyFn(source, target, { notes: copyNotes })
     const before = manifestTree(source)
     const after = manifestTree(target)
     if (!manifestsEqual(before, after)) {
@@ -205,7 +205,7 @@ export function readBackupManifest(backupDir) {
  * live one), then as the bytes that came back. Names the bundle and the
  * relative paths that disagree; never reports success on "the directory exists".
  */
-export function restoreBackup({ backupDir, appsDir, bundles = DEFAULT_BUNDLES, copyFn = defaultCopy, manifest = null }) {
+export function restoreBackup({ backupDir, appsDir, bundles = DEFAULT_BUNDLES, copyFn = defaultCopy, manifest = null, copyNotes = null }) {
   const wanted = manifest ?? readBackupManifest(backupDir)
   if (wanted.ok === false) {
     return {
@@ -232,7 +232,7 @@ export function restoreBackup({ backupDir, appsDir, bundles = DEFAULT_BUNDLES, c
       continue
     }
     try {
-      copyFn(source, path.join(appsDir, bundle.name))
+      copyFn(source, path.join(appsDir, bundle.name), { notes: copyNotes })
     } catch (error) {
       mismatches.push(`${bundle.name} read back different (the copy failed: ${error.message}) after the restore`)
       continue
@@ -249,20 +249,45 @@ export function restoreBackup({ backupDir, appsDir, bundles = DEFAULT_BUNDLES, c
 }
 
 /**
+ * The name this run puts the previous copy at while the new one takes the live name.
+ *
+ * `X.old-<pid>` alone is not safe: pids get recycled, and a leftover the *reused* number made (the one an
+ * earlier run could not delete — see the note below the `rmSync`) is a non-empty directory, so
+ * `renameSync(target, aside)` on it answers `ENOTEMPTY` and the swap dies at the step that has nothing wrong
+ * with it. The numbered tail keeps the name free; {@link sweepStaleCopies} recognises both shapes.
+ */
+function asideNameFor(parent, base) {
+  const first = path.join(parent, `${base}.old-${process.pid}`)
+  if (!fs.existsSync(first)) return first
+  for (let n = 2; n < 100; n += 1) {
+    const next = path.join(parent, `${base}.old-${process.pid}-${n}`)
+    if (!fs.existsSync(next)) return next
+  }
+  return first
+}
+
+/**
  * Move a freshly built bundle onto its live name without ever leaving the live
  * name holding a half copy: rename the old one aside, rename the new one in,
  * and put the old one back if that second rename fails. The window is one
  * syscall wide; what is *not* survivable is the old order (rm the target, then
  * copy into it), where an interrupted or failing copy leaves the installed app
  * deleted and nothing at its name.
+ *
+ * `notes` is the run's list of *what this left on disk it could not delete* — the same register
+ * `applyUpdate` keeps for the staged tree (`stagingNotes`), and for the same reason. The note used to be
+ * returned and thrown away by both call sites (`defaultCopy`, `verifyStagedBytes`), while the comment on the
+ * `rmSync` catch promised that "the next run's cleanup takes it"; {@link sweepStaleCopies} only recognised
+ * `.new-`, so the promise was false in both directions and the directory sat there uncounted.
  */
-function renameDirectoryIntoPlace(sourceDir, targetDir) {
+function renameDirectoryIntoPlace(sourceDir, targetDir, notes = null) {
   const parent = path.dirname(targetDir)
+  const base = path.basename(targetDir)
   if (!fs.existsSync(targetDir)) {
     fs.renameSync(sourceDir, targetDir)
     return null
   }
-  const aside = path.join(parent, `${path.basename(targetDir)}.old-${process.pid}`)
+  const aside = asideNameFor(parent, base)
   fs.renameSync(targetDir, aside)
   try {
     fs.renameSync(sourceDir, targetDir)
@@ -284,9 +309,37 @@ function renameDirectoryIntoPlace(sourceDir, targetDir) {
     fs.rmSync(aside, { recursive: true, force: true })
     return null
   } catch (error) {
-    // Disk, not trust: the landed tree is complete and the leftover is a stale copy
-    // the next run's cleanup (or `discardStaging`) takes with the directory it sits in.
-    return `${aside} could not be removed after the swap (${error?.message ?? String(error)})`
+    // Disk, not trust: the landed tree is complete, so this is not a swap failure and must not roll one
+    // back. It *is* a fact about this machine's disk, so it goes into the caller's register (and out through
+    // the record and the sentence) instead of into a returned value nobody reads. The remedy named here is
+    // the honest one: a sweep may take it on a later run when the live name holds these same bytes again,
+    // and until then a person with the disk problem is the only one who can.
+    return note(`${aside} is the copy this run replaced and it could not be removed (${error?.message ?? String(error)}); ${targetDir} is complete and verified, so nothing about the install changed — fix whatever keeps the directory undeletable, and until the live name holds these same bytes again no sweep will take it`, notes)
+  }
+}
+
+/**
+ * Add one "this run left it on the disk" sentence to the caller's register, once.
+ *
+ * The register is an array the caller owns (`applyUpdate` passes its `stagingNotes`), and `null` from a
+ * caller that has no use for the fact — every one of those still gets the note as `defaultCopy`'s return
+ * value, which is why nothing here throws on a missing sink.
+ */
+function note(text, sink) {
+  if (!Array.isArray(sink) || sink.includes(text)) return text
+  sink.push(text)
+  return text
+}
+
+/** Is another process still running under this pid? EPERM means yes (it is somebody else's). */
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return true
+  if (pid === process.pid) return true
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === 'EPERM'
   }
 }
 
@@ -298,34 +351,73 @@ function renameDirectoryIntoPlace(sourceDir, targetDir) {
  * name is only safe when that name is free, so the sweep runs before every copy;
  * a *live* other pid is left alone (it is mid-copy right now), which is why the
  * probe distinguishes ESRCH from EPERM.
+ *
+ * The second pattern is the `<bundle>.old-<pid>` a *completed* swap could not delete. It is not the same
+ * question as `.new-`, and treating it as one would delete the only copy of the previous version that this
+ * machine has whenever the backup root lives somewhere else: an `.old-` tree goes only when its content is
+ * **byte-identical to what is installed at the live name now** (`manifestTree`, the same proof every copy in
+ * this file is judged by). Equal bytes means the live name already holds them, so removing the duplicate
+ * loses nothing; different bytes, no live name, or a pid still running means this run cannot prove the copy
+ * is spare, so it is left in place and named in `notes` — which is what "the next run's cleanup takes it"
+ * was supposed to mean and never did.
  */
-function sweepStaleCopies(parent, base) {
+function sweepStaleCopies(parent, base, notes = null) {
   let entries = []
   try {
     entries = fs.readdirSync(parent)
   } catch {
     return
   }
-  const pattern = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.new-(\\d+)$`)
+  const quoted = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const keep = []
+  const live = path.join(parent, base)
   for (const name of entries) {
-    const match = pattern.exec(name)
-    if (!match) continue
-    const pid = Number(match[1])
-    if (pid !== process.pid) {
-      let alive = false
+    const fresh = new RegExp(`^${quoted}\\.new-(\\d+)$`).exec(name)
+    const old = new RegExp(`^${quoted}\\.old-(\\d+)(?:-\\d+)?$`).exec(name)
+    if (!fresh && !old) continue
+    const pid = Number((fresh ?? old)[1])
+    if (fresh) {
+      // A `.new-` made by *this* pid is deleted, not kept: it is a half tree from an earlier copy in this
+      // same run (a `cpSync` that failed and whose `rmSync` failed with it), and copying a fresh bundle into
+      // a name that already holds one is exactly the half bundle the whole function exists to refuse. A
+      // *different* live pid is somebody mid-copy right now — which is why the probe tells ESRCH from EPERM.
+      if (pid !== process.pid && pidAlive(pid)) continue
+    } else if (pidAlive(pid)) {
+      // Somebody is mid-swap under this name right now. Not ours to touch — and not ours to forget either,
+      // which is the whole reason this list exists.
+      keep.push({ name, why: 'the process that made it is still running' })
+      continue
+    }
+    const target = path.join(parent, name)
+    if (old) {
+      let redundant = false
       try {
-        process.kill(pid, 0)
-        alive = true
-      } catch (error) {
-        alive = error?.code === 'EPERM'
+        redundant = fs.existsSync(live) && manifestsEqual(manifestTree(target), manifestTree(live))
+      } catch {
+        // A tree this run cannot read is a tree it cannot prove spare.
+        redundant = false
       }
-      if (alive) continue
+      if (!redundant) {
+        keep.push({
+          name,
+          why: fs.existsSync(live)
+            ? 'its bytes are not what is installed at the live name now, so it may be the only copy of something'
+            : `nothing is installed at ${live}, so this may be the only copy of it`,
+        })
+        continue
+      }
     }
     try {
-      fs.rmSync(path.join(parent, name), { recursive: true, force: true })
-    } catch {
-      /* leftover disk is bad; a target that is a half bundle is worse, so keep going */
+      fs.rmSync(target, { recursive: true, force: true })
+    } catch (error) {
+      // For `.new-`: leftover disk is bad; a target that is a half bundle is worse, so keep going. Either
+      // way the leftover is now *said*, because a run that quietly leaves two of these is a run whose next
+      // swap pays for it in a way nobody can attribute.
+      note(`the sweep could not remove ${name} under ${parent} (${error?.message ?? String(error)}), so it is still on disk`, notes)
     }
+  }
+  if (keep.length > 0) {
+    note(`${keep.map(({ name, why }) => `${name} (${why})`).join(', ')} under ${parent} ${keep.length === 1 ? 'is' : 'are'} a previous copy this tool could not prove spare, so nothing removed it${keep.length === 1 ? '' : ' them'}; if the disk is short, check ${live} is the version you want and remove them from there by hand`, notes)
   }
 }
 
@@ -334,24 +426,31 @@ function sweepStaleCopies(parent, base) {
  * because "what happens when this is interrupted" is only answerable by interrupting
  * it — `test/review-2026-10-09.test.mjs` kills a real child process in the middle of a
  * real copy and reads the target back.
+ *
+ * Its third argument is the caller's disk-note register (see {@link renameDirectoryIntoPlace}); a caller
+ * that passes nothing, which is every caller outside `applyUpdate`, still gets a copy that works and a
+ * leftover it can read off the return value.
  */
-export function defaultCopy(source, target) {
+export function defaultCopy(source, target, { notes = null } = {}) {
   const parent = path.dirname(target)
   const base = path.basename(target)
   fs.mkdirSync(parent, { recursive: true })
-  sweepStaleCopies(parent, base)
+  sweepStaleCopies(parent, base, notes)
   const staged = path.join(parent, `${base}.new-${process.pid}`)
   try {
     fs.cpSync(source, staged, { recursive: true, dereference: false })
   } catch (error) {
     try {
       fs.rmSync(staged, { recursive: true, force: true })
-    } catch {
-      /* a half copy we could not delete is still not a half *target* */
+    } catch (rmError) {
+      // The same register: a half copy this run could not delete is disk the caller owns, and "a half copy
+      // we could not delete is still not a half *target*" is the reason to keep going — never a reason to
+      // stop saying it.
+      note(`the interrupted copy ${staged} could not be deleted (${rmError?.message ?? String(rmError)})`, notes)
     }
     throw error
   }
-  renameDirectoryIntoPlace(staged, target)
+  return renameDirectoryIntoPlace(staged, target, notes)
 }
 
 /* ------------------------------------------- the staged bytes, re-proven at apply time */
@@ -386,6 +485,7 @@ export async function verifyStagedBytes({
   rootPath,
   readArchive = (file) => fs.readFileSync(file),
   existsFn = (file) => fs.existsSync(file),
+  notes = null,
 }) {
   const { staging } = writableRoots(stateRoot)
   const expected = String(staged?.digest ?? '')
@@ -436,7 +536,7 @@ export async function verifyStagedBytes({
     // Proven *and* landed: after this line the only bytes at `rootPath` are the ones
     // `extractInto` wrote from the buffer whose digest was just measured, and they are
     // what `build`, `npm pack` and the runtime copy downstream are handed.
-    renameDirectoryIntoPlace(unpacked.rootPath, rootPath)
+    renameDirectoryIntoPlace(unpacked.rootPath, rootPath, notes)
     return { ok: true, reason: null, digest: actual, rootPath }
   } catch (error) {
     return { ok: false, reason: `re-reading the staged archive failed (${error?.message ?? String(error)})` }
@@ -464,6 +564,12 @@ export function buildStagedTree(stagedTree, { run = defaultRun, timeoutMs = 15 *
     return { ok: false, builtDir: null, message: `the staged tree has no engine/ directory: ${stagedTree}` }
   }
   const build = run('swift', ['build', '-c', 'release', '--package-path', engineDir], { cwd: stagedTree, timeoutMs })
+  if (build.timedOut === true) {
+    // The 15-minute ceiling this function sets, hit. Said as a timeout, with the layer that was killed and
+    // the warning that the compiler it spawned may still be holding `engine/.build` — the shape a retry has
+    // to know about before it starts a second build in the same tree.
+    return { ok: false, builtDir: null, message: `the build did not finish in this run's time: ${(build.stderr ?? '').trim() || `swift build ran past ${humanMs(timeoutMs)}`}` }
+  }
   if (build.notFound === true || build.notExecutable === true || build.runtimeUnavailable === true) {
     // "no swift on this machine" and "swift is installed but this job was started with a PATH that does
     // not reach it" are different repairs from a build error, and the searched paths are the actionable
@@ -479,6 +585,9 @@ export function buildStagedTree(stagedTree, { run = defaultRun, timeoutMs = 15 *
     return { ok: false, builtDir: null, message: `the staged tree has no engine/scripts/make-app.sh` }
   }
   const pack = run('/bin/sh', [makeApp], { cwd: stagedTree, timeoutMs })
+  if (pack.timedOut === true) {
+    return { ok: false, builtDir: null, message: `assembling the bundles did not finish in this run's time: ${(pack.stderr ?? '').trim() || `make-app.sh ran past ${humanMs(timeoutMs)}`}` }
+  }
   if (pack.status !== 0) {
     return { ok: false, builtDir: null, message: `make-app.sh exited ${pack.status}: ${(pack.stderr || pack.stdout || '').trim().slice(-400)}` }
   }
@@ -489,6 +598,45 @@ export function buildStagedTree(stagedTree, { run = defaultRun, timeoutMs = 15 *
     }
   }
   return { ok: true, builtDir, message: null }
+}
+
+/**
+ * A duration said the way a person reads a build log, next to the raw number that ran out.
+ * `spawnSync`'s timeout is this file's own choice (15 minutes for `swift build`/`make-app.sh`, 5 for an npm
+ * step, 30 s for `npm config get prefix`), and "exited 127" named none of them.
+ */
+function humanMs(ms) {
+  const value = Number(ms)
+  if (!Number.isFinite(value)) return String(ms)
+  if (value < 1000) return `${value}ms`
+  const seconds = value / 1000
+  if (seconds < 120) return `${Math.round(seconds * 10) / 10}s`
+  return `${Math.round((seconds / 60) * 10) / 10} minutes`
+}
+
+/**
+ * What a child that never answered says, in the sentence the person reads.
+ *
+ * Three facts, and the old code reported none of them: this run *did* start the command (so `binaries.js`'s
+ * whole argument — "127 is not notFound" — forbids folding this into the not-found sentinel), the command ran
+ * past its own budget, and killing the direct child does not kill what *it* started.
+ *
+ * Both shapes below were measured on this machine with a real `sh -c` child under `spawnSync`'s own timeout:
+ * `{status:null, signal:'SIGTERM', error:{code:'ETIMEDOUT'}}` when the child dies from the kill, and
+ * `{status:0, signal:null, error:{code:'ETIMEDOUT'}}` when it traps SIGTERM and is still running when the wait
+ * gives up. So "which layer this run terminated" is read off `signal` and never assumed, and a timeout is
+ * recognised from `error.code` whether or not the child also reported an exit.
+ */
+function spawnTimeoutDetail({ name, bin, timeoutMs, signal, cwd }) {
+  const who = name ?? bin
+  const where = cwd ?? 'that directory'
+  const killed = signal
+    ? `this run terminated ${who} with ${signal}`
+    : `${who} did not answer the kill this run sent it, so it may still be running`
+  const orphan = signal
+    ? `anything *it* started (a compiler, a packer, a script mid-step) was not killed by that and may still be holding ${where}`
+    : `${who} itself survived, along with anything it started under ${where}`
+  return `${who} ran past its ${humanMs(timeoutMs)} limit (${timeoutMs}ms) without answering: ${killed}. ${orphan}. Nothing was swapped by this run: before retrying, make sure the earlier ${who} is really gone (a second build racing the first in the same tree fails in a different way), and raise this limit only if this machine genuinely needs more than ${humanMs(timeoutMs)}`
 }
 
 /**
@@ -531,6 +679,13 @@ export function defaultRun(bin, args, {
   // the negative control ("node genuinely unavailable") has to be able to say that this machine's node is
   // *not* reachable, which no other injection can express without lying about the spawn.
   execPath = process.execPath,
+  /**
+   * The `spawnSync` this runner calls. Production takes the real one; a test that has to hold a *specific*
+   * spawn-result shape (a child that was killed at its budget on a busy machine is not a child any test can
+   * schedule) takes the shape measured above and recorded at `test/daily-20261029-updater-apply.test.mjs`.
+   * Same reason `run`, `copyFn` and `readArchive` are seams: the verdict is what is under test, not the OS.
+   */
+  spawn = spawnSync,
 } = {}) {
   const wanted = String(bin ?? '')
   let command = wanted
@@ -561,7 +716,26 @@ export function defaultRun(bin, args, {
     command = found.bin
   }
   const spawnEnv = childSpawnEnv(command, { env, execPath })
-  const res = spawnSync(command, args, { cwd, encoding: 'utf8', timeout: timeoutMs ?? 120_000, env: spawnEnv })
+  const budgetMs = timeoutMs ?? 120_000
+  const res = spawn(command, args, { cwd, encoding: 'utf8', timeout: budgetMs, env: spawnEnv })
+  // S8-4: a child that ran past its own budget is **not** a missing command, and it is the one spawn failure
+  // this file can hand back for *every* step (`swift build` at 15 minutes, `npm pack` at 3, `npm install -g`
+  // at 5). It used to fall into the line below it — `{status:127}` — which is the exact sentinel
+  // `lib/binaries.js` spends its whole existence keeping free of "did not run" meanings, so an agent triaging
+  // by code got the notFound remedy for a build that simply never answered. Checked before the
+  // `status === null` gate because a child that traps SIGTERM answers `{error:{code:'ETIMEDOUT'}, status:0}`
+  // (measured), and "it exited 0 after we gave up on it" is still not an answer.
+  if (res?.error?.code === 'ETIMEDOUT') {
+    return {
+      status: null,
+      stdout: res.stdout ?? '',
+      stderr: spawnTimeoutDetail({ name: wanted === '' ? command : wanted, bin: command, timeoutMs: budgetMs, signal: res.signal ?? null, cwd }),
+      timedOut: true,
+      timedOutMs: budgetMs,
+      killed: res.signal ?? null,
+      tried: tried ?? [command],
+    }
+  }
   if (res.error && res.status === null) {
     // Found a moment ago and unspawnable now: say which of the two facts this is, and name the path.
     if (res.error.code === 'EACCES') {
@@ -591,7 +765,18 @@ export function defaultRun(bin, args, {
         tried: tried ?? [command],
       }
     }
-    return { status: 127, stdout: '', stderr: String(res.error.message) }
+    // The third class, and the one that used to be a *lie by arithmetic*: any other spawn error
+    // (`E2BIG`, `ENOEXEC`, `ENOTDIR` on a resolved path, `EMFILE` under a fork bomb) reported the shell's
+    // "command not found" code. Nothing in this file can tell those facts apart from 127, and the reader
+    // that triages by code goes looking for an installed binary that is already there.
+    return {
+      status: null,
+      stdout: res.stdout ?? '',
+      stderr: `${wanted === '' ? command : wanted} could not be run by this process (${res.error.code ?? 'no error code'}): ${String(res.error.message ?? res.error)}`,
+      spawnFailed: true,
+      spawnErrorCode: res.error.code ?? null,
+      tried: tried ?? [command],
+    }
   }
   const stderrText = res.stderr ?? ''
   if (isInterpreterMissing({ status: res.status, stderr: stderrText })) {
@@ -616,20 +801,25 @@ export function defaultRun(bin, args, {
  * the sentence and must not be cut off by a length cap.
  */
 function npmRunFailure(res, what) {
-  if (res?.notFound === true || res?.notExecutable === true || res?.runtimeUnavailable === true) {
+  if (res?.timedOut === true) {
+    // `${what} timed out` and the detail's own budget sentence: the caller's `what` names the command and
+    // the directory, the detail says how long it got, which signal answered, and what may still be running.
+    return `${what} timed out: ${(res.stderr ?? '').trim() || `it ran past ${humanMs(res.timedOutMs)} without answering`}`
+  }
+  if (res?.notFound === true || res?.notExecutable === true || res?.runtimeUnavailable === true || res?.spawnFailed === true) {
     return `${what} could not be run: ${(res.stderr ?? '').trim() || 'the command was not there'}`
   }
   return `${what} exited ${String(res?.status)}: ${(res?.stderr || res?.stdout || 'no output').toString().trim().slice(0, 300)}`
 }
 
 /** Move built bundles into `appsDir`, verifying each one after the copy. */
-export function installBundles({ builtDir, appsDir, bundles = DEFAULT_BUNDLES, copyFn = defaultCopy }) {
+export function installBundles({ builtDir, appsDir, bundles = DEFAULT_BUNDLES, copyFn = defaultCopy, copyNotes = null }) {
   const failures = []
   for (const bundle of bundles) {
     const source = path.join(builtDir, bundle.name)
     const target = path.join(appsDir, bundle.name)
     try {
-      copyFn(source, target)
+      copyFn(source, target, { notes: copyNotes })
       const expected = manifestTree(source)
       const landed = manifestTree(target)
       if (!manifestsEqual(expected, landed)) {
@@ -790,7 +980,13 @@ export function installNpmPackages({
     }
     const res = run('npm', ['pack', '--ignore-scripts'], { cwd: dir, timeoutMs: 180_000 })
     const file = (res.stdout ?? '').trim().split('\n').filter(Boolean).pop()
-    if (res.notFound === true || res.notExecutable === true || res.runtimeUnavailable === true) {
+    if (res.timedOut === true) {
+      // A pack that never answered is not "npm pack failed for a build reason" and not "npm is missing":
+      // nothing was installed yet, so this stays a refusal that costs the machine nothing — but the sentence
+      // has to carry the budget it ran out and the child that may still be holding the tree.
+      return { ok: false, code: CODES.npmVersionMismatch, message: npmRunFailure(res, `npm pack in ${dir}`) }
+    }
+    if (res.notFound === true || res.notExecutable === true || res.runtimeUnavailable === true || res.spawnFailed === true) {
       // Nothing has been installed yet, so this is still a refusal that costs the machine nothing — and
       // it must say that npm was not runnable rather than that `npm pack` failed for some build reason.
       return { ok: false, code: CODES.npmVersionMismatch, message: npmRunFailure(res, `npm pack in ${dir}`) }
@@ -1025,7 +1221,8 @@ function notWired(what) {
  * old 300-character cap cut them off, which is how a PATH problem lost its own evidence.
  */
 function npmFailureLine(res) {
-  if (res?.notFound === true || res?.notExecutable === true || res?.runtimeUnavailable === true) {
+  if (res?.timedOut === true) return String(res.stderr ?? '').trim() || `npm ran past ${humanMs(res.timedOutMs)} without answering`
+  if (res?.notFound === true || res?.notExecutable === true || res?.runtimeUnavailable === true || res?.spawnFailed === true) {
     return String(res.stderr ?? '').trim() || 'npm was not runnable by this process'
   }
   return (res?.stderr || res?.stdout || 'no output').toString().trim().slice(0, 300)
@@ -1086,10 +1283,13 @@ export function defaultReadGlobalVersions({ run = defaultRun } = {}) {
   const res = run('npm', ['ls', '-g', '--depth=0', '--json'], { timeoutMs: 60_000 })
   const stdout = (res.stdout ?? '').trim()
   const stderr = (res.stderr ?? '').trim()
-  if (res.notFound === true || res.notExecutable === true || res.runtimeUnavailable === true) {
-    // "I could not look" — and here the reason is that there was no npm to ask. The caller distinguishes
-    // this from a listing that names no package, which is why an unreadable prefix must never be read as
-    // an absence (see `installNpmPackages`).
+  if (res.timedOut === true || res.spawnFailed === true || res.notFound === true || res.notExecutable === true || res.runtimeUnavailable === true) {
+    // "I could not look" — and here the reason is that there was no npm to ask, or the npm this run asked
+    // never answered within its budget. The caller distinguishes this from a listing that names no package,
+    // which is why an unreadable prefix must never be read as an absence (see `installNpmPackages`) — and
+    // why a *timed-out* listing cannot be read as one either: a prefix whose listing never arrived, read as
+    // "nothing installed here", is the exact input that would let an undo `npm uninstall -g` a package the
+    // person installed themselves.
     return { ok: false, versions: {}, message: npmRunFailure(res, 'npm ls -g --json') }
   }
   if (!stdout) {
@@ -1452,24 +1652,61 @@ export async function applyUpdate({
     return stampOnto(state, patch)
   }
   /**
-   * The base used for the *last* write of a successful apply — after §11's handover.
+   * The base every write after this run's first long window has to merge onto: re-read the document.
    *
    * `enable` in the new copy is a separate process, and it writes this very file: its own history row
-   * and, when it re-exports the root bundle, a newer `caRoots`. Merging the applied patch onto the
-   * document read before the swap deletes whatever that child recorded, and the history is the only
-   * thing the panel's two buttons and `gp_diagnose` can quote. So the base is re-read.
+   * and, when it re-exports the root bundle, a newer `caRoots`. Merging a patch onto the document read
+   * before the swap deletes whatever that child recorded, and the history is the only thing the panel's
+   * two buttons and `gp_diagnose` can quote. So the base is re-read.
    *
-   * A file that cannot be re-read is not a reason to undo a swap that happened, and it is not a
-   * reason to pretend either: the run falls back to its own earlier read and says so in the record.
+   * The same argument covers the *other* long windows, and it used to stop at the successful one. This
+   * package has no cross-process lock (measured: nothing in `updater/`, `installer/` or `mcp-shell/` takes
+   * one), and between this run's first read and its rollback write sits a `swift build` that is allowed to
+   * run for fifteen minutes. A `updater check` that finished inside that window wrote `lastCheckAt` and its
+   * own `staged` offer; merging the undo onto the run-start read erases both, and — because that read still
+   * names the offer the check replaced — puts the *old* offer back in the document, pointing at a tree the
+   * check's own sweep has already thrown away.
+   *
+   * Two answers are not fresh and are not used: a file that cannot be re-read, and a file that is *gone*
+   * (an absent document is `emptyState()` from `loadState`, whose `current`/`history`/`consents` are
+   * `null`/`[]`/absent — publishing a rollback onto that would delete the version record the rollback
+   * exists to restore). Both fall back to this run's own read and say so in the record.
    */
   function freshestBase(notes) {
     try {
-      return loadState(stateRoot).state
+      const again = loadState(stateRoot)
+      if (again.existed === false) {
+        notes.push(`update-state.json was not on disk to be re-read before this write (${roots.stateFile}), so this record was merged onto `
+          + 'the state read at the start of the run: whatever another process did to that file in the meantime is not in it')
+        return state
+      }
+      return again.state
     } catch (error) {
-      notes.push(`the state file could not be re-read before the final write (${error?.message ?? String(error)}), so this record was merged onto `
-        + 'the state read at the start of the run: a row the new updater wrote during the handover may be missing from the history')
+      notes.push(`the state file could not be re-read before this write (${error?.message ?? String(error)}), so this record was merged onto `
+        + 'the state read at the start of the run: a row another process wrote while this run worked may be missing from the history')
       return state
     }
+  }
+  /**
+   * The write used by every outcome that lands *after* a window another process could write into: the
+   * build, the swap, both restarts, the handshake, the npm step and every undo of them.
+   *
+   * `stamp` (the run's own read as the base) stays for the gates before any of that, where nothing between
+   * the read and the write has taken time. The note a failed re-read produces goes into the sentence the
+   * panel prints verbatim, so "this record may be missing a row" is never only in the return value.
+   */
+  function stampFreshest(patch) {
+    const notes = []
+    const base = freshestBase(notes)
+    // The run's disk register is part of the same sentence: a swap that rolled back *and* left an
+    // undeletable copy under `appsDir` has to say both, and the copy is the fact the person can still act
+    // on tomorrow. Deduplicated against the re-read notes and appended, never replacing the verdict.
+    const tail = [...notes, ...stagingNotes.filter((one) => !notes.includes(one))]
+    if (tail.length === 0) return { saved: stampOnto(base, patch), message: patch.message ?? null }
+    const message = typeof patch.message === 'string' && patch.message.trim() !== ''
+      ? `${patch.message}. ${tail.join('. ')}`
+      : tail.join('. ')
+    return { saved: stampOnto(base, { ...patch, message }), message }
   }
   // What §11's handover may have written that this run cannot see from its own read. Kept as a list so
   // the catch below can say it too, and never folded into a status by itself.
@@ -1478,6 +1715,13 @@ export async function applyUpdate({
    * What this run left on the disk it could not delete. Same shape as `handoverNotes` and kept separate
    * because it is a different fact: the install verdict does not change, but "the staged bytes are still
    * there" has to be in the record rather than in a swallowed `catch`.
+   *
+   * It is also the register every copy in this run reports into (`copyNotes` on `backupBundles`,
+   * `installBundles`, `restoreBackup`, and `notes` on `verifyStagedBytes`), because
+   * `renameDirectoryIntoPlace`/`sweepStaleCopies` used to hand back exactly that sentence and both call
+   * sites dropped it. Nothing here changes a verdict — a complete landed bundle is a success whatever the
+   * leftover costs — and nothing here is a promise that a later run will clean it up either, which is what
+   * the deleted comment used to claim.
    */
   const stagingNotes = []
   // Only true once the new copy has been asked to register itself: before that, nothing but this
@@ -1487,18 +1731,29 @@ export async function applyUpdate({
     // §4: the panel prints `lastError` verbatim, so the sentence that comes back
     // from the gate is stamped into the state file alongside the code — a code
     // alone is not something a person can act on.
-    const saved = stamp({
-      status,
-      code,
-      message,
-      details: extra.details ?? null,
-      // A refusal that invalidates the staged offer has to say so in the
-      // document too: leaving `staged` standing is what lets a stale tree be
-      // applied minutes later against a version nobody checked it against.
-      ...(extra.clearStaged ? { staged: null } : {}),
-      historyEntry: { action: 'apply', result: status, digest: state.staged?.digest ?? null, code },
-    })
-    return { ok: false, status, code, message, state: saved, rollback: extra.rollback ?? { ok: true, performed: false }, details: extra.details ?? null }
+    //
+    // `freshBase` is set by the two refusals that run *after* the machine has been swapped and restored:
+    // this run's own read is then a minute to a quarter-hour old, and merging onto it erases the check that
+    // ran during the build (S8-2). The gates before the swap take the run's read — between that read and
+    // those writes nothing has happened that could let another process in.
+    const wrote = extra.freshBase === true
+      ? stampFreshest({
+        status,
+        code,
+        message,
+        details: extra.details ?? null,
+        ...(extra.clearStaged ? { staged: null } : {}),
+        historyEntry: { action: 'apply', result: status, digest: appliedDigest, code },
+      })
+      : { saved: stamp({
+        status,
+        code,
+        message,
+        details: extra.details ?? null,
+        ...(extra.clearStaged ? { staged: null } : {}),
+        historyEntry: { action: 'apply', result: status, digest: state.staged?.digest ?? null, code },
+      }), message }
+    return { ok: false, status, code, message: wrote.message, state: wrote.saved, rollback: extra.rollback ?? { ok: true, performed: false }, details: extra.details ?? null }
   }
 
   // Gate: something must be staged, and the tree must still be there.
@@ -1570,7 +1825,7 @@ export async function applyUpdate({
   // Gate §3 / #3（本轮加的）：staged 的字节在动任何真东西之前重新证明一次。`check` 的证明
   // 发生在几分钟之前，而 `stagedTreePresent` 只回答"树还在、形状还对"——形状对的树里完全可以
   // 是别人写进来的源码，`swift build` 与 `npm pack` 都照编译照装（见 verifyStagedBytes 的注释）。
-  const proven = await verifyStagedBytes({ stateRoot, staged: state.staged, rootPath: staged.rootPath, readArchive })
+  const proven = await verifyStagedBytes({ stateRoot, staged: state.staged, rootPath: staged.rootPath, readArchive, notes: stagingNotes })
   if (!proven.ok) {
     return fail('deferred', CODES.digestMismatch,
       `the staged release is no longer the bytes "check" verified: ${proven.reason}. Nothing was built, packed, swapped or restarted, and the daemon was left running the version it had. `
@@ -1647,6 +1902,7 @@ export async function applyUpdate({
       bundles,
       marker: { version: baseline, targetVersion: wantVersion, fromStateRoot: stateRoot },
       copyFn,
+      copyNotes: stagingNotes,
     })
   } catch (error) {
     return fail('apply-failed', error.code ?? CODES.backupFailed, `${error.message}; the installed version ${baseline} is untouched`, { rollback: { ok: true, performed: false, reason: 'nothing was replaced' } })
@@ -1658,8 +1914,12 @@ export async function applyUpdate({
   const built = build(provenTree, {})
   if (!built.ok) {
     // §3.2: the build failed before anything moved — site untouched.
+    //
+    // The record of that is still a write that lands *after* the run's first long window: the build this
+    // sentence reports ran for as long as `timeoutMs` allows, and a `updater check` that finished during it
+    // owns a newer `lastCheckAt` and a newer offer than the one this run read (S8-2).
     const message = `${built.message}; the installed ${baseline} is still in place because nothing was swapped`
-    const saved = stamp({
+    const wrote = stampFreshest({
       status: 'staged-build-failed',
       code: CODES.stagedBuildFailed,
       message,
@@ -1669,8 +1929,8 @@ export async function applyUpdate({
       ok: false,
       status: 'staged-build-failed',
       code: CODES.stagedBuildFailed,
-      message,
-      state: saved,
+      message: wrote.message,
+      state: wrote.saved,
       rollback: { ok: true, performed: false, reason: 'build failed before the swap' },
     }
   }
@@ -1698,20 +1958,20 @@ export async function applyUpdate({
     }
   }
 
-  const installed = installBundles({ builtDir: built.builtDir, appsDir, bundles, copyFn })
+  const installed = installBundles({ builtDir: built.builtDir, appsDir, bundles, copyFn, copyNotes: stagingNotes })
   if (!installed.ok) {
-    const restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn })
+    const restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn, copyNotes: stagingNotes })
     if (!restored.ok) {
       // §7's exit 5: the swap did not land *and* the way back is gone. The
       // sentence has to tell a person what to do, not what the code says.
       const message = `installing the new bundles failed (${installed.failures.join('; ')}) and the previous version could not be put back (${restored.message}): re-run the GlassPane installer to put ${appsDir} back, and do not press "Install update" again until you have`
-      const saved = stamp({ status: 'rollback-failed', code: CODES.rollbackFailed, message, historyEntry: { action: 'apply', result: 'rollback-failed', digest: state.staged.digest, code: CODES.rollbackFailed } })
+      const wrote = stampFreshest({ status: 'rollback-failed', code: CODES.rollbackFailed, message, historyEntry: { action: 'apply', result: 'rollback-failed', digest: state.staged.digest, code: CODES.rollbackFailed } })
       return {
         ok: false,
         status: 'rollback-failed',
         code: CODES.rollbackFailed,
-        message,
-        state: saved,
+        message: wrote.message,
+        state: wrote.saved,
         rollback: { ok: false, performed: true, reason: restored.message },
       }
     }
@@ -1720,7 +1980,7 @@ export async function applyUpdate({
       'apply-failed',
       CODES.swapFailed,
       `the new bundles could not be installed (${installed.failures.join('; ')}); version ${baseline} was restored and verified${restartLine(restart)}`,
-      { rollback: { ok: true, performed: true } },
+      { rollback: { ok: true, performed: true }, freshBase: true },
     )
   }
 
@@ -1746,16 +2006,16 @@ export async function applyUpdate({
     // Re-probe before the first restart: the build ran, the user may not be idle.
     const firstRestart = await restartIfIdle()
     if (!firstRestart.restarted) {
-      const restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn })
+      const restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn, copyNotes: stagingNotes })
       if (!restored.ok) {
         const message = `the daemon stopped answering the idle probe while the new version was being built (${firstRestart.reason}), so it was not restarted, and the previous version could not be put back (${restored.message}): re-run the GlassPane installer to put ${appsDir} back`
-        const saved = stamp({ status: 'rollback-failed', code: CODES.rollbackFailed, message, details: { reason: firstRestart.reason }, historyEntry: { action: 'rollback', result: 'rollback-failed', digest: state.staged.digest, code: CODES.rollbackFailed } })
+        const wrote = stampFreshest({ status: 'rollback-failed', code: CODES.rollbackFailed, message, details: { reason: firstRestart.reason }, historyEntry: { action: 'rollback', result: 'rollback-failed', digest: state.staged.digest, code: CODES.rollbackFailed } })
         return {
           ok: false,
           status: 'rollback-failed',
           code: CODES.rollbackFailed,
-          message,
-          state: saved,
+          message: wrote.message,
+          state: wrote.saved,
           rollback: { ok: false, performed: true, reason: restored.message },
           restart: firstRestart,
         }
@@ -1766,7 +2026,7 @@ export async function applyUpdate({
         'deferred',
         CODES.busyOrUnreachable,
         `the daemon did not answer the idle probe a second time before the restart (${firstRestart.reason}), so it was not restarted and ${baseline} was put back and verified; nothing was swapped in`,
-        { rollback: { ok: true, performed: true } },
+        { rollback: { ok: true, performed: true }, freshBase: true },
       )
     }
 
@@ -1787,11 +2047,11 @@ export async function applyUpdate({
       call: helloCall,
     })
     if (!daemonUp.ok) {
-      const restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn })
+      const restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn, copyNotes: stagingNotes })
       const sides = `installed ${wantVersion}, running daemon reports ${JSON.stringify(daemonUp.seen?.hello ?? null)}`
       if (!restored.ok) {
         const message = `${daemonUp.message}; and the backup could not be restored (${restored.message}): re-run the GlassPane installer to put ${appsDir} back`
-        const saved = stamp({
+        const wrote = stampFreshest({
           status: 'rollback-failed',
           code: CODES.rollbackFailed,
           message,
@@ -1802,8 +2062,8 @@ export async function applyUpdate({
           ok: false,
           status: 'rollback-failed',
           code: CODES.rollbackFailed,
-          message,
-          state: saved,
+          message: wrote.message,
+          state: wrote.saved,
           rollback: { ok: false, performed: true, reason: restored.message },
           handshake: daemonUp,
         }
@@ -1813,7 +2073,7 @@ export async function applyUpdate({
       // the sentence says so.
       const restart = await restartIfIdle()
       const message = `${daemonUp.message}; ${sides}; ${baseline} was restored and verified${restartLine(restart, 'the daemon was restarted again')}. The npm layer was never touched, so nothing was installed or removed there.`
-      const saved = stamp({
+      const wrote = stampFreshest({
         status: 'rolled-back',
         code: CODES.rolledBack,
         message,
@@ -1825,8 +2085,8 @@ export async function applyUpdate({
         ok: false,
         status: 'rolled-back',
         code: CODES.rolledBack,
-        message,
-        state: saved,
+        message: wrote.message,
+        state: wrote.saved,
         rollback: { ok: true, performed: true },
         handshake: daemonUp,
         restart,
@@ -1841,17 +2101,17 @@ export async function applyUpdate({
     // contract the person chose on 2026-10-26 and for why an install that *started* still rolls back.
     const npmResult = npmBlocked === null ? await npm({ stagedTree: provenTree, copyFn }) : null
     if (npmResult?.ok === false) {
-      const restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn })
+      const restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn, copyNotes: stagingNotes })
       const restart = await restartIfIdle()
       const status = restored.ok ? 'rolled-back' : 'rollback-failed'
       const message = `${npmResult.message}; the bundles were ${restored.ok ? `restored to ${baseline}${restartLine(restart, 'and the daemon restarted again')}` : `NOT restorable (${restored.message}) — re-run the GlassPane installer`}`
-      const saved = stamp({ status, code: npmResult.code, message, historyEntry: { action: 'rollback', result: status, digest: state.staged.digest, code: npmResult.code } })
+      const wrote = stampFreshest({ status, code: npmResult.code, message, historyEntry: { action: 'rollback', result: status, digest: state.staged.digest, code: npmResult.code } })
       return {
         ok: false,
         status,
         code: npmResult.code,
-        message,
-        state: saved,
+        message: wrote.message,
+        state: wrote.saved,
         rollback: { ok: restored.ok, performed: true },
         npm: npmResult,
         restart,
@@ -1894,7 +2154,7 @@ export async function applyUpdate({
         call: helloCall,
       })
     if (!handshake.ok) {
-      const restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn })
+      const restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn, copyNotes: stagingNotes })
       const npmBack = restoreNpm(npmResult ?? {})
       const npmBackLine = npmBlocked !== null
         // Nothing was installed here, so nothing can be taken back — and saying "the npm layer was left
@@ -1906,7 +2166,7 @@ export async function applyUpdate({
       const sides = `installed ${wantVersion}, running daemon reports ${JSON.stringify(handshake.seen?.hello ?? null)}`
       if (!restored.ok) {
         const message = `${handshake.message}; ${npmBackLine}; and the backup could not be restored (${restored.message}): re-run the GlassPane installer to put ${appsDir} back`
-        const saved = stamp({
+        const wrote = stampFreshest({
           status: 'rollback-failed',
           code: CODES.rollbackFailed,
           message,
@@ -1917,8 +2177,8 @@ export async function applyUpdate({
           ok: false,
           status: 'rollback-failed',
           code: CODES.rollbackFailed,
-          message,
-          state: saved,
+          message: wrote.message,
+          state: wrote.saved,
           rollback: { ok: false, performed: true, reason: restored.message },
           handshake,
           npm: { ...npmResult, restored: npmBack },
@@ -1926,7 +2186,7 @@ export async function applyUpdate({
       }
       const restart = await restartIfIdle()
       const message = `${handshake.message}; ${sides}; ${npmBackLine}; ${baseline} was restored and verified${restartLine(restart, 'the daemon was restarted again')}`
-      const saved = stamp({
+      const wrote = stampFreshest({
         status: 'rolled-back',
         code: CODES.rolledBack,
         message,
@@ -1938,8 +2198,8 @@ export async function applyUpdate({
         ok: false,
         status: 'rolled-back',
         code: CODES.rolledBack,
-        message,
-        state: saved,
+        message: wrote.message,
+        state: wrote.saved,
         rollback: { ok: true, performed: true },
         handshake,
         npm: { ...npmResult, restored: npmBack },
@@ -2087,7 +2347,7 @@ export async function applyUpdate({
     let restored = null
     let restoreNote = null
     try {
-      restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn })
+      restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn, copyNotes: stagingNotes })
     } catch (restoreError) {
       restored = { ok: false, message: `the restore itself threw (${restoreError.message})` }
       restoreNote = `restoreBackup threw: ${restoreError.stack ?? restoreError.message}`
@@ -2130,10 +2390,12 @@ export async function applyUpdate({
       }
     }
     const status = restored.ok ? 'rolled-back' : 'rollback-failed'
-    // The same re-read as the success path, and only when the handover ran: a throw that lands here
-    // *after* §11 means the new copy already wrote its own row, and merging onto this run's read would
-    // delete it while the record says the machine went back.
-    const failedBase = handoverRan ? freshestBase(handoverNotes) : state
+    // The same re-read as the success path, and **always** — not only when §11 ran. Two windows reach this
+    // line: the handover child writing its own row (the case the old comment knew about), and the build plus
+    // swap plus restart that precede *every* throw here, during which any `updater check` on this account has
+    // written `lastCheckAt` and its own offer. Merging onto this run's read deletes that work while the record
+    // says the machine went back; `freshestBase` says so out loud when the file cannot be re-read at all.
+    const failedBase = freshestBase(handoverNotes)
     const undoLine = undo ? ` ${undo.record.detail}.` : ''
     const message = [`the new bundles were already installed when "${what}" failed; ${baseline} was ${restored.ok ? 'restored and verified' : `NOT restorable (${restored.message}) — re-run the GlassPane installer to put ${appsDir} back`}.${undoLine}${handoverNotes.length ? ` ${handoverNotes.join('. ')}` : ''}`]
       .filter(Boolean)
@@ -2190,6 +2452,42 @@ function describeKind(kind, wantVersion, baseline) {
 }
 
 /**
+ * Whose install a backup actually is, judged from the marker `backupBundles` wrote next to the bytes.
+ *
+ * Both fields existed for exactly this question and had no reader anywhere in the repository (measured: the
+ * only field of a rollback marker anything reads is `version`), which is how `GLASSPANE_APPS_DIR=A updater
+ * apply` followed by a plain `updater rollback` in a normal shell restored A's old bytes into the default
+ * `~/Applications`, kickstarted the real daemon, and answered "restored 1.4.0 and the daemon reports it" —
+ * a true sentence about the wrong installation. The restore itself verifies *bytes*, never *ownership*, so
+ * the check has to happen before the copy and before the probe: a refusal must not restart anything either.
+ *
+ * A marker that names neither field is a backup from before these fields were written, and its ownership is
+ * unknown rather than wrong — that answer is `unknown`, and the caller says so in the sentence instead of
+ * pretending the check passed.
+ */
+export function backupOwnership(marker, { appsDir, stateRoot }) {
+  const wantAppsDir = typeof marker?.sourceAppsDir === 'string' ? marker.sourceAppsDir : null
+  const wantStateRoot = typeof marker?.fromStateRoot === 'string' ? marker.fromStateRoot : null
+  const problems = []
+  if (wantAppsDir && !sameRuntimePath(wantAppsDir, appsDir)) {
+    problems.push(`its bundles were copied out of ${canonicalPath(wantAppsDir)}, and this run would put them back into ${canonicalPath(appsDir)}`)
+  }
+  if (wantStateRoot && !sameRuntimePath(wantStateRoot, stateRoot)) {
+    problems.push(`the run that made it recorded its state root as ${canonicalPath(wantStateRoot)}, not this run's ${canonicalPath(stateRoot)}`)
+  }
+  const unknown = problems.length === 0 && wantAppsDir === null && wantStateRoot === null
+  return { ok: problems.length === 0, unknown, problems, wantAppsDir, wantStateRoot }
+}
+
+/** The sentence for a backup that belongs to a different installation, with the command that reaches it. */
+function ownershipRefusal(dir, ownership, { appsDir, stateRoot }) {
+  const command = ['updater rollback']
+  if (ownership.wantAppsDir && !sameRuntimePath(ownership.wantAppsDir, appsDir)) command.push(`--apps-dir "${canonicalPath(ownership.wantAppsDir)}"`)
+  if (ownership.wantStateRoot && !sameRuntimePath(ownership.wantStateRoot, stateRoot)) command.push(`--state-dir "${canonicalPath(ownership.wantStateRoot)}"`)
+  return `${dir} is not a backup of the installation this command is pointed at: ${ownership.problems.join('; ')}. Nothing was restored and the daemon was not restarted. To roll back the install this backup belongs to, run it against that install: ${command.join(' ')}`
+}
+
+/**
  * `updater rollback`: put the newest verified backup back and prove the daemon
  * reports the version it holds. Used by the panel's "restore previous version".
  */
@@ -2219,7 +2517,11 @@ export async function rollbackToBackup({
 } = {}) {
   const roots = writableRoots(stateRoot)
   const { state } = loadState(stateRoot)
-  const dir = backupDir ?? newestBackup(roots.backup)
+  // When the caller named no backup, the restore point is chosen *for this installation*: a machine that has
+  // updated two `--apps-dir` values shares one backup root, and the newest directory in it is not the newest
+  // one that belongs here. An explicitly named `backupDir` is never switched for another — a person who
+  // pointed at one deserves the refusal below, not a different restore point.
+  const dir = backupDir ?? newestBackup(roots.backup, { appsDir, stateRoot })
   if (!dir) {
     return { ok: false, status: 'deferred', code: CODES.backupFailed, message: `no backup under ${roots.backup}: nothing to roll back to` }
   }
@@ -2229,17 +2531,31 @@ export async function rollbackToBackup({
   } catch {
     return { ok: false, status: 'deferred', code: CODES.backupFailed, message: `${dir} carries no readable backup-marker.json, so it is not a backup this tool made` }
   }
+  /**
+   * Ownership, before the probe and before any byte moves (S8-1).
+   *
+   * Everything below this line is irreversible in the way this command is trusted not to be: it restores a
+   * bundle set, restarts the job that is running GlassPane on this machine, and answers "restored X and the
+   * daemon reports it". `restoreBackup` proves the *bytes* match the manifest; nothing else on this path can
+   * tell A's 1.4.0 from B's, which is why the marker says which install it came from.
+   */
+  const ownership = backupOwnership(marker, { appsDir, stateRoot })
+  if (!ownership.ok) {
+    return { ok: false, status: 'deferred', code: CODES.backupFailed, message: ownershipRefusal(dir, ownership, { appsDir, stateRoot }), details: { backup: dir, sourceAppsDir: ownership.wantAppsDir, fromStateRoot: ownership.wantStateRoot } }
+  }
+  // What this run left on disk it could not delete, in the same register the swap uses.
+  const leftoverNotes = []
   // Same §2 rule as apply: never restart a daemon that might be mid-action.
   const verdict = await probe({ socketPath })
   if (!verdict.answered) {
     return { ok: false, status: 'deferred', code: CODES.busyOrUnreachable, message: `the daemon did not answer the idle probe (${verdict.reason}), so it was not restarted and nothing was rolled back` }
   }
-  const restored = restoreBackup({ backupDir: dir, appsDir, bundles, copyFn })
+  const restored = restoreBackup({ backupDir: dir, appsDir, bundles, copyFn, copyNotes: leftoverNotes })
   if (!restored.ok) {
     const saved = nextState(state, {
       status: 'rollback-failed',
       code: CODES.rollbackFailed,
-      message: `${restored.message}: re-run the GlassPane installer to put a working version back into ${appsDir}`,
+      message: `${restored.message}: re-run the GlassPane installer to put a working version back into ${appsDir}${leftoverNotes.length ? `. ${leftoverNotes.join('. ')}` : ''}`,
       historyEntry: { at: writeClock().toISOString(), action: 'rollback', result: 'rollback-failed', digest: null, code: CODES.rollbackFailed },
     }, { now })
     saveState(stateRoot, saved, { now })
@@ -2277,6 +2593,7 @@ export async function rollbackToBackup({
    * `a manual rollback nobody could verify answers 5, not 4` goes red.
    */
   const status = handshake.ok ? 'rolled-back' : 'rollback-failed'
+  const leftover = leftoverNotes.length ? `. ${leftoverNotes.join('. ')}` : ''
   const saved = nextState(
     state,
     {
@@ -2293,24 +2610,46 @@ export async function rollbackToBackup({
     ok: handshake.ok,
     status,
     code: handshake.ok ? null : CODES.handshakeFailed,
-    message: handshake.ok
+    message: (handshake.ok
       ? `restored ${wantVersion} from ${dir} and the daemon reports it`
-      : `restored ${wantVersion} from ${dir} on disk and verified the files, but the running daemon did not confirm it: ${handshake.message}. Restart it when GlassPane is idle ("updater rollback" again), and if it still does not report ${wantVersion} re-run the GlassPane installer`,
+      : `restored ${wantVersion} from ${dir} on disk and verified the files, but the running daemon did not confirm it: ${handshake.message}. Restart it when GlassPane is idle ("updater rollback" again), and if it still does not report ${wantVersion} re-run the GlassPane installer`) + leftover,
     state: saved,
     rollback: { ok: true, performed: true },
     restart,
   }
 }
 
-/** Newest backup directory that carries a marker. */
-export function newestBackup(backupRoot) {
+/**
+ * Newest backup directory that carries a marker.
+ *
+ * `prefer` (an `{appsDir, stateRoot}` pair) makes it the newest one that *belongs to that installation*:
+ * two `--apps-dir` values share one backup root, and the restore point for a rollback is chosen by owner as
+ * well as by date. Candidates whose marker names no owner (a backup from before the fields existed) and
+ * candidates belonging to somebody else are still returned when nothing matches, so {@link backupOwnership}
+ * is the one that says which of the two it is — an invented "no backup exists" would send the person to the
+ * installer instead of to the `--apps-dir` that has one.
+ */
+export function newestBackup(backupRoot, prefer = null) {
   if (!fs.existsSync(backupRoot)) return null
   const dirs = fs
     .readdirSync(backupRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && fs.existsSync(path.join(backupRoot, entry.name, 'backup-marker.json')))
     .map((entry) => entry.name)
     .sort()
-  return dirs.length ? path.join(backupRoot, dirs[dirs.length - 1]) : null
+  if (dirs.length === 0) return null
+  if (prefer && prefer.appsDir && prefer.stateRoot) {
+    const owned = dirs.filter((name) => {
+      try {
+        const body = JSON.parse(fs.readFileSync(path.join(backupRoot, name, 'backup-marker.json'), 'utf8'))
+        const judge = backupOwnership(body, { appsDir: prefer.appsDir, stateRoot: prefer.stateRoot })
+        return judge.ok && judge.unknown === false
+      } catch {
+        return false
+      }
+    })
+    if (owned.length > 0) return path.join(backupRoot, owned[owned.length - 1])
+  }
+  return path.join(backupRoot, dirs[dirs.length - 1])
 }
 
 export { foreignStateDir }
