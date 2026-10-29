@@ -286,10 +286,11 @@ public final class ProbeSocketServer {
         for fd in clients { shutdown(fd, SHUT_RDWR) }
         wakeAccept(listener: listener)
         // 只删自己那一个 inode：名字已被继任者 bind 走时留它在原地，让那扇门继续开着。
-        if SocketNameOwnership.removeIfOurs(recorded: recordedInode, atPath: socketPath) {
-            log.info("probe socket removed \(socketPath)")
-        } else {
-            log.info("left \(socketPath) in place: it is not the socket this listener bound")
+        // 三态各说一句（S2-2）："不是我的"与"是我的但删不掉"（errno 在句子里）不能共用一句。
+        let removal = SocketNameOwnership.removeIfOurs(recorded: recordedInode, atPath: socketPath)
+        switch removal {
+        case .removed, .notOurs: log.info(removal.line(for: socketPath))
+        case .unlinkFailed: log.error(removal.line(for: socketPath))
         }
     }
 

@@ -705,6 +705,25 @@ public enum DecisionOutcome: String, Codable {
 /// the next entry links against. `number` therefore carries a `Double` and prints integral values
 /// bare, which is precisely the rule `canonicalJson` states for both TypeScript and Swift:
 /// shortest roundtrip form, integral values without a fraction.
+///
+/// ONE SPELLING, ONE OWNER (2026-10-29 S2-1). That rule is written exactly once, in
+/// `CanonicalJSON`; `encode` asks it what a value is spelled as and then picks the *carrier*
+/// whose `JSONEncoder` output reproduces those bytes. It used to restate the integral cut as
+/// its own literal — one decade below the cut `CanonicalJSON` applies — and then handed
+/// everything above that cut to `encode(Double)`. Two writers, two numbers, two spellings:
+/// `JSONEncoder` prints `1e16` as `1e+16` (measured on this host) while
+/// `canonicalJson` prints `10000000000000000`, and the read side of the ledger compares line
+/// bytes against `canonicalJson(entry)` — so such a line is judged corrupt and every hash from
+/// that line on stops being recomputable. A restated threshold is also a threshold nobody checks
+/// against the other copy, which is how the decade gap survived; `DailyRound20261029Swift1Tests`
+/// now fails the moment a magnitude literal reappears in this file.
+///
+/// The residue the carriers cannot reach is measured and named here, not assumed away: a value
+/// whose canonical spelling is a *single-digit negative* exponent (`1e-7`, `1.2345e-8`) has no
+/// `Encodable` carrier — `Double` prints `1e-07` (padded) and `Decimal` prints `0.0000001`
+/// (fixed), while `JSON.stringify` prints `1e-7`. Those values are why `canonicalJSONText`
+/// below, not `encode`, is the spelling a byte-authoritative writer must use; the same test
+/// pins the residue against node so it cannot silently grow.
 public indirect enum JSONValue: Codable, Equatable {
     case string(String)
     case number(Double)
@@ -735,11 +754,46 @@ public indirect enum JSONValue: Codable, Equatable {
         case .array(let items): try container.encode(items)
         case .object(let fields): try container.encode(fields)
         case .number(let value):
-            if value.rounded() == value, abs(value) < 9.007_199_254_740_992e14 {
-                try container.encode(Int(value))
+            // 非有限值在两个口径里都是 `null`：`JSON.stringify(NaN)`，以及 `CanonicalJSON` 里
+            // 那句 `guard double.isFinite else { return "null" }`。旧代码把它交给
+            // `encode(Double)`，实测是抛 `EncodingError`（"Unable to encode Double.nan directly
+            // in JSON"）——于是一个带 NaN 的 payload 在 `validateInvariants` 里抛出的是编码错，
+            // 不是它本来要判的那条不变量。
+            guard value.isFinite else { try container.encodeNil(); return }
+            // 拼写只有一个来源（见类型文档那句 S2-1）：先问 `CanonicalJSON` 这个值该长成什么样，
+            // 再选一个能把那串字节原样发出去的载体。载体是被**验**过的，不是被猜的——
+            // 每一条都拿 outlet 的文本对一次，对不上就换下一条，全对不上才落回 `Double`。
+            let spelling = CanonicalJSON.stringify(NSNumber(value: value))
+            if let whole = Int64(exactly: value), String(whole) == spelling {
+                try container.encode(whole)               // 整数量级：裸十进制，与 `canonicalJson` 同串
+            } else if let decimal = Decimal(string: spelling), decimal.description == spelling {
+                try container.encode(decimal)             // 固定记数法：`JSONEncoder` 打的是 Decimal 的十进制
             } else {
-                try container.encode(value)
+                try container.encode(value)               // 指数记数法（`1e+21` 一类）：stdlib 与 ECMAScript 同形
             }
+        }
+    }
+}
+
+public extension JSONValue {
+
+    /// 这个 payload 的**规范字节**——决策日志取哈希、读取侧逐行比对的那个口径。
+    ///
+    /// 它是"一行该长成什么样"的唯一出口：`encode(to:)` 受 `Encodable` 载体所限，发不出负指数
+    /// 的裸 token（`1e-7` → `Double` 打 `1e-07`、`Decimal` 打 `0.0000001`，node 打 `1e-7`），
+    /// 所以任何要把字节钉下来的写侧都必须以这一条为准，而不是以 `encode` 的输出为准。
+    /// 判据不在这里重述一遍：走的是 `CanonicalJSON.stringify`，与内核 `canonicalJson` 同一个函数。
+    var canonicalJSONText: String { CanonicalJSON.stringify(canonicalJSONBridge) }
+
+    /// `CanonicalJSON` 认得的那棵树（`NSNumber`/`[Any]`/`[String: Any]`/`NSNull`）。
+    var canonicalJSONBridge: Any {
+        switch self {
+        case .string(let text): return text
+        case .number(let value): return NSNumber(value: value)
+        case .bool(let flag): return flag
+        case .null: return NSNull()
+        case .array(let items): return items.map { $0.canonicalJSONBridge }
+        case .object(let fields): return fields.mapValues { $0.canonicalJSONBridge }
         }
     }
 }
@@ -901,10 +955,12 @@ public extension DecisionLogEntry {
         }
         if let payload {
             // The bound is on the canonical form — the same bytes the chain hashes. Measuring
-            // the encoder's output would let key order or spacing hide an oversized payload.
-            let data = try EvidencePack.encoder.encode(payload)
-            let decoded = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
-            let canonical = CanonicalJSON.stringify(decoded)
+            // the encoder's output would let key order or spacing hide an oversized payload,
+            // and (2026-10-29 S2-1) it would measure **a different spelling**: the encoder and
+            // `canonicalJson` disagreed on numbers, so the bound was computed on bytes that are
+            // not the ones the chain hashes. `JSONValue.canonicalJSONText` is that one outlet,
+            // so this check no longer holds a second writer.
+            let canonical = payload.canonicalJSONText
             guard canonical.utf16.count <= Self.payloadMaxCanonicalLength else {
                 throw DecisionLogEntryError.payloadTooLong(canonical.utf16.count)
             }

@@ -101,10 +101,11 @@ public final class SocketServer {
         listenFD = -1
         // 只删自己那一个 inode（见 `SocketNameOwnership`）：`--force-socket` 之后这个
         // 字符串可能正指着继任者**正在监听**的 socket。
-        if SocketNameOwnership.removeIfOurs(recorded: boundInode, atPath: socketPath) {
-            log.info("socket removed \(socketPath)")
-        } else {
-            log.info("left \(socketPath) in place: the name no longer points at the socket this instance bound")
+        // 三态各说一句（S2-2）：名字被继任者拿走与"名字是我的但这里删不掉"是两个现场。
+        let removal = SocketNameOwnership.removeIfOurs(recorded: boundInode, atPath: socketPath)
+        switch removal {
+        case .removed, .notOurs: log.info(removal.line(for: socketPath))
+        case .unlinkFailed: log.error(removal.line(for: socketPath))
         }
         didUnlinkOnExit = false
         boundInode = nil

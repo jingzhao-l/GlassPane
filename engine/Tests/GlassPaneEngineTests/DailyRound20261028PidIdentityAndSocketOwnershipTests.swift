@@ -203,7 +203,9 @@ final class DailyRound20261028PidIdentityAndSocketOwnershipTests: XCTestCase {
                           "名字上的读数该是真实卷（`fstat` 那种 VNONCE 的 -1 不能用来认名字）")
         XCTAssertGreaterThan(recorded.inode, 0, "inode 必须是一次真读数")
         XCTAssertTrue(SocketNameOwnership.mayRemove(recorded: recorded, atPath: path))
-        XCTAssertTrue(SocketNameOwnership.removeIfOurs(recorded: recorded, atPath: path))
+        // 2026-10-29 S2-2 之后 `removeIfOurs` 回的是三态，不是 Bool：这里逐字改回
+        // `XCTAssertTrue(...)` 会让本文件编译不过，而不是"变绿"。
+        XCTAssertEqual(SocketNameOwnership.removeIfOurs(recorded: recorded, atPath: path), .removed)
         XCTAssertFalse(FileManager.default.fileExists(atPath: path), "删的是自己那一个")
 
         // 继任者 bind 同一个名字（`--force-socket` 的形状）：前任手里的凭证与名字现在的
@@ -214,17 +216,17 @@ final class DailyRound20261028PidIdentityAndSocketOwnershipTests: XCTestCase {
         XCTAssertFalse(SocketNameOwnership.mayRemove(recorded: recorded, atPath: path),
                        "名字已经不是前任 bind 的那个，它就不许删")
         // ★ 关键那一支：前任收尾，删完名字必须还在（继任还在听）。
-        XCTAssertFalse(SocketNameOwnership.removeIfOurs(recorded: recorded, atPath: path))
+        XCTAssertEqual(SocketNameOwnership.removeIfOurs(recorded: recorded, atPath: path), .notOurs)
         XCTAssertTrue(FileManager.default.fileExists(atPath: path),
                       "前任把继任正在监听的 socket 删掉了——这就是本轮修的那件事")
         // 继任自己删得掉。
-        XCTAssertTrue(SocketNameOwnership.removeIfOurs(recorded: secondInode, atPath: path))
+        XCTAssertEqual(SocketNameOwnership.removeIfOurs(recorded: secondInode, atPath: path), .removed)
         XCTAssertFalse(FileManager.default.fileExists(atPath: path))
         close(second)
 
         // 没记到凭证 ⇒ 一个字都不删。
         let third = try bindListener(at: path)
-        XCTAssertFalse(SocketNameOwnership.removeIfOurs(recorded: nil, atPath: path),
+        XCTAssertEqual(SocketNameOwnership.removeIfOurs(recorded: nil, atPath: path), .notOurs,
                        "没记到 inode 就删，等于回到按名字删的旧行为")
         XCTAssertTrue(FileManager.default.fileExists(atPath: path))
         close(third)
@@ -237,7 +239,7 @@ final class DailyRound20261028PidIdentityAndSocketOwnershipTests: XCTestCase {
         try Data("not a socket".utf8).write(to: URL(fileURLWithPath: path))
         let listener = try bindListener(at: dir + "/real.sock")
         let recorded = try XCTUnwrap(SocketNameOwnership.currentInode(atPath: dir + "/real.sock"))
-        XCTAssertFalse(SocketNameOwnership.removeIfOurs(recorded: recorded, atPath: path))
+        XCTAssertEqual(SocketNameOwnership.removeIfOurs(recorded: recorded, atPath: path), .notOurs)
         XCTAssertTrue(FileManager.default.fileExists(atPath: path), "别人的普通文件一个字节都不动")
         close(listener)
     }

@@ -919,13 +919,16 @@ private func startShutdownWaiter(registry: ShutdownSocketRegistry, inFlightAct: 
             let code = sigwait(&shutdownSignalSet, &signalNumber)
             guard code == 0 else { continue }
             for entry in registry.current {
-                if SocketNameOwnership.removeIfOurs(recorded: entry.inode, atPath: entry.path) {
+                let removal = SocketNameOwnership.removeIfOurs(recorded: entry.inode, atPath: entry.path)
+                if removal.isRemoved {
                     continue
                 }
                 // 与 `EngineLog` 同口径的例外：quiet 会把"名字没删"整个吞掉，而那正是
                 // 运维最需要看见的一种现场（与上面 probe socket 那一条同一个先例）。
+                // 三态里剩下的两态各自说一句（S2-2）：删不掉那句必须带 errno——它说的
+                // 是"这个名字还指着我"，与"这个名字已经不是我的"正好相反。
                 FileHandle.standardError.write(Data(
-                    "glasspaned: left \(entry.path) in place — the name is not the socket this instance bound\n".utf8
+                    "glasspaned: \(removal.line(for: entry.path))\n".utf8
                 ))
             }
             if let abandoned = inFlightAct() {

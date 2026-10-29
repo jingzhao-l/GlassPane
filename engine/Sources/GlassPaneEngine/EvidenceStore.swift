@@ -12,11 +12,24 @@ public struct EvidenceArchiveStats: Equatable {
     /// read, and the two zeros below are then the zeros of "nothing was
     /// measured" — which `glasspaned --evidence-stats` publishes as null.
     public let listFailure: String?
+    /// 2026-10-29 S2-3：这个档案柜的**年龄闸到底作不作数**，由引擎自己说。
+    ///
+    /// 之前这一面只有 `{count, totalBytes}`，而 `maxAgeDays` 在 `engine/Sources` 里一个调用者
+    /// 都没有（`grep -rn "maxAgeDays\|setRetention" engine/Sources` 只命中本文件），于是每次写
+    /// 都跑的 `pruneExpiredIfNeeded()` 在生产恒为 no-op——但模块头与 `retentionNotice` 里那句
+    /// "older than N day(s)" 让读者以为档案会按年龄到期。这条读数把事实放在引擎答得出来的
+    /// 那一面上：默认就是"daemon 不做年龄到期，按年龄删只有 `--prune-evidence --older-than`
+    /// 一条路"。它不新增任何配置入口（不扩产品面），只发布已经成立的事实。
+    public let ageRetention: String
 
-    public init(count: Int, totalBytes: Int, listFailure: String? = nil) {
+    public init(
+        count: Int, totalBytes: Int, listFailure: String? = nil,
+        ageRetention: String = EvidenceStore.ageRetentionNotEnforced
+    ) {
         self.count = count
         self.totalBytes = totalBytes
         self.listFailure = listFailure
+        self.ageRetention = ageRetention
     }
 }
 
@@ -59,8 +72,16 @@ public enum EvidencePruneReport {
 /// Archive lifecycle (spec v1.6 §12.2–§12.3):
 /// - writes prune the oldest entries by mtime when the archive exceeds
 ///   `maxFiles`, keeping the active directory bounded;
-/// - `stats()` exposes `{count, totalBytes}` for observation;
+/// - `stats()` exposes `{count, totalBytes, ageRetention}` for observation;
 /// - `clear()` removes every entry in the active directory on demand.
+///
+/// Age is **not** one of the write-time passes a daemon runs (2026-10-29 S2-3, measured):
+/// `maxAgeDays` has no caller anywhere in `engine/Sources`, so `pruneExpiredIfNeeded()` is a
+/// permanent no-op in production and the only route that deletes by age is the explicit
+/// `glasspaned --prune-evidence --older-than <days>`. That fact is published rather than
+/// implied — through `stats()`'s `ageRetention` reading and through the sentence appended to
+/// `retentionNotice` when no age gate is set — and no new configuration surface was added to
+/// say it.
 ///
 /// Deletion radius (P0 §8.1 blast-radius review): the archive directory is
 /// configurable per project, so every destructive pass below is limited to
@@ -88,6 +109,23 @@ public final class EvidenceStore {
     /// default "audit everything first" semantics keep holding, but bounded so
     /// a long-running daemon cannot grow the archive without limit.
     public static let defaultMaxFiles = 10_000
+
+    /// 引擎对"档案会不会按年龄到期"这一句的唯一实话（2026-10-29 S2-3）。
+    ///
+    /// 量出来的事实：`maxAgeDays` 与 `setRetention(maxAgeDays:)` 在整个 `engine/Sources` 里
+    /// **零个调用者**（`grep -rn "maxAgeDays\|setRetention" engine/Sources` 只命中本文件——
+    /// 声明、折算与那条内部 TTL 自己），所以每次写都跑的 `pruneExpiredIfNeeded()` 在生产
+    /// 恒为 no-op。不扩产品面（不加新的配置入口），只把这件事放到读得见的地方。
+    public static let ageRetentionNotEnforced =
+        "not enforced by the daemon; --prune-evidence --older-than <days> is the only age path"
+
+    /// 年龄闸此刻的读数：设了就说谁设的（不是 daemon 的旗），没设就说没设。
+    static func ageRetentionReading(maxAgeDays: Int?) -> String {
+        guard maxAgeDays != nil else { return ageRetentionNotEnforced }
+        return "age gate of \(maxAgeDays!) day(s) set in this process by a caller of EvidenceStore — "
+            + "no daemon flag or configuration path sets one, so a daemon started from the CLI runs with "
+            + ageRetentionNotEnforced
+    }
 
     /// Separator kept distinct from the Crockford opId alphabet, so file
     /// names derived solely from opId are filesystem-safe with no path risk.
@@ -151,6 +189,11 @@ public final class EvidenceStore {
     /// Non-nil values below 1 are clamped to nil (disabled): "expire after 0
     /// days = delete on write" is a misconfiguration, mirrored reversed from
     /// the maxFiles clamp (≥1).
+    ///
+    /// Read the default as a *fact about the daemon*, not a knob waiting to be
+    /// turned: nothing in `engine/Sources` ever passes a value here (S2-3), so
+    /// `nil` is what every real archive runs with, and `stats().ageRetention`
+    /// says so on the surface the engine can answer from.
     public private(set) var maxAgeDays: Int?
 
     /// Injectable "now" for age computation (P5 §9.2): tests pin a fixed clock
@@ -577,6 +620,11 @@ public final class EvidenceStore {
 
     /// 留存结论的折算（纯函数，供单测）：没删东西就回 nil，删了多少就按各自的
     /// 判据说多少条——命中数与删除数在两个方向上都不许互相冒充。
+    ///
+    /// 没有年龄闸那一条也必须说清楚（2026-10-29 S2-3）：`maxAgeDays == nil` 时"automatic
+    /// retention"这句只可能是按条数上限删的，而模块头与 §9.2 让读者以为档案会按年龄到期，
+    /// 于是"这次删了 3 条"会被读成"按龄也一直在删"。这里把唯一那条按年龄的路点名，
+    /// 不新增任何配置入口。设了年龄闸的那一支一个字不改：它本来就在说自己那半。
     nonisolated static func retentionNotice(
         capRemoved: Int, ttlRemoved: Int, maxFiles: Int, maxAgeDays: Int?, directory: String
     ) -> String? {
@@ -584,7 +632,10 @@ public final class EvidenceStore {
         if capRemoved > 0 { removed.append("\(capRemoved) over the \(maxFiles)-entry cap") }
         if ttlRemoved > 0, let maxAgeDays { removed.append("\(ttlRemoved) older than \(maxAgeDays) day(s)") }
         guard !removed.isEmpty else { return nil }
-        return "automatic retention removed \(removed.joined(separator: " and ")) from \(directory); the archive the panel and gp_export_evidence read is smaller than it was before this write"
+        let ageClause = maxAgeDays == nil
+            ? "; \(ageRetentionNotEnforced)"
+            : ""
+        return "automatic retention removed \(removed.joined(separator: " and ")) from \(directory); the archive the panel and gp_export_evidence read is smaller than it was before this write" + ageClause
     }
 
     /// Undo a publication the isolation verdict refused, and say so out loud
@@ -724,13 +775,16 @@ public final class EvidenceStore {
     public func stats(sizeOf: (URL) -> Int? = { url in
         (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
     }) -> EvidenceArchiveStats {
+        // S2-3：这一面的每一条回答都带着"年龄闸到底作不作数"，包括读不了的那几条。
+        let ageRetention = Self.ageRetentionReading(maxAgeDays: maxAgeDays)
         switch archiveListing(keys: [.fileSizeKey]) {
         case .absent:
-            return EvidenceArchiveStats(count: 0, totalBytes: 0)
+            return EvidenceArchiveStats(count: 0, totalBytes: 0, ageRetention: ageRetention)
         case let .unreadable(path):
             return EvidenceArchiveStats(
                 count: 0, totalBytes: 0,
-                listFailure: "cannot read the evidence archive at \(path) to count it"
+                listFailure: "cannot read the evidence archive at \(path) to count it",
+                ageRetention: ageRetention
             )
         case let .entries(urls):
             var totalBytes = 0
@@ -748,10 +802,11 @@ public final class EvidenceStore {
                     totalBytes: 0,
                     listFailure: "\(uncounted.count) of \(urls.count) archive entries would not report a size "
                         + "(first: \(uncounted.first ?? "")), so totalBytes is not obtained — this is reported as "
-                        + "null with exit 1 rather than as the smaller total of the entries that did answer"
+                        + "null with exit 1 rather than as the smaller total of the entries that did answer",
+                    ageRetention: ageRetention
                 )
             }
-            return EvidenceArchiveStats(count: urls.count, totalBytes: totalBytes)
+            return EvidenceArchiveStats(count: urls.count, totalBytes: totalBytes, ageRetention: ageRetention)
         }
     }
 

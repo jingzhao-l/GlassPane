@@ -46,6 +46,44 @@ public struct SocketInode: Equatable {
     }
 }
 
+/// 收尾那一次 unlink 的**三态**结论。
+///
+/// 为什么不能用 `Bool`（2026-10-29 S2-2）：旧签名把两件不同的事压成同一个 `false`——
+/// 「这个名字不是我的（什么都不该删）」与「这个名字是我的、但 `unlink()` 失败了」。
+/// 两个调用方（`SocketServer.run()` 与 `glasspaned` 的 sigwait 收尾）对 `false` 一律打印
+/// "the name no longer points at the socket this instance bound"，而 `unlink()` 失败那一支里
+/// inode 恰恰**就是**本实例的：socket 目录只读、父目录被 `chflags uchg`、卷 remount ro 都会走到
+/// 这里（实测 `EACCES`/`EPERM`）。那句话在那个现场是反的，而且 errno 被整个丢掉——运维照着
+/// 那句去查"谁抢了这个名字"，永远查不到"这个目录删不掉文件"。`errno` 是被测到的事实，
+/// 不是实现细节，所以它进结论、也进那句话。
+public enum SocketNameRemoval: Equatable {
+
+    /// 名字是本实例的，且已经删掉了。
+    case removed
+    /// 名字不是本实例的那个 inode（或根本读不到）——**一个字节都没动**，这是判据在起作用。
+    case notOurs
+    /// 名字**是**本实例的那个 inode，`unlink()` 却失败了；带着 errno。
+    case unlinkFailed(errno: Int32)
+
+    public var isRemoved: Bool { self == .removed }
+
+    /// 这一态该说出口的那句话（两个调用方共用一份文案；判决与措辞都不许落到壳/面板那边去）。
+    public func line(for path: String) -> String {
+        switch self {
+        case .removed:
+            return "removed \(path): it was the socket this instance bound"
+        case .notOurs:
+            return "left \(path) in place: the name does not point at the socket this instance bound "
+                + "(or this instance never recorded one) — nothing was removed"
+        case .unlinkFailed(let code):
+            return "left \(path) in place: the name IS the socket this instance bound but unlink() failed "
+                + "with errno \(code) (\(String(cString: strerror(code)))) — the socket file is still there "
+                + "and this process cannot remove it; make the parent directory writable (or clear its "
+                + "immutable flag) and remove that name by hand"
+        }
+    }
+}
+
 public enum SocketNameOwnership {
 
     /// 这个名字此刻指着哪一个 inode（`lstat`：不跟随符号链接——链接本身就是要认出的那种
@@ -72,12 +110,14 @@ public enum SocketNameOwnership {
         return current == recorded
     }
 
-    /// 动手那一条：判据成立才 unlink，并把结果如实报出去（调用方要把它写进日志——
-    /// "没删"是一次测量，不是一个沉默的分支）。
-    /// 返回 true = 删掉了；false = 名字不属于本次实例（或已经没有了），**什么都没删**。
+    /// 动手那一条：判据成立才 unlink，并把结果**按三态**如实报出去（调用方要把它写进日志——
+    /// "没删"是一次测量，不是一个沉默的分支；而"删不掉"与"不是我的"是两次不同的测量）。
+    /// 调用方拿到的必须是 `outcome.line(for:)` 那一句，不是自己重写的一句：旧签名回 `Bool`
+    /// 时两个调用方对 `false` 共用同一句"名字不是我的"，那正是 S2-2 修掉的东西。
     @discardableResult
-    public static func removeIfOurs(recorded: SocketInode?, atPath path: String) -> Bool {
-        guard mayRemove(recorded: recorded, atPath: path) else { return false }
-        return unlink(path) == 0
+    public static func removeIfOurs(recorded: SocketInode?, atPath path: String) -> SocketNameRemoval {
+        guard mayRemove(recorded: recorded, atPath: path) else { return .notOurs }
+        // `unlink` 之前不清 errno：它只在返回 -1 时才可信，而这里判的就是返回 -1。
+        return unlink(path) == 0 ? .removed : .unlinkFailed(errno: errno)
     }
 }
