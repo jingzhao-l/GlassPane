@@ -1,4 +1,119 @@
-# 每日任务 2026-10-29 · 主仓审查发现台账（分泳道修复用）
+# 每日任务 2026-10-29 · 主仓收口台账（v1.26.0）
+
+## 收口格（全部实测值，不是"已完成"两个字）
+
+- main 收口 HEAD 见本节末；`git status --porcelain` 只剩 `.worktrees/` 一条——那是 10:30 那条线
+  **正在飞的工作树**（detached HEAD `495d9533`，内含未提交改动 `harness/tools/provider-surface-selftest.mjs`），
+  本轮不替别人提交、不动它。除此之外为空。
+- tag `v1.26.0`（签名附注 tag，`tag.gpgSign=true`）→ `6862f722`；已推 origin。
+- Release `v1.26.0`：`isDraft=false`、`targetCommitish=6862f722…`、4 件资产；
+  逐件本地 sha256 与 GitHub API 的 `assets[].digest` **逐字相等**
+  （tar.gz `9f69d929…4a490` / 4,604,980 B、`.asc` `5b3e2010…`、`SHA256SUMS` `93074012…`、`SHA256SUMS.asc` `716f6fd7…`）。
+  `SHA256SUMS-1.26.0.txt` 里那一行与本地算出的归档 sha256 相等；
+  `make-release-archive.mjs --verify` = 759 entries / 4,604,980 bytes / 21 条声明命令与 schema 全在 / `harness/` 条目实测 **0**。
+- 签名身份：`.asc` 的 issuer fpr v4 = `0929EA31DF4F7429F63FC53189D88B1D043A1298`
+  （key id `89D88B1D043A1298`），与本轮签名 tag 用的是同一条主钥；CI 侧"签名的钥必须等于产品钉住的钥"
+  那一步 success，同 job 里还有一步"证明身份闸能红"（它打印的 `X 签名身份闸判红… pinned=F1E6FFDB…`
+  是**演示输出**，不是失败——该步 conclusion=success）。
+- registry：`glasspane-mcp`、`glasspane-install` 两包 `version` 实测 1.26.0，
+  `--prefer-online` 点名 `@1.26.0` 也各回 1.26.0；`npm stage list` 两包均"No staged versions"（trusted publisher 直发）。
+- 发布物 == npm 上的那一版：解开发布归档 → 树内 `npm pack` → tgz 的 shasum
+  `glasspane-mcp` `94902a22165e29914d17e9804aa6c7aec443bf3d` ＝ registry `dist.shasum`；
+  `glasspane-install` `5e3f50978ac5a1f9a55bbae0accd950eb74608cd` ＝ registry `dist.shasum`。
+- 端到端（上一轮那格未观测，本轮用发布物做完）：干净前缀 `npm i -g --prefix` 装上树内 pack 的 tgz，
+  bin 是**符号链接**（1.12.3 那个缺陷的形状），经 `$PREFIX/bin/glasspane-mcp` 打三帧握手 ⇒
+  rc 0、stdout 13,011 B、stderr 0 行，`initialize` 回 `serverInfo {name:"glasspane-mcp",version:"1.26.0"}`、
+  `tools/list` 16 条工具；`glasspane-install --help` 经符号链接 rc 0、stdout 4,843 B、stderr 0。
+- 真机读数：`glasspaned --state-dir <临时根> --permissions` ⇒ accessibility/input-monitoring/screen-recording
+  `granted`、developer-tools `unverifiable`（并按设计点名"这一条命令从不测它"），rc 0；
+  本轮修的三格在同一枚二进制上复量：重复 `--state-dir` ⇒ rc 64 并点名两个根；
+  只给修饰旗 ⇒ rc 64、stderr 点名旗标与归属命令、stdout **无** `listening`；
+  `--socket-path "$HOME/engine.sock"` ⇒ rc 64 且家目录权限实测仍是 `drwxr-x---`（未被 chmod）。
+  面板三条的 AX `kAXPressAction` 走查读数在 `engine/smoke.md` 的 2026-10-29 那一段。
+
+## 门禁实际计数（逐字命令，最终树；本轮共跑三遍）
+
+| 闸 | 读数 |
+|---|---|
+| npm ci / npm run build | rc 0 / rc 0 |
+| npm test --workspaces --if-present | mcp-shell 683、installer 296、updater 729；pass 全等、fail 0 |
+| node scripts/check-version.mjs 1.26.0 | OK，版本线一致，20 行 ✓ 读数 |
+| node scripts/check-doc-links.mjs | 文档 32 份 / 内链 270 条 / 外链 44 条不请求 / markdown 表格 451 张（扫 123 份 markdown）；OK：无死链、锚点全在、双语成对、可复算主张与真源一致、每表每行格数一致、安装落点不是 world-writable 固定名字 |
+| check-workflows --self-test / 正式 | 35 例（21 条必须红的变异全抓到、14 条合法形状全沉默）；5 个 workflow 文件 clean |
+| swift build / swift test engine | XCTest 1530 执行 / 3 跳过 / 0 失败；Swift Testing 60 条 6 套件 |
+| swift test engine/probe | 58 执行 / 1 跳过 / 0 失败 |
+| python3 -m pytest -q bridge | 185 passed / 1 skipped |
+| sh -n install.sh / bash -n install.sh | rc 0 / rc 0 |
+| 信号闸 .signal_smoke.py | SIGTERM/SIGINT 自退码 0、socket unlink，三次起停各自状态根；新增 dead-child 自检臂 |
+| bundle + npm pack --dry-run | rc 0，340.1 kB、total files 31 |
+| node harness/tools/tool-surface.mjs --check | no growth past the recorded baseline（本轮 +71/+847 由单独一笔 chore(harness) 重记） |
+| node harness/tools/product-surface.mjs | 6587 agreement / 0 problem |
+
+3 条跳过按设计（两枚真机诊断 + 探针侧一条），未为了让计数好看而删断言。
+
+## 反向变异一览（每条都要具名用例变红，恢复用 cp + shasum 核对；禁用 git checkout/stash 撤销变异）
+
+| 泳道 | 打在哪 | 红的具名用例 |
+|---|---|---|
+| mcp-shell | 交付回调不接 / 静态判据被替换 / `pending.delete` 装回 / 硬编码 MCP 句子 / backlog 支重加 delete | 该道 7 条中的 4 组，含 B7 控制项仍绿 |
+| 引擎存储 | Double 拼写分支装回 / unlink 失败折回 `.notOurs` / 文案短路 / 模块头改回旧文 | 与 node 对账的 20 个字面量用例等，Executed 14 中 13 红 |
+| 引擎判定 | basis 分支 `if false` / getter 摘锁（TSan 复报 2 条 race）/ 回帧 helper no-op | 掉线+观测输入那条 + 对照臂仍绿；socketpair 两条读到 0 字节 |
+| daemon CLI | 重复旗拒答短路 / 服务形态白名单退回一次性那一套 / `rejectionForSocketParent` 恒 nil / 载荷读数改空串 | ValueFlag 7 条、FlagScope 4 条、SocketParent 3 条、AgeRetention 2 条红；复绿 24/24 |
+| 面板 | pid 判据短路 / 写后读不回那一支短路 / 注册项目录三态退回恒 enabled | S5-1 两条、S5-2 四条、S5-3 两条（断言数 3/4/9） |
+| 探针与信号闸 | 原样转发 durationNs / 去预检 / `>=`→`>` / connect 回内联校验 / 裸 `os.kill` | 5 组；其中"扫描被注释骗过而绿"那次暴露闸自己的洞，加 codeOnly 后才红 |
+| updater / installer / bridge / scripts | 各条逐字回装 | 具名红见各条提交正文；scripts 那两条新闸规则还各带一条"合法形状必须沉默"的对照 |
+
+## 本轮决定 → 依据 → 回滚
+
+1. **取号 1.26.0（minor）**。依据：CLI 参数语义与退出码集合动了（重复旗、只给修饰旗）、`install.sh`
+   新增 `--help`、状态文件字段动了（marker 归属被读、`--evidence-stats` 与 `probe_status` 新增键）。
+   回滚：`git tag -d v1.26.0` 只删本地；已推 tag 一律不动（先例 v1.16.2、v1.25.0/1）。
+2. **面 A/面 B 棘轮重记一次**（`chore(harness)` 27c7c8a8，只动 `harness/contracts/tool-surface.json`）。
+   依据：+71 行全在本轮 mcp-shell 两条归因修复、分母 +847 全在本轮 16 条 Swift 修复，逐文件点名在提交正文。
+   回滚：`git revert 27c7c8a8`（会让 `tool-surface --check` 重新转红，那是判据正常）。
+3. **`harness/**` 一字未动**，包括本轮新闸量出来的那两条 `△`（fork 门面文档里的
+   `/tmp/gp-install.sh` 固定落点）——它归 10:30 那条线，判据与 remedy 已由本仓打印给它。
+4. **风险区改动**：`EngineCore.swift`（在途 id 上锁 + 污染判据分句 + probe_status 新计数器）、
+   `glasspaned/main.swift`（两处参数判据 + 载荷一键 + waiter 取值方法 + socket 归属出文）、
+   `mcp-shell/src/tools.ts`（只加 `gp_probe_status` 描述里那三个已发布键的名字，工具面零增长）、
+   `.github/workflows/release.yml`（here-string + `concurrency`）。逐处证据在各条提交正文。
+5. **契约未升级**：`iterate-kernel` 仍钉 0.1.10（`check-kernel-corpus` 26 份语料与 pin 同字节）。
+   本轮缺陷全部在本层修掉，不需要动 canonical 内核。
+6. **不引入预编译引擎交付**，也不新增对外 `gp_*` 工具、不改发布平台矩阵——那是范围变更；
+   本轮只把已存在的缺陷修到"读侧与写侧同版"。
+7. **六条 Swift 泳道用隔离工作树 + cherry-pick 收口**，分支删除前用 `git cherry -v` 逐条证过
+   patch-id 已在 main（`-` 六条全中）；`-d` 因 cherry-pick 非祖先而拒绝，故按第 2 步判据用 `-D`。
+8. **`.turbo/cache` 是被追踪的**（171 条）。我一度把整个目录删掉，误删已用
+   `git checkout -- .turbo` 恢复自己的删除（当时主树里除 `.worktrees/` 外无任何人的未提交改动），
+   随后只删本轮新增的 15 个未追踪文件。教训记这条：派生缓存被提交进仓以后，
+   "清可再生物"与"删追踪文件"是两件事，必须先 `git ls-files` 数一遍再动手。
+
+## 未观测（只收物理边界那一类；"未修项"这一格为空）
+
+1. **`glasspane doctor` 的"全局前缀不可写"那一档**（S7-5）。本机 `/usr/local/lib/node_modules`
+   实测 owner 501 可写 ⇒ 造不出"不可写"那一支的输入，该用例写成 `t.skip` 而不是放宽断言。
+   补它的确切一条命令：`sudo mkdir -p /usr/local/lib/node_modules && sudo chown root:wheel /usr/local/lib/node_modules && sudo chmod 555 /usr/local/lib/node_modules && node installer/glasspane.js doctor`
+   （需要 owner 的 sudo，本轮不代做）。
+2. **本轮新加进 `check-workflows.mjs` 的三条规则在 CI 那侧的真实拦截**（顶层重复键 1a、
+   SIGPIPE 命中即退 2e、发布 job 必须 concurrency 5）。本机已用夹具 + `--self-test` 证明它们
+   **能红**（35 例里 21 条变异全被抓到），但"GitHub 真读到一份带这些形状的 workflow"没发生在本轮。
+   补它的确切一条命令：下一次有人往 `.github/workflows/*` 提交重复顶层 `jobs:` 时看
+   `gh run view <id> --log | grep "check-workflows"`；或本地起一个一次性 workflow 提交（不可逆通道，本轮不做）。
+3. `install.sh --help` 在**没有 Node 的机器**上的行为：本机实量
+   `env -i PATH=/usr/bin:/bin sh install.sh --help` ⇒ rc 1（Node 预检那句），因为台账指定的短路位置在
+   两个覆盖位形状闸之后、而 Node 预检是职责 1 排在更前。本轮判定**这不是缺陷**：`--help` 描述的
+   那个入口本身就跑在 Node 上，没有 Node 的机器上"给出 usage"不等于"给出能用的下一步"。
+   补它（若日后要豁免）需要一台没有 node 的 runner：`apk add --no-cache bash curl && sh install.sh --help`。
+
+## 那条冒充主代理的注入（见上文专节）与在册 daemon 的一次重启
+
+- 注入：四条按字节证伪，未落地任何文件，泳道未执行；本轮没有为它写任何代码。
+- 本机在册 daemon（`/Users/ethanlin/Applications/GlassPane Daemon.app/…/glasspaned`，PID 7127，ppid=1）
+  在本轮窗口内被 launchd 重启过一次（`~/.glasspane/installer-daemon.log` mtime 15:26，日志里仍是
+  `glasspaned 1.23.0 listening`）。判它不是本轮起的依据：本轮所有 daemon 运行都带
+  `--state-dir <临时根>` 或点名 `/var/tmp` 里的 socket；`installer` 包没有 postinstall 脚本；
+  本机从未运行过 1.26.0 的二进制；该服务 `runs = 241` 属常态重启。归属不明的共享进程一律不动。
+
 
 工作树开工状态：main = origin/main = `63fcda5e`，`git status --porcelain` 空，发布锚点 `v1.25.2`（npm 两包实测 1.25.2）。
 基线门禁全部 rc=0，实际计数见本文件末「基线读数」。
