@@ -152,6 +152,58 @@
    `bun install --frozen-lockfile`，2901 包，`bun.lock` sha256 `02c96d9d…` 前后未变）。
    给那条线的补救：等他们收口后 `cd harness/glasspane-harness && bun install --frozen-lockfile`。
 
+### 收尾补记（同一会话）· origin 在我干活时前进了 17 笔、tag 重切一次、又花掉一个号
+
+这一段是本轮**我自己的**两次时序错误与一次外部变化，全部按实测记，不合并进上面那节的"成绩"里。
+
+**一、`origin/main` 在本轮开工后被推进。** 开工时记的 HEAD 是 `63fcda5e`；推第一个提交时它是
+`41f5917f`——07:30 那条线在这两小时里落了 17 笔并发了 1.26.0。其中只有一笔碰到 `harness/`：
+`27c7c8a8` 把 `harness/contracts/tool-surface.json` 的面 A 重记成 12325（它那 +71 行 mcp-shell）。
+冲突就只在这一个金样文件上。处置按既有口径：**取一侧再 `--record`**（`git show origin/main:… > …`，
+不手抄、不拼接），在合好的树上重量一次，得到面 A **12325 / 21.62%**、面 B **11990 / 21.03%**——
+两份移动由同一次测量产出，而不是我把两个 JSON 对齐。不可加性再确认一次：他们记的时候我的面 B 没落，
+我记的时候他们的面 A 没落，只有这棵合好的树同时含两边。rebase 后核过 fork 子树字节未变
+（`6179b72c` == 当时那个 tag 的树），所以第一次推的 split 与 tag 仍然精确。
+
+**二、本轮的修复自己引入两条"本地全绿、别人机器上必红"的缺陷，两条都是 CI 抓的**（详见
+`harness/README.md`「闸自己被验过吗」的 2026-10-29 段）：① `surface-semantics` 新钉的 `files`
+名单存的是绝对路径，父仓 CI 在 `/home/runner/work/…` 判它漂移；② `workflow-gates` 新加的一条断言
+假设了父仓的目录布局，在搬运仓里 `../..` 不是 git 仓库。**这两条都不是既有缺陷**，是我写的，
+被远端测出来；第一条修完还顺手加了一条"金样里出现绝对路径就红"的判据与对照，因为
+"本地就是被写进金样的那台机器"时只有远端看得见这一类。
+
+**三、tag `v0.12.4` 被重切过一次，理由与证据都在这儿。** 第一次推 tag 后 Release 跑红在
+`CI for the commit this tag points at must already be green`——那时它指的是 rebase 前的
+`3f88cc05`，而搬运仓 CI 在 `3f88cc05` 上因为缺陷 ② 是红的。修完 ② 之后 fork 子树变了字节，
+于是重切。重切之前先证明**旧 tag 从未承载任何发布物**，实测三条：
+`gh release view v0.12.4` → `release not found`；
+`npm view glasspane-harness@0.12.4 version` → 404；`npm view glasspane-harness-darwin-arm64@0.12.4` → 404
+（registry 当时的 `latest` 复量为 `0.12.3`）。搬运仓 main 的覆盖另证一次不丢：
+`git diff --name-only 3f88cc05 6db4a500` 只有 1 个路径，`--diff-filter=D` 为 0 条，
+文件数 5038 → 5038，即旧树里每个文件都在新树中、唯一差异就是我有意删掉那 3 行的那个测试文件。
+因此"移动一个已发布 tag"没有发生——被移动的 tag 背后没有任何用户能拿到的字节。
+推送用 `--force-with-lease=refs/heads/main:3f88cc05…`（显式 SHA），tag 走 delete + 重建 + 推，
+签名 key 仍是 `0929EA31…1298`，与 `scripts/install.sh` 内联的那一条逐字相同。
+
+**四、又花了一个号（0.12.5），花在我自己的时序上。** `scripts/install.sh` 的别名与 `--version`
+校验的固定点测试（`installer-selftest.sh` +13 条）写在了 tag 之后，而它不是台账文件——
+`release-artifact` 的豁免只有 `SYNCLOG.md`/`CHANGELOG.md` 落后那一格，所以能闭合它的只有下一个号。
+这正是提示词里 10-27 一天三个号那一条警告的形状，本轮又犯一次、按同一条规矩收：已发布的 tag 不动。
+**下轮的操作顺序因此改一条**：凡本轮要改 fork 子树里的文件（含测试与自测脚本），必须在第一次打 tag
+之前全部落进 main；本轮的实际顺序是"尺子→代码→金样→台账→发布→测试补齐"，正确的顺序应是
+"尺子→代码→**测试**→金样→tag→发布→台账"。
+
+**五、本轮量到但没跑成的一格，如实写在这里而不是省略。** 兜底通道的**真**资产下载在本机做不了：
+`curl` 到 `release-assets.githubusercontent.com` 恒退 97（SOCKS5），换 `gh api … /releases/assets/<id>`
+能连上但 1.7 MB / 10 分钟（~3 KB/s），46 MB 的 zip 在本会话内取不完。所以
+"安装器对真发布字节验 SHA256SUMS + `.asc`"这一格**仍未观测**——离线桩那 188 条（含本轮新增的别名与
+形状校验）覆盖的是这段代码的判断，不是真签名。补它的确切一条命令（在代理正常的机器上）：
+
+    curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.5/scripts/install.sh | bash
+
+它走的正是兜底通道，成功行会把 `sha256: verified (SHA256SUMS.txt)` 与 `GPG: verified` 打出来；
+读不到 `.asc` 时按本轮新增的别名那节一同可见。
+
 ### 未观测（只限物理边界，各附补上它的那一条命令）
 
 - **真模型轮次**：本版没有换 provider 或网关，`gp_act` 的 `ctx.ask` 权限卡与 `output` 截断仍需一次

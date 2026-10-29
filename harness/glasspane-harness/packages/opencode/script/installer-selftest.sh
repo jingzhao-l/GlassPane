@@ -875,6 +875,56 @@ assert_has "and the verify step checks the binary this channel actually wrote" "
 assert_has "the --allow-scripts retry string carries the same evidence wording" "$INSTALL_SH" ", scripts allowed; integrity: npm dist.integrity vs the pinned registry; product signature: not checked on this channel)"
 assert_not_has "install.sh keeps no bare 'sha256/GPG: not checked' string" "$INSTALL_SH" "sha256/GPG: not checked"
 
+# ---------------------------------------------------------------- 23: the alias, and the shape of --version
+# Two things this file used to be silent about, both added on 2026-10-29.
+#
+# (a) `product.json` declares TWO bins and both READMEs promise "two commands are installed" for
+# every channel, but the release asset carries one binary (`build.ts` writes `dist/<target>/bin/
+# glasspane-harness` and zips that directory), so on the one-click channel `gp-harness` was
+# documented and never created. An installer that advertises a command it did not install is the
+# same class as one that claims a verification it did not run.
+# (b) `--version` flows into a URL, an asset name, and two remedy lines the script prints for a
+# human or an agent to paste back into a shell. The API-resolved branch screened its answer; the
+# flag branch screened nothing, so `--version '1.0$(id)'` reached the printed command intact.
+run_install "$SCRATCH/alias-ok.log" --version 9.9.9
+assert_code "the asset channel still installs green" "$?" "0"
+ALIAS_ROOT="$SCRATCH/root-alias-ok.log"
+if [ -x "$ALIAS_ROOT/bin/gp-harness" ]; then
+  pass "the second declared bin is created on the release-asset channel and is executable"
+else
+  fail "gp-harness is missing or not executable under $ALIAS_ROOT/bin — the docs promise two commands and this channel delivered $(ls -1 "$ALIAS_ROOT/bin" 2>/dev/null | tr '\n' ' ')"
+fi
+if [ -e "$ALIAS_ROOT/bin/gp-harness" ]; then
+  pass "and it is a real entry in bin, not only a name in the summary line"
+else
+  fail "gp-harness has no entry at all under $ALIAS_ROOT/bin"
+fi
+# The refusal half: a leftover non-executable file by that name must NOT read as installed. The
+# branch is reachable in real life — a previous interrupted install leaves exactly this.
+# `installer_env` derives `GLASSPANE_HARNESS_HOME` from the log's basename, so the prefix this run
+# will install into is spelled here the same way it does — a pre-created file at any other path is
+# a fixture that tests nothing, and the run would go green for the wrong reason.
+PREFIX="$SCRATCH/root-alias-fail.log"
+mkdir -p "$PREFIX/bin"
+printf 'not a binary\n' > "$PREFIX/bin/gp-harness"
+chmod -x "$PREFIX/bin/gp-harness"
+run_install "$SCRATCH/alias-fail.log" --version 9.9.9
+assert_code "an unusable gp-harness refuses the install rather than announcing it" "$?" "1"
+assert_has "and names which command is missing" "$SCRATCH/alias-fail.log" "gp-harness is not executable"
+
+run_install "$SCRATCH/bad-version-subst.log" --version '1.0$(id)'
+assert_code "a --version carrying command substitution is refused" "$?" "1"
+assert_has "and the refusal says what shape it wanted" "$SCRATCH/bad-version-subst.log" "is not a version this product publishes"
+assert_not_has "the substitution never reaches the plan as a URL" "$SCRATCH/bad-version-subst.log" "releases/download/v1.0\$"
+run_install "$SCRATCH/bad-version-traverse.log" --version '../../x'
+assert_code "a --version that is a path is refused" "$?" "1"
+assert_not_has "and it never becomes an asset name" "$SCRATCH/bad-version-traverse.log" "glasspane-harness-darwin-../../x"
+run_install "$SCRATCH/bad-version-chars.log" --version '0.12.4;rm'
+assert_code "a --version carrying shell metacharacters is refused by the character screen" "$?" "1"
+assert_has "with the reason naming what is not allowed" "$SCRATCH/bad-version-chars.log" "characters that are not digits or dots"
+run_install "$SCRATCH/good-version.log" --dry-run --version 9.9.9
+assert_code "the screen does not reject the shape the product actually publishes" "$?" "0"
+
 echo ""
 if [ "$FAILURES" -gt 0 ]; then
   echo "installer-selftest: $FAILURES of $CHECKS checks failed"

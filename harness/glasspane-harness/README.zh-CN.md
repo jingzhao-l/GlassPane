@@ -135,7 +135,7 @@ Azure、OpenRouter 等等全在——几百个模型——每一个都用**你�
 ```bash
 npm install -g glasspane-harness     # 推荐
 bun add -g glasspane-harness
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.4/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.5/scripts/install.sh | bash
 ```
 
 会装出两个命令：**`glasspane-harness`** 与短别名 **`gp-harness`**。npm 与 bun 从 wrapper 的
