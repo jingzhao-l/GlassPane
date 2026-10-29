@@ -876,6 +876,9 @@ type Pending = {
    * transport that can measure it (one with `bufferedBytes()`), and it means the frame was
    * still sitting in *this* process's write queue when the transport died — so the daemon
    * never saw it, and {@link transportDeathRemedy} may not claim otherwise.
+   * The `writeLine` hand-off callback (S1-1) can raise it back to `true` after the
+   * queue drains: bytes that were locally queued at write time but flushed before
+   * the transport went are the daemon's to have executed.
    */
   handedOff: boolean;
   deadlineMs: number;
@@ -1166,7 +1169,9 @@ export class EngineJsonRpcClient {
       if (backlog > ENGINE_WRITE_BACKLOG_BYTES) {
         // 自己的码：GP_E_ENGINE_UNREACHABLE 的出路在这里自相矛盾（它命令重启，而这条
         // 测量没测到 daemon 的任何事），见 `writeBacklogRemedy`。
-        this.pending.delete(id);
+        // 这里没有、也不该有 `pending.delete(id)`：这一支发生在 `pending.set(id, entry)`
+        // 之前，id 由 `state.nextId++` 单调生成、从未进过这张表，删除恒为 no-op（S1-4）。
+        // catch 里那一句不同——那里的 set 已经发生，删除是真的在收口。
         this.reject(entry, new EngineCallError(
           GP_E_ENGINE_BACKLOG,
           `not sending '${method}': ${backlog} bytes are already queued for the engine socket and it `
@@ -1181,8 +1186,22 @@ export class EngineJsonRpcClient {
       const queuedBefore = this.io.bufferedBytes?.() ?? null;
       try {
         const frameText = JSON.stringify(frame);
-        this.io.writeLine(frameText);
-        if (queuedBefore !== null) {
+        // S1-1: two criteria answer one question — did this frame's bytes leave
+        // this process? The static `bufferedBytes()` diff below is the *instant*
+        // reading at write time; the write callback is the *temporal* one, run
+        // when a transport that queued the bytes finally flushes them. Without
+        // the callback, a frame that sat in the local send queue, then drained,
+        // then was executed by the daemon before the transport died was
+        // permanently answered with NEVER_LEFT_TRANSPORT and a "then retry" the
+        // user's screen pays for twice. A transport that never calls back (every
+        // silent fake, B7's `QueuingIo` among them) keeps the static verdict
+        // untouched — the callback only ever raises `handedOff`, never lowers it.
+        let writeHandedOffConfirmed = false;
+        this.io.writeLine(frameText, () => {
+          writeHandedOffConfirmed = true;
+          entry.handedOff = true;
+        });
+        if (queuedBefore !== null && !writeHandedOffConfirmed) {
           // B7: the lazy transport opens its socket on the first write, and a `net.Socket`
           // accepts that write into its own queue — `write()` returns, nothing has been
           // delivered, and `writableLength` still holds the bytes. A transport that reports
@@ -1233,8 +1252,14 @@ export class EngineJsonRpcClient {
     this.report(
       `engine has not answered '${entry.method}' (id ${entry.id}) within ${entry.deadlineMs}ms — still in flight`,
     );
+    // S1-3: who this shell stops waiting *for* is a fact about the surface, not
+    // about the shell — the same split `lateReplyRoute` was authored for
+    // (R8b-高3). Hard-coding "an MCP client" here told a `curl` caller of the
+    // HTTP gateway that this shell had given up on somebody else's caller, and
+    // `MCP_PROSE_FOR_HTTP` in the gateway never translated this clause.
+    const waitingFor = this.surface === "mcp" ? "an MCP client" : "an HTTP caller";
     const capped = entry.methodDeadlineMs > entry.deadlineMs
-      ? ` This shell stops waiting for an MCP client's sake at ${entry.deadlineMs}ms while the daemon gets up to ${entry.methodDeadlineMs}ms for '${entry.method}', because a client that is left hanging retries on its own and a retried '${entry.method}' runs twice.`
+      ? ` This shell stops waiting for ${waitingFor}'s sake at ${entry.deadlineMs}ms while the daemon gets up to ${entry.methodDeadlineMs}ms for '${entry.method}', because a client that is left hanging retries on its own and a retried '${entry.method}' runs twice.`
       : "";
     this.reject(entry, new EngineCallError(
       GP_E_ENGINE_TIMEOUT,
@@ -1435,14 +1460,31 @@ export class EngineJsonRpcClient {
       this.report(`the engine's late reply to '${entry.method}' (id ${entry.id}) exceeded the ${MAX_FRAME_BYTES}-byte frame cap (${error.bytes} bytes), so its body could not be delivered even late${inferred ? " (attributed by arrival order: the frame's head carried no readable id)" : ""}`);
       return;
     }
-    this.pending.delete(entry.id);
-    this.reject(entry, attribute(new EngineCallError(
+    const failure = new EngineCallError(
       GP_E_PAYLOAD_TOO_LARGE,
       `the engine's reply to '${entry.method}' exceeded the ${MAX_FRAME_BYTES}-byte frame cap (${error.bytes} bytes) and was dropped; the connection is intact and other requests are unaffected`,
       "narrow this request or ask for less of it; the tool's own schema names the parameters that can "
       + "shrink a reply, and this shell rewrites this line into that advice when it can (the transport "
       + "layer deliberately does not guess them)",
-    ), entry, inferred));
+    );
+    if (inferred) {
+      // S1-2: same shape as the id-less error-frame arm above (reject, keep the
+      // entry, mark the guess spent, retain for the late reply). This attribution
+      // is a guess by arrival order, and the daemon's real reply — which does
+      // echo the id — still has to find its entry; deleting it here made that
+      // reply read as "a frame this client never issued", kept the operationId
+      // out of the trail, and left the caller's PAYLOAD_TOO_LARGE answer with a
+      // re-narrow story for a request the daemon may in fact have answered.
+      this.reject(entry, attribute(failure, entry));
+      entry.arrivalOrderConsumed = true;
+      this.retainForLateReply();
+      return;
+    }
+    // The echoed-id case is a confirmed attribution: the frame naming this
+    // request *was* its answer, nothing further can arrive for it, and the entry
+    // goes.
+    this.pending.delete(entry.id);
+    this.reject(entry, attribute(failure, entry, false));
   }
 
   /**
@@ -1897,8 +1939,8 @@ class ReconnectingSocketIo implements LineIo {
     private readonly open: EngineTransportOpener,
   ) {}
 
-  writeLine(line: string): void {
-    this.connect().writeLine(line);
+  writeLine(line: string, onHandedOff?: () => void): void {
+    this.connect().writeLine(line, onHandedOff);
   }
 
   bufferedBytes(): number {

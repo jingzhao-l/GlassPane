@@ -222,7 +222,21 @@ export function recoverFrameId(prefix: string): number | string | null {
  * a Unix socket; tests inject an in-memory fake transport.
  */
 export interface LineIo {
-  writeLine(line: string): void;
+  /**
+   * Write one newline-terminated frame.
+   *
+   * @param onHandedOff optional. A transport that can tell *when* the bytes
+   * actually left this process (the flush callback of its write) calls this with
+   * no error. It is the temporal half of the hand-off question that
+   * `bufferedBytes()` answers statically (S1-1): a frame whose bytes sat in the
+   * local send queue at write time and drained out afterwards is a frame the
+   * daemon could have executed, and a transport that goes away after that may
+   * not claim "nothing left this process". Transports that never call it —
+   * every in-memory fake written before this parameter existed — leave the
+   * verdict to the static measurement, which is why the callback only ever
+   * *raises* `handedOff`, never lowers it.
+   */
+  writeLine(line: string, onHandedOff?: () => void): void;
   /**
    * 已经交给内核、还没被对端读走的字节数。可选：只有真的接在一条 socket/pipe 上
    * 的传输量得出这个数。
@@ -269,8 +283,23 @@ export class StreamLineIo implements LineIo {
     input.on("error", (error) => this.errorHandler?.(error));
   }
 
-  writeLine(line: string): void {
-    this.output.write(line + "\n");
+  writeLine(line: string, onHandedOff?: () => void): void {
+    const text = line + "\n";
+    if (onHandedOff === undefined) {
+      this.output.write(text);
+      return;
+    }
+    // The stream's write callback fires once the chunk has been flushed to the
+    // destination — the bytes are no longer this process's to keep. Node's docs
+    // say the callback runs with no arguments on that success and *may* receive
+    // an error as its first argument otherwise (the same failure also arrives on
+    // the `error` event, which is what tears the request down); only the
+    // no-error arm confirms the hand-off, so an errored flush must not.
+    this.output.write(text, (error?: Error | null) => {
+      if (!error) {
+        onHandedOff();
+      }
+    });
   }
 
   bufferedBytes(): number {
