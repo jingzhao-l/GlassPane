@@ -238,13 +238,26 @@ export function parseArgs(argv) {
   return { options: opts, error: null }
 }
 
+/** "这一棵是不是 GlassPane 仓库"的**唯一一份**判据（两个 marker 的相对路径）。
+ *  install.sh 的 `looks_like_repo` 测的就是这两个路径，两处由
+ *  `installer/test/daily-20261029-installer-lane7.test.mjs` 逐值对照——在那之前"两条入口的判据
+ *  同源"只是两句注释互相指认，脚本里那份是没人对照的第二份抄本。 */
+export const REPO_MARKERS = Object.freeze(['engine/Package.swift', 'mcp-shell/package.json'])
+
+/** 只问**这一层目录**，一律不向上走：`looksLikeRepoHere(<外层repo>/vendored)` 答 false，
+ *  而 {@link resolveProjectRoot} 会答出外层那一棵。S7-1（2026-10-29，P0）修的就是这个差别——
+ *  判断"目标是不是仓库"时向上走，别人的仓库子目录就被读成"既有 clone"，随后 fetch/checkout
+ *  动的是外层那棵树。 */
+export function looksLikeRepoHere(dir) {
+  if (typeof dir !== 'string' || dir === '') return false
+  return REPO_MARKERS.every((rel) => fs.existsSync(path.join(dir, rel)))
+}
+
 /** 从起始目录向上逐级寻找含 engine/Package.swift 与 mcp-shell/package.json 的根目录。 */
 export function resolveProjectRoot(startDir = process.cwd()) {
   let dir = path.resolve(startDir)
   while (true) {
-    const hasEngine = fs.existsSync(path.join(dir, 'engine', 'Package.swift'))
-    const hasShell = fs.existsSync(path.join(dir, 'mcp-shell', 'package.json'))
-    if (hasEngine && hasShell) {
+    if (looksLikeRepoHere(dir)) {
       return dir
     }
     const parent = path.dirname(dir)
@@ -2239,8 +2252,10 @@ export function usageText() {
     '  注：install.sh 用 exec 委托本文件，所以**脚本自己跑完了**之后，退出码原样透传。',
     '      但 `curl … | sh` 的 $? 只在 curl 成功时才是这里的结论：curl 取不到脚本时 sh 读到的',
     '      是空输入，直接 EOF 退 0（本机实测 curl 退 7、管道退 0）；中途断流时 sh 只执行了',
-    '      收到的前半截，回的是最后一条命令的状态。要拿退出码当结论就分两步跑：',
-    '      curl -fsSL <install.sh> -o /tmp/gp-install.sh && sh /tmp/gp-install.sh',
+    '      收到的前半截，回的是最后一条命令的状态。要拿退出码当结论就分两步跑，且落点必须是',
+    '      一次性文件（`/tmp` 是 1777：sticky 只挡住别人删你的目录项，挡不住他先建一个',
+    '      `/tmp/gp-install.sh -> ~/.bashrc`，而 curl -o 会跟随那个符号链接、以你的 uid 截断覆写它）：',
+    '      GP="$(mktemp "${TMPDIR:-/tmp/}gp-install.XXXXXXXX")" && curl -fsSL <install.sh> -o "$GP" && sh "$GP" && rm -f "$GP"',
     '',
   ].join('\n')
 }
@@ -2504,8 +2519,8 @@ export function writePrivatePlist(plistPath, xml, {
 
 /** clone 失败的归因（finding 9）：把 **git 自己的原话**交给读者，而不是把任何非零退出
  *  都算成"网络不可达或该发布 tag 不存在"。"destination path … already exists and is not an
- *  empty directory" 是真能走到的（bootstrapPlan 只拒绝"存在且父目录也不是仓库"的那种），
- *  被归因成网络问题时读者会一直重试一条永远不通的路。 */
+ *  empty directory" 是真能走到的（bootstrapPlan 只拒绝"这一层目录自己不是 GlassPane 仓库"的那种，
+ *  判据见 looksLikeRepoHere），被归因成网络问题时读者会一直重试一条永远不通的路。 */
 export function cloneFailureText({ ref, status, stderr = '', targetDir }) {
   const detail = String(stderr ?? '').trim()
   const head = `git clone 失败（ref '${ref}'，目标 ${targetDir}，退出码 ${status ?? 'null'}）。`
@@ -2550,7 +2565,11 @@ export function bootstrapPlan({
     return { error: '无法确定用户主目录（HOME 为空），不知道把源码 clone 到哪里' }
   }
   const targetDir = installDir || path.join(homeDir, 'glasspane')
-  if (fs.existsSync(targetDir) && resolveProjectRoot(targetDir) === null) {
+  // 只问这一层，不向上走（S7-1，2026-10-29 P0）。这里从前用的是 `resolveProjectRoot(targetDir)`，
+  // 而它会一路向上找到外层的仓库：`<外层repo>/vendored` 于是"是一个仓库"，躲过这条拒绝，
+  // 后面的 fetch/checkout 就全落在外层那一棵上（同一条输入 install.sh 的答案是"目标目录已存在
+  // 且不是 GlassPane 仓库"+ rc 1——两条一键入口对着同一个目录给两种结论，修的就是这一类）。
+  if (fs.existsSync(targetDir) && !looksLikeRepoHere(targetDir)) {
     return {
       error: `目标目录已存在且不是 GlassPane 仓库：${targetDir}（用 --repo 指定仓库，或清理该目录后重试）`,
     }
@@ -2579,6 +2598,59 @@ export function bootstrapPlan({
 }
 
 /**
+ * 两条路径是不是同一个东西。`git rev-parse --show-toplevel` 打的是**物理路径**（macOS 上
+ * `/var` → `/private/var`、家目录里的软链都会被解开），所以两侧都要过一遍 realpath 才可比；
+ * 路径不存在时 realpathSync 抛，退回 `path.resolve`——不存在的那一侧本来就答不出仓库根。
+ */
+function canonicalPath(p) {
+  try {
+    return fs.realpathSync(p)
+  } catch {
+    return path.resolve(p)
+  }
+}
+
+/** 问一次「这一带最近的仓库根在哪」，把答案作为数据交回去（不判定）。 */
+export function readRepoToplevel({ dir, spawn = spawnSync } = {}) {
+  const res = spawn('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' })
+  const answer = String(res?.stdout ?? '').trim()
+  if (res?.status !== 0 || answer === '') {
+    return { read: false, toplevel: null }
+  }
+  return { read: true, toplevel: answer }
+}
+
+/**
+ * 纯判定：要动手的那一棵，是不是说话人指的那一棵？（S7-1，2026-10-29，P0）
+ * `git -C <dir>` 对**任何**目录都按"离它最近的那棵树"答话，所以 `git -C <外层repo>/vendored
+ * status` 与 `checkout --detach` 动的都是外层那棵树——本轮实测把外层 main detach 了。
+ * 只答两种"不是同一棵"：答不出（`unreadable`，那目录不是任何仓库的一部分，或 git 没答话），
+ * 与答的是别处（`outside`）。相等就回 null。
+ */
+export function toplevelProblemFor({ targetDir, toplevel = null, readOk = false } = {}) {
+  if (!readOk) return { kind: 'unreadable' }
+  if (canonicalPath(toplevel) === canonicalPath(targetDir)) return null
+  return { kind: 'outside', toplevel }
+}
+
+/** 两种"不是同一棵"各说一句；两处调用（纯判据、IO 步）共用这一份，不发明第二套说法。 */
+export function toplevelRefuseText({ targetDir, problem }) {
+  if (problem?.kind === 'outside') {
+    return `${targetDir} 自己不是一棵 git 仓库的根：git 说这一带最近的根在 **${problem.toplevel}**。`
+      + `\n本轮要是动手，动的就是 ${problem.toplevel} 那一棵，而不是你指的 ${targetDir}——那是别人的仓库，`
+      + '安装器不在它上面 fetch、不切它的分支、不碰它的工作树。'
+      + `\n下一步（两条都做得动，且不销毁任何东西）：`
+      + `\n  a) 换一处不属于任何仓库的落点：GLASSPANE_INSTALL_DIR=<空目录> 重跑一键安装`
+      + '（那个目录自己要能让 git -C <目录> rev-parse --show-toplevel 答不出才算它自己）；'
+      + `\n  b) 要装的那一棵在别处就用 --repo / GLASSPANE_REPO 指过去，指的目录必须自己就是仓库根。`
+  }
+  return `${targetDir} 答不出 git 仓库根（这一带它不是 git 仓库，或 git 本身没答话）：`
+    + '连"要动的是哪一棵"都判不出来，就不动它，也不装它。'
+    + `\n下一步：确认 ${targetDir} 是一棵 git 仓库（git -C "${targetDir}" rev-parse --show-toplevel 能不能答话）；`
+    + '要一份全新的 clone 就 GLASSPANE_INSTALL_DIR=<空目录> 重跑一键安装。'
+}
+
+/**
  * 既有 clone 的结论（纯判定，可单测）。
  *
  * 为什么这一格不能像以前那样"提示一句就照用"：`~/glasspane` 是产品自己的安装位置，`install.sh` 与
@@ -2588,6 +2660,9 @@ export function bootstrapPlan({
  * "destination path … already exists and is not an empty directory" 拒掉，读者只剩"换目录"这一条死路。
  *
  * 判据按那个人 2026-10-26 选的形状：
+ *   · 先问「要动的是不是这一棵」（`toplevelProblem`，见 `readRepoToplevel`）：答不出或答的是
+ *     别处 ⇒ 拒绝，点名要动的到底是哪一棵——这一问排在脏/干净之前，因为"这棵树干净"是对着
+ *     别人的仓库说的结论（S7-1，2026-10-29 P0）；
  *   · 干净（`git status --porcelain` 空）且 HEAD 已经是那个 tag ⇒ 就用；
  *   · 干净但不是那个 tag ⇒ 前进（fetch + detached checkout —— 这是移动**产品自己的 clone**，
  *     不是移动任何人的工作树）；
@@ -2602,7 +2677,17 @@ export function bootstrapPlan({
  * 现在 tag 缺席归到"前进"里：fetch 不成仍由 `advanceExistingClone` 拒，并交出 git 的原话；
  * HEAD 读不出照旧是拒。前者是能补的事实缺口，后者是判据本身没了。
  */
-export function existingCloneDecision({ targetDir, ref, head = null, tagCommit = null, blocking = [] }) {
+export function existingCloneDecision({ targetDir, ref, head = null, tagCommit = null, blocking = [], toplevelProblem = null }) {
+  // 「要动的是哪一棵」问在「这棵树脏不脏」之前：判不出对象的时候，后面每一条结论都是对着
+  // 别人的仓库说的（S7-1 的实测形状：外层 main 被 detach，然后回一句 advance: use）。
+  if (toplevelProblem) {
+    return {
+      action: 'refuse',
+      blocking: [],
+      toplevelProblem,
+      text: toplevelRefuseText({ targetDir, problem: toplevelProblem }),
+    }
+  }
   const dirty = blocking.map((line) => String(line).trim()).filter((line) => line !== '')
   if (dirty.length > 0) {
     const shown = dirty.slice(0, 10)
@@ -2663,6 +2748,9 @@ export function existingCloneDecision({ targetDir, ref, head = null, tagCommit =
  * `git status --porcelain` 的行，以及这份 clone 是不是浅仓。判据一律在 `existingCloneDecision`，
  * 两处调用（bootstrap 的纯计划、前进这一步的复判）共用同一份读数，避免出现第二个"什么算脏"的说法。
  *
+ * 这四份事实之前还有一问：`rev-parse --show-toplevel`——它决定"这四份事实到底是谁的事实"。
+ * 答不出或答的是别处时**一份都不给**（见上面的 S7-1 注释），调用方拿到的就是 head=null。
+ *
  * `shallow` 是给 fetch 挑形状的：`--depth 1` 会把一棵**完整**的 clone 变成浅仓（`.git/shallow`
  * 一旦落下，之后的遍历都撞上人为边界，要恢复得 `git fetch --unshallow`）。旧写法对任何树都带
  * `--depth 1`，而注释写的是"只往 .git 里加对象"——那句话对完整 clone 不成立，它加的是一个边界。
@@ -2670,6 +2758,15 @@ export function existingCloneDecision({ targetDir, ref, head = null, tagCommit =
  * 一点也不给人家的历史加边界。
  */
 export function readCloneFacts({ targetDir, ref, spawn = spawnSync, fetchHead = false } = {}) {
+  // 开头先问「要动的是不是这一棵」（S7-1）。`git -C <dir>` 对别人仓库的子目录一样答话，
+  // 所以后面的 status / rev-parse 读回来的其实是**外层那棵树**的事实：外层干净、外层 HEAD 在
+  // 某一笔上，于是这一棵被读成"干净的既有 clone"，下一步 fetch/checkout 就 detach 了外层的 main。
+  // 答不出或答的是别处 ⇒ 一条事实也不给（head 为 null），判据那一侧只能落到"拒"。
+  const top = readRepoToplevel({ dir: targetDir, spawn })
+  const toplevelProblem = toplevelProblemFor({ targetDir, toplevel: top.toplevel, readOk: top.read })
+  if (toplevelProblem) {
+    return { head: null, tagCommit: null, blocking: [], shallow: null, toplevelProblem, toplevel: top.toplevel }
+  }
   const read = (args) => spawn('git', ['-C', targetDir, ...args], { encoding: 'utf8' })
   const sha = (what) => {
     const res = read(['rev-parse', '--verify', what])
@@ -2722,16 +2819,8 @@ export function resolveRemoteName({ remotes = [] } = {}) {
 /**
  * 把既有 clone 前进到钉住的 ref（IO 步；判据全在 `existingCloneDecision` 里）。
  *
- * 只有这几种 git 动作：`status --porcelain`、两次 `rev-parse --verify`、`rev-parse
- * --is-shallow-repository`（全是读），`fetch --tags [origin <ref>]`（只往 .git 里加对象；
- * 带不带 `--depth 1` 由 git 自己答的那句"是不是浅仓"决定，见 `readCloneFacts`），以及
- * `checkout --detach <ref>`（只在树干净时执行）。没有 `-f`、没有 `stash`、没有 `clean`、
- * 没有 `reset --hard`：一个 installer 不该有能把别人的未提交工作抹掉的那一格。
- */
-/**
- * 把既有 clone 前进到钉住的 ref（IO 步；判据全在 `existingCloneDecision` 里）。
- *
- * 只有这几种 git 动作：`status --porcelain`、`remote`、几次 `rev-parse --verify`、`rev-parse
+ * 只有这几种 git 动作：开头一次 `rev-parse --show-toplevel`（问"要动的是不是这一棵"，见下面的
+ * S7-1 注释）、`status --porcelain`、`remote`、几次 `rev-parse --verify`、`rev-parse
  * --is-shallow-repository`（全是读），`fetch --tags [remote <ref>]`（只往 .git 里加对象；
  * 带不带 `--depth 1` 由 git 自己答的那句"是不是浅仓"决定，见 `readCloneFacts`），以及
  * `checkout --detach <那个 commit 的 sha>`（只在树干净时执行）。没有 `-f`、没有 `stash`、没有
@@ -2742,6 +2831,22 @@ export function resolveRemoteName({ remotes = [] } = {}) {
  * 拒绝；而那次 fetch 的落点（FETCH_HEAD）就是一个 sha，切它才是这一句本来的意思。
  */
 export function advanceExistingClone({ repoDir, ref, spawn = spawnSync } = {}) {
+  // 第一件事不是"这棵树脏不脏"，而是"要动的是不是这一棵"（S7-1，2026-10-29 P0）：
+  // `git -C <dir> …` 会落到离它最近的那棵树，所以从前这一支对着 `<外层repo>/vendored` 跑
+  // `checkout --detach` 时，切走的是**外层的 main**（本轮实测：detach 完还回一句 advance: use）。
+  // 这一问在这里独立跑一次，不靠 `readCloneFacts` 内部那道——两个函数都可能被单独调用，
+  // 守卫住在各自开头才算各自守得住。
+  const top = readRepoToplevel({ dir: repoDir, spawn })
+  const toplevelProblem = toplevelProblemFor({ targetDir: repoDir, toplevel: top.toplevel, readOk: top.read })
+  if (toplevelProblem) {
+    return {
+      action: 'refuse',
+      blocking: [],
+      toplevelProblem,
+      toplevel: top.toplevel,
+      text: toplevelRefuseText({ targetDir: repoDir, problem: toplevelProblem }),
+    }
+  }
   const read = (args) => spawn('git', ['-C', repoDir, ...args], { encoding: 'utf8' })
   const remoteNames = () => {
     const res = read(['remote'])
@@ -3066,7 +3171,9 @@ export async function install({
           })}\n\n${repoMissingText()}`,
         )
       }
-      if (resolveProjectRoot(plan.targetDir) === null) {
+      // 核对的也是**这一层**：clone 出来的目录自己得有 marker。从前这里用 resolveProjectRoot，
+      // 它会向上走，于是一棵内容不完整的 clone 只要落在某个仓库里就能被判成"结构完整"。
+      if (!looksLikeRepoHere(plan.targetDir)) {
         throw new Error(`clone 完成但目录结构不完整：${plan.targetDir}\n\n${repoMissingText()}`)
       }
       rootDir = plan.targetDir

@@ -154,8 +154,10 @@ test('doctor：六格都在位时答 0，且逐格给的是读到的东西', () 
   }
 })
 
-test('doctor：全局包缺一格要答"不在"，并给一行不带权限的补法', () => {
+test('doctor：全局包缺一格要答"不在"，补法那一行由前缀探测背书且不带 shell 元字符', () => {
   const root = scratch('doctor-npm')
+  const prefix = scratch('doctor-npm-prefix')
+  fs.mkdirSync(path.join(prefix, 'lib', 'node_modules'), { recursive: true })
   const pointerPath = path.join(root, 'update-install.json')
   const cli = path.join(root, 'tree', 'updater', 'cli.js')
   fs.mkdirSync(path.dirname(cli), { recursive: true })
@@ -167,13 +169,21 @@ test('doctor：全局包缺一格要答"不在"，并给一行不带权限的补
     [/updater\/cli\.js status/, { status: 0, stdout: JSON.stringify(updaterStatusJson({ status: 'applied', code: 'npm-not-refreshed' })), stderr: '' }],
     [/launchctl print/, { status: 0, stdout: 'gui/501/x = {\n\tstate = running\n}', stderr: '' }],
     [/^npm ls -g/, { status: 0, stdout: npm, stderr: '' }],
+    // 2026-10-29 S7-5：从前这一把桩没有 `npm prefix -g` 这一答，而那一格的补法张口就写"不需要权限"。
+    // 旧断言钉的是 `npm install -g glasspane-mcp@` 那一串——`@<版本>` 里的 `<` 是 shell 重定向符，
+    // 照抄连命令都起不来（/bin/sh -c 回语法错），所以那条断言本身在给缺陷背书。现在钉的是
+    // "命令里印的就是能跑的那一条"，并由 daily-20261029-installer-lane7.test.mjs 逐形状量三档答案。
+    [/npm prefix -g/, { status: 0, stdout: `${prefix}\n`, stderr: '' }],
   ])
   try {
     const readings = doctorReadings({ env: { GLASSPANE_STATE_DIR: root }, spawn: spawner.fn, uid: '501' })
     const npmRow = readings.find((one) => one.name === '全局 npm 包')
     assert.equal(npmRow.read, READS.absent, JSON.stringify(npmRow))
     assert.match(npmRow.detail, /glasspane-install=没装/, npmRow.detail)
-    assert.match(npmRow.remedy, /npm install -g glasspane-mcp@/, npmRow.remedy)
+    assert.ok(spawner.calls.some((line) => /npm prefix -g/.test(line)), '那句"不需要权限"必须由一次真探测支撑')
+    assert.match(npmRow.remedy, /npm install -g glasspane-mcp glasspane-install/, '补法里的命令就是不带占位符的那一条')
+    assert.doesNotMatch(npmRow.remedy, /@<|</, '占位符那一枚重定向符不许再出现')
+    assert.ok(npmRow.remedy.includes(prefix), '可写性是对着读到的那个前缀说的')
     assert.doesNotMatch(npmRow.remedy, /\bsudo\b/, '补法不许交出可照抄的升权命令')
     const statusRow = readings.find((one) => one.name === '更新器状态')
     assert.match(statusRow.detail, /装着=1\.20\.0/, `版本号只能从状态文档里取：${statusRow.detail}`)
@@ -182,6 +192,7 @@ test('doctor：全局包缺一格要答"不在"，并给一行不带权限的补
     assert.equal(doctorReport(readings).ok, false, '有一格不在位时 doctor 必须答"不健康"')
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
+    fs.rmSync(prefix, { recursive: true, force: true })
   }
 })
 

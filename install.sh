@@ -16,7 +16,8 @@
 # 职责5：委托 installer/cli.js 走完整安装流程（swift/npm 预检、构建、launchd、GUI 授权
 #        引导均在 installer 内）。
 # 另有一道不算职责的前置闸门：HOME 闸（下面的 0a）——它不是"做一件事"，而是保证后面每一条
-# 拼出来的路径都有家可归；dry-run 也不豁免它。
+# 拼出来的路径都有家可归；dry-run 也不豁免它。usage 闸（下面的 2d）同理：它不做任何事，只是
+# 在动手之前把这一页交出来（2026-10-29 之前本脚本压根不认 --help/-h，见下面那一节的注释）。
 # **顺序要紧**：Node 预检排在 clone 之前，否则跑不动 installer
 # 的机器要先付一次深 1 clone 才知道装不了（2026-10-15 修）；平台闸同样排在 clone 之前，
 # 因为它要挡的正是那笔 clone。
@@ -38,6 +39,40 @@ GLASSPANE_RELEASE="v1.25.2"
 # 输出函数先定义：下面第 (0) 条 HOME 闸要用 fail 说话，而它必须排在任何 $HOME 展开之前。
 say() { printf '%s\n' "$*"; }
 fail() { printf '错误: %s\n' "$*" >&2; exit 1; }
+
+# usage 闸（下面的 2d）要打印的那一页，因此必须排在它被调用之前——shell 的函数是"定义在前才存在"。
+# 内容只到"这一层脚本认什么"为止：installer 那一层的旗标交给它自己的 --help。把那份旗标清单抄进
+# 这里，就是下一处"两份抄本没人对照"（本轮修的那几条里已经有三条是这个形状）。
+usage() {
+  say 'GlassPane 一键安装入口（install.sh）——只说明这一层做什么，其余交给 installer。'
+  say ''
+  say '用法：'
+  say '  脚本头里那一行 curl -fsSL … | sh 就是本文件的安装写法（那一行的地址与 installer/cli.js 的'
+  say '  INSTALL_SH_URL 常量由用例逐字对照；这里不再抄一遍，多一处地址就多一处没人对照的抄本）。'
+  say '  sh install.sh [选项]                     # 一键命令里要带旗标就写：| sh -s -- <选项>'
+  say ''
+  say '这一层认的三个旗标（其余原样透传给 installer/cli.js，它的 --help 里有完整清单）：'
+  say '  --repo <目录>    用这棵树当源码（目录里必须同时有 engine/Package.swift 与'
+  say '                   mcp-shell/package.json）；给了而不合这条判据就当场停下，不 clone、也不委托。'
+  say '  --no-bootstrap   定位不到源码时不 clone，直接停下并打印四个定位位。'
+  say '  -h, --help       这一页。退出码 0，且不 clone、不委托——任何平台都一样（与 installer/cli.js'
+  say '                   对 --help 的豁免同一句话：CI 读的就是这一页，不是这台机器装不装得了）。'
+  say ''
+  say '环境变量：'
+  say '  GLASSPANE_REPO_URL      clone 的地址，只认 https:// / ssh:// / file://（默认 GitHub 上的本仓）'
+  say '  GLASSPANE_REF           钉的版本（默认 '"${GLASSPANE_RELEASE}"'；要追主干必须显式写 main）'
+  say '  GLASSPANE_INSTALL_DIR   clone 的落点（默认 '"${HOME:-当前登录家目录}"'/glasspane）'
+  say '  GLASSPANE_REPO          指一棵已经在手的仓库树（与 --repo 同一件事）'
+  say '  GLASSPANE_INSTALL_DRY_RUN=1  只报告决策：不 clone、不委托'
+  say ''
+  say '这一层做的五件事（Node 预检 / 平台闸 / 源码定位 / 覆盖位的形状闸与透传 / 委托 installer）'
+  say '写在脚本头里；构建、launchd 注册与权限引导都在 installer 里：'
+  say '  node <仓库>/installer/cli.js --help'
+  say ''
+  say '退出码：0 = 这一页已打印（--help），或委托之后 installer 自己回的那个 0；'
+  say '        1 = 这一层就停下（HOME/形状闸/源码定位/平台闸），或 installer 回 1；'
+  say '        2 = installer 判定的命令行参数错误（由 exec 原样透传）。'
+}
 
 # --- 0a) HOME 闸（必须在 CLONE_DIR 展开之前）---------------------------------
 # `set -u` 下 `${VAR:-$HOME/x}` 的**默认值也是展开的一部分**：HOME 没设置时 shell 在拼
@@ -191,6 +226,20 @@ describe_ref() {
 advance_existing_clone() { # $1=目录 $2=要装的 ref。回 0 = 这棵树可以用；非 0 = 本轮别用它，且没动过它
   _dir="$1"
   _ref="$2"
+  # 第一件事不是"这棵树脏不脏"，而是"要动的是不是这一棵"（2026-10-29 S7-1，installer 那一侧同修）。
+  # `git -C <目录>` 落到的是**离它最近的那棵树**：`<外层repo>/vendored` 这样的子目录过得了
+  # looks_like_repo（它自己就有那两个 marker），而随后 status / checkout 读与写的都是外层那一棵。
+  # 两侧都要化成物理路径再比：git 打的 --show-toplevel 是物理路径，而 $_dir 可能带着
+  # /var→/private/var 这一类软链进来（本机实测），直接比字符串会把一棵正当的 clone 判成别处。
+  _top=$(git -C "$_dir" rev-parse --show-toplevel 2>/dev/null || true)
+  _here=$(cd "$_dir" 2>/dev/null && pwd -P || true)
+  if [ -z "$_top" ] || [ -z "$_here" ] || [ "$_top" != "$_here" ]; then
+    say "  ${_dir} 自己不是一棵 git 仓库的根：git -C \"${_dir}\" rev-parse --show-toplevel 答的是 ${_top:-（没答话）}。"
+    say "  本轮要是动手，动的就是 ${_top:-那一问没有答案} 那一棵，而不是你指的 ${_dir}——那是别人的仓库：不在它上面 fetch、不切它的分支、不碰它的工作树。"
+    say "  下一步（两条都做得动，且不销毁任何东西）：a) GLASSPANE_INSTALL_DIR=<不属于任何仓库的目录> 重跑一键安装；"
+    say "    b) 要装的那一棵在别处，就用 --repo <目录> 或 GLASSPANE_REPO=<目录> 指过去——指的目录自己必须就是仓库根。"
+    return 1
+  fi
   _dirty=$(git -C "$_dir" status --porcelain 2>/dev/null || echo "__读不出__")
   if [ "$_dirty" = "__读不出__" ]; then
     say "  ${_dir} 读不出 git 状态（那目录不是仓库，或 git 答不了）：判不出来的事不当成「干净」，不动它。"
@@ -244,9 +293,16 @@ advance_existing_clone() { # $1=目录 $2=要装的 ref。回 0 = 这棵树可�
       return 1
     fi
     say "  ${_dir} 里没有 ${_ref} 这个引用（旧 clone 的 tag 表停在更早一版、浅 clone，以及**按 tag 建的 clone 里根本没有 refs/heads/** 都会这样）："
-    say "    先 fetch 它——git -C ${_dir} fetch --tags ${_depth:+$_depth }${_remote} ${_ref}，只补对象、不动工作树。"
+    # 这一句是**打印给读者照抄**的，所以路径必须带引号（2026-10-29 S7-4）：HOME 或
+    # GLASSPANE_INSTALL_DIR 里带空格时（/Users/John Smith），裸的 ${_dir} 照抄进 shell 就断成两个词，
+    # git 收到的是 `git -C /Users/John Smith fetch …`——那条命令要么失败要么在别处生效，而这一行
+    # 的本意是"照着跑就对了"。同一个函数上面 40 行的 GLASSPANE_INSTALL_DIR=\"…\" 已经是带引号的
+    # 那一形；判据对、句子漏一处，就是这道闸（install-sh 那条静态闸）现在扫的东西。
+    # $_depth 保持不带引号：它要在打印出来的那一行里就是两个词（--depth 1），加引号反而合成一个
+    # git 不认的参数。
+    say "    先 fetch 它——git -C \"${_dir}\" fetch --tags ${_depth:+$_depth }\"${_remote}\" \"${_ref}\"，只补对象、不动工作树。"
     if ! git -C "$_dir" fetch --tags $_depth "$_remote" "$_ref" >/dev/null 2>&1; then
-      say "    git fetch 非零退出：确认网络与该引用存在（git ls-remote ${_remote} ${_ref}），"
+      say "    git fetch 非零退出：确认网络与该引用存在（git ls-remote \"${_remote}\" \"${_ref}\"），"
       say "    或 GLASSPANE_INSTALL_DIR=<空目录> 换一处全新的 clone。本轮没有 clone、没有切分支。"
       return 1
     fi
@@ -330,6 +386,7 @@ assert_ref "$REF"
 # 一个只在其中一条入口上生效的旗标，等于给读者留了一条看着能用的死路。
 _explicit_repo=""
 _no_bootstrap=0
+_wants_help=0
 _want_repo_arg=0
 for _arg in "$@"; do
   if [ "$_want_repo_arg" = "1" ]; then
@@ -340,8 +397,46 @@ for _arg in "$@"; do
   case "$_arg" in
     --repo) _want_repo_arg=1 ;;
     --no-bootstrap) _no_bootstrap=1 ;;
+    # --help 排在这里而不是另起一轮扫描：`--repo --help` 在 installer/cli.js 里是"值被 --repo 吃掉"
+    # （parseArgs 的 case '--repo' 直接吞下一枚），这里跟着同一个形状走，两条入口才对同一串 argv
+    # 给出同一个结论。另起一轮"看见 --help 就算"会和它分叉。
+    --help|-h) _wants_help=1 ;;
   esac
 done
+
+# --- 2d) usage 闸（2026-10-29 S7-3：这一层从前压根不认 --help/-h）---------------
+# 从前 --help 走的是"什么都不认识 → 原样透传"那一条：非 macOS 上脚本先被平台闸拒回 1，而
+# `node installer/cli.js --help` 明明白白回 0（cli.js 把 options.help 从平台闸豁免，CI 的
+# install-gate 那一格读的就是那一页 usage）——同一种问法在两条一键入口上两个退出码。
+# macOS 上更贵：`--help` 一路走到源码定位，先付一次 depth-1 的网络 clone，然后才由 installer
+# 把那一页打出来。
+# 位置是这句承诺的一部分：HOME 闸与两个覆盖位的形状闸**在前**（它们拒的是"这一趟根本没法谈"，
+# 带不带 --help 都该听见），clone 与委托在后。非 macOS 同样豁免——这一条打印的不是安装动作，
+# 平台闸挡的从来不是它。
+if [ "$_wants_help" = "1" ]; then
+  usage
+  exit 0
+fi
+
+# --- 2e) 透传前先把 --repo 自己问一遍（2026-10-29 S7-2）-------------------------
+# `--repo <坏目录>` 从前只在上面的定位级联里"没命中"，然后脚本照常去 clone，最后
+# `exec node "$REPO/installer/cli.js" "$@"` 把那一枚原样透传过去——而 cli.js 里 --repo 的优先级
+# 最高（explicitRoot 在 GLASSPANE_REPO 与自动查找之前），于是刚 clone 完的那一棵被无视，npm install
+# 真的以那个**已经被 looks_like_repo 拒过**的目录为 cwd 跑起来。
+# 两种修法里选了"当场拒绝"：把旗标从透传参数里剔掉也能通，但那要让脚本学会重写 argv，而读者
+# 看到的仍旧是"我给了 --repo，它没理我"。停下来说清"这一枚旗标为什么不行"才是做得动的那一步，
+# 形状也与 --no-bootstrap 那一支同句（say + exit 1，dry-run 不豁免）。
+# 排在定位级联**之前**也带着另一条理由：`$PWD` 恰好是一棵真仓库时，级联会命中 cwd 那一支而
+# 让 REPO 非空——坏旗标就再也没被问过，照样原样透传。给了就要么合判据、要么当场拒，不给兜底的机会。
+if [ -n "$_explicit_repo" ] && ! looks_like_repo "$_explicit_repo"; then
+  say "--repo 给了这个目录，而它不合判据：${_explicit_repo}"
+  say "  判据（与 looks_like_repo 同一份）：目录里要同时有 engine/Package.swift 与 mcp-shell/package.json。"
+  say "  这一枚旗标原样透传给 installer/cli.js 时它优先级最高：刚 clone 的那一棵会被无视，"
+  say "  npm install 会以这个被拒的目录为 cwd 真的跑起来——所以这里停下，不 clone、不委托。"
+  say "本轮没有 clone、没有写入任何东西。"
+  say "下一步：--repo 指一棵真的仓库（上面那两条判据都在），或去掉 --repo 让它 clone 一份（ref: ${REF}）。"
+  exit 1
+fi
 
 # --- 3) 源码定位：--repo → GLASSPANE_REPO → 当前目录 → 既有 clone → 自动 clone --
 REPO=""

@@ -37,8 +37,94 @@ export const VERBS = Object.freeze(['update', 'doctor', 'status', 'help'])
 export const VERB_ALIASES = Object.freeze({ '-h': 'help', '--help': 'help' })
 export const DAEMON_JOB_LABEL = 'com.glasspane.daemon'
 export const NPM_PACKAGES = Object.freeze(['glasspane-mcp', 'glasspane-install'])
+/**
+ * The one line the npm remedy prints. It carries **no version placeholder on purpose**: the previous
+ * shape pinned each package to a version written inside angle brackets, and that opening bracket is a
+ * shell redirection — `/bin/sh -c '<那整行>'` fails with a syntax error (measured 2026-10-29, exit 2),
+ * so an agent copying the remedy could not even start the command. No version means "the registry's
+ * latest", which is what a missing package wants; pinning is a separate, explicit step
+ * (`npm view <pkg> versions`), and the remedy says so in prose instead of shipping an uncopyable token.
+ * Named and exported so a test can assert that *what is printed* is *what runs* — never a second copy
+ * of the command living in a template string.
+ */
+export const NPM_GLOBAL_INSTALL_CMD = `npm install -g ${NPM_PACKAGES.join(' ')}`
 /** The three answers a read may give. `unverified` is the one that used to be missing everywhere. */
 export const READS = Object.freeze({ available: 'available', absent: 'absent', unverified: 'unverified' })
+
+/** 要印进"可照抄的一行"里的原文，先剥掉 shell 元字符：npm 自己的原话带着 `'`、`<`、`|` 时，
+ *  那句话就不再能被 /bin/sh 解析了（S7-5 测的正是这一族）。裁的是元字符，不是信息。 */
+function shellSafe(text) {
+  return String(text ?? '').replace(/[\n\r]/g, ' ').replace(/[<>&|;'"`\\$()]/g, '')
+}
+
+/**
+ * Is this machine's global npm prefix writable by *this* user? Three answers, same rule as READS:
+ * the claim printed in the remedy ("不需要权限") used to be backed by no probe at all — neither
+ * `npm prefix -g` nor a W_OK check happened anywhere in this file (or in the whole installer shard).
+ * `unverified` is therefore an answer of its own: "I could not look" is not "you do not need permission",
+ * and it is certainly not an escalation command.
+ */
+export function probeGlobalNpmPrefix({
+  spawn = spawnSync,
+  exists = (p) => fs.existsSync(p),
+  writable = (p) => {
+    try {
+      fs.accessSync(p, fs.constants.W_OK)
+      return true
+    } catch {
+      return false
+    }
+  },
+} = {}) {
+  const res = spawn('npm', ['prefix', '-g'], { encoding: 'utf8', timeout: 30_000 })
+  const status = typeof res?.status === 'number' ? res.status : null
+  if (status !== 0) {
+    return {
+      read: READS.unverified,
+      prefix: null,
+      target: null,
+      writable: null,
+      reason: status === null
+        ? `npm prefix -g 没答话（${res?.error?.message ?? String(res?.error ?? '没有退出码')}）`
+        : `npm prefix -g 退出 ${status}`,
+    }
+  }
+  const prefix = String(res.stdout ?? '').trim()
+  if (prefix === '') return { read: READS.unverified, prefix: null, target: null, writable: null, reason: 'npm prefix -g 退 0 而答案是空的' }
+  // npm 真正落包的是 `<prefix>/lib/node_modules`；那一级不存在时退到 `lib`、再退到前缀本身——
+  // 要判的是"这一趟能不能写进去"，所以问的是盘上真在的那一级。
+  const target = [path.join(prefix, 'lib', 'node_modules'), path.join(prefix, 'lib'), prefix].find((p) => exists(p)) ?? null
+  if (target === null) {
+    return { read: READS.unverified, prefix, target: null, writable: null, reason: `全局前缀 ${prefix} 在盘上不存在（lib/node_modules、lib、前缀本身三级都没读到目录）` }
+  }
+  return { read: READS.available, prefix, target, writable: writable(target) === true, reason: null }
+}
+
+/**
+ * The remedy line, composed from the probe's answer (pure: the three shapes are unit-testable without
+ * touching a machine). Never an escalation: when the prefix is not ours to write, the sentence names the
+ * prefix and the directory that refused W_OK and points at moving the prefix under the user — it does
+ * not hand out a privileged command (SECURITY.md §3, and this file's own header).
+ */
+export function npmGlobalRemedy({ missing = [], prefixState } = {}) {
+  const named = missing.map((name) => shellSafe(name)).join(' ')
+  const cmd = NPM_GLOBAL_INSTALL_CMD
+  if (!prefixState || prefixState.read !== READS.available) {
+    const why = prefixState?.reason ?? '这一问没有答案'
+    return `补法（全局 npm 前缀的可写性**未验证**——${shellSafe(why)}；这一问没答案，所以这一条不替你保证免权限）：`
+      + `先让 npm prefix -g 能答话，再照这一行装 ${cmd}。不带版本号=取 registry 最新发布物，`
+      + `要钉版本先跑 npm view glasspane-mcp versions。缺的是 ${named || '（没读出来）'}。`
+  }
+  if (prefixState.writable === true) {
+    return `补法（不需要权限——本机探测过：全局前缀 ${shellSafe(prefixState.target)} 对本账号可写 W_OK）：${cmd}。`
+      + `不带版本号=取 registry 最新发布物，要钉版本先跑 npm view glasspane-mcp versions。缺的是 ${named}。`
+  }
+  return `补法（**不给升权命令**：这台机器的全局 npm 前缀不可写——前缀 ${shellSafe(prefixState.prefix)}，`
+    + `探测的是 ${shellSafe(prefixState.target)}，它对 W_OK 答"不可写"）。装进系统前缀不是这一层能替你做的事。`
+    + `下一步：先 npm config set prefix 指到一个你自己可写的目录（或用一个自带前缀的 Node 版本，nvm 就是这一档），`
+    + `再跑 ${cmd}（不带版本号=取 registry 最新发布物，要钉版本先跑 npm view glasspane-mcp versions）。缺的是 ${named}。`
+}
+
 
 const POINTER_NAME = 'update-install.json'
 const STATE_NAME = 'update-state.json'
@@ -281,12 +367,14 @@ export function doctorReadings({
     const deps = npm.json.dependencies ?? {}
     const seen = NPM_PACKAGES.map((name) => `${name}=${deps[name]?.version ?? '没装'}`)
     const missing = NPM_PACKAGES.filter((name) => !deps[name])
+    // 缺包时要不要说"不需要权限"，由这台机器答，不由这句话答（S7-5）：先探一次全局前缀。
+    // 探测排在读完全局包之后、只在真要给出补法时才问——都在位时没人需要这一行。
     out.push({
       name: '全局 npm 包',
       read: missing.length === 0 ? READS.available : READS.absent,
       detail: seen.join(' '),
       remedy: missing.length === 0 ? null
-        : `补法（不需要权限，取的是 registry 的发布物）：npm install -g ${NPM_PACKAGES.map((n) => `${n}@<版本>`).join(' ')}`,
+        : npmGlobalRemedy({ missing, prefixState: probeGlobalNpmPrefix({ spawn, exists }) }),
     })
   }
 

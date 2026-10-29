@@ -372,6 +372,11 @@ test('readCloneFacts: 浅不浅由 git 答，答不出来按完整仓对待', ()
   const read = (stdout, status = 0) => ({ status, stdout, stderr: '' })
   const spawn = (bin, args) => {
     const join = args.join(' ')
+    // 2026-10-29 S7-1：这把桩从前**没有** --show-toplevel 这一答，于是它对任意目录都默认
+    // "这里就是一棵仓库，且这就是它自己的根"——被修的缺陷恰恰活在那一句没问里（外层那棵树
+    // 的事实被读成"这一棵"的事实）。答成被问的那个目录本身，测的才是"根对上了往下走"那一支；
+    // 答不上的那一支由 daily-20261029-installer-lane7.test.mjs 用**真 git** 量。
+    if (/--show-toplevel/.test(join)) return read(`${args[1]}\n`)
     if (/status --porcelain/.test(join)) return read('')
     if (/rev-parse --verify HEAD/.test(join)) return read('b'.repeat(40) + '\n')
     if (/rev-parse --verify v9\.9\.9/.test(join)) return read('', 1)  // 本地没这个 tag
@@ -399,6 +404,11 @@ test('advanceExistingClone: 完整 clone 的 fetch 不许带 --depth，浅仓才
     const spawn = (bin, args) => {
       calls.push(args.slice(2).join(' '))
       const join = args.join(' ')
+      // S7-1（2026-10-29）：这把桩必须答得出"要动的是不是这一棵"。从前它对所有 argv 都答话、
+      // 唯独没被问过 --show-toplevel，等于替"外层那棵树也可以被前进"作背书。这里答的是被问的
+      // 那个目录自己（args[1]），也就是"根对上了"那一支；答不上的那一支由真 git 的量
+      // （daily-20261029-installer-lane7.test.mjs），不在桩里假装验过。
+      if (/--show-toplevel/.test(join)) return { status: 0, stdout: `${args[1]}\n`, stderr: '' }
       if (args[args.length - 1] === 'remote') return { status: 0, stdout: 'origin\n', stderr: '' }
       if (/status --porcelain/.test(join)) return { status: 0, stdout: checkedOut ? '' : '', stderr: '' }
       if (/rev-parse --verify HEAD/.test(join)) return { status: 0, stdout: `${head}\n`, stderr: '' }
@@ -460,6 +470,9 @@ test('advanceExistingClone: 只有读、fetch、detach 这几种动作，且切�
   const spawn = (bin, args) => {
     calls.push(args.slice(2))
     const join = args.join(' ')
+    // S7-1：见上一条用例里同一段注释——"只有这几种动作"这份名单从前漏了 --show-toplevel，
+    // 而恰恰是那一问挡住了"动外层那棵树"。它现在是一次**读**，仍在这条用例允许的集合里。
+    if (/--show-toplevel/.test(join)) return { status: 0, stdout: `${args[1]}\n`, stderr: '' }
     if (args[args.length - 1] === 'remote') return { status: 0, stdout: 'origin\n', stderr: '' }
     if (/status --porcelain/.test(join)) return { status: 0, stdout: checkedOut ? '' : '', stderr: '' }
     if (/rev-parse --verify HEAD/.test(join)) return { status: 0, stdout: `${head}\n`, stderr: '' }
@@ -486,6 +499,8 @@ test('advanceExistingClone: 只有读、fetch、detach 这几种动作，且切�
     ref: 'v9.9.9',
     spawn: (bin, args) => {
       const join = args.join(' ')
+      // S7-1：同上。这一把桩要演的是"切完之后判据不再成立"，所以它得先通过"要动的是这一棵"那一问。
+      if (/--show-toplevel/.test(join)) return { status: 0, stdout: `${args[1]}\n`, stderr: '' }
       if (args[args.length - 1] === 'remote') return { status: 0, stdout: 'origin\n', stderr: '' }
       // 切之前：干净、HEAD 在 B、tag 在 A ⇒ 判成"前进"。切之后：HEAD 到了 A 却冒出一处改动，
       // 复判必须把它拦下来——这一支不许把"命令退出了 0"当成"这棵树可用"。

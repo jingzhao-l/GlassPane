@@ -238,6 +238,11 @@ test('advanceExistingClone: 切的那一步只拿得到读到的 commit——空
   const spawn = (bin, args) => {
     calls.push(args.slice(2).join(' '))
     const join = args.join(' ')
+    // S7-1（2026-10-29）：这把假 git 从前对每个 argv 都答话，唯独没被问过 --show-toplevel，
+    // 于是"前进的是不是被指的这一棵"这件事在任何桩里都不成立。答成被问的目录本身（args[1]）
+    // 之后，这一条测的才是它本来的那一格（空落点不许进 checkout 的 argv）；"答的是外层那棵树"
+    // 那一格由真 git 的量，见 daily-20261029-installer-lane7.test.mjs。
+    if (/--show-toplevel/.test(join)) return { status: 0, stdout: `${args[1]}\n`, stderr: '' }
     if (args[args.length - 1] === 'remote') return { status: 0, stdout: 'origin\n', stderr: '' }
     if (/status --porcelain/.test(join)) return { status: 0, stdout: '', stderr: '' }
     if (/rev-parse --verify HEAD/.test(join)) return { status: 0, stdout: `${B}\n`, stderr: '' }
