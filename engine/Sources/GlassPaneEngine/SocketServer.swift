@@ -324,6 +324,9 @@ public final class SocketServer {
                 switch Self.silenceTimeoutAction(for: plan.wait, codec: codec) {
                 case .close(let reason):
                     log.error(reason)
+                    // S3-3：到点关闭不等于这条线没欠东西——半行/超长帧同样可能正卡着，
+                    // 退出前问一次 codec，先回一帧再走。
+                    answerUndeliveredRequestBeforeClose(clientFD: clientFD, codec: codec)
                     return
                 case .keepWaiting:
                     // 空闲切片到头。这条连接什么都不知道，我们只是回头看了它一眼
@@ -346,6 +349,11 @@ public final class SocketServer {
                 return
             }
             if readCount == 0 {
+                // S3-3（每日 2026-10-29）："写半行就 EOF"与"写了 >4 MiB 不写换行后断开"
+                // 从前只换来一条 stderr 日志，线上 0 字节——`FrameCodec` 的 `.oversize`
+                // 只在见换行时产出，`Dispatcher` 承诺的 GP_E_PAYLOAD_TOO_LARGE 永远发不
+                // 出去，调用方只能把自己的超时读成"daemon 挂了"。return 之前问一次 codec。
+                answerUndeliveredRequestBeforeClose(clientFD: clientFD, codec: codec)
                 log.info("client disconnected")
                 return
             }
@@ -357,6 +365,31 @@ public final class SocketServer {
                 let response = dispatcher.handle(event)
                 guard writeAll(clientFD, response) else { return }
             }
+        }
+    }
+
+    /// S3-3：EOF/到点退出前问一次 codec——这一行还欠着收尾（半行挂起，或超长帧正在
+    /// 丢弃中）时，先把错误帧写回线上再 return。错误帧恒三字段 `{code,message,remedy}`：
+    /// 超长丢弃走 `dispatcher.handle(.oversize)`（GP_E_PAYLOAD_TOO_LARGE，与见换行时
+    /// 同一份承诺），半行走 `Dispatcher.structuredErrorLine`（GP_E_BAD_REQUEST：没解析
+    /// 就没执行，remedy 取自共享错误表）。不欠东西（干净 EOF、首字节沉默）时一个字节
+    /// 都不许多发——那是 `SilentClientDeadlineTests` 守着的既有语义。
+    private func answerUndeliveredRequestBeforeClose(clientFD: Int32, codec: FrameCodec) {
+        guard codec.awaitsNewline else { return }
+        let response: Data
+        if codec.isDiscardingOversizeFrame {
+            response = dispatcher.handle(.oversize)
+        } else {
+            response = Dispatcher.structuredErrorLine(
+                id: nil,
+                code: .badRequest,
+                message: "request ended mid-line: \(codec.pendingBytes) byte(s) reached this daemon without a terminating newline, so nothing was parsed and nothing was executed"
+            )
+        }
+        // 对端可能连读端也关了（EPIPE；SIGPIPE 已由 Swift 运行时置为忽略）：发不出去
+        // 就具名留一条日志，而不是让"回帧了"成为没有读数支撑的主张。
+        if !writeAll(clientFD, response) {
+            log.error("undelivered-request answer could not be written back: the peer closed before reading it")
         }
     }
 

@@ -1836,7 +1836,7 @@ blockShutdownSignalsEarly()
 // read as unkillable. That is the shape R5-07 removed for the single-instance guard,
 // reappearing one function later. Starting the thread first costs nothing: the
 // registry is empty until a listener really binds, so an early exit unlinks nothing.
-startShutdownWaiter(registry: shutdownSockets, inFlightAct: { daemonCore?.activeOperationId })
+startShutdownWaiter(registry: shutdownSockets, inFlightAct: { daemonCore?.inFlightOperationId() })
 let channel = AXChannel()
 // T9 progressive degradation is on by default: it needs no TCC permission
 // (proc_pidinfo is same-user process inspection). C33 is injected by default

@@ -136,10 +136,16 @@ final class DailyRound20261028UsageAndHonestyTests: XCTestCase {
     }
 
     /// 收尾那一条读的是这个读数，且被拒时不写日志之外的任何东西。
+    /// 每日 2026-10-29 S3-2：这一支从前钉的是 `daemonCore?.activeOperationId` ——裸属性
+    /// 跨线程直读正是那条数据竞争（waiter 线程读、service 线程写，无同步）。waiter 从此
+    /// 走取值方法 `inFlightOperationId()`（锁内读数），这一支改钉新形状；本文件的同线程
+    /// 用例 `testActiveOperationIdIsVisibleDuringActAndClearedAfter` 逐字保持绿。
     func testShutdownWaiterReadsTheInFlightActAndSaysSo() throws {
         let source = try sourceText("Sources/glasspaned/main.swift")
-        XCTAssertTrue(source.contains("inFlightAct: { daemonCore?.activeOperationId }"),
+        XCTAssertTrue(source.contains("inFlightAct: { daemonCore?.inFlightOperationId() }"),
                       "waiter 不再问在途 act 了：那一句\"少了一条证据\"永远不会被写出来")
+        XCTAssertFalse(source.contains("inFlightAct: { daemonCore?.activeOperationId }"),
+                       "S3-2：waiter 又绕着锁裸读属性了——收尾读数与被 service 线程写的字段赛跑")
         XCTAssertTrue(source.contains("the shutdown signal arrived while operation"),
                       "具名要点到那一次的 operationId")
         XCTAssertTrue(source.contains("never archived"),

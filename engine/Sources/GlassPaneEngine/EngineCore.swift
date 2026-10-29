@@ -130,7 +130,8 @@ public final class EngineCore {
     public private(set) var attachedApp: AttachedApp?
     /// Currently active project (P1 spec v1.4 §1.3). Set via attach with projectId.
     public private(set) var activeProjectId: String?
-    public private(set) var shutdownRequested = false
+    // `shutdownRequested`（S3-2）的声明与锁移到了 `activeOperationId` 旁边——同一个
+    // 跨线程读批次的字段共用一把 `crossThreadStateLock`。
 
     private let channel: RuntimeChannel
     private let clock: () -> Date
@@ -267,7 +268,45 @@ public final class EngineCore {
     /// 唯一的读者是收尾路径（`glasspaned` 的 SIGTERM/SIGINT waiter）：被打断的那一次 act
     /// 不会留下档案，所以"少了一份证据"必须由日志具名说出来的那个 id 来说。
     /// 刻意不进 `hello`、不进证据包——它不是对外能力，是本次进程自己的一次在途事实。
-    public private(set) var activeOperationId: String?
+    ///
+    /// S3-2（每日 2026-10-29）：这个字段与 `shutdownRequested` 从前都是裸的
+    /// `public private(set) var`，waiter/socket 线程在读、service 线程在写——修前 TSan
+    /// 报两条 race（`act` 的写 :906/:895 vs 测试线程读；`shutdown()` 的写 vs
+    /// `SocketServer.serve` 循环顶部 :305 的读）。轻则收尾那句"是被打断不是没产出"
+    /// 报上错误的号，重则读到刚释放的 buffer、收尾变 SIGSEGV。读写从此收进同一把锁；
+    /// 对外读数面保留原名（计算属性），收尾路径走 `inFlightOperationId()`。
+    private let crossThreadStateLock = NSLock()
+    private var _activeOperationId: String?
+    private var _shutdownRequested = false
+
+    public var activeOperationId: String? {
+        crossThreadStateLock.lock()
+        defer { crossThreadStateLock.unlock() }
+        return _activeOperationId
+    }
+
+    /// waiter 侧的取值方法（`glasspaned/main.swift` 的 SIGTERM/SIGINT 收尾唯一的读者）。
+    /// 与属性同一个事实源、同一把锁——两问答案不许分叉。
+    public func inFlightOperationId() -> String? { activeOperationId }
+
+    public var shutdownRequested: Bool {
+        crossThreadStateLock.lock()
+        defer { crossThreadStateLock.unlock() }
+        return _shutdownRequested
+    }
+
+    private func setActiveOperationId(_ operationId: String?) {
+        crossThreadStateLock.lock()
+        _activeOperationId = operationId
+        crossThreadStateLock.unlock()
+    }
+
+    private func markShutdownRequested() {
+        crossThreadStateLock.lock()
+        _shutdownRequested = true
+        crossThreadStateLock.unlock()
+    }
+
     /// `humanInputEvents` 的投递上限；`humanInputEventCount` 始终是真实总数
     /// （样本可截断，计数不截断）。
     public static let humanEventWireLimit = 32
@@ -892,7 +931,7 @@ public final class EngineCore {
             if let attributionGuard, attributionGuard.isHolding {
                 _ = attributionGuard.releaseOperationRight()
             }
-            activeOperationId = nil
+            setActiveOperationId(nil)
         }
 
         let started = clock()
@@ -903,7 +942,7 @@ public final class EngineCore {
         // 用途是把"有一份证据不会进档案"写进行业日志——被 SIGTERM 打断不是"做完了"，
         // 而档案里从来不会有这一条，所以那句话必须落在日志里，否则这段历史只剩
         // "调用方拿到一个连接被掐断"这一种读法。
-        activeOperationId = operationId
+        setActiveOperationId(operationId)
 
         let aliveBefore = channel.isProcessAlive()
 
@@ -1376,7 +1415,17 @@ public final class EngineCore {
                 ? "the input stream was watched for the whole operation window, but this monitor declared no event kinds — which kinds the watch covers is not measured here, so an empty window is not evidence that nobody touched the machine"
                 : "the input stream was watched for the whole operation window, for these event kinds only: \(watchedEventKinds.joined(separator: ", ")) — a human input outside that list is not attributed by this channel"
         } else if monitorWasLost, let monitorFault {
-            contaminationBasis = "the input monitor stopped reporting inside this window: \(monitorFault) — the contaminated=true verdict is the absence of a watching channel, not an observed input"
+            // S3-1（每日 2026-10-29）：这一支从前无条件说"依据是没人在看通道，不是
+            // 观测到的输入"，可掉线**和**抓到人类输入可以同时成立——那时同一帧旁边就挂着
+            // `humanInputEventCount`/`humanInputEvents`，这句话把真实点击从判据里抹掉了，
+            // 事后档案（`circuitBreaker.reason` 同话）只剩"没人碰过机器"一种读法。
+            // 按 `observedHumanInput` 分支出两句，各自只说自己那半；对照臂（只有掉线、
+            // 没有观测输入）逐字保住原句——负例不许被顺手改掉。
+            if observedHumanInput, let humanEvents = contaminationVerdict?.humanEvents {
+                contaminationBasis = "the input monitor stopped reporting inside this window: \(monitorFault) — the contaminated=true verdict here rests on \(humanEvents.count) observed human input event(s) the guard drained in this same window; the channel loss is the monitor's own fault on record, it is not the basis of this verdict"
+            } else {
+                contaminationBasis = "the input monitor stopped reporting inside this window: \(monitorFault) — the contaminated=true verdict is the absence of a watching channel, not an observed input"
+            }
         } else if let monitorFault {
             contaminationBasis = "no input monitor was installed for this window: \(monitorFault) — the contaminated=true verdict is the absence of a monitor, not an observed input"
         } else {
@@ -1386,7 +1435,13 @@ public final class EngineCore {
             let label = monitorWasLost
                 ? "input-contamination-monitor-lost"
                 : "input-contamination-not-monitored"
-            let basis = "\(label): \(monitorFault)"
+            var basis = "\(label): \(monitorFault)"
+            // S3-1 的另一半：这句话随 `circuitBreaker.reason` 进档案，判据必须与
+            // `contaminationBasis` 同一口径——同一条件下不许断言相反的话。掉线且有
+            // 观测输入时，进档案那半点名观测到的输入；没有观测输入时逐字不变。
+            if monitorWasLost, observedHumanInput, let humanEvents = contaminationVerdict?.humanEvents {
+                basis += " — the guard drained \(humanEvents.count) human input event(s) in this window; those observed inputs are part of what the contaminated=true verdict rests on, and this label names only the channel's own fault"
+            }
             finalReason = finalReason.map { $0 + "; " + basis } ?? basis
         }
         // R1-09: AttributionGuard already measured *which* human inputs
@@ -1957,7 +2012,7 @@ public final class EngineCore {
     }
 
     public func shutdown() -> [String: Any] {
-        shutdownRequested = true
+        markShutdownRequested()
         return ["bye": true]
     }
 
