@@ -36,6 +36,13 @@ import Metal
 //     frame the probe cannot fit is refused on purpose and counted, never handed
 //     over to be thrown away in silence (values carry their own byte cap,
 //     `ProbeRuntime.stateValueByteCap`, so a normal state frame fits by design);
+//   * a `durationNs` the daemon's wire cannot carry (its clamp is
+//     `ProbeRuntime.durationNsWireCap`) is never sent as a carryable duration —
+//     it becomes a named overflow frame plus a `durationOverflowCount` in hello,
+//     so "the slow call happened" stays tellable from "nothing took >1 ms";
+//   * a socket name that cannot be dialled at all (`sun_path`) is refused by
+//     `start` on the spot — reason in `GP.socketProblem`, one stderr line, no
+//     retry loop — instead of pretending to be "no listener yet" forever;
 // Losses stay observable (GP.droppedEventCount / GP.droppedWriteCount, and
 // GP.truncatedValueCount for the values the byte cap shortened) and are announced
 // in `hello`, so "the handler did not run" can be told apart from "the probe could
@@ -177,6 +184,15 @@ public enum GP {
     /// prefix" has to stay tellable from "the frame never arrived".
     public static var truncatedValueCount: Int { runtime.truncatedValueCount }
 
+    /// Durations the probe refused to hand over because the wire cannot carry them
+    /// (`durationNs` outside the daemon's `0…Int32.max` clamp,
+    /// `ProbeRuntime.durationNsWireCap`). A *reading* loss, counted apart from
+    /// `droppedWriteCount` (a delivery loss) and announced in `hello` as
+    /// `durationOverflowCount`: without it, "the slow call happened but its
+    /// duration was eaten by the wire" is indistinguishable from "nothing took
+    /// longer than 1 ms".
+    public static var durationOverflowCount: Int { runtime.durationOverflowCount }
+
     /// keyPaths `registerKVCObject` was asked for and refused to observe
     /// (unresolvable, empty, or a shape the probe cannot validate). Registration
     /// is the only place this can be detected, so the count is how a missing
@@ -198,6 +214,16 @@ public enum GP {
     /// Whether a live daemon connection backs the probe right now — with the
     /// two drop counters, what separates "no hits" from "could not report".
     public static var isConnected: Bool { runtime.isConnected }
+
+    /// Why the configured socket name **cannot be dialled at all** — the size of
+    /// `sun_path`, an embedded NUL — or nil when the name is dialable and the
+    /// probe is merely waiting for a listener. `start` fills this once, on the
+    /// caller's thread, before the retry loop is ever entered; the two failures
+    /// used to share `connect`'s `-1`, so an undialable name burned the
+    /// 1 s + 2 s + 3 s, then 30 s schedule forever while `isConnected` said only
+    /// "not connected". A non-nil value here means retrying cannot help: fix the
+    /// name.
+    public static var socketProblem: String? { runtime.socketProblem }
 }
 
 // MARK: - Runtime
@@ -277,6 +303,47 @@ final class ProbeRuntime: @unchecked Sendable {
     /// measurement in `writeFrame`, not this number.
     static let stateValueByteCap = 1024
 
+    /// `durationNs` 能装上这条线路的最大值：daemon 的 `ProbeWire.swift` 把该键夹在
+    /// `0...(Int32.max)`，超界整帧判 malformed 并**丢弃**——丢弃发生在对端，探针的
+    /// `droppedWrites` 纹丝不动，"有 entry 帧、没有时长"就被读成"这次没有 >1ms"。
+    /// 与出站字节帽（`maxOutboundFrameBytes`）同一条纪律：装不下的东西不许当可携带
+    /// 的读数发出，由探针这边拒发并具名记账。这个上限与 daemon 源码互锁在
+    /// `Qoder20261029Swift5ProbeWireAndDialGates`（先例：`stateFolderName` 那条
+    /// 源码互锁闸），daemon 侧若改了夹界，探针的测试立刻红。
+    static let durationNsWireCap = Int32.max
+
+    /// 超出 `durationNsWireCap` 的时替代换发出的具名帧类型。当前的 daemon 对未知
+    /// 类型记 "unknown frame type 'handlerDurationOverflow'" 的日志——它进不了环形
+    /// 缓冲，但那一次"有时长、装不下"从此在 daemon 日志里有了名字，不再冒充
+    /// "没有超过 1ms 的调用"。
+    static let durationOverflowFrameType = "handlerDurationOverflow"
+
+    /// `sockaddr_un.sun_path` 的字节容量（Darwin 上是 104）。名字必须严格小于它
+    /// 并留一个隐式 NUL：103 字节是最大可拨名。`Qoder20261029Swift5ProbeWireAndDialGates`
+    /// 钉住 103 放行 / 104 拒这两个边界。
+    static let sunPathBytes: Int = {
+        var address = sockaddr_un()
+        return MemoryLayout.size(ofValue: address.sun_path)
+    }()
+
+    /// 这个名字**根本拨不出去**的原因（装不进 `sun_path`、或内嵌 NUL），可拨时返回
+    /// nil。纯函数、单一真源：`start` 用它当场判定（不进重试循环），`connect` 用
+    /// 它保留拒拨行为。从前长度校验只在 `connect` 里，与"对端没起来"共用返回值
+    /// -1，探针于是按 1+2+3s 再 30s 永久重试一个永远不可能成功的名字，`isConnected`
+    /// 只说"没连上"，永远说不出"这个名字拨不出去"。daemon 侧同名故障
+    /// （`UnixSocketAddress.fits`）是可见的红，探针侧不该更盲。
+    static func socketNameProblem(_ path: String) -> String? {
+        let bytes = path.utf8.count
+        if bytes >= sunPathBytes {
+            return "socket 名字超出 sun_path 容量：\(bytes) 字节 ≥ \(sunPathBytes)"
+                + "（最大可拨 \(sunPathBytes - 1) 字节），这个名字没有对端能绑上去：\(path)"
+        }
+        if path.utf8.contains(0) {
+            return "socket 名字内嵌 NUL，sun_path 会在它处截断成另一个名字：\(path)"
+        }
+        return nil
+    }
+
     /// Backoff after a failed attempt *inside* one cycle: attempt 0 → 1 s,
     /// attempt 1 → 2 s, attempt 2 → 3 s, then the cycle gap
     /// (`reconnectCycleIntervalMs`). The multiplier is the attempt index plus one,
@@ -336,6 +403,13 @@ final class ProbeRuntime: @unchecked Sendable {
     private var offlineBuffer: [[String: Any]] = []
     private var dropped = 0
     private var droppedWrites = 0
+    /// 时长超界被探针拒发（换成具名溢出帧）的次数——一种**读数**丢失，与送达丢失
+    /// `droppedWrites` 分账：后者说"帧没到"，这一条说"到过的帧里没有那个时长"。
+    private var durationOverflows = 0
+    /// `start` 当场判定的"这个名字拨不出去"，`GP.socketProblem` 的读源。nil =
+    /// 名字可拨（或还没 start 过）。它与"没连上"（`isConnected == false`、
+    /// `failedCycles` 在涨）是两种故障，从前共用 `connect` 的 -1，永远说不分开。
+    private var socketProblemValue: String?
     /// Values the probe cut at `stateValueByteCap` on their way to the wire —
     /// a reading loss, kept apart from the delivery losses above.
     private var truncatedValues = 0
@@ -393,6 +467,17 @@ final class ProbeRuntime: @unchecked Sendable {
     var truncatedValueCount: Int {
         lock.lock(); defer { lock.unlock() }
         return truncatedValues
+    }
+
+    var durationOverflowCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return durationOverflows
+    }
+
+    /// `start` 判定的"这个名字根本拨不出去"，nil = 名字可拨或从未 start 过。
+    var socketProblem: String? {
+        lock.lock(); defer { lock.unlock() }
+        return socketProblemValue
     }
 
     var rejectedKeyCount: Int {
@@ -523,7 +608,20 @@ final class ProbeRuntime: @unchecked Sendable {
         appNameValue = appName ?? ProcessInfo.processInfo.processName
         bundleIdValue = Bundle.main.bundleIdentifier
         socketPathValue = path
+        // 当场判定"这个名字根本拨不出去"：不进三次尝试 1 s、2 s、3 s 再 30 s 一周期的
+        // 重试循环，不烧 failedCycles，原因写进 `GP.socketProblem` 并在 stderr 打一行。
+        // 从前它藏在 `connect` 的 -1 里与"没人监听"同码，探针于是永远说不出差别。
+        let nameProblem = ProbeRuntime.socketNameProblem(path)
+        if let nameProblem { socketProblemValue = nameProblem }
         lock.unlock()
+
+        if let nameProblem {
+            FileHandle.standardError.write(
+                Data(("glasspane probe: not dialling " + path + " — " + nameProblem
+                      + " (GP.socketProblem; events buffer offline, retrying cannot help)\n").utf8)
+            )
+            return
+        }
 
         let thread = Thread { [weak self] in self?.serveConnections(path: path, generation: generation) }
         thread.name = "glasspane.probe.connection"
@@ -639,6 +737,7 @@ final class ProbeRuntime: @unchecked Sendable {
         let offlineDropped = dropped
         let writeDropped = droppedWrites
         let valueTruncated = truncatedValues
+        let overflowedDurations = durationOverflows
         let inboundDropped = droppedInboundLines
         let framesDropped = droppedInboundFrames
         let appName = appNameValue
@@ -662,6 +761,11 @@ final class ProbeRuntime: @unchecked Sendable {
             // "daemon 什么都没读到"，后者是"读到的只是一个前缀"。合成一个数就再也分不开，
             // 而预算收紧后一次截短可以完全不动任何帧。
             "truncatedValues": valueTruncated,
+            // 时长装不进线路（`durationNs` 越出 daemon 的 0…Int32.max 夹界）的次数。
+            // daemon 现版解码器忽略陌生的 hello 键——这一条是给 daemon 侧配合（读取
+            // 并进 gp_probe_status）准备的交接项，同时在探针自己的读数里可见；没有
+            // 它，一次超界就与"没有 >1ms 的调用"同形。
+            "durationOverflowCount": overflowedDurations,
             // 入站方向同样有丢：daemon 写过一条没有换行的超长行、SDK 断开重连后，
             // "命令都收到了"必须能被证伪，而不是靠那半行没被执行来侥幸。
             "droppedInboundLines": inboundDropped,
@@ -996,7 +1100,25 @@ final class ProbeRuntime: @unchecked Sendable {
             "t": "handler", "file": file, "line": line,
             "ts": Date().timeIntervalSince1970
         ]
-        if let durationNs { frame["durationNs"] = durationNs }
+        if let durationNs {
+            // 超界不是一个"更长的时长"，而是一个对端装不下的时长：`ProbeWire` 对
+            // 带越界 `durationNs` 的帧判 malformed 并整帧丢弃，那份丢弃发生在对端，
+            // `droppedWrites` 不动、hello 干净，"有 entry 帧、没有时长"就被读成
+            // "这次没有 >1ms"。与出站字节帽同一条纪律：装不下的不许当可携带读数
+            // 发出。这里**不**补发一条不带 `durationNs` 的 handler 帧——那会把这条
+            // 帧降级成 entry 帧，正好踩中 daemon 注释点名禁止的"被 demote 成另一种
+            // 帧类型"（hitCount 虚增）。改发具名溢出帧 + 计数进 hello。
+            if durationNs < 0 || durationNs > Int(ProbeRuntime.durationNsWireCap) {
+                lock.lock()
+                durationOverflows += 1
+                lock.unlock()
+                frame["t"] = ProbeRuntime.durationOverflowFrameType
+                frame["rejectedDurationNs"] = durationNs
+                writeFrame(frame)
+                return
+            }
+            frame["durationNs"] = durationNs
+        }
         writeFrame(frame)
     }
 
@@ -1288,10 +1410,15 @@ final class ProbeRuntime: @unchecked Sendable {
         awaitingCloseFD = -1
         started = false
         queuedWrites = 0
+        // 与连接线程同生同灭：reset 判死了线程，它烧掉的周期数不许活到下一个
+        // 用例里去——否则"这条路径不烧周期"的断言读的是前一个测试的余烬。
+        failedCycles = 0
         offlineBuffer = []
         dropped = 0
         droppedWrites = 0
         truncatedValues = 0
+        durationOverflows = 0
+        socketProblemValue = nil
         droppedInboundLines = 0
         droppedInboundFrames = 0
         rejectedKeys = 0
@@ -1895,15 +2022,17 @@ private func connect(to path: String) -> Int32 {
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
     guard fd >= 0 else { return -1 }
     // sun_path 装不下就等于这个名字不存在：strncpy 会静默截断，然后连到别的
-    // 名字上去。探针不能替调用方把"连不上"说成"对方没答话"。
-    var address = sockaddr_un()
-    address.sun_family = sa_family_t(AF_UNIX)
-    address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
-    guard path.utf8.count < MemoryLayout.size(ofValue: address.sun_path),
-          !path.utf8.contains(0) else {
+    // 名字上去。判据是 `ProbeRuntime.socketNameProblem` 这一份单一真源——`start`
+    // 用它当场拒拨并把原因写进 `GP.socketProblem`，这里保留"不可拨即 -1"的行为，
+    // 但"名字拨不出去"与"对端没起来"的**分别**已经由 start 那一层说出来了，
+    // 不再靠探针按重试日程空烧。
+    guard ProbeRuntime.socketNameProblem(path) == nil else {
         close(fd)
         return -1
     }
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
     let ok = path.withCString { source in
         withUnsafeMutableBytes(of: &address.sun_path) { destination in
             guard let base = destination.baseAddress else { return false }

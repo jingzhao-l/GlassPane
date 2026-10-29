@@ -18,6 +18,7 @@ unlink**。隔离靠 `--state-dir`：只点名 socket、不点名状态根的写
 用法：
   python3 engine/.signal_smoke.py                    # 默认 .build/release/glasspaned
   python3 engine/.signal_smoke.py <glasspaned>       # 指定产物（可指向旧构建做对照）
+  python3 engine/.signal_smoke.py --self-test        # 只跑 S6-3 红色检验（假 daemon 提前离场），不需产物
   二进制定位：argv > env GLASSPANE_DAEMON_BIN > 上面的默认值
 
 退出码：0 = PASS（两路断言真实跑过），1 = FAIL（断言不过），
@@ -323,6 +324,53 @@ def self_test_diagnosis(work):
     return problems
 
 
+#: S6-3 自检夹具的假 daemon：`--state-dir` 点名的根自己建、自己收成 0700，在
+#: `<root>/daemon.sock` 上绑**真** AF_UNIX listen socket，活着等完闸对 engine.sock
+#: 的验证（2s，短于 probe.sock 那一格 3s 的预算），随后 `exit 0` 自行离场。
+#: 它不绑 probe.sock、不等信号——模拟的正是"engine.sock 验完之后、信号发出去之前，
+#: daemon 自己走了"这个窗口。桩只对这一种现场答话：判据仍是 run_case 的返回值。
+_DEAD_DAEMON_SOURCE = """#!/bin/sh
+# 假 daemon（S6-3 自检夹具）。参数形状与 glasspaned 相同：$1=--state-dir $2=根。
+root="$2"
+[ -n "$root" ] || exit 64
+mkdir -p "$root" || exit 1
+chmod 700 "$root" || exit 1
+'%(python)s' -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.bind(sys.argv[1]); s.listen(1); time.sleep(2.0)' "$root/daemon.sock" || exit 1
+exit 0
+"""
+
+
+def self_test_dead_child(work):
+    """S6-3 的红色检验：daemon 在信号送达前自行离场时，闸必须**如实返回**而不是带栈中断。
+
+    从前 `wait_for_socket(..., poll=child.poll)` 里的 poll() 已把子进程收掉，7 行之后的
+    `os.kill(child.pid, …)` 照发 ⇒ ProcessLookupError 未捕获，整道闸带 traceback 中断：
+    failures 里已经量到的条目一条都不打印，后两案（SIGINT、inherit_ignored）不再跑；
+    pid 若被复用，那就是对本机随机进程开枪（2026-10-29 用本夹具实量：今天它抛）。
+    修法之后这条路径必须返回一个非空 failures、点名"已自行离场"，且不外抛。
+    REVERSE MUTATION：删掉 os.kill 之前的 poll 闸（恢复无条件 os.kill）——本自检
+    以 ProcessLookupError 中断，红。
+    """
+    state_dir = os.path.join(work, "state-dead-child")
+    stub = os.path.join(work, "dead-daemon.sh")
+    with open(stub, "w", encoding="utf-8") as handle:
+        handle.write(_DEAD_DAEMON_SOURCE % {"python": sys.executable})
+    os.chmod(stub, 0o755)
+    try:
+        failures = run_case(stub, "SIGTERM", state_dir, 15)
+    except ProcessLookupError as error:
+        return ["假 daemon 已自行离场，run_case 却带 ProcessLookupError 中断（%r）"
+                "⇒ S6-3 的修复不成立：os.kill 前必须先问 poll() 并如实返回，"
+                "已量到的 failures 必须能打印出来" % (error,)]
+    if not failures:
+        return ["假 daemon 已自行离场，run_case 却回报全绿 ⇒ 这一趟根本没有把"
+                "'信号收尾无从验证'记成失败"]
+    if not any("已自行离场" in one for one in failures):
+        return ["假 daemon 已自行离场，run_case 的报文却没有点名这件事：%r"
+                "⇒ 失败被记成了别的说法，读的人会去查错的那一半" % (failures,)]
+    return []
+
+
 def run_case(binary, tag, state_dir, signum, inherit_ignored=False):
     """起一个 daemon，发 signum，断言它自行干净退出。返回失败原因列表。
 
@@ -390,7 +438,32 @@ def run_case(binary, tag, state_dir, signum, inherit_ignored=False):
             "这一趟对『两个 socket 均被 unlink』里的 probe 那一半无从验证，被证明的只有 "
             "engine socket。stderr 尾：%s"
             % (tag, os.path.basename(probe_sock), read_stderr_tail(err_log)))
-    os.kill(child.pid, signum)
+    # 发信号之前必须再问一次 poll()：上面的 wait_for_socket(..., poll=child.poll) 里的
+    # child.poll() **会把子进程收掉**。daemon 在"engine.sock 已验完、probe 那一格还没
+    # 验完"的窗口里死掉时，走到这里 pid 已被回收——从前 os.kill 照发，ProcessLookupError
+    # 未捕获，整道闸带 traceback 中断：failures 里已经量到的条目一条都不打印，后两案
+    # （SIGINT、inherit_ignored）不再跑；pid 若已被复用，对它发 TERM/INT 就是对本机
+    # 随机进程开枪。诚实的答案是如实记录"这一趟无法验证信号收尾"，并且不再对该 pid
+    # 发任何信号。
+    early_exit = child.poll()
+    if early_exit is not None:
+        failures.append(
+            "%s 无法送达，这一趟无法验证信号收尾：被测进程在 %s 的验证窗口里已自行离场"
+            "（退出码 %s，pid %d 已被本闸回收），不得再对该 pid 发信号（它可能已属于"
+            "另一个进程）。本趟被证明的只有启动与状态根那一半。stderr 尾：%s"
+            % (tag, os.path.basename(engine_sock), early_exit, child.pid,
+               read_stderr_tail(err_log)))
+        return failures
+    try:
+        os.kill(child.pid, signum)
+    except ProcessLookupError:
+        # poll() 与 os.kill 之间的竞态窗口：进程刚好在那两步之间离场。与上面同一条
+        # 纪律——如实返回，不外抛，不再对该 pid 发信号。
+        failures.append(
+            "%s 无法送达，这一趟无法验证信号收尾：被测进程在 poll() 与 os.kill() 之间"
+            "已自行离场（pid %d 已被回收），不得再对该 pid 发信号。stderr 尾：%s"
+            % (tag, child.pid, read_stderr_tail(err_log)))
+        return failures
     try:
         code = child.wait(timeout=EXIT_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
@@ -421,6 +494,25 @@ def run_case(binary, tag, state_dir, signum, inherit_ignored=False):
 
 
 def main(argv):
+    # 自检臂（S6-3）：不要求真 daemon 产物，只跑"假 daemon 提前离场"这一条红色检验。
+    # 必须在 resolve_binary 之前认下——否则 `--self-test` 会被当成二进制路径，
+    # 闸门以 NOT RUN 离场，把"检验没跑"混进"检验跑过"。
+    if len(argv) > 1 and argv[1] == "--self-test":
+        work = tempfile.mkdtemp(prefix="glasspane-signal-smoke-selftest-", dir="/var/tmp")
+        try:
+            problems = self_test_dead_child(work)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+            if os.path.exists(work):
+                print("WARN: 自检运行目录没能清干净，现场仍在 %s" % work)
+        if problems:
+            print("SIGNAL SMOKE SELF-TEST FAILED（%d 项）：" % len(problems))
+            for detail in problems:
+                print("  - " + detail)
+            return EXIT_FAIL
+        print("SIGNAL SMOKE SELF-TEST OK：daemon 在信号送达前自行离场时，"
+              "run_case 如实回报'已自行离场'且不带 traceback 中断")
+        return EXIT_PASS
     binary = resolve_binary(argv)
     problem = binary_problem(binary)
     if problem is not None:
@@ -450,6 +542,7 @@ def main(argv):
     work = tempfile.mkdtemp(prefix="glasspane-signal-smoke-", dir="/var/tmp")
     try:
         problems = self_test_diagnosis(work)
+        problems += self_test_dead_child(work)
         problems += run_case(binary, "SIGTERM", os.path.join(work, "state-sigterm"), 15)
         problems += run_case(binary, "SIGINT", os.path.join(work, "state-sigint"), 2)
         problems += run_case(binary, "SIGINT", os.path.join(work, "state-sigint-ignored"),
