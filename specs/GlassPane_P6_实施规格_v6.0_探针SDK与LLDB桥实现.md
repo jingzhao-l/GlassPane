@@ -116,6 +116,16 @@ daemon → 探针：`op_begin {}` / `op_end {}` / `checkpoint_export {domains}` 
    - `probes` 每行：`{pid,appName,probeVersion,capabilities,connectedAt,eventsSeen,connected:true}`，另有 `bundleId`（探针上报时）与 `stateFramesUnmappedSource`（该 pid 计数非零时）。
    - `recentDisconnections` 每行：`{pid, appName, disconnectReason, disconnectedAt, connectedAt, drops}`，只含已断开且未重连的注册。
    - 探针自报的三个计数：`droppedEvents` / `droppedWrites` / `rejectedKeys`，逐行可选。
+   - **追加（2026-10-29 每日轮，不改上面任何一条结论）**：这张表上文自称"权威键表在此"，而它此后
+     没有跟着读侧长——`ringEvictedEventsTotal`（上一轮）与 `durationOverflowFramesTotal`（本轮，
+     配套 `probes` 行内的 `durationOverflowFrames` 与 `durationOverflowCount`）都已由
+     `EngineCore.probeStatus()` 发布却不在上面那几行里。上面那条"缺席规则"点名的那把尺子
+     （`mcp-shell/test/probe-status-surface.test.mjs`：从 `probeStatus()` 源码抽全部发布键，
+     逐键要求出现在 `gp_probe_status` 的工具描述里）只保证**描述**不落后，管不到这份规格，
+     所以这里的补记是给人看的、不是机器的。三个新键的形状：`durationOverflowCount` 是探针自报
+     （只在上报时存在，坏形状不折成 0，与 `droppedWrites` 同一判据）；`durationOverflowFrames`
+     是该 pid 收到具名溢出帧的次数；`durationOverflowFramesTotal` 是收件箱的单调总计数，
+     断开后仍可读（它是"这条通道曾经丢过读数"的唯一证据）。
    - **缺席规则**：`disconnections`/`recentDisconnections`/`unmapableStateFrames` 只在探针收件箱被接线时存在，`degradation` 只在 T9 追踪器被接线时存在，`bundleId` 与三个自报计数只在探针上报时存在，`slopes` 里某一通道只在它真算出斜率时存在——未上报即不写该键，`0` 是测量结果（不是缺省）。这条一致性的机器保证是 `mcp-shell/test/probe-status-surface.test.mjs`：它从 `EngineCore.probeStatus()` 的源码里抽出全部发布键，逐个要求在 `gp_probe_status` 的工具描述里出现（描述是 agent 在读回包之前唯一能看到的东西）。
    - `probes` 保持"活注册"语义（A-10）：断开过的探针不出现在其中，也不存在 `connected:false` 这种行；断开史走 `recentDisconnections`。
    - `hello.capabilities` 追加 `"probe"`。

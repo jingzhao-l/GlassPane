@@ -312,10 +312,11 @@ final class ProbeRuntime: @unchecked Sendable {
     /// 源码互锁闸），daemon 侧若改了夹界，探针的测试立刻红。
     static let durationNsWireCap = Int32.max
 
-    /// 超出 `durationNsWireCap` 的时替代换发出的具名帧类型。当前的 daemon 对未知
-    /// 类型记 "unknown frame type 'handlerDurationOverflow'" 的日志——它进不了环形
-    /// 缓冲，但那一次"有时长、装不下"从此在 daemon 日志里有了名字，不再冒充
-    /// "没有超过 1ms 的调用"。
+    /// 超出 `durationNsWireCap` 的时替代换发出的具名帧类型。daemon 读侧认得这一类型
+    /// （`ProbeWire.durationOverflowFrameType`，两侧由 `Qoder20261029Swift6…` 的源码互锁
+    /// 钉住）：它进不了环形缓冲、也不算 `rejectedFrames`，而是单独计入
+    /// `durationOverflowFrames`——那一次"有时长、装不下"从此既有名字又不是协议违规，
+    /// 不再冒充"没有超过 1ms 的调用"。
     static let durationOverflowFrameType = "handlerDurationOverflow"
 
     /// `sockaddr_un.sun_path` 的字节容量（Darwin 上是 104）。名字必须严格小于它
