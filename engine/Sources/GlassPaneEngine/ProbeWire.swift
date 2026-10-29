@@ -34,6 +34,14 @@ public struct ProbeHello: Equatable {
     /// can no longer be told apart, and a "state never changed" verdict is only readable
     /// against whichever of the two actually happened.
     public let truncatedValues: Int?
+    /// How many handler durations the probe read but could not put on this wire, because
+    /// they fall outside `0…Int32.max` (`GlassPaneProbe.emitHandler` counts them into
+    /// `ProbeRuntime.durationOverflowFrameType` frames instead of shipping a value the
+    /// daemon's clamp would refuse). Same optional rule as the counters above: `nil` is
+    /// "this probe never reported it", `0` is a measurement that nothing overflowed — so
+    /// a reader has to be able to tell them apart, which is why a missing key stays
+    /// missing through `counter` rather than folding to `0`.
+    public let durationOverflowCount: Int?
 
     public init(
         pid: Int32,
@@ -46,7 +54,8 @@ public struct ProbeHello: Equatable {
         rejectedKeys: Int? = nil,
         droppedInboundFrames: Int? = nil,
         droppedInboundLines: Int? = nil,
-        truncatedValues: Int? = nil
+        truncatedValues: Int? = nil,
+        durationOverflowCount: Int? = nil
     ) {
         self.pid = pid
         self.bundleId = bundleId
@@ -59,6 +68,7 @@ public struct ProbeHello: Equatable {
         self.droppedInboundFrames = droppedInboundFrames
         self.droppedInboundLines = droppedInboundLines
         self.truncatedValues = truncatedValues
+        self.durationOverflowCount = durationOverflowCount
     }
 }
 
@@ -66,6 +76,26 @@ public enum ProbeInboundFrame: Equatable {
     case hello(ProbeHello)
     /// Z1 handler event. `durationNs` present only on the >1ms follow-up frame.
     case handler(file: String, line: Int, ts: Double, durationNs: Int?)
+    /// The probe read a handler duration that cannot fit this wire — outside the
+    /// `0…Int32.max` clamp the `handler` branch below applies to `durationNs` — and
+    /// named it instead of shipping a value the daemon would refuse
+    /// (`GlassPaneProbe.emitHandler`, `ProbeRuntime.durationOverflowFrameType`).
+    ///
+    /// Its own case, never demoted into `.handler`: the event ring would then count a
+    /// frame that carries no usable duration as an invocation, and `hitCount` — the
+    /// number T4/T5/T7 branch on — would rise for a click the probe could not measure.
+    /// That is the demotion the `durationNs` comment below refuses ("a frame that
+    /// claims a duration and cannot state one is refused and named, never demoted to a
+    /// different frame type"), and the demotion's twin is `.malformed`: charging the
+    /// peer with a protocol violation for a reading this protocol cannot hold.
+    ///
+    /// Every field is optional because the frame is legitimate the moment it names
+    /// itself: `file`/`line` say which handler, `rejectedDurationNs` says what was
+    /// read, and a frame that states less is recorded as stating less, not refused and
+    /// not folded into a number it never claimed.
+    case handlerDurationOverflow(
+        file: String?, line: Int?, ts: Double, rejectedDurationNs: Int?
+    )
     case state(key: String, before: String, after: String, source: String, ts: Double)
     /// Answer to checkpoint_export: ref + domain table (string values only),
     /// or an error string. `digest` is the probe's self-reported SHA-256 over
@@ -142,6 +172,14 @@ public enum ProbeWire {
     static let pidRange: ClosedRange<Int32> =
         Int32(ParamValidation.pidLower)...Int32(ParamValidation.pidUpper)
 
+    /// The frame type a probe sends when the duration it read does not fit this wire
+    /// (`GlassPaneProbe.ProbeRuntime.durationOverflowFrameType` — one string, two
+    /// packages). It is named here rather than typed twice in the switch below so the
+    /// read side and the write side can be locked to each other:
+    /// `Qoder20261029Swift6ProbeDurationOverflowReadSide` reads both sources and fails
+    /// if either renames it (precedent: the `stateFolderName` interlock).
+    public static let durationOverflowFrameType = "handlerDurationOverflow"
+
     /// Decode one frame payload (no trailing newline). Never throws: bad
     /// frames come back as `.malformed` so the socket layer can log + skip.
     public static func decode(_ data: Data) -> ProbeInboundFrame {
@@ -173,7 +211,8 @@ public enum ProbeWire {
                 rejectedKeys: Self.counter(dict["rejectedKeys"]),
                 droppedInboundFrames: Self.counter(dict["droppedInboundFrames"]),
                 droppedInboundLines: Self.counter(dict["droppedInboundLines"]),
-                truncatedValues: Self.counter(dict["truncatedValues"])
+                truncatedValues: Self.counter(dict["truncatedValues"]),
+                durationOverflowCount: Self.counter(dict["durationOverflowCount"])
             ))
         case "handler":
             // `line` is a source position the probe reports; past Int32 there is
@@ -214,6 +253,31 @@ public enum ProbeWire {
                 line: Int(line),
                 ts: (scalar(dict["ts"]))?.doubleValue ?? 0,
                 durationNs: durationNs
+            )
+        case durationOverflowFrameType:
+            // The write side moved the unreadable number here rather than into
+            // `durationNs`, precisely so this branch can exist. `file`/`line` locate
+            // the handler and `rejectedDurationNs` is the reading that overflowed —
+            // both read with the gates this file already has, and neither is required:
+            // the frame has named itself by the time the switch reaches here, so
+            // refusing it for a missing companion key would put it back on the
+            // `.malformed` branch and charge the peer for the very thing it reported.
+            //
+            // `rejectedDurationNs` deliberately does not go through `counter` /
+            // `boundedInt32`: the clamp is `0…Int32.max`, and the number this frame
+            // carries exists *because* it fell outside that range — applying the clamp
+            // here would refuse the only fact the frame reports and fold it to "no
+            // value". `scalar` still vetoes a boolean, and `int64ValueExact` reads the
+            // whole integer (negatives included, since the probe counts a negative
+            // duration as an overflow too) without the truncation `boundedInt32`
+            // exists to avoid.
+            return .handlerDurationOverflow(
+                file: dict["file"] as? String,
+                line: boundedInt32(dict["line"], in: 0...(Int32.max)).map(Int.init),
+                ts: (scalar(dict["ts"]))?.doubleValue ?? 0,
+                rejectedDurationNs: scalar(dict["rejectedDurationNs"]).flatMap { number in
+                    number.int64ValueExact.flatMap { Int(exactly: $0) }
+                }
             )
         case "state":
             guard let key = dict["key"] as? String,

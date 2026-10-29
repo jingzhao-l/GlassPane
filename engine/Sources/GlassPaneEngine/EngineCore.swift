@@ -1933,6 +1933,15 @@ public final class EngineCore {
             // a probe disconnecting, and without a published number an agent reading
             // `hitCount` has no way to learn that the channel discarded events.
             payload["ringEvictedEventsTotal"] = inbox.ringEvictionCount
+            // The fourth figure of the same family, and the one that would otherwise
+            // have no reader at all: `handlerDurationOverflow` frames this daemon has
+            // ingested since start — handler durations the probe read and this wire
+            // cannot carry. Per-pid rows carry `durationOverflowFrames` (only when
+            // non-zero) plus the probe's own `durationOverflowCount`; this total
+            // survives the probe disconnecting, and it is not the malformed-frame
+            // count: a reading the protocol cannot hold is not a peer's protocol
+            // violation, which is the confusion this row exists to end.
+            payload["durationOverflowFramesTotal"] = inbox.durationOverflowFrameCount
         }
         // R5-06, second half: T9 escalates the circuit breaker only when two
         // drivers trend together (`drivers.count >= 2`), a deliberate false-alarm

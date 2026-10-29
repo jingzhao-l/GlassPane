@@ -118,6 +118,18 @@ public final class ProbeInbox {
     /// `ringEvictionCount`.
     private var ringEvictions: [Int32: Int] = [:]
     private var ringEvictionTotal = 0
+    /// Handler durations this daemon saw refused by the wire: one per
+    /// `ProbeWire.durationOverflowFrameType` frame ingested for that pid, plus the
+    /// monotonic total — the same shape A-09's `unmappedStateSources` and defect 3's
+    /// `ringEvictions` use. This is the **daemon's** observation of what arrived; the
+    /// probe's own lifetime figure rides in hello as `durationOverflowCount` and is
+    /// published beside it under that name. Two numbers because they answer two
+    /// questions: an overflow the probe counted while the socket was down never reaches
+    /// this tally, and folding the two into one number makes "the app lost readings"
+    /// unreadable against "the daemon saw them lost" — the mistake
+    /// `ProbeHello.truncatedValues`' comment names.
+    private var durationOverflows: [Int32: Int] = [:]
+    private var durationOverflowTotal = 0
     /// Per-command failure reasons. They are inbox state and sit behind `lock`
     /// with everything else: the dispatcher thread writes them while probe
     /// reader threads write the frames those errors explain, and plain storage
@@ -183,7 +195,8 @@ public final class ProbeInbox {
                     rejectedKeys: hello.rejectedKeys ?? existing.hello.rejectedKeys,
                     droppedInboundFrames: hello.droppedInboundFrames ?? existing.hello.droppedInboundFrames,
                     droppedInboundLines: hello.droppedInboundLines ?? existing.hello.droppedInboundLines,
-                    truncatedValues: hello.truncatedValues ?? existing.hello.truncatedValues
+                    truncatedValues: hello.truncatedValues ?? existing.hello.truncatedValues,
+                    durationOverflowCount: hello.durationOverflowCount ?? existing.hello.durationOverflowCount
                 ),
                 connectedAt: existing.connectedAt,
                 eventsSeen: existing.eventsSeen
@@ -202,6 +215,9 @@ public final class ProbeInbox {
         // nothing evicted, and a window opened for it cannot inherit another
         // process's baseline (that delta is what `eventsEvicted` reports).
         ringEvictions[hello.pid] = 0
+        // Same rule for the lost-duration tally: a new process has had no reading
+        // overflow this wire, and the per-pid row must not inherit another process's.
+        durationOverflows[hello.pid] = 0
         return true
     }
 
@@ -230,6 +246,10 @@ public final class ProbeInbox {
         // `unmapableStateFrameTotal` above — a re-registered pid must not be
         // charged for events its predecessor overflowed.
         ringEvictions.removeValue(forKey: pid)
+        // The overflow tally is that process's lost reading too: the monotonic
+        // `durationOverflowTotal` keeps the history, and a recycled pid must not be
+        // charged for durations its predecessor read.
+        durationOverflows.removeValue(forKey: pid)
         // Defect 1: a window that was open when the probe went away can never be
         // measured again — its event ring is what `endWindow` counts, and that
         // ring is gone with the process. Flag it so the close answers the honest
@@ -309,6 +329,17 @@ public final class ProbeInbox {
                 unmappedStateSources[pid, default: 0] += 1
                 unmapableStateFrameTotal += 1
             }
+        case .handlerDurationOverflow:
+            // A lost reading, counted — never an event. Appending it to the ring would
+            // file it as a handler hit (`countsAsInvocation` reads a frame without
+            // `durationNs` as an entry frame), which is the demotion `ProbeWire.decode`
+            // refuses to perform; one increment per frame, because the frame names one
+            // overflow: the probe moves the single unreadable value to
+            // `rejectedDurationNs` and carries no count of its own on this frame
+            // (`GlassPaneProbe.emitHandler`), so the number of frames *is* the number of
+            // occurrences. The probe's lifetime figure arrives separately in hello.
+            durationOverflows[pid, default: 0] += 1
+            durationOverflowTotal += 1
         case .checkpoint(let ref, let domains, let digest, let error):
             responseSequence += 1
             latestCheckpoint = (responseSequence, pid, ref, domains, digest, error)
@@ -906,7 +937,7 @@ public final class ProbeInbox {
     ///
     /// The probe's own drop counters (`droppedEvents`, `droppedWrites`,
     /// `rejectedKeys`, `droppedInboundFrames`, `droppedInboundLines`,
-    /// `truncatedValues`) follow the
+    /// `truncatedValues`, `durationOverflowCount`) follow the
     /// **opposite** rule: they
     /// are added only when the
     /// probe reported them, because a probe that predates them, or one whose
@@ -937,6 +968,15 @@ public final class ProbeInbox {
             if let evicted = ringEvictions[connection.hello.pid], evicted > 0 {
                 entry["ringEvictedEvents"] = evicted
             }
+            // The same rule for a duration the wire could not carry: this is a
+            // **daemon-side** observation (how many
+            // `ProbeWire.durationOverflowFrameType` frames this pid's connection
+            // delivered), so absence means the daemon saw none — and it is a different
+            // number from the probe's self-reported `durationOverflowCount` below,
+            // which also counts overflows that happened while the socket was down.
+            if let overflows = durationOverflows[connection.hello.pid], overflows > 0 {
+                entry["durationOverflowFrames"] = overflows
+            }
             if let droppedEvents = connection.hello.droppedEvents {
                 entry["droppedEvents"] = droppedEvents
             }
@@ -954,6 +994,15 @@ public final class ProbeInbox {
             }
             if let truncatedValues = connection.hello.truncatedValues {
                 entry["truncatedValues"] = truncatedValues
+            }
+            // The probe's own count of durations it could not put on the wire, in the
+            // same shape as its other self-reported counters: the key exists only when
+            // the hello reported one. Absence means "this probe never said", never a
+            // measured zero — a `0` here would be the assertion that no reading was
+            // lost, which is exactly what the row has to be able to deny (`counter`'s
+            // rule in ProbeWire, restated in `statusJSON`'s doc block above).
+            if let durationOverflowCount = connection.hello.durationOverflowCount {
+                entry["durationOverflowCount"] = durationOverflowCount
             }
             return entry
         }
@@ -1000,6 +1049,19 @@ public final class ProbeInbox {
     public var unmapableStateFrameCount: Int {
         lock.lock(); defer { lock.unlock() }
         return unmapableStateFrameTotal
+    }
+
+    /// `handlerDurationOverflow` frames ingested since start (monotonic): handler
+    /// durations this daemon was told about but the wire could not carry. The per-pid
+    /// figure reaches an agent as `durationOverflowFrames` on the live `probes` row and
+    /// the probe's own lifetime figure as `durationOverflowCount` on the same row; this
+    /// total is the one that survives the probe disconnecting, published by
+    /// `EngineCore.probeStatus()` as `durationOverflowFramesTotal` — a counter with no
+    /// reader is how `stateFramesUnmappedSource` and `ringEvictedEventsTotal` both had
+    /// to be closed out, so this one ships with its reader.
+    public var durationOverflowFrameCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return durationOverflowTotal
     }
 
     /// Probe events **this daemon** dropped from a pid's ring while `opId`'s window

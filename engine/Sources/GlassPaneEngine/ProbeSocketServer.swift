@@ -383,6 +383,13 @@ public final class ProbeSocketServer {
         // the raw token still exists; the inbox keeps the per-pid tally.
         var unmappedStateFrames = 0
         var firstUnmappedSource: String?
+        // Handler durations the probe read and could not put on this wire
+        // (`ProbeWire.durationOverflowFrameType`). Counted apart from `rejectedFrames`
+        // on purpose: the peer did not send a malformed frame, it sent a reading the
+        // protocol cannot hold, and charging it as a protocol violation is the same
+        // false statement as the missing number, wearing a different name.
+        var durationOverflowFrames = 0
+        var firstRejectedDurationNs: Int?
         var readTimeoutSeconds = ProbeSocketServer.preHelloReadTimeoutSeconds
         configureClientSocket(clientFD, readTimeoutSeconds: readTimeoutSeconds, stage: "pre-hello")
         var codec = FrameCodec()
@@ -427,6 +434,21 @@ public final class ProbeSocketServer {
                         + " map to a state channel (first source=\""
                         + ProbeSocketServer.logSafePeerText(firstUnmappedSource ?? "?")
                         + ";\" schema lanes are z1-macro/z2-mirror/z3-kvc)"
+                )
+            }
+            if durationOverflowFrames > 0 {
+                // Same handling as the row above: count what arrived, name it, and say
+                // at close how many there were. `rejectedFrames` never saw these —
+                // after `ProbeWire.decode` stopped folding them into `.malformed` they
+                // are neither malformed nor dropped, they are one lost reading each.
+                let firstValue = firstRejectedDurationNs.map { " first rejectedDurationNs=\($0)" }
+                    ?? " the first such frame stated no duration value"
+                log.error(
+                    "probe fd \(clientFD) sent \(durationOverflowFrames)"
+                        + " \(ProbeWire.durationOverflowFrameType) frame(s): handler durations the"
+                        + " probe read but this wire cannot carry (0…\(Int32.max)). They are counted"
+                        + " apart from malformed frames, and per pid on the probe_status row as"
+                        + " durationOverflowFrames." + firstValue
                 )
             }
             closeOwned(clientFD)
@@ -500,6 +522,25 @@ public final class ProbeSocketServer {
                     )
                     rejectedFrames += 1
                     continue
+                }
+                if case .handlerDurationOverflow(_, _, _, let rejectedDurationNs) = frame {
+                    // A named lost reading, not a protocol violation: this branch exists
+                    // so the frame never reaches the `rejectedFrames` counter above,
+                    // which is what the daemon reports as "the peer sent malformed
+                    // frames". Logged once per connection like the unmapped-source row
+                    // below, then ingested so the inbox keeps the per-pid tally.
+                    durationOverflowFrames += 1
+                    if firstRejectedDurationNs == nil {
+                        firstRejectedDurationNs = rejectedDurationNs
+                        let stated = rejectedDurationNs.map { " (it read \($0) ns)" }
+                            ?? " (the frame stated no duration value)"
+                        log.error(
+                            "probe pid \(pid) reports a handler duration outside this wire's"
+                                + " 0…\(Int32.max)\(stated): the daemon keeps the fact that a"
+                                + " duration was unreadable, not the duration. It is not a handler"
+                                + " hit and not a malformed frame."
+                        )
+                    }
                 }
                 if case .state(_, _, _, let rawSource, _) = frame,
                    StateDiffSource(rawValue: rawSource) == nil {
