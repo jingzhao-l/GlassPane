@@ -4,7 +4,114 @@
 
 ## [Unreleased]
 
-（空。1.25.0 收口后没有未归号的条目。)
+（空。1.26.0 收口后没有未归号的条目。)
+
+## [1.26.0] — 2026-10-29
+
+**版本判断：minor。** 判据仍是 1.6.2 写下、1.22.0/1.23.0/1.24.0/1.25.0 各自复述过的那一条：patch 要求
+「状态文件的字段没动、退出码集合没动、CLI 参数没动、npm 包的 `bin` 声明没动」。本轮动了三项：
+
+1. `glasspaned` 的**退出码集合与参数语义**——同一枚取值旗在一趟调用里给两次，从前是后者静默胜
+   （`--state-dir A --state-dir B --list-projects` 实测 rc 0、A 被丢、stderr 零字节），现在 64 +
+   整块 usage 并点名两个值；只给修饰旗不给一次性命令的那一格（`--state-dir X --older-than 7
+   --dry-run`）从前起服务、rc 0、一个字不说，现在同样 64 + usage。
+2. **CLI 参数**——`install.sh` 新增了 `--help|-h`（此前完全没有这一支，非 macOS 上回 1 而
+   `installer/cli.js --help` 回 0；现在两条入口逐值相等且 `--help` 不再先 clone）。
+3. **状态文件的字段**——updater 的回滚路径开始读 `sourceAppsDir`/`fromStateRoot`（这两个字段
+   此前写进 marker 而**全仓零读者**），`--evidence-stats` 的载荷新增 `ageRetention`，
+   `probe_status` 新增 `durationOverflowFrames`/`durationOverflowCount`/`durationOverflowFramesTotal`。
+
+本版没有合并任何未发布的旧号；`v1.25.0`/`v1.25.1` 那两格空号（上一轮留下的、各有解释）不移动、不删除。
+
+本轮审出 **42 条已核实缺陷，全部随本版发出**：mcp-shell 传输与归因 4、引擎存储与 socket 归属 3、
+引擎判定与并发 3、daemon CLI 与状态根 3、设置面板 3、探针与信号交付闸 3、daemon 读侧 1、
+installer + install.sh 5、updater 4、LLDB 桥 4、交付闸与对外文档 7、主代理复核时追加 2。
+逐条的触发输入、失效模式与覆盖它的具名用例见 `specs/GlassPane_每日2026-10-29_发现台账.md`；
+每一条都做过反向变异（把那处修复逐字改回坏写法、要求具名用例变红、cp 恢复后 shasum 核对）。
+
+### 证据诚实性（本产品的立身之本）
+
+- **传输死亡把"daemon 收到并执行过的动作"说成从未送达**（P0，mcp-shell）。`handedOff` 只在
+  `writeLine` 那一瞬按 `bufferedBytes()` 差值算一次、此后永不重测；帧先留在本地发送队列、随后排空
+  被 daemon 执行、传输再死亡时，`teardown` 仍以 `NEVER_LEFT_TRANSPORT` 宣称"字节从未离开本进程、
+  什么都没执行"，并把 remedy 交到"…then retry"——同一枚按钮在用户屏幕上被按第二次。
+  现在 `LineIo.writeLine` 收一个交付回调，生产实现接在 `output.write(chunk, cb)` 上（无错误才算出门），
+  原有 bufferedBytes 判据一字不动（它管"从没开口的传输"那一档，B7 那批夹具靠它）。
+- **写后读不回被面板报成"删除没有执行"**（面板 × daemon 的互相否定）。daemon 自己
+  在载荷里写 `found:true` + `requiresDaemonRestart:true`，注释是"盘与内存此刻已经不一致，
+  重启确实需要"，且正因如此把 `remaining` 从载荷里删掉；面板却用**写前拒绝**那句"为避免把读不回的
+  条目覆写掉，删除没有执行"——面板替 daemon 断了一件它自己不敢断的事。写前拒与写后读不回现在分开出文。
+- **同一个进程再答一次就撤掉唯一的补救入口**（面板）。1s 轮询里一次 `presentButSilent` 会把
+  `daemon.stateRoot/pid` 清成 nil，下一帧答了 ⇒ `rootChanged` ⇒ 重新采纳 ⇒ "注册表已改动，重启后台
+  服务后才会用新表"横幅连同它里面那枚唯一的「重启后台服务」按钮一起消失，而进程还是那个进程。
+  真机走查第一遍还量出**缺的不止判据**：只挂 liveness 与 stateRoot 的 `.onChange` 收不到
+  "同 liveness、同根、只有进程号换了"那一帧，判据根本轮不到跑，故补 `.onChange(of: daemon.pid)`。
+- **掉线过的窗口把"抓到了人类输入"说成"没人碰过机器"**（引擎归因）。`contaminationBasis` 在
+  同帧挂着 `humanInputEventCount` 时仍断言"依据是没有在看的通道，不是观测到的输入"，
+  这句话还随 `circuitBreaker.reason` 进档案——事后只剩一种读法，代理把根因归到通道而不是那次点击。
+- **探针的时长装不进线路时被读成"这次没有 >1ms"**。探针把 `durationNs` 原样发出，daemon 侧夹在
+  `0…Int32.max`、越界判 malformed 并**丢弃**，`droppedWrites` 纹丝不动、hello 计数器一片干净。
+  现在探针发具名溢出帧 + `durationOverflowCount` 自报，daemon 读侧**同版**接住：单独计
+  `durationOverflowFrames`，不再冒充 `rejectedFrames`（一次读数丢失被记成一次协议违规就是上一轮的
+  半修形状），总计数 `durationOverflowFramesTotal` 断开后仍可读。
+- **信号交付闸向已被回收的 pid 开枪**（`engine/.signal_smoke.py`）。`wait_for_socket(…, poll=child.poll)`
+  里那个 `poll()` 会把子进程收掉，7 行之后 `os.kill(child.pid, …)` 照发 ⇒ `ProcessLookupError` 未捕获、
+  整道闸带 traceback 中断、已经量到的 failures 一条都不打印、后两案不再跑；而那个号此刻可能属于
+  本机任意进程。修法是先问一次 `child.poll()`，已离场就如实记"这一趟无法验证信号收尾，且不得再对
+  该 pid 发信号"。
+- **LLDB 桥把没答话当成没发生**：`--timeout nan/inf` 实测抛 `ValueError`/`OverflowError`、traceback
+  外泄、stdout 一个字节都没有（违背 §6.2「失败也以 JSON 离场」），而 `resume_frozen_target` 只写在
+  超时那一臂 ⇒ 非超时的异常路径把被 `--pid` 附上的用户进程**留在 SIGSTOP**，既无 SIGCONT、
+  也无"IT IS NOT CONFIRMED RESUMED"那句自陈、也无 `kill -CONT` 补救行。
+- **伪造的崩溃证据可被采信**（同 uid 的攻击面）：本轮哨兵 nonce 经子进程环境交给 lldb，
+  `--exe` 启动档里被调试目标继承它（`target.inherit-env` 默认 true），于是目标能读到
+  `GPBRIDGE_SENTINEL_NONCE` 并把自己伪造的那一对写成最右——而 `extract_sentinel` 的判据正是
+  "最后一个可解析对获胜"，真桥输出被跳过。同 uid 下藏不住秘密，所以不修"通道更隐蔽"、
+  修"不再靠秘密做完整性"：stdout 上出现多于一对带本轮 nonce 的可解析对时如实标 `stdoutAmbiguous`
+  并降级退出码，绝不把这条当实测。
+
+### 会在别人机器上动东西的那一类
+
+- **`--socket-path "$HOME/engine.sock"` 把用户家目录 chmod 成 0700**（P0）。同一份危害
+  （`chmod(0700)` 落在不是本产品的根上）在 `--state-dir ~` 上早已被判为必须拒，判据也只用在
+  `--state-dir` 的**值**上；socket 用的是同一个值的**父目录**，于是换一种拼写就绕过去。
+  且那句 log 只在目录**不在** home 之内时打印——恰好把"动的就是 home"这一档留在无声里。
+- **一键安装会在别人仓库的子目录上动外层那棵树**（P0）。`bootstrapPlan` 判"是不是仓库"用的
+  `resolveProjectRoot` 会**向上走**，`<外层repo>/vendored` 因此被判成"既有 clone"；紧接着
+  `readCloneFacts`/`advanceExistingClone` 只 `git -C <dir>`、从不问 `--show-toplevel` ⇒
+  实测把用户自己 checkout 在 `main` 的分支 detach 并搬到旧 tag，然后才回一句 `advance: use`。
+  同一条输入 `install.sh` 是"目标目录已存在且不是 GlassPane 仓库" + rc 1：两条一键入口相反答案。
+- **`updater rollback` 把别家 appsDir 的旧字节盖到在册安装上**。备份 marker 早就写了
+  `sourceAppsDir`/`fromStateRoot`，但两个字段**全仓零读者** ⇒ `GLASSPANE_APPS_DIR=A updater apply`
+  之后在普通 shell 里 `updater rollback` 选中那份备份、恢复进默认 `~/Applications` 并 kickstart
+  真机 daemon，还报 "restored X and the daemon reports it"。
+- **被拒的 `--repo` 仍然生效**：`install.sh` 用 `looks_like_repo` 拒了它、去 clone，末尾却把
+  `"$@"` 原样透传，而 cli.js 里 `--repo` 优先级最高 ⇒ 刚 clone 的那棵被无视，`npm install`
+  以那个被拒目录为 cwd 真的跑了起。
+
+### 交付闸自己会静默失效的那一类
+
+- `release.yml` 的 tag 前置闸在 `set -euo pipefail` 下用 `printf | awk {exit}`：tag 列表超过约
+  64 KB 且目标行距 EOF 超缓冲时，awk 命中即退 ⇒ printf 死 EPIPE ⇒ 整步 141、**没有任何
+  `::error::` 文本**的无名崩溃。同一个坑本仓在四处记过名，唯独这两行漏改。
+- `check-workflows.mjs` 看不见**顶层重复键**：两块 `jobs:` 且 job 名不重叠时并成一个读、打印
+  "clean; N job(s)" 退 0，而 YAML 映射只保留最后一块 ⇒ 前一块里的交付闸从此永不运行
+  （正是 2026-09-25 那次事故换了层 key）。新规则 + 一对红/静默自测用例。
+- `check-doc-links.mjs` 的三处 `decodeURIComponent` 无保护：链接里一个裸 `%`（散文"50%"）抛 URIError，
+  整道闸在文档循环中途带栈崩死，后面的主张核对与表格形状本轮全没跑——"一条拒该是一句话，不是一个栈"。
+- `github-release` 这条对外不可逆的 job 没有 `concurrency`（只有 `npm-publish` 有并写了理由）：
+  同 tag 两个 writer 时归档字节与 Release target 由最后写胜者决定，先结束那条 run 的读回判据
+  在它自己视野里全过。
+- `check-kernel-corpus.mjs` 检查分支对被 pin 名字落在**目录**上会 EISDIR 栈崩
+  （2026-10-28 那次"detect-then-write"只修了 `--record` 那一半）。
+- `.worktrees/` 被算进 `check-doc-links` 的 markdown 扫描集合：并行会话/每日任务把工作树开在仓库目录
+  **里面**，本机实量 5 份工作树把扫描量从 122 份涨到 1257 份、表格 448→3275 张——同一棵 main 的树
+  因为旁边有没有工作树而给出不同读数，量的就不是"仓库里有什么"了。
+- 安装落点 `/tmp/gp-install.sh` 是同机任意账号的**覆写原语**：`/private/tmp` 是 1777，sticky 只挡住
+  别人删你的目录项，挡不住他先建一个 `/tmp/gp-install.sh -> ~/.bashrc`，而 `curl -o` 跟随符号链接
+  并以你的 uid 截断覆写目标。三处对外文档 + 一处 usage 文本已改 mktemp 落点；钉住那句话的三条测试
+  从前把**脆弱落点本身**当契约（改对就红），现在钉的是判据。README 那一侧的同一读数由文档闸直接判红。
+
 
 ## [1.25.2] — 2026-10-28
 
