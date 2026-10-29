@@ -1,5 +1,5 @@
 {
-  "observedAt": "2026-10-26",
+  "observedAt": "2026-10-29",
   "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
   "rules": [
     {
@@ -21,6 +21,26 @@
     {
       "id": "doc-line-without-lineage",
       "why": "a README line that says opencode must also say fork/upstream/anomalyco/MIT/上游/血缘"
+    },
+    {
+      "id": "first-party-gateway",
+      "why": "shipped code must not offer or link a first-party gateway this product has no account for"
+    },
+    {
+      "id": "wire-identity",
+      "why": "identifiers sent to third-party services must name this product, not upstream"
+    },
+    {
+      "id": "foreign-schema-write",
+      "why": "never write a third party's $schema URL into a user's file"
+    },
+    {
+      "id": "product-file-name",
+      "why": "the user's own files are named for the product"
+    },
+    {
+      "id": "removed-tree",
+      "why": "an upstream tree this product deleted must not be referenced again"
     }
   ],
   "productFiles": 26,
@@ -33,8 +53,10 @@
     "packages/core/src/plugin/skill/customize-harness.md"
   ],
   "lineage": {
-    "occurrences": 9607,
-    "filesScanned": 3328
+    "occurrences": 9634,
+    "filesScanned": 3329
   },
-  "lineageNote": "2026-10-21: fork 侧 provider 注册绑定层与其测试把产品名写进注册 id 与注释（glasspane-engine-ae / glasspane-evidence），是归属说明不是新产品面"
+  "shippedFiles": 1323,
+  "shippedSrc": 5,
+  "lineageNote": "2026-10-29 0.12.4 (9607→9634, +27 over 3329 files): 全部是本轮修复在注释/文档里点名它正在改掉或正在 dual-read 的那个上游名——server/auth.ts 与其测试写 OPENCODE_SERVER_PASSWORD/OPENCODE_SERVER_USERNAME 是因为那条规则就是「产品名 orElse 上游名」；tool/registry.ts 的 [gp] 边界说明写 opencode/opencode-go 是因为那两个析取支就是被删的对象；docs/kernel-integration.md、CHANGELOG、uninstall.ts 同理。没有一处把它作为产品名称呈现，也没有新增请求头/包名/registry。"
 }

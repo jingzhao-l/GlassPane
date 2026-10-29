@@ -2,11 +2,11 @@
   "baseTag": "v1.18.32",
   "forkPath": "harness/glasspane-harness",
   "referenceClone": ".external/opencode",
-  "observedAt": "2026-10-27",
+  "observedAt": "2026-10-29",
   "counts": {
-    "identical": 4640,
-    "edited": 285,
-    "added": 112,
+    "identical": 4638,
+    "edited": 287,
+    "added": 113,
     "deleted": 1707
   },
   "edited": [
@@ -14,6 +14,7 @@
     ".github/ISSUE_TEMPLATE/bug-report.yml",
     ".github/ISSUE_TEMPLATE/feature-request.yml",
     ".github/actions/setup-bun/action.yml",
+    ".github/actions/setup-git-committer/action.yml",
     ".github/pull_request_template.md",
     "AGENTS.md",
     "CONTEXT.md",
@@ -225,6 +226,7 @@
     "packages/opencode/test/permission/next.test.ts",
     "packages/opencode/test/plugin/trigger.test.ts",
     "packages/opencode/test/plugin/workspace-adapter.test.ts",
+    "packages/opencode/test/server/auth.test.ts",
     "packages/opencode/test/server/httpapi-experimental.test.ts",
     "packages/plugin/package.json",
     "packages/plugin/script/publish.ts",
@@ -399,6 +401,7 @@
     "packages/opencode/test/tool/glasspane-kernel.test.ts",
     "packages/opencode/test/tool/glasspane-provider-registration.test.ts",
     "packages/opencode/test/tool/glasspane-surface.test.ts",
+    "packages/opencode/test/tool/glasspane-websearch-boundary.test.ts",
     "packages/tui/src/util/tool-denial.ts",
     "patches/@modelcontextprotocol%2Fsdk@1.32.0.patch",
     "product.json",
@@ -2123,7 +2126,12 @@
     {
       "file": ".github/actions/setup-bun/action.yml",
       "upstreamHash": "9d29724d86a429e08a9031f1c7e92ab607688412",
-      "forkHash": "6d529b9bf300d117f279502065e5114c6f0144f5"
+      "forkHash": "09c437c5b8aac7db3e6d1f56138d84bb8e3c6a8d"
+    },
+    {
+      "file": ".github/actions/setup-git-committer/action.yml",
+      "upstreamHash": "65c974c6ab4891d5e3fd0aaddd8fe7833f329e2a",
+      "forkHash": "ef84dd46d4d7480e5fcb899e942821b23708d0d0"
     },
     {
       "file": ".github/CODEOWNERS",
@@ -2763,7 +2771,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "df6f9ca21a8784b18b392bbdb76acc8702059fff"
+      "forkHash": "e5b8e691b61d1c34dee7950390d2494fcfbe16db"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -2783,7 +2791,7 @@
     {
       "file": "packages/opencode/script/publish.ts",
       "upstreamHash": "ac1cafff56f46e9611a9ff78aa05217d21a907ef",
-      "forkHash": "a89596eb55bd28432289a5be665fc8939a8498f4"
+      "forkHash": "28682be9dda8ba0c4ad8d13fa2c83124dec7faca"
     },
     {
       "file": "packages/opencode/src/acp/service.ts",
@@ -2893,7 +2901,7 @@
     {
       "file": "packages/opencode/src/cli/cmd/uninstall.ts",
       "upstreamHash": "0afdc518545d1084b0cca7ba945353fd54d38e07",
-      "forkHash": "2dcebdf4ed469027e43fba55cbbf658130c2089a"
+      "forkHash": "8f812c20555b054f176e6328b6b47fbb6e15aaed"
     },
     {
       "file": "packages/opencode/src/cli/cmd/upgrade.ts",
@@ -3028,7 +3036,7 @@
     {
       "file": "packages/opencode/src/server/auth.ts",
       "upstreamHash": "9630ddbe20ed28944037de56363c672666931964",
-      "forkHash": "bbc9002d9b2cbcc259cf4dcb431270d4b30e232a"
+      "forkHash": "95eb80e2f440446ba29696e9f755c14bfc1da1e3"
     },
     {
       "file": "packages/opencode/src/server/mdns.ts",
@@ -3108,7 +3116,7 @@
     {
       "file": "packages/opencode/src/tool/registry.ts",
       "upstreamHash": "9167cb3ea6bc5c8dd075f0f8271adbdec6074b12",
-      "forkHash": "7688af2c79c1db2b515b217a481e71c9333e83e9"
+      "forkHash": "87ed463d8ea9b3eb9dac4fba2eed165e11ed2e4b"
     },
     {
       "file": "packages/opencode/src/tool/webfetch.ts",
@@ -3184,6 +3192,11 @@
       "file": "packages/opencode/test/plugin/workspace-adapter.test.ts",
       "upstreamHash": "a8dd172521726a5d847b30ef8ca49a38bd0951df",
       "forkHash": "918077cfca0125613e97b990e46c47b43f6d130c"
+    },
+    {
+      "file": "packages/opencode/test/server/auth.test.ts",
+      "upstreamHash": "1278e8c72e8c93a26b2f04640949f44950f8e8f3",
+      "forkHash": "2aa202ce86bbaed3a81617e6ff27e52db7750d4e"
     },
     {
       "file": "packages/opencode/test/server/httpapi-experimental.test.ts",
@@ -3523,7 +3536,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "f3a7b424032bf3afe66dfecb513cde0fd677c7be"
+      "forkHash": "5d4b62ab6632562d9990540dd1de366925310086"
     },
     {
       "file": "script/publish.ts",
@@ -3549,11 +3562,11 @@
   "addedDetail": [
     {
       "file": ".github/workflows/ci.yml",
-      "forkHash": "5554603318709eac9f4ff6920f618e6ad610f982"
+      "forkHash": "25daf1eee1a787473c5db045ef4429f13f4346ba"
     },
     {
       "file": ".github/workflows/release.yml",
-      "forkHash": "782b78e73f4170aa237166fcbe53d5f8723b42d7"
+      "forkHash": "8867a675c0b353afee276192c3d3e605f3a5392d"
     },
     {
       "file": ".glasspane-harness/.gitignore",
@@ -3721,7 +3734,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "33cc870b0bbe9f51e0c28b2f6553f6097300b9dd"
+      "forkHash": "0e834efcc2e3cd75dd4fbedec4df042f56f563ef"
     },
     {
       "file": "contracts/engine-methods.json",
@@ -3749,11 +3762,11 @@
     },
     {
       "file": "docs/install.md",
-      "forkHash": "32e4b6903f8c2b0c9104e7d1c003994180f5a18e"
+      "forkHash": "f2d865e03a8b16fe6c1ba33e906e8146315b28de"
     },
     {
       "file": "docs/kernel-integration.md",
-      "forkHash": "c0744b78d18fa97f1298173f99b385d97ae5456d"
+      "forkHash": "39788265351dd37862237ce705c5d1ced5a03caf"
     },
     {
       "file": "docs/migrate-from-opencode.md",
@@ -3793,15 +3806,15 @@
     },
     {
       "file": "packages/opencode/script/glasspane-e7-ledger.ts",
-      "forkHash": "6c1627babcfe245148d6baff4f6b2afc53d43545"
+      "forkHash": "7f35c5674768544cc03cebbc61c0f8297c606633"
     },
     {
       "file": "packages/opencode/script/glasspane-e8-compaction.ts",
-      "forkHash": "a7cf6a68b2b2fb69d9289427aba252fe49da8625"
+      "forkHash": "fc7c223f96ed9b26a820022b3cab658cc4da1195"
     },
     {
       "file": "packages/opencode/script/glasspane-preflight.sh",
-      "forkHash": "8629aed34af47b35e8d43a9d6194155e97f84ef0"
+      "forkHash": "8d3323eb4f3e7192ebf7e6b5e32cd53fee6fdb69"
     },
     {
       "file": "packages/opencode/script/installer-selftest.sh",
@@ -3821,7 +3834,7 @@
     },
     {
       "file": "packages/opencode/script/registry-readiness.ts",
-      "forkHash": "62f0b6151fe74c954bb10ba36c9e728c866e5d0b"
+      "forkHash": "0406593fa0b80814456a2c814c3ee253f34b0ec2"
     },
     {
       "file": "packages/opencode/script/release-assets.ts",
@@ -3829,7 +3842,7 @@
     },
     {
       "file": "packages/opencode/script/verify-published.ts",
-      "forkHash": "fdc8bcf34c315d08f9bd0c9d93f69e544e48df94"
+      "forkHash": "c223915415c3fd0dd2f28737d4498d001236c9c5"
     },
     {
       "file": "packages/opencode/src/plugin/glasspane-compaction.ts",
@@ -3841,7 +3854,7 @@
     },
     {
       "file": "packages/opencode/src/tool/glasspane/daemon.ts",
-      "forkHash": "77235a48978e17a78e1a149da84ed8b656a5d4a1"
+      "forkHash": "74d031472e2107a2e1d723f183e93a3ac1c4efa7"
     },
     {
       "file": "packages/opencode/src/tool/glasspane/index.ts",
@@ -3921,7 +3934,7 @@
     },
     {
       "file": "packages/opencode/test/script/registry-readiness.test.ts",
-      "forkHash": "144cc93d546c3ae7d37221b61930e3c52685a85d"
+      "forkHash": "b10c05da3f55f8648b60eb7880e0bf732c2974ea"
     },
     {
       "file": "packages/opencode/test/script/release-assets.test.ts",
@@ -3933,7 +3946,7 @@
     },
     {
       "file": "packages/opencode/test/script/workflow-gates.test.ts",
-      "forkHash": "e59366382c6a86324b14d04e18b10052703b501b"
+      "forkHash": "9f250e0db6ea775fd7261357339f332035a01a33"
     },
     {
       "file": "packages/opencode/test/tool/glasspane-kernel.test.ts",
@@ -3945,7 +3958,11 @@
     },
     {
       "file": "packages/opencode/test/tool/glasspane-surface.test.ts",
-      "forkHash": "841e3755bada2748fbe37c0b00acbe310c338328"
+      "forkHash": "f2db3dfd04da225542526723848af2c69699fe16"
+    },
+    {
+      "file": "packages/opencode/test/tool/glasspane-websearch-boundary.test.ts",
+      "forkHash": "fed40a783c1a4ebfdd0801487828561c99340ffd"
     },
     {
       "file": "packages/tui/src/util/tool-denial.ts",
@@ -3957,11 +3974,11 @@
     },
     {
       "file": "product.json",
-      "forkHash": "2ff847d65da8de813d1e3ab65fd9c4c48b7eab2b"
+      "forkHash": "ae82c44dd1f4833c35aa854b6c9ff1df85bbcd57"
     },
     {
       "file": "README.zh-CN.md",
-      "forkHash": "e4cd0f05325c0a298d34b80ce28fb4c50eb8d056"
+      "forkHash": "c2d978950b05ffb0ac757eefa4cdffedea3e7743"
     },
     {
       "file": "script/assert-ci-green.mjs",
@@ -3969,7 +3986,7 @@
     },
     {
       "file": "script/check-workflows.mjs",
-      "forkHash": "c5588df29e4f6fc7777adf051af6f4910e5f847c"
+      "forkHash": "5ea6e59c049e409c90ec3510c8ce7ce77d279f34"
     },
     {
       "file": "script/gpg-signing.sh",
@@ -3989,7 +4006,7 @@
     },
     {
       "file": "scripts/install.sh",
-      "forkHash": "1e2518065334d8f5796b50b11f78b4acb2a899a4"
+      "forkHash": "cebab90e5a2a9224274727e3c8d105830f8ca769"
     },
     {
       "file": "SYNCLOG.md",
