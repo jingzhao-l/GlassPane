@@ -2,6 +2,168 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-29（第二十五次会话）· 取号 0.12.4：26 条修复、八条新守卫，以及 fork 自己的 CI 从未跑过的那 9 个测试文件
+
+本轮是四条只读审查泳道（工具面正确性 / 发布与供应链 / 六把尺子 / 用户面文案与功能缺口）交回
+31 条发现，主代理逐条回代码复核后处置：**26 条确认为缺陷并全部修完 + 固定点测试 + 进 main**、
+**2 条用实测否证**、**3 条判为维持现状并写下依据**。逐条内容在 `CHANGELOG.md` 的 0.12.4 条目里，
+这里只记测量、因果与决定。
+
+### 提交链（41 文件 / +1458 / −175，不含本条与它引发的金样跟笔）
+
+| 提交 | 内容 |
+| --- | --- |
+| `7264f377` | 26 条修复 + 版本线 8 处（36 文件，+1218 / −120） |
+| `04871ae8` | 四把尺子的金样跟上（`fork-diff` / `tool-surface` / `brand-surface` / `surface-semantics`） |
+| `495d9533` | 本轮新增的 8 条守卫各配一条"它必须能红"的对照 |
+| `d31a8c7c` | 修掉其中一条对照自己的针 |
+
+金样与代码分两笔，不是忘了纪律：这四把尺子里 `brand-surface`/`tool-surface`/`fork-diff` **拒绝在脏树上记录**
+（那正是防并行泳道把未提交行洗进金样的那道闸），所以只能"代码一笔 → 记录一笔"，两笔一起推，
+远端 CI 只测尖端。
+
+### 本轮量到的数字（每一条都由当场跑的那条命令抄下，量法写在后面）
+
+- `fork-diff`：**`4638/6745 byte-identical, 287 edited, 113 added, 1707 deleted`**。
+  与上一版金样（`4640/6744, 285/112/1707`）差三处，每一处对应一笔真实分叉：`edited +2` 是两个
+  复合动作 `action.yml` 补 shell 闸（它们此前与上游逐字节相同）、`added +1` 是新的
+  `test/tool/glasspane-websearch-boundary.test.ts`、总数 6744→6745 是同因。
+  量法：`node harness/tools/fork-diff.mjs --check`（约 2 分钟，需参照克隆）。
+- `tool-surface`：面 A **12254 LOC / 21.85%**（16 文件，LOC 一字未动；百分比从 21.94% 降到 21.85%
+  的原因是上游侧参照 blob 697→698，分母动了、分子没动）；面 B **11750 → 11990 LOC / 21.04% → 21.38%**
+  （229 文件覆盖数不变），+240 行全在本轮修复里。被排除在面 B 之外的测试 **46 文件 / 6199 行 →
+  48 文件 / 6625 行**，口径未变。engine 31839 LOC / 65 文件。
+  两面的 10% 文档上限仍是既成的超限量（棘轮只挡进一步增长，本轮如实重记，没有借 `--record` 掩盖语义外移）。
+- `brand-surface`：**26 product + 2 doc，1323 shipped-code 文件，0 hit，血缘 9634 / 3329 文件**。
+  9607 → 9634 的 **+27** 走的是既有口径：`--record --lineage-note` 点名每一处的位置与理由
+  （全是注释/文档里点名"它正在改掉或正在 dual-read 的那个上游名"）。
+  本轮给这把尺子新增 `shippedFiles` / `shippedSrc` 两个字段与"扫描集为 0 ⇒ exit 2"的下限。
+- `surface-semantics`：正对照 **3/3**，`0 hit / 23 文件`（mcpShell 16、fork 7）。金样新增逐面 `files` 名单。
+- `product-surface`：**6587 agreement / 0 problem**，`glasspane-harness@0.12.4`。无基线、无 `--record`。
+- `hook-liveness`：**21 钩子 no drift，bound hooks 2/2**；本轮新增"记录里的派发点必须被读回"。
+- `kernel-pin`：**iterate-kernel@0.1.10**，lock integrity + **26** 个契约文件逐条 sha256。
+  `kernel-conformance`：**16 条 fixture** 全对上（CI 注释里那句"10 fixtures / 15 contract files"是
+  它自己那次实测的历史读数，不是今天的数）。
+- `patched-deps --check`：**18/19** 声明补丁对上安装字节，1 条不在当前图里（`△`）。
+- `provider-surface`：**面 B 5 / 面 A 3 / overlap 3 / one-sided 2**。
+- `mcp-redirect-policy`：**all 5 behaviours hold**，拒绝仍自报 `not followed`。
+  注意一条环境事实：在主工作树里它答 **exit 2**（"找到 3 份不同的 `@modelcontextprotocol/sdk` 拷贝"），
+  在本轮自己的干净 worktree（`bun install --frozen-lockfile`，2901 包）里它答 exit 0。
+  主树那份 `node_modules` 里有往轮留下的 1.29.0 / 1.31.0 死拷贝——尺子拒绝归因是**正确行为**，
+  不是缺陷；量这条必须在装有单一拷贝的树上量。
+- 固定点测试：**19 个文件 / 324 条用例 / 0 失败 / 1511 次 `expect()`**（12.69s），
+  TUI `inline-tool-wrap-snapshot` **36 条 / 0 失败 / 8 snapshot / 239 expect**。
+  上一轮这条 lane 只点名 9 个文件、能跑到的是 172 条。
+- typecheck 四个发布包各自 `bun run typecheck`：**opencode 0 / tui 0 / sdk/js 0 / plugin 0**。
+- 两条对照电池：**`rulers-selftest` 25 条 ok、`provider-surface-selftest` 7 条 ok，均 exit 0**，
+  且各自收尾要求"无 tracked 文件残留修改"，实测 `git status --porcelain` 为 0 行。
+- 父仓公共闸：`scripts/check-workflows.mjs --self-test` 0、`scripts/check-workflows.mjs` 0
+  （5 份 workflow clean）、`scripts/check-doc-links.mjs` 0
+  （**文档 32 份 / 仓库内链接 270 条 / 外链 44 条不请求 / markdown 表格 448 张，扫 120 份 markdown**）。
+
+### 真机观测：这是 M2 台账证明第一次真正跑通
+
+`glasspaned` 今天在跑（`~/.glasspane/engine.sock`），于是 `script/glasspane-e7-ledger.ts` 得以实跑：
+**18 条全 PASS**，链上 entry 0→1 由 `prevEntryHash` 相接、`operationId` 是引擎自己的
+`op_01M35PAMYNNPJRNCCM6Q34XQ`、outcome `inconclusive` + summary "attribution soft"，
+台账文件 0600，读取的那一条归档包 sha256 `243c93ecdcc2…` 与 daemon 回放出来的**逐字相等**。
+顺带这次实跑抓出并修掉了两处只在真形状下才暴露的缺陷：手写 metadata 缺 `DAEMON_ORIGIN`
+（导致 4/6/7 永不可达、5 以错误原因通过），以及把 `{evidencePack: reply}` 多包了一层
+（导致内核读侧契约以 `<root>: Unrecognized key: "evidencePack"` 拒绝引擎的真帧——那条 remedy 会把
+读者引向"Swift 与 TypeScript 漂移了"，而漂移的是这个脚本自己）。
+另：daemon 对畸形帧回的是 `{code: GP_E_BAD_REQUEST, message, remedy}` 三键齐全的错误帧，实测读到。
+
+### 红过又修好的（都记在这里，不藏在"已通过"后面）
+
+1. `check-workflows` 把复合动作纳入扫描后，**当场抓出 3 处真实缺陷**（`setup-bun` 两处、
+   `setup-git-committer` 一处多语句正文没有 shell 闸）；refs 18→23、files 2→4。修完转绿。
+2. `surface-semantics` 新加的"注释化对照必须不发射"反对照，**第一版把自己写错了**：它把
+   `"// " + sample` 直接喂给 `rule.count()`，绕过了它本该验证的 `stripComments`，于是报了一条
+   不存在的缺陷（`verdict-synthesis` 在注释形态下发射）。改成走同一个 `prepare()` 之后三条对照全过，
+   那次误报也说明这条反对照确实有力。
+3. `workflow-gates` 三条新用例第一版有两条红：一条把 `--self-test` 用在一个没有 workflow 的目录上
+   （`invoke(".")` 得到的是"没有可扫之物"的 exit 2，而不是旗标拒绝），一条把 CLEAN 基线的
+   refs/bodies 数记错。都按实测改成真数，不是放宽断言。
+4. `provider-surface-selftest` 的 overlap 那条对照自己的针写错（`counts.overlap:` 前缀，尺子实际打
+   `asymmetry-ledger:`），电池因此红了一次；先手工驱动该变异（备份 + sha256 核回，**没有用
+   `git checkout`**）确认针与 mustNot，再提交。
+5. `test/server/auth.test.ts` 里那条"defaults to the opencode username"是**本轮修复的产物之一**：
+   它在 main 上就红（本分支起点 `63fcda5e` 的同一棵树实测 4 pass / 1 fail），原因是断言还写着上游
+   默认名，而 `header()`、`ServerAuth.Config`、`run.ts:198` / `attach.ts:43` 三处都是产品名。
+   改断言之前先用主树证明它红在改动前，避免把自己的破坏说成既有缺陷。
+
+### 否证的两条，以及它们各自的量法
+
+- "`daemon.ts` 在 close/end 会丢弃一帧没有换行结尾的完整 JSON"：**不成立**。
+  `engine/Sources/GlassPaneEngine/Dispatcher.swift:316` 是 `return data + Data([0x0A])`，
+  它在 `lastResortErrorFrame` 那支兜底之后仍执行，因此每一条返回路径都以换行结尾；
+  `SocketServer.swift:357` 原样 `writeAll`。给一个生产发不出的形状加解析分支，等于把
+  "帧以换行为界"这条契约写弱。
+- "`resolveSocket` 返回未归一化的 stateRoot，能让引擎树内的台账绕过守卫"：**不成立**。
+  实测 `GLASSPANE_SOCKET=<root>/nope/../engine.sock` + `GLASSPANE_DECISION_LOG=<root>/projects.json`
+  仍被拒（`GP_E_DECISION_LOG_PATH`）。原因在 `kernel.ts:222-236` 的 `physicalPath`：它把最深存在祖先
+  `realpathSync` 之后用 `path.join` 拼回缺失部分，而 `path.join` 自己就折叠 `..`，所以物理那一支
+  兜住了词法那一支漏掉的情形。
+
+### 维持现状的三条（依据与代价都写清楚，不是"下一轮再看"）
+
+- 不加 `status` 一类的"不经模型读引擎连通性"命令：那是新增 CLI 形状 = minor，且要连 docs 双语、
+  brand/product 闸一起改；而本轮实测任何一次 `gp_*` 调用失败回的就是三键齐全、remedy 可直接执行
+  （`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon` 那一类）的帧。
+- `--help` 走 stderr 是上游 yargs 行为，两条 bin 同源、退出码不变。真正错的是 `install.sh` 把
+  `$PRODUCT --help` 写成"验证安装"的补救——管道里读不到字节。已按补救本身改成 `--version`。
+- `script/beta.ts` / `script/version.ts` 是上游开发期工具（与 pin 逐字节相同），本产品没有 `beta`
+  分支、不用 `gh release create`。删除会移动 `fork-diff` 的 deleted 计数而收益只有"少两个没人点的文件"；
+  改为把它钉成一条闸（`workflow-gates.test.ts` 断言两个 workflow、两份 package.json 与 `publish.ts`
+  都不引用它们）。
+
+### 本轮我替你做的决定 → 依据 → 回滚
+
+1. **取号 0.12.4（patch）**。依据：pre-1.0 口径"产品面/CLI 形状变动 = minor"；本版没有新命令、
+   没有新参数、目标矩阵一字未动，唯一用户可见形状变化是让一键通道兑现 `product.json` 早就声明的
+   第二个 bin。回滚：`git revert d31a8c7c 495d9533 04871ae8 7264f377`（顺序从新到旧），
+   或只把版本线 8 处改回 0.12.3——但 0.12.3 已被 tag 承载，改回去只会让 `release-artifact` 具名红。
+2. **金样重记（四把尺子）而非把改动挪走**。依据：+240 行面 B 与 +27 行血缘都是本轮有意修复的字节；
+   口径纪律是"同批 `--record` 并说清长了多少/为什么"。`product-surface` 全程没有 `--record`。
+   回滚：`git checkout 63fcda5e -- harness/contracts/{fork-diff,tool-surface,brand-surface,surface-semantics}.json`
+   之后尺子必红（那是正确结果，不是回归）。
+3. **复合动作纳入 `check-workflows` 扫描，并给三个 action 正文补 `set -euo pipefail`**。依据：那两个文件
+   在每个持 `id-token: write` 与发布签名 key 的 job 里执行，从前没有任何 lane 问过它。
+   代价与风险：新闸当场就红，说明这两个文件此前确实带着未声明 shell 闸的多语句正文上线过。
+   回滚：`git revert` 对应 hunk，尺子会退回"只扫 workflows"的旧口径。
+4. **发布 `npm publish` 改为点名 `npm pack` 出来的 tarball**。依据：`publish.ts --dry-run` 验的是
+   `bun pm pack` 的归档，而 `npm publish .` 让 npm 重新打包同一目录，本文件自己就记账两次打包的
+   sha512 不同（v0.7.10 复投实测），所以"闸验过的字节 == 发出去的字节"此前不成立。
+   回滚：把 `npm publish "$tarball"` 改回 `npm publish`。
+5. **资产名三处推导统一到 `build.ts:110-116` 的模板，并把 `find()` 改成"必须恰好命中一条"**。
+   依据：`checksums` 与 wrapper 两支此前写法不同，`platformTargets` 一旦回到同 os-arch 双条目
+   （glibc/musl、avx2/baseline）就会 `cd` 进错目录并发错包。今天的矩阵只有 2 条、无 abi，
+   所以这是**尚未发生的形状**，改它不改变本版产物。回滚：改回各自的一行推导。
+6. **`fork-diff` / `release-artifact` / 四把尺子的 dirty 守卫改 `-c core.quotepath=off` + `-z`**。
+   依据：本仓追踪的文件名里有非 ASCII（`specs/GlassPane_每日2026-10-29_发现台账.md` 今天就在），
+   默认引用形式会让前缀匹配失效，`--record` 因此可能把别人的未提交行洗进金样。
+   实测本轮 fork-diff 四桶计数在改动前后一致（见上），所以这是防未来而非修当下已坏之物。
+   回滚：去掉 `-z` 与 quotepath 参数即可，金样不需重记。
+7. **`provider-surface` 的 `counts` 缺失与逐方法表新增为两条硬判据**。依据：`!== undefined` 那种
+   可选断言删掉一个金样字段就集体失效。代价：金样若被手工编辑过会立刻红——这正是目的。
+8. **主工作树 `node_modules` 不修**。依据：那棵树此刻被 07:30 那条线占用（`install.sh`、
+   `installer/*`、`mcp-shell/*` 六个文件的在飞批次 + 5 个 worktree），在里面跑 `bun install` 会换掉
+   他们正在依赖的字节。本轮所有测量改在 `.worktrees/harness-daily-20261029` 里做（自带一次
+   `bun install --frozen-lockfile`，2901 包，`bun.lock` sha256 `02c96d9d…` 前后未变）。
+   给那条线的补救：等他们收口后 `cd harness/glasspane-harness && bun install --frozen-lockfile`。
+
+### 未观测（只限物理边界，各附补上它的那一条命令）
+
+- **真模型轮次**：本版没有换 provider 或网关，`gp_act` 的 `ctx.ask` 权限卡与 `output` 截断仍需一次
+  带真 key 的会话才能观测。补它：`cd harness/glasspane-harness/packages/opencode && bun run dev`
+  起 TUI，手工对一条会触发 `gp_act` 的任务走一遍，并确认权限卡弹出、被拒的行走 `⊘` 而不是 `◈`。
+  本轮没跑的原因：需要真 API key 与一次不可逆的 GUI 操作，无人值守场景里不能替你花额度。
+- **musl / baseline 目标**：`product.json` 的 `platform.dropped` 记着这些目标已随 macOS-only 裁决移除，
+  "没有 CI lane"是因为"没有目标"。恢复任一目标要先改 `platformTargets` 与 `platform.dropped`，
+  再给 `binaries` 加 runner——本轮不动产品形状。
+- **`npm stage approve`**：本版若被 registry 要求 staged，批准是你账号的 2FA 人工动作。
+  实测本版走的是直接发布（见下"发布读数"），本轮没有待批 stage。
+
 ## 2026-10-27（第二十四次会话）· 取号 0.12.1：一次"为了让父仓那把尺子重新成立"的发布，和它真正的理由
 
 本轮搬运仓里只有两类改动，都不是代码：
