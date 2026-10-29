@@ -494,6 +494,13 @@ public enum LocalArchive {
     /// 理解**（daemon 不认这条命令 → 退出码 64 + 一段帮助文本）会被折算成
     /// `matched = 0`，面板于是当着一屏"68 条残留"说"没有需要清理的测试残留项目"。
     /// "没东西可删"与"这条命令不存在"是两件事，混起来的后果是用户以为已经干净了。
+    ///
+    /// `loadFailed` 有**两支**，各说各话：
+    ///  * 写之前就读不开（`requiresDaemonRestart:false`，回话里根本没有 matched）——
+    ///    一次都没动手，那句"清理没有执行"说得出口；
+    ///  * 写完读不回（`requiresDaemonRestart:true`，后台服务自己说这一趟动过盘）——
+    ///    这里不许再说"没有执行/未改动"：盘与内存此刻已经不一致，替它断言"没动过"
+    ///    会把唯一那一步补救（先修文件、再重启）说成没必要做。
     public static func pruneResultMessage(
         cliRan: Bool,
         replyShaped: Bool,
@@ -513,6 +520,11 @@ public enum LocalArchive {
                 + "这一句不代表已经干净了：一条都没删，也没人去问过有没有可删的。"
         }
         if loadFailed {
+            if needsRestart {
+                return "清理已经动过盘上那份注册表，可这一趟写完读不回它，确认不了删掉了哪几条、"
+                    + "现在还剩什么。下一步：先把那份文件修到能读开，再重启后台服务——"
+                    + "它手里此刻还是改动前的那一份。"
+            }
             return "注册表文件读不开，为避免把读不回的条目覆写掉，清理没有执行。修好该文件后重启后台服务再试。"
         }
         if matched == 0 { return "没有需要清理的测试残留项目。" }
@@ -529,12 +541,19 @@ public enum LocalArchive {
     /// 单条删除结果 → 面板那句话。未知 id、"拒绝覆写损坏表"、以及"这条命令根本
     /// 不被认识"是三件事。第三种从前会被读成"没找到这个项目"——同一个 `removed: false`，
     /// 一个说的是用户给错了 id，一个说的是这台机器上没有这条命令。
+    ///
+    /// `found` 把 `loadFailed` 那一支再分成两件事，它们互相否定：
+    ///  * `found` 缺席 = 表在**动手之前**就读不开，这一趟确实什么都没写；
+    ///  * `found:true` = 它先读开了表、认出了这条注册项、把删除写了下去，之后才读不回——
+    ///    这时说"删除没有执行"就是把已经动过的盘说成没动过，还会顺带抹掉那一步补救
+    ///    （先修文件、再重启）的必要性。后台服务自己都不敢断言"未改动"，面板不许替它断。
     public static func removeResultMessage(
         cliRan: Bool,
         replyShaped: Bool,
         exitCode: Int32,
         removed: Bool,
         loadFailed: Bool,
+        found: Bool = false,
         needsRestart: Bool
     ) -> String {
         if !cliRan { return "删除命令没能跑起来，注册表未改动。" }
@@ -548,7 +567,16 @@ public enum LocalArchive {
                 + (needsRestart ? "重启后台服务后，它内存里的旧列表才会同步。" : "")
         }
         if loadFailed {
+            if found {
+                return "删除已经写进盘上那份注册表，可这一趟写完读不回它，确认不了它现在还在不在、"
+                    + "表里还剩什么。下一步：先把那份文件修到能读开，再重启后台服务——"
+                    + "它手里此刻还是改动前的那一份。"
+            }
             return "注册表文件读不开，为避免把读不回的条目覆写掉，删除没有执行。"
+        }
+        if found {
+            return "后台服务认得这一条注册项，但这一趟没把它删掉，注册表还是原样。"
+                + "下一步：点「刷新」重读注册表确认它仍在，再重试删除。"
         }
         return "没找到这个项目，注册表未改动。"
     }

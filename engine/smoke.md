@@ -1387,3 +1387,91 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.glasspane.daemon.pli
 ```
 两支的判据与措辞由 `ConsoleModel.daemonStatsRecovery(pathKnown:)` 一处给出，
 所以它现在有单元与结构两层闸（`Qoder20261027StatsRecoveryTests`，4 条；反向变异见那条提交正文）。
+
+## 每日真机核对 2026-10-29（泳道 5 · SwiftUI 设置面板三条）
+
+被测字节：本轮源码构建的 `engine/.build/debug/glasspane-settings` 与 `glasspaned 1.25.2`。
+状态根与 socket 全程隔离在 `/var/tmp/glasspane-main-check/2026-10-29-main/lane5/root`
+（`GLASSPANE_STATE_DIR` + `GLASSPANE_ENGINE_SOCK` 点名，面板页脚读到的就是这一个根）。
+**本机在册的用户 daemon（PID 95907，`~/.glasspane/engine.sock`）一次都没被停过、也没被写过**：
+`~/.glasspane/projects.json` 走完这一轮仍是 mtime `Oct 24 09:45`、sha1 `aa5d7042f476be1b7acb54dfc9e4141acfe7f7a5`、5 条注册项。
+AX 驱动仍是自写的 Swift + `ApplicationServices` 辅助器（本机无 pyobjc，与 10-20/10-21/10-27 同一办法）：
+`/var/tmp/glasspane-main-check/2026-10-29-main/lane5/gp-ax-walk.swift`，按 `AXIdentifier` 读、按 `kAXPressAction` 点。
+
+### ① S5-3 注册项自己写过的档案目录（本轮修的那一枚控件）
+
+按 `gp-nav-projects` 进项目页，详情栏选中的注册项写着 `evidenceStoragePath` 而那个目录不在盘上时：
+
+```
+gp-open-evidence-directory | AXButton | enabled=0 | 在访达中打开证据目录 |
+  「在访达中打开证据目录」现在按不动：这条注册项写过的档案目录
+  /var/tmp/glasspane-main-check/2026-10-29-main/lane5/root/evidence-gone
+  这一页量过了——它已不在盘上（注册之后被系统或档案保留策略清掉是这条路常见的结局），
+  访达没有一个去处可显示。下一步：执行一次会留档案的操作后点「刷新」重扫这一页；
+  要让这个项目继续有自己的档案目录，就在注册时给它重写 evidenceStoragePath。
+```
+
+对照臂（同一个根里那条写了**在盘上**目录的注册项）：
+
+```
+gp-open-evidence-directory | AXButton | enabled=1 | 在访达中打开证据目录 |
+  在访达中打开这条注册项自己写的档案目录：…/lane5/root/evidence-present
+```
+
+从前一臂也是 `enabled=1`，按下 `NSWorkspace.selectFile` 无事发生、屏幕零字。
+
+### ② S5-1 重启横幅：同一个进程再答不撤，换个进程号才撤
+
+按 `gp-prune-projects` →（确认表 `gp-confirm-prune` 标着「清理 1 条」）→ 屏上：
+
+```
+gp-action-message | AXStaticText | 已清理 1 条测试残留项目。重启后台服务后，它内存里的旧列表才会同步。
+gp-restart-after-prune | AXButton | enabled=1 | 重启后台服务
+```
+
+- 同一个 daemon（pid 43633）继续应门：相隔 4 秒读屏三次（其间按 `gp-refresh-projects`），`gp-restart-after-prune` 枚数 **1 / 1 / 1** ——横幅与它那枚按钮留着。
+- 把 daemon 换成**新进程**（pid 44612）并按 `gp-refresh-all`：枚数 **0** ——实测到换过进程，那句话这才收起。
+- **这一条第一次跑的时候读不到那个 0**（旧 35411 → 新 38480，按刷新之后横幅仍是 1）。量出来缺的不是判据而是采纳点：
+  只挂 `settings.daemon.liveness` 与 `settings.daemon.stateRoot` 的 `.onChange` 收不到"同一档 liveness、同一个根、只有进程号换了"那一帧，
+  于是"只有 pid 换过才清"这一条在真窗口里根本轮不到跑。补上 `.onChange(of: settings.daemon.pid)` 之后重跑才是上面那两组数。
+- 没有按 `gp-restart-after-prune`：它走 `launchctl kickstart -k gui/<uid>/com.glasspane.daemon`，动的是本机**在册那个用户 daemon**，
+  本轮纪律是不停别人在跑的服务。它的 `enabled=1` 与 help 都读到了。
+
+### ③ S5-2 删除/清理回执：写前拒与写后读不回分开
+
+面板这一侧真机读到三支里的两支（同一枚 `gp-remove-project`）：
+
+```
+（chmod 000 projects.json 之后）gp-action-message | 注册表文件读不开，为避免把读不回的条目覆写掉，删除没有执行。
+（恢复正常之后）        gp-action-message | 已删除该项目。重启后台服务后，它内存里的旧列表才会同步。
+```
+
+「写完读不回」那一句在面板上**未观测**。争的是一次性命令"写完 → 回读"那一个微秒级空隙：
+前四批 `panel_race.py`／`panel_race2.py`／`panel_race3.py`／`panel_race4.py` 合计 120 轮，屏上每轮都是
+健康臂那句；第五批 `panel_race5.py` 加了"按压前详情栏真的挂着那枚按钮、`kAXPressAction` 回 err=0"两道核验，
+26 轮**一轮都没按成**（列表没落地，`reset()` 与按压之间没等够），所以前四批那 120 句也不能算 120 次新鲜删除的
+读数——它们只证明那句结论留在屏上。这一支的补做命令是：
+`python3 /var/tmp/glasspane-main-check/2026-10-29-main/lane5/panel_race5.py 60`，
+前提是每轮 `reset()` 之后先按 `gp-refresh-projects` 并等详情栏真的出现「删除这个项目」（脚本自己会跳过没按成的轮次）。
+同一支的**载荷**在这台机器上用真二进制量到过——`race_probe.py` 第 21 次
+`glasspaned --state-dir <隔离根> --project-remove lane5-race-01` 回（原文字段照抄）：
+
+```
+"loadFailed": true, "found": true, "removed": false, "requiresDaemonRestart": true,
+"error": "projects.json at …/lane5/root/projects.json cannot be read (… Permission denied)",
+"next": "make the file readable again …, or restore it from a copy) and restart the daemon"
+```
+
+面板那句新文案就是 `LocalArchive.removeResultMessage` 对这份载荷的折算（不注入、不代测；
+它禁掉了"没有执行/未改动/保持原样"，只说"已经写进盘上、这一趟读不回、先修文件再重启"），
+由 `DailyRound20261029Swift4PanelLanesTests` 里 `S5-2 remove: …` 与 `S5-2 prune: …` 各两条钉着。
+补那一条 UI 读数要跑的命令：`python3 /var/tmp/glasspane-main-check/2026-10-29-main/lane5/panel_race5.py 60`
+（前提是每轮 `reset()` 之后按一次 `gp-refresh-projects`，让详情栏真的挂着「删除这个项目」）。
+
+### ④ 本轮计数
+
+- `swift test --package-path engine --filter "DailyRound20261029Swift4"` → Swift Testing **12 条 / 1 套件全过**。
+- 邻域复跑 `--filter "Panel|Console|Projects|LocalArchive|Retention"` → XCTest **231 执行 / 0 失败**，Swift Testing **41 条 / 3 套件全过**。
+- 补充复跑（吃了改动 API 的那批文件：`Qoder20261027PruneBannerTests|Qoder20261019PanelDefectsTests|QoderPanel20261019Tests|Qoder20261024PanelHonestyTests|Qoder20261024CliAndPanelTests|ConsoleCliChannel|Prune|Daemon`）→ XCTest **176 执行 / 0 失败**。
+- 反向变异 9 点（`/var/tmp/glasspane-main-check/2026-10-29-main/lane5/reverse_mutations.py`，日志 `mutations-final.log`）：
+  M1a/M1b/M2a/M2b/M2c/M3a/M3b/M3c/M3d **全部具名用例变红**，每次 `cp` 回备份后 `shasum -a 1` 与备份逐字一致。

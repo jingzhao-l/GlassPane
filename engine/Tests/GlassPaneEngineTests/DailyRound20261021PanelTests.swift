@@ -39,13 +39,16 @@ struct DailyRound20261021PanelTests {
     )
 
     /// 项目页那枚控件的调用形态（同一份判据，不在测试里另立第二套规则）。
+    /// `registeredExists` 默认 nil ＝ 这一页还没量过那个注册项写下的目录。
     private func projectControl(
         registered: String?,
         shared: String,
-        sharedExists: Bool?
+        sharedExists: Bool?,
+        registeredExists: Bool? = nil
     ) -> ConsoleModel.PanelControl {
         ConsoleModel.projectEvidenceDirectoryControl(
             registeredPath: registered,
+            registeredDirectoryExists: registeredExists,
             sharedDirectory: shared,
             sharedDirectoryExists: sharedExists,
             stateRootCaption: "后台服务这一帧上报的状态根 /tmp/x"
@@ -542,22 +545,55 @@ struct DailyRound20261021PanelTests {
         #expect(present.help.contains("共用的档案目录"),
                 "这一枚开的是本页共用的那一份，这句话必须写在控件上：\(present.help)")
 
-        // 注册项自己写了目录：共用那一份量没量过都与它无关，照旧按得动且点名自己那份。
+        // 注册项自己写了目录：**那条路径也是这一枚要按下去的去处，一样要先量过在不在**。
+        // 从前这里钉的是 `#expect(owned.enabled)`——它给缺陷背书：注册项写的
+        // `evidenceStoragePath` 是注册当时留下的事实，那个目录可能已被系统或保留策略清掉
+        // （本页点名要清的测试残留就落在这种目录里），按下 `NSWorkspace.selectFile`
+        // 无事发生、屏幕零字。共用那一条早就由 `directoryIsPresent` 管住，同一条判据
+        // 没理由绕过注册项自己那一份。以下三条把"量到在／量到不在／还没量过"三态钉全。
         let owned = projectControl(
-            registered: "/tmp/project-own/evidence", shared: shared, sharedExists: false)
-        #expect(owned.enabled)
+            registered: "/tmp/project-own/evidence", shared: shared,
+            sharedExists: false, registeredExists: true)
+        #expect(owned.enabled, "量到在盘上就该按得动：\(owned.help)")
         #expect(owned.help.contains("/tmp/project-own/evidence"), "读数: \(owned.help)")
         #expect(!owned.help.contains(shared),
                 "它说的是自己那一份，不该顺带替共用那一份说话：\(owned.help)")
+
+        // 量到不在：按不动，且那句话给得出路径与两条做得动的下一步。
+        let ownedGone = projectControl(
+            registered: "/tmp/project-own/evidence", shared: shared,
+            sharedExists: true, registeredExists: false)
+        #expect(!ownedGone.enabled, "目录已被清掉还按得动，按下就是一次静默无反应：\(ownedGone.help)")
+        #expect(ownedGone.help.contains("按不动"), "读数: \(ownedGone.help)")
+        #expect(ownedGone.help.contains("/tmp/project-own/evidence"),
+                "理由要点名它量过哪一个去处不在：\(ownedGone.help)")
+        #expect(ownedGone.help.contains("不在盘上"), "读数: \(ownedGone.help)")
+        #expect(ownedGone.help.contains("下一步"), "禁用的一句话必须给得出下一步：\(ownedGone.help)")
+        #expect(ownedGone.help.contains("刷新") && ownedGone.help.contains("evidenceStoragePath"),
+                "下一步得是这一屏做得动的两件：\(ownedGone.help)")
+        // 注册项写了自己那一份时，它不在与共用那一份在不在是两件事：
+        // 这句不许顺口替共用那一份说话（那是另一枚控件的读数）。
+        #expect(!ownedGone.help.contains(shared), "读数: \(ownedGone.help)")
+
+        // 没量过 ≠ 不在：这一枚同样不许开一个没验证过的位置。
+        let ownedUnmeasured = projectControl(
+            registered: "/tmp/project-own/evidence", shared: shared, sharedExists: true)
+        #expect(!ownedUnmeasured.enabled, "没量过就按得动，等于拿注册表里的一句话当实测：\(ownedUnmeasured.help)")
+        #expect(ownedUnmeasured.help.contains("还没量过"), "读数: \(ownedUnmeasured.help)")
+        #expect(!ownedUnmeasured.help.contains("不在盘上"),
+                "把没量过说成那里没有，是另一件没观测到的事：\(ownedUnmeasured.help)")
+
         // 空白串不算写了目录（与 `adoptDaemonReport` 那一条同一判据）。
         #expect(!projectControl(registered: "   ", shared: shared, sharedExists: false).enabled,
                 "空白那一份等于没写：控件不该按得动")
     }
 
     /// 判据必须来自这一页自己的那次实测（扫注册表的同一趟），不能借证据页那一枚的
-    /// 布尔——那一枚的 `false` 里还混着「还没扫过」。
+    /// 布尔——那一枚的 `false` 里还混着「还没扫过」。共用那一份与注册项自己写过的那一份
+    /// 都算：后者从前没有这一趟，于是那句 `evidenceStoragePath` 被当成实测。
     /// REVERSE：删掉 `reloadProjects` 里 `Self.directoryIsPresent(sharedDirectory)`
-    /// 那一句 → 存在性那四条红；把控件判据换成 `archiveExists` → 后两条红。
+    /// 那一句 → 存在性那四条红；把控件判据换成 `archiveExists` → 后两条红；
+    /// 删掉 `registeredPresence` 那一次量（2026-10-29 补的那一条）→ 上面注册项那三态红。
     @Test("Shape: the gate reads this page own measurement") func ShapeTheGateReadsThisPageOwnMeasurement() throws {
         let dir = TestSandbox.directory("project-dir-gate")
         let missing = dir + "/evidence-missing"
@@ -574,6 +610,11 @@ struct DailyRound20261021PanelTests {
         let model = try PanelSourceText.code("ConsoleModel.swift")
         #expect(model.contains("self.sharedEvidenceDirectoryExists = sharedExists"),
                 "这一页没有把量到的那一次落进状态，控件只好继续猜")
+        // 注册项自己写过的那一份也要在同一趟里量，并由那一个 projectId 递给控件。
+        #expect(model.contains("self.registeredEvidenceDirectoryExists = registeredPresence"),
+                "注册项写下的路径没被量过，那一枚就只会说「还没量过」或继续无条件按得动")
+        #expect(model.contains("registeredDirectoryExists: registeredEvidenceDirectoryExists[entry.projectId]"),
+                "量到的那一次没接到这一枚控件上，等于白量")
         let projects = try PanelSourceText.code("ProjectsTabView.swift")
         #expect(projects.contains(".disabled(!evidenceDirectoryEnabled(entry))"),
                 "那一枚又回到永远按得动")

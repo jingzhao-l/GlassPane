@@ -133,6 +133,15 @@ final class ConsoleModel: ObservableObject {
     /// 项目页那枚「在访达中打开证据目录」在它没有自己的目录时就开这一份，所以这一
     /// 枚的可用性只能由这一次实测决定，不能由"看起来应该有"决定。
     @Published private(set) var sharedEvidenceDirectoryExists: Bool?
+    /// 同一趟里量到的"每条注册项**自己写过**的那份档案目录在不在"（projectId → 结局）。
+    ///
+    /// 这一枚与上面那一份共用同一条判据（`directoryIsPresent`），从前却是漏掉的：
+    /// 注册项只要写了 `evidenceStoragePath`，那一枚就无条件按得动，而这个路径是注册当时
+    /// 写下的旧事实——它随时可能被系统或档案保留策略清掉（`/var/folders/…` 那种临时目录
+    /// 按天清是常态，也正是本页点名要清的测试残留）。目录没了的时候按下
+    /// `NSWorkspace.selectFile` 什么都不做、屏幕上没有一个字。
+    /// 没有这一条实测，控件就只会说"还没量过"，不会说"开得了"。
+    @Published private(set) var registeredEvidenceDirectoryExists: [String: Bool] = [:]
     @Published var selectedProjectId: String?
     /// 待确认的清理清单。**必须由 daemon 的 `--project-prune --dry-run` 产生**：
     /// 从前这里是面板自己按 `LocalArchive.isTestResidue` 过滤本地读到的注册表，
@@ -148,6 +157,9 @@ final class ConsoleModel: ObservableObject {
     /// 读过，而那是闸门不是读者——真删那 20 秒里按钮已经回到可点状态。
     @Published var isRunningPrune = false
     /// 修剪后是否需要重启后台服务（daemon 内存里还是旧表）。
+    /// 收起它只有两条实测路径：重启那侧量到进程号换过（`SettingsModel.pruneBannerCleared`），
+    /// 或轮询里 hello 报回**另一个**进程号（`adoptDaemonReport` 的 `reportedPid`）。
+    /// 同一个进程再答一次不算——那句话的横幅里带着这一屏唯一那枚「重启后台服务」。
     @Published var pruneNeedsRestart = false
     /// 上一次写入动作（清理／删除）的结论。**必须被渲染**：这条曾经只被写入、
     /// 没有任何读者，于是"确认清理"点下去只是关掉确认表，删了几条、失败在哪、
@@ -312,6 +324,16 @@ final class ConsoleModel: ObservableObject {
         return refusedDaemonStateRootCaption
     }
 
+    /// 上一次实测到的后台服务进程号（nil = 这一页从没实测到它的进程号）。
+    ///
+    /// 这一枚存在唯一的理由：「注册表已改动，重启后台服务后它才会用新表」那句话只能在
+    /// **实测到另一个进程应门**之后撤。从前它挂在"hello 又答了一次"上，而 1 秒一轮的轮询
+    /// 里同一个进程也会再答一次——横幅连同它里面那枚唯一的「重启后台服务」按钮一起消失，
+    /// 用户失去的就是那一次补救的入口。留着旧进程号才量得出"换了没"：一次
+    /// `presentButSilent` 会把 `daemon.pid` 清成 nil（没回话就没有自报），那时这一页手里
+    /// 剩下的最后一个实测就是这一个数。
+    private var lastReportedPid: Int?
+
     /// 把一次 hello 的实测结局接到控制台数据上。
     ///
     /// 从前这里只在 `daemonBinaryPath == nil` 时赋值一次，于是重装/重开之后
@@ -320,9 +342,17 @@ final class ConsoleModel: ObservableObject {
     /// 没自报，保持现状，因为"没读到路径"不等于"路径没了"），而"跟着换"的前提是
     /// 那个路径先过引擎侧那三条实测判据——自报的话不许直接换成一次 exec。
     /// 拒掉的形状记在 `refusedDaemonBinaryPath`，页面上说得出拒了什么。
-    /// - Parameter answered: 这一帧是不是真的拿到了 hello 回话。"注册表改动要重启
-    ///   后台服务才生效"那句话只能在服务重新应门之后撤，点一下按钮不算重启成功。
-    func adoptDaemonReport(binaryPath: String?, daemonStateRoot: String? = nil, answered: Bool) {
+    /// - Parameter answered: 这一帧是不是真的拿到了 hello 回话。
+    /// - Parameter reportedPid: 同一帧里它自报的进程号（nil = 这一帧没报）。
+    ///   "注册表改动要重启后台服务才生效"那句话只能在**量到进程号换过**之后撤：一次没换
+    ///   进程的应答证明不了新表被加载过，判据与 `SettingsModel.pruneBannerCleared(by:)`
+    ///   （只认实测到换过进程号的那一个重启结局）是同一条，两扇门不许各说一套。
+    func adoptDaemonReport(
+        binaryPath: String?,
+        daemonStateRoot: String? = nil,
+        reportedPid: Int? = nil,
+        answered: Bool
+    ) {
         // 只有真空白算"这一帧没自报"；空白串也不能当路径——后面四条动作都要拿它去 exec。
         let reported = binaryPath?.trimmingCharacters(in: .whitespacesAndNewlines)
         let reportedRoot = daemonStateRoot?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -384,7 +414,15 @@ final class ConsoleModel: ObservableObject {
         }
         if answered {
             daemonHasAnswered = true
-            pruneNeedsRestart = false
+            // 只有量到**另一个进程**在应门才撤那句"要重启"。同一个进程再答一次（1 秒一轮
+            // 的轮询里这是常态，而一次 presentButSilent 之后 rootChanged 还会逼着这一侧
+            // 再采纳一遍）没让旧注册表变成新注册表，撤了就是把用户唯一的补救入口抹掉。
+            if let reportedPid {
+                if let previous = lastReportedPid, previous != reportedPid {
+                    pruneNeedsRestart = false
+                }
+                lastReportedPid = reportedPid
+            }
         }
     }
 
@@ -462,8 +500,16 @@ final class ConsoleModel: ObservableObject {
             let registry = ProjectRegistry(filePath: path)
             let entries = registry.all
             var counts: [String: Int?] = [:]
+            var registeredPresence: [String: Bool] = [:]
             for entry in entries {
                 counts[entry.projectId] = Self.ownedEvidenceCount(for: entry)
+                // 注册项自己写过目录的那一条，同在这一趟里量一次在不在：项目页那一枚
+                // 按的就是这一个位置，判据不能是"注册时写过所以应该还在"。
+                let owned = entry.evidenceStoragePath?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if !owned.isEmpty {
+                    registeredPresence[entry.projectId] = Self.directoryIsPresent(owned)
+                }
             }
             let damaged = registry.loadFailed
             // 同一趟里量一下"本页在读的那一份档案目录在不在"：项目页那枚打开目录的
@@ -472,6 +518,7 @@ final class ConsoleModel: ObservableObject {
             await MainActor.run {
                 self.projects = entries
                 self.projectEvidenceCounts = counts
+                self.registeredEvidenceDirectoryExists = registeredPresence
                 self.sharedEvidenceDirectoryExists = sharedExists
                 self.projectsState = damaged ? .failed("注册表文件读不开，面板只呈现能读到的部分") : .loaded
                 if self.selectedProjectId == nil {
@@ -991,8 +1038,9 @@ final class ConsoleModel: ObservableObject {
         return shaped || !cliRan ? message : message + quoteDaemonWords(stderr)
     }
 
-    /// remove 的结论，同一判据：未知 id、"拒绝覆写损坏表"与"这条命令不被认识"是
-    /// 三件事，而 stderr 里那份 `loadFailed` 报告属于第二件。
+    /// remove 的结论，同一判据：未知 id、"动手前就读不开所以拒写"、"写下去之后读不回"
+    /// 与"这条命令不被认识"是四件事。前两件都在 stderr 里带着 `loadFailed`，区别只在
+    /// 那份回话里有没有 `found:true`——有它才说明这一趟真的读开了表并写过盘。
     nonisolated static func removeActionMessage(
         cliRan: Bool, stdout: String, stderr: String, exitCode: Int32
     ) -> String {
@@ -1006,6 +1054,9 @@ final class ConsoleModel: ObservableObject {
             exitCode: exitCode,
             removed: boolField("removed", in: reply) == true,
             loadFailed: boolField("loadFailed", in: reply) ?? false,
+            // `found:true` 说的是"这一趟先读开了表、认出了这条注册项"——于是它后面那句
+            // `loadFailed` 只能发生在写下去之后，两句话不能合成一句"删除没有执行"。
+            found: boolField("found", in: reply) == true,
             needsRestart: boolField("requiresDaemonRestart", in: reply) ?? false
         )
         return shaped || !cliRan ? message : message + quoteDaemonWords(stderr)
@@ -1182,19 +1233,40 @@ final class ConsoleModel: ObservableObject {
     /// 对一个不存在的位置什么都不做，屏幕上没有一个字说为什么。证据页的同胞早就由
     /// `evidenceDirectoryControl(exists:directory:)` 管住了自己，这一枚是漏网的那一个。
     ///
-    /// `sharedDirectoryExists` 用的是三态而不是 Bool：`nil` = 这一趟还没量过。
-    /// 把"没量过"写成"那里没有"、或把"没量过"放过去开一个没验证过的位置，是同一个
-    /// 毛病的两个方向。
+    /// 同一枚控件上还有第二个漏网的：注册项**写了**目录时，从前它无条件按得动——可那个
+    /// 路径是注册当时写下的旧事实，随时可能已经不在了（系统清理、保留策略到期，本页点名
+    /// 要清的那些测试残留就落在这种目录里）。注册项写过的路径也是这一页要按下去的位置，
+    /// 一样得先量过在不在；量到不在就说"按不动 + 为什么 + 下一步"，没量过就说"按不动 +
+    /// 点刷新量一次"。两个去处共用同一条 `directoryIsPresent` 判据与同一种三态说法。
+    ///
+    /// `sharedDirectoryExists` / `registeredDirectoryExists` 用的都是三态而不是 Bool：
+    /// `nil` = 这一趟还没量过。把"没量过"写成"那里没有"、或把"没量过"放过去开一个
+    /// 没验证过的位置，是同一个毛病的两个方向。
     nonisolated static func projectEvidenceDirectoryControl(
         registeredPath: String?,
+        registeredDirectoryExists: Bool? = nil,
         sharedDirectory: String,
         sharedDirectoryExists: Bool?,
         stateRootCaption: String
     ) -> PanelControl {
         let registered = registeredPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !registered.isEmpty {
-            return PanelControl(enabled: true, help:
-                "在访达中打开这条注册项自己写的档案目录：\(registered)")
+            switch registeredDirectoryExists {
+            case .some(true):
+                return PanelControl(enabled: true, help:
+                    "在访达中打开这条注册项自己写的档案目录：\(registered)")
+            case .some(false):
+                return PanelControl(enabled: false, help:
+                    "「在访达中打开证据目录」现在按不动：这条注册项写过的档案目录 \(registered) "
+                        + "这一页量过了——它已不在盘上（注册之后被系统或档案保留策略清掉是这条路常见的结局），"
+                        + "访达没有一个去处可显示。下一步：执行一次会留档案的操作后点「刷新」重扫这一页；"
+                        + "要让这个项目继续有自己的档案目录，就在注册时给它重写 evidenceStoragePath。")
+            case nil:
+                return PanelControl(enabled: false, help:
+                    "「在访达中打开证据目录」现在按不动：这条注册项写着档案目录 \(registered)，"
+                        + "而这一页还没量过它在不在——没量过就不开一个没验证过的位置。"
+                        + "下一步：点这一页的「刷新」量一次，再决定去哪儿。")
+            }
         }
         switch sharedDirectoryExists {
         case .some(true):
@@ -1496,10 +1568,12 @@ final class ConsoleModel: ObservableObject {
     }
 
     /// 项目页「在访达中打开证据目录」那一枚的现在形态。判据与证据页那枚同一条：
-    /// 这一页量到过那个去处，才谈得上按得动。
+    /// 这一页量到过那个去处，它才按得动——注册项自己写了目录时，那个去处就是它写的那一份，
+    /// 量的也是它（`registeredEvidenceDirectoryExists`），不是本页共用的那一份。
     func projectEvidenceDirectoryControl(for entry: ProjectEntry) -> PanelControl {
         Self.projectEvidenceDirectoryControl(
             registeredPath: entry.evidenceStoragePath,
+            registeredDirectoryExists: registeredEvidenceDirectoryExists[entry.projectId],
             sharedDirectory: evidenceDirectoryPath,
             sharedDirectoryExists: sharedEvidenceDirectoryExists,
             stateRootCaption: displayedStateRootCaption

@@ -75,7 +75,8 @@ struct ConsoleRootView: View {
         .onAppear { syncFromSettings(liveness: settings.daemon.liveness) }
         // 每一帧实测的 hello 都要重新对一次账：后台服务重装/重开之后自报了新的
         // 程序路径，控制台的清理/删除/校验/统计必须跟着换，否则一直在 exec 那份
-        // 已经退役的二进制；"注册表改动要重启才生效"也只等服务重新应门之后才撤。
+        // 已经退役的二进制；"注册表改动要重启才生效"只等**实测到换个进程号**才撤——
+        // 同一个进程再答一次不算重启过。
         .onChange(of: settings.daemon.liveness) { liveness in
             syncFromSettings(liveness: liveness)
         }
@@ -83,6 +84,13 @@ struct ConsoleRootView: View {
         // --state-dir 指到别处）。只挂 liveness 会漏掉这一帧，于是这一页继续按旧根读、
         // 旧根写——正是这条缺陷的形状。
         .onChange(of: settings.daemon.stateRoot) { _ in
+            syncFromSettings(liveness: settings.daemon.liveness)
+        }
+        // 进程号换过一个 daemon 也能在**同一档 liveness 与同一个根**下发生（重启快、
+        // 轮询没抓到空隙）。这一页收起「注册表已改动，重启后才会用新表」那句的依据就是
+        // 这一个实测，所以它自己也必须是一个采纳点——只挂 liveness/根会把"量到新进程"
+        // 这一帧漏掉，那句话就永远挂着一个已经完成的补救。
+        .onChange(of: settings.daemon.pid) { _ in
             syncFromSettings(liveness: settings.daemon.liveness)
         }
         .onChange(of: selection) { section in
@@ -106,6 +114,7 @@ struct ConsoleRootView: View {
         console.adoptDaemonReport(
             binaryPath: settings.daemon.subject?.binaryPath,
             daemonStateRoot: settings.daemon.stateRoot,
+            reportedPid: settings.daemon.pid,
             answered: answered
         )
         // 更新页也要跟着同一帧实测走：它的指针与根证书束都落在状态根下，从前这一页

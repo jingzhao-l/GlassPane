@@ -194,13 +194,30 @@ final class ReviewPanelTests: XCTestCase {
 
     /// 反向变异：**按下「重启后台服务」就把 `pruneNeedsRestart` 抹掉**——点一下
     /// 不构成重启成功，那句话只能等服务重新应门之后撤。
-    func testRestartNoticeSurvivesTheClickAndClearsOnAnAnsweredHello() {
+    ///
+    /// 2026-10-29 这一轮把"重新应门"钉得更严：**同一个进程再答一次不算应过一次新的门**。
+    /// 从前这一条只断到 `answered:true` 就收起，而 1 秒一轮的轮询里那个进程本来就会一直答——
+    /// 一次 `presentButSilent` 把 `daemon.stateRoot/pid` 清成 nil、下一帧又报回同一个根，
+    /// `rootChanged` 于是让这一侧再采纳一遍，横幅连同它里面那枚唯一的「重启后台服务」按钮
+    /// 一起消失，用户失去的就是那一次补救的入口。判据与
+    /// `SettingsModel.pruneBannerCleared(by:)`（只认实测到换过进程号）同一条。
+    func testRestartNoticeSurvivesTheClickAndClearsOnlyOnAMeasuredNewProcess() {
         let console = makeConsole()
         console.pruneNeedsRestart = true
-        console.adoptDaemonReport(binaryPath: "/opt/glasspane/glasspaned", answered: false)
+        console.adoptDaemonReport(binaryPath: "/opt/glasspane/glasspaned", reportedPid: 501, answered: false)
         XCTAssertTrue(console.pruneNeedsRestart, "没应门就没有「重启好了」的证据")
-        console.adoptDaemonReport(binaryPath: "/opt/glasspane/glasspaned", answered: true)
-        XCTAssertFalse(console.pruneNeedsRestart)
+        // 同一个进程又答了一次（旧表还在它内存里）：横幅必须留着，它带着那枚唯一的按钮。
+        console.adoptDaemonReport(binaryPath: "/opt/glasspane/glasspaned", reportedPid: 501, answered: true)
+        XCTAssertTrue(console.pruneNeedsRestart,
+                      "同一个 pid 的应答证明不了新表被加载过，撤掉就是把补救入口抹掉")
+        // 连答三轮都还是同一个 pid：一次都不许撤。
+        for _ in 0..<3 {
+            console.adoptDaemonReport(binaryPath: "/opt/glasspane/glasspaned", reportedPid: 501, answered: true)
+        }
+        XCTAssertTrue(console.pruneNeedsRestart)
+        // 对照臂：报回**另一个**进程号＝实测到换过进程，那句话这才撤得动。
+        console.adoptDaemonReport(binaryPath: "/opt/glasspane/glasspaned", reportedPid: 702, answered: true)
+        XCTAssertFalse(console.pruneNeedsRestart, "换个进程应门＝旧表已经被新进程加载过")
     }
 
     // MARK: - daemon 统计（发现 6）：路径到了要重问，重试要真重问
