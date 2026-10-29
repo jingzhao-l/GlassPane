@@ -38,9 +38,13 @@ stub may hand back an SB-shaped value, it may not make the bridge report a
 measurement it did not take (unreadable stays null + an errors[] note).
 
 Outer CLI exit codes (`run_outer`): 0 = a non-crash scene was captured, 1 =
-nothing was captured, 2 = lldb could not be spawned or the payload could not be
-delivered, 3 = a crash scene was captured and delivered. 3 exists because a
-signal stop used to be indistinguishable from a clean capture at both layers
+nothing was captured (and, since S9-4, a stdout whose payload is ambiguous —
+more than one nonce-bearing parseable pair — is downgraded to 1, never 0/3),
+2 = lldb could not be spawned, the child run escaped through a non-timeout
+error, or the payload could not be delivered — since S9-1 even that escape
+leaves with a JSON payload, and an invalid `--timeout` (non-finite / <= 0) is
+refused as JSON at rc 2 before anything spawns. 3 exists because a signal stop
+used to be indistinguishable from a clean capture at both layers
 (`stopReason` came from a hand-copied enum table, so SIGSEGV rendered as
 "frameIndexChanged" with `crash: null`, and the exit code was 0).
 """
@@ -63,8 +67,13 @@ SENTINEL_END = ">>GPBRIDGE"
 #: `test_bridge.py` 的噪声用例也是这个形状），任何被测进程都能先吐一对
 #: `GPBRIDGE<<{…}>>GPBRIDGE` 把 threads/status 换掉，或夹一对畸形 JSON 让真载荷
 #: 读成"没有载荷"。父进程生成 nonce、只经子进程环境交给 lldb 内的那个脚本，
-#: 匹配时要求它——剩下的残余风险只有一个会读自己环境变量的被测目标，
-#: 而"取最后一个可解析的完整对"正是为那种情形兜底。
+#: 匹配时要求它。S9-4（2026-10-29 复核）把残余风险说实：`--exe` 启动档里
+#: 目标继承 lldb 的环境（`target.inherit-env` 默认 true），**读得到本轮 nonce**，
+#: 所以它会伪造的不再是固定标记而是整条载荷。兜底不是"取最后一个可解析的完整对"
+#: ——那只是没读到 nonce 时的次序规则——而是 `extract_sentinel` 的歧义判决：
+#: stdout 上出现**多于一个**带本轮 nonce 的可解析对时，最右那一条照常返回，但打上
+#: `stdoutAmbiguous: true`、errors[] 写明"哪一对来自桥无法区分"，`outer_exit_code`
+#: 把这次交付降回 1。同 uid 下藏不住秘密，所以这条通道的完整性不靠"更隐蔽的通道"背书。
 SENTINEL_NONCE_ENV = "GPBRIDGE_SENTINEL_NONCE"
 SENTINEL_NONCE_BYTES = 16
 #: `gp-watch add` 的读写档：只有这三形。`x`（或任何别的）会落成
@@ -627,7 +636,11 @@ def assemble_result(mode, target, status, threads, registers=None, stop_reason=N
 
 
 def new_sentinel_nonce():
-    """Per-run marker nonce (hex). Unguessable, never read from the target."""
+    """Per-run marker nonce (hex)——对**只认识固定标记**的伪造者不可猜，但对被调试
+    目标**不是秘密**：`--exe` 启动档把它经子进程环境交给 lldb，目标继承那份环境
+    （`target.inherit-env` 默认 true），读得到它，因此也能写出一对带 nonce 的载荷。
+    这条通道上的诚实由 `extract_sentinel` 的歧义判决负责（多于一对可解析 → 标记
+    `stdoutAmbiguous` 并降级退出码），不由这个值本身负责。"""
     return secrets.token_hex(SENTINEL_NONCE_BYTES // 2)
 
 
@@ -657,33 +670,61 @@ def wrap_sentinel(text, nonce=None):
 
 
 def extract_sentinel(stdout_text, nonce=None):
-    """Pull the payload out of noisy lldb stdout: the LAST parseable pair wins.
+    """Pull the payload out of noisy lldb stdout: the LAST parseable pair wins —
+    **and with a `nonce` in play, more than one parseable pair is an ambiguity,
+    not a winner** (S9-4, 2026-10-29).
 
-    Two rules, both learned from a real shape rather than theory:
+    Three rules, each learned from a real shape rather than theory:
       * last, not first — the bridge emits its payload after the target has run,
         so an earlier pair is noise or a forgery by construction;
       * parseable — "last" alone would let a late malformed pair mask the real
         payload and read as "no payload", so a candidate that does not complete
-        (no end marker) or does not parse is skipped, and the scan keeps going
-        leftwards.
-    `nonce` narrows the marker to this run's random prefix, so a target that only
-    knows the fixed text cannot be matched at all. Returns (payload | None, raw).
+        (no end marker) or does not parse is skipped, and the scan keeps going;
+      * ambiguous, never silently trusted — the nonce is not a secret from the
+        target: `run_outer` hands it to lldb through the child environment and a
+        target launched via `--exe` inherits that environment
+        (`target.inherit-env` is on by default), so a target that reads its own
+        env can write a nonce-carrying pair as the right-most one. When MORE
+        THAN ONE nonce-bearing pair parses, the right-most payload is still
+        returned (best effort) but a dict payload comes back marked
+        ``stdoutAmbiguous: true`` with an errors[] note saying the bridge cannot
+        attribute either pair on this channel; `outer_exit_code` keeps such a
+        run out of the 0/3 verdicts. Secrets do not buy integrity at the same
+        uid — the declaration is the fix, a sneakier channel would still be an
+        endorsement.
+    Returns (payload | None, raw).
     """
     begin = sentinel_begin(nonce)
-    cursor = len(stdout_text)
-    while True:
-        start = stdout_text.rfind(begin, 0, cursor)
-        if start < 0:
-            return None, stdout_text
-        cursor = start  # next candidate sits strictly left of this one
+    candidates = []
+    start = stdout_text.find(begin)
+    while start >= 0:
         body = stdout_text[start + len(begin):]
         end = body.find(SENTINEL_END)
-        if end < 0:
-            continue
-        try:
-            return json.loads(body[:end]), body[:end]
-        except json.JSONDecodeError:
-            continue
+        if end >= 0:
+            try:
+                candidates.append((json.loads(body[:end]), body[:end]))
+            except json.JSONDecodeError:
+                pass
+        start = stdout_text.find(begin, start + len(begin))
+    if not candidates:
+        return None, stdout_text
+    payload, raw = candidates[-1]
+    if nonce and len(candidates) > 1 and isinstance(payload, dict):
+        payload = dict(payload)
+        payload["stdoutAmbiguous"] = True
+        note = ("%d sentinel pairs carrying this run's nonce parsed on lldb's stdout, "
+                "and this channel cannot tell which one the bridge wrote: the nonce "
+                "reaches the launched --exe target through the inherited environment, "
+                "so a target that reads its own env can emit a nonce-carrying pair too. "
+                "The right-most pair is returned best-effort, NOT as a measurement "
+                "(stdoutAmbiguous: true), and outer_exit_code downgrades this run to 1 "
+                "instead of endorsing it as a clean capture." % len(candidates))
+        errors = payload.get("errors")
+        if isinstance(errors, list):
+            payload["errors"] = errors + [note]
+        else:
+            payload["errors"] = [note]
+    return payload, raw
 
 
 def sentinel_absence_clue(stdout_text, nonce=None):
@@ -805,6 +846,36 @@ def capture_budget_s(raw_env_value, timeout=None):
                          "short for a first attach. Raise --timeout to at least %gs."
                          % (value, timeout, floor, floor))
     return value, None
+
+
+def timeout_refusal(value):
+    """`--timeout` 判据（纯函数，S9-1）：有限且 >0，照 `capture_budget_s` 的 NaN/inf 那条。
+
+    从前这里什么都不收：`--timeout nan` 一路飘进 `communicate()`，变成
+    `ValueError: cannot convert float NaN to integer` 的整段 traceback（`inf` 同理是
+    OverflowError）——退 1、`--out`/`--send-sock` 零字节，调用方一个字段都读不到，
+    正违背 §6.2「失败也以 JSON 离场」；而且 `resume_frozen_target` 从前只跑在
+    `timed_out` 臂里，这条非超时的逃逸路径把 `--pid` 附上的用户进程留在 SIGSTOP。
+    返回 None 表示放行，否则返回那句拒因（必须点名原值）。
+    """
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return ("--timeout wants a finite number of seconds greater than 0, got %r: the value "
+                "cannot be read as a number, so nothing was spawned. §6.2 keeps this refusal "
+                "JSON-shaped instead of a traceback." % (value,))
+    if seconds != seconds or seconds in (float("inf"), float("-inf")):  # NaN / Infinity
+        return ("--timeout wants a finite number of seconds, got %r: a NaN or infinite timeout "
+                "raises *inside* the pipe drain (ValueError/OverflowError in communicate()), "
+                "which is how this bridge used to leave through a traceback with zero bytes in "
+                "--out/--send-sock and a --pid target still stopped in SIGSTOP. Nothing was "
+                "spawned." % (value,))
+    if seconds <= 0:
+        return ("--timeout wants more than 0 seconds, got %r: a non-positive window cannot "
+                "honour even the shortest debugserver cold start (F5: %gs floor), so nothing "
+                "was spawned. Raise --timeout to at least %gs."
+                % (value, BUDGET_FLOOR_S, BUDGET_FLOOR_S))
+    return None
 
 
 def build_lldb_argv(bridge_path, mode, pid=None, exe=None, exe_args=None,
@@ -1111,6 +1182,23 @@ def resume_frozen_target(pid):
 def run_outer(args):
     """Parent-process path: exec lldb, extract payload, re-emit per §6.2."""
     bridge_path = os.path.abspath(__file__)
+    # S9-1：`--timeout` 在起孩子之前收"有限且 >0"（判据是纯函数 `timeout_refusal`），
+    # 拒因以 §6.2 的 JSON 载荷离场，rc 2——从前 `nan`/`inf` 一路飘到 drain 里面才
+    # 炸成 traceback，`--out`/`--send-sock` 零字节，一个字段都读不到。
+    refusal = timeout_refusal(args.timeout)
+    if refusal:
+        payload = assemble_result(
+            mode=args.mode,
+            target={"pid": args.pid, "exe": args.exe},
+            status="failed",
+            threads=[],
+            errors=[refusal],
+        )
+        try:
+            emit(payload, out_path=args.out, send_sock=args.send_sock)
+        except OSError as error:
+            sys.stderr.write("payload delivery failed (--out / --send-sock): %s\n" % error)
+        return 2
     exe_args = list(args.exe_args) if args.exe_args else None
     _budget, budget_note = capture_budget_s(os.environ.get("GPBRIDGE_BUDGET"), args.timeout)
     argv = build_lldb_argv(
@@ -1123,15 +1211,54 @@ def run_outer(args):
         extra_script=args.setup,
         timeout=args.timeout,
     )
-    # 本轮的哨兵 nonce 只经**子进程环境**交给 lldb 内的那个脚本：被调试目标若自己
-    # 打印一对固定标记，它匹配不上带 nonce 的 begin，也就不可能被当成载荷（加上
-    # extract_sentinel 的"最后一个可解析对"，两路都堵上）。
+    # 本轮的哨兵 nonce 经**子进程环境**交给 lldb 内的那个脚本。S9-4（2026-10-29）把
+    # 边界说实：旧注释在这里宣称过通道已被完全堵死，那不成立——同一条环境同一趟也
+    # 交给了被 `--exe` 启动的目标（`target.inherit-env` 默认 true），nonce 对它不是秘密。
+    # 固定标记的伪造被 nonce 挡下；读到 nonce 的伪造**不需要挡，只需要如实标**——
+    # `extract_sentinel` 见到多于一对带本轮 nonce 的可解析载荷就写 `stdoutAmbiguous: true`，
+    # `outer_exit_code` 把这次交付从"实测"降回 1。同 uid 下藏不住秘密，所以不靠换通道来背书判决。
     nonce = new_sentinel_nonce()
     try:
         completed, timed_out = run_child_captured(
             argv, args.timeout, env=dict(os.environ, **{SENTINEL_NONCE_ENV: nonce}))
-    except OSError as error:
-        sys.stderr.write("cannot spawn lldb: %s\n" % error)
+    except BaseException as error:
+        # S9-1（§6.2）：这一臂从前只接 OSError，且不起 JSON 载荷。drain 里冒出来的
+        # 任何东西（`--timeout nan` 的 ValueError、`inf` 的 OverflowError、D7 那种注入的
+        # 非超时异常）都因此绕过下面两段收尾：被 SIGSTOP 停住的 `--pid` 目标没人唤醒
+        # （`resume_frozen_target` 只跑在 `timed_out` 臂），桥以 traceback 离场、
+        # `--out`/`--send-sock` 零字节。现在每条逃逸路径都先走与超时臂同一套收尾
+        # ——resume 目标、assemble 结构化失败、emit JSON——然后才回 2。
+        if isinstance(error, OSError):
+            sys.stderr.write("cannot spawn lldb: %s\n" % error)
+        woke, wake_detail = resume_frozen_target(args.pid)
+        kind = ("cannot spawn lldb" if isinstance(error, OSError)
+                else "the lldb child run raised a non-timeout error")
+        errors = [
+            "%s (%r): no payload was drained. About the target: %s (%s)"
+            % (kind, error,
+               "it was resumed" if woke else "IT IS NOT CONFIRMED RESUMED — check the pid",
+               wake_detail),
+        ]
+        if not woke and args.pid is not None:
+            errors.append("remedy for a target left stopped by an attach: kill -CONT %s; "
+                          "if that is refused the process belongs to another debugger session "
+                          "and only that session can release it." % args.pid)
+        if budget_note:
+            errors.append(budget_note)
+        failure = assemble_result(
+            mode=args.mode,
+            target={"pid": args.pid, "exe": args.exe},
+            status="failed",
+            threads=[],
+            errors=errors,
+        )
+        try:
+            emit(failure, out_path=args.out, send_sock=args.send_sock)
+        except OSError as emit_error:
+            sys.stderr.write("payload delivery failed (--out / --send-sock): %s\n" % emit_error)
+        if not isinstance(error, Exception):
+            # KeyboardInterrupt / SystemExit 之类：收尾照做，但退场原因不许被桥吞掉。
+            raise
         return 2
     if timed_out:
         # F5: lldb --batch can hang pre-timeout on machines where debug attach
@@ -1508,7 +1635,13 @@ def outer_exit_code(payload):
 
     3 是本轮新增的一档。此前崩溃与"采到一帧干净的停住"共用 0，而崩溃判据又押在
     抄错的数字上，于是 SIGSEGV 的现场既没有 `crash` 也没有非零退出——两层都沉默。
+
+    S9-4 加了一条先判：载荷带着 `stdoutAmbiguous: true`（stdout 上有**不止一对**
+    带本轮 nonce 的可解析载荷）时一律回 1——"哪一对来自桥"没测出来，这条就不许
+    读成 0（干净采到）或 3（崩溃采到）。降级是判决，不是猜测。
     """
+    if isinstance(payload, dict) and payload.get("stdoutAmbiguous") is True:
+        return 1
     if not capture_succeeded(payload):
         return 1
     return 3 if crash_reported(payload) else 0
@@ -1529,13 +1662,15 @@ def no_payload_cause(stderr_text, stdout_text=None, bridge_path=None):
     拿一条从没测量过的通道去下一个自信的判决——目标只要 print 一句
     `cat: config: No such file or directory`，就会命中 "no such file or directory"，
     把"桥没被导入"连同一个指向 checkout 路径的补救报出来，而真正该看的通道是空的。
-    于是现在：stderr 明说导入失败 → bridge-not-imported；stderr 有内容但没说导入失败
-    → 桥确实导入了（可信通道里若没导入失败，lldb 一定会写下来），没载荷就归到
-    debug-gated；stderr 一片空白 → 可信通道回答不了，如实说 not-determinable，
+    于是现在：stderr 明说导入失败 → bridge-not-imported；stderr 明说 attach 的对象
+    不存在 → target-gone；stderr 明说两侧属户 → peer-user-or-sip（后两条是 S9-2 补的，
+    真机原文从前落进 catch-all，收到的补救是一张永远治不了它们的 Developer Tools
+    席位）；stderr 有内容但没点名任何成因 → debug-gated，且文案明写这是缺省猜测不是
+    测量；stderr 一片空白 → 可信通道回答不了，如实说 not-determinable，
     不再从猜测里挑一个病因。`stdout_text` 仍留在签名里供调用方传，但不参与分类。
 
-    返回 `(cause, remedy)`：cause ∈ {"bridge-not-imported", "debug-gated",
-    "not-determinable"}。
+    返回 `(cause, remedy)`：cause ∈ {"bridge-not-imported", "target-gone",
+    "peer-user-or-sip", "debug-gated", "not-determinable"}。
     """
     trusted = (stderr_text or "").lower()
     named_us = bridge_path if bridge_path else "glasspane_bridge.py"
@@ -1577,6 +1712,35 @@ def no_payload_cause(stderr_text, stdout_text=None, bridge_path=None):
                 "run their code as you. "
                 "No seat in System Settings fixes this one."
                 % (named_us, quoted, quoted, quoted))
+    if "no such process" in trusted:
+        # S9-2（2026-10-29）：真机原文 `error: attach failed: no such process`——pid
+        # 不存在（最常见的操作失误），从前落进 catch-all，收到的补救是一张 TCC 席位，
+        # 而席位永远治不了一个不存在的进程。放行者仍是测量：这句话在 stderr 上。
+        return ("target-gone",
+                "the attach target is gone: lldb's own stderr says 'no such process', "
+                "which measures that the pid does not exist (or exited before the "
+                "attach landed) — the most common operator mistake, and one no "
+                "permission seat in System Settings touches. Steps that can change "
+                "the outcome: (1) read the real state and owner, `ps -p <pid> -o "
+                "pid=,user=,comm=`; (2) find the live pid of the process you meant "
+                "and re-run with that pid — pids are recycled, so a match from "
+                "minutes ago is not evidence; (3) if the goal is a crash scene from "
+                "a fresh run, capture the launch instead of attaching: `capture "
+                "--exe <path> --timeout <seconds>`.")
+    if "running as user" in trusted:
+        # S9-2：另一条真机原文 `… running as user 'A' and process is running as user
+        # 'B'`（跨用户，或对 SIP 保护进程的越权）——uid 边界，同样不是 TCC 席位。
+        return ("peer-user-or-sip",
+                "the attach crossed a user boundary: lldb named two different owners "
+                "on its stderr ('running as user X and process is running as user "
+                "Y'). That is a uid boundary — and a SIP-protected system binary "
+                "stays unattachable even for root (P6 §7.1) — not a permission seat; "
+                "re-checking any seat changes nothing. Steps that can change the "
+                "outcome: (1) read the owner, `ps -p <pid> -o user=`; (2) run the "
+                "bridge from the account that owns the target; (3) if the target is "
+                "root-owned, the bridge and debugserver must both run as root — "
+                "`sudo python3 bridge/glasspane_bridge.py capture --pid <pid>` — "
+                "and an SIP-protected process stays refused after that step too.")
     if not trusted.strip():
         # 可信通道一个字都没写：既没有 `command script import` 的失败，也没有 attach
         # 被拒的那一行，成因无从测量。不许因为 stdout（目标的共享流，见上）里出现了
@@ -1591,10 +1755,16 @@ def no_payload_cause(stderr_text, stdout_text=None, bridge_path=None):
                 "stderr is genuinely empty the next step is a real-machine capture "
                 "(GLASSPANE_REAL_LLDB=1), not a permission seat or a path fix.")
     return ("debug-gated",
-            "the bridge imported but produced no payload: debug attach/launch is "
-            "permission-gated on this machine (P6 §0 F1/F2, §7.1) — grant System "
-            "Settings > Privacy & Security > Developer Tools to the calling process, "
-            "or re-run inside an already-authorized Terminal session.")
+            "the bridge imported and lldb wrote *something* to its stderr, but nothing "
+            "on the trusted channel names a cause, so this line is NOT a measurement — "
+            "it is the default guess left after the named causes (import split, gone "
+            "pid, cross-user attach) were each ruled out by reading the line itself. "
+            "If a debugger seat really is missing here (P6 §0 F1/F2, §7.1), granting "
+            "System Settings > Privacy & Security > Developer Tools to the calling "
+            "process, or re-running inside an already-authorized Terminal session, is "
+            "the step; if the seat is already granted the guess is wrong, and the next "
+            "step is re-running the exact argv lldb echoed and reading its stderr "
+            "verbatim instead of this fallback.")
 
 
 # ---------------------------------------------------------------------------
@@ -2122,6 +2292,39 @@ def _payload_via_debugger(debugger, mode, errors=None, samples=None):
     return _payload_from_process(process, mode, errors=errors, samples=samples)
 
 
+def kill_launched_target(process):
+    """把 `SBProcess.Kill()` 的判决取回来（S9-3，F7 三态读回在启动臂的对应物）。
+
+    这条路径的目标是桥**自己启动**的；它收没收到拢是可测量的事实，从前却包在
+    `except Exception: pass` 里且发生在 print **之后**——判决没有读者。Returns
+    (ok, detail)，形态经 `_outcome_ok` 归一（bool / SBError / 缺绑定 / 抛异常）。
+    """
+    killer = getattr(process, "Kill", None)
+    if killer is None:
+        return (False, "this lldb binding exposes no SBProcess.Kill()")
+    try:
+        outcome = killer()
+    except Exception as error:
+        return (False, "Kill() raised %r" % (error,))
+    return _outcome_ok(outcome)
+
+
+def capture_teardown_note(ok, detail, pid=None):
+    """纯函数（S9-3）：收拢判决失败时要追加的那句话；成功返回 None。
+
+    载荷此刻**尚未打印**，调用方把返回值 append 进 errors[]，于是"这个进程可能还
+    活着"与现场同船离场，并给出当场可核的两步（`ps -p` / `kill -9`）。
+    """
+    if ok:
+        return None
+    shown = "<pid>" if pid is None else pid
+    return ("the target this bridge launched (pid %s) was NOT confirmed collected: %s. "
+            "It may still be running or stopped in the debugger's hands. Verify with "
+            "`ps -p %s`; if it lingers, collect it manually with `kill -9 %s`. This "
+            "caveat rides on the payload itself — an unconfirmed teardown is never "
+            "silent again." % (shown, detail, shown, shown))
+
+
 def run_capture_cli(spec_json):
     """SB-API driven capture for `lldb --batch -o script ...` invocation.
 
@@ -2181,11 +2384,20 @@ def run_capture_cli(spec_json):
         payload.setdefault("errors", [])
         if isinstance(payload["errors"], list):
             payload["errors"].extend(notes)
-    print(_sentinel(payload))
+    # S9-3：收拢判决与采集同船——**先**取 `Kill()` 的判决（从前是 print 之后
+    # `except Exception: pass`，失败一字不提），失败就追加进尚未打印的 errors[]，
+    # 再发射。attach 臂有 F7 三态读回，启动臂不许没有读者。
+    kill_ok, kill_detail = kill_launched_target(process)
     try:
-        process.Kill()
+        launched_pid = process.GetProcessID()
     except Exception:
-        pass
+        launched_pid = None
+    teardown_note = capture_teardown_note(kill_ok, kill_detail, launched_pid)
+    if teardown_note:
+        payload.setdefault("errors", [])
+        if isinstance(payload["errors"], list):
+            payload["errors"].append(teardown_note)
+    print(_sentinel(payload))
 
 
 def run_capture_cli_b64(spec_b64):

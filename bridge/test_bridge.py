@@ -1670,11 +1670,29 @@ class StubProcess(object):
     larger than the thread list, which is the shape of a real wide target."""
 
     def __init__(self, threads=(), state=5, pid=38946, stop_id=1, selected=None,
-                 valid=True, num_threads=None):
+                 valid=True, num_threads=None, kill_results=None):
         self._threads = list(threads)
         self._state, self._pid, self._stop_id = state, pid, stop_id
         self._selected, self._valid = selected, valid
         self._num_threads = num_threads
+        #: S9-3: the launch arm reads this verdict. Same knob shape as
+        #: StubWatchpoint.Disable — a queue consumed per call, the last entry
+        #: repeats; an entry that is an Exception is raised the way a failing
+        #: SB call does. Default (empty): Kill() succeeds.
+        self._kill_results = list(kill_results or [])
+        self.kill_calls = 0
+
+    def Kill(self):
+        """SBProcess.Kill() takes no arguments — the signature is the refusal:
+        the stub answers the call the bridge actually makes, nothing wider."""
+        self.kill_calls += 1
+        if not self._kill_results:
+            return True
+        result = self._kill_results.pop(0) if len(self._kill_results) > 1 \
+            else self._kill_results[0]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     def IsValid(self):
         return self._valid
@@ -2325,6 +2343,12 @@ class NoPayloadCauseIsTriagedNotAssumed(unittest.TestCase):
                           "error: module importing failed: invalid pathname "
                           "'sp/glasspane_bridge.py'\n")
     GATED_STDERR = ("error: process attach failed: Not allowed to attach to process\n")
+    #: S9-2（2026-10-29）：另两条**本机真 lldb 原文**。从前它们都落进 catch-all
+    #: `debug-gated`，收到的补救是"去勾 Developer Tools"——两张 TCC 席位永远治不了
+    #: 一个不存在的 pid，也治不了跨用户的 attach。
+    NO_SUCH_PROCESS_STDERR = "error: attach failed: no such process\n"
+    PEER_USER_STDERR = ("error: attach failed: process is running as user 'ethanlin' "
+                        "and process is running as user 'root'\n")
 
     def test_path_shape_failure_names_the_path_and_not_permissions(self):
         cause, remedy = gb.no_payload_cause(self.SPACED_PATH_STDERR, "", "/tmp/gp sp/b.py")
@@ -2358,6 +2382,35 @@ class NoPayloadCauseIsTriagedNotAssumed(unittest.TestCase):
                          "lldb 明说导入失败了，就不许因为载荷形状而改口报权限")
         self.assertEqual(gb.no_payload_cause("nothing useful at all\n", "", "/tmp/b.py")[0],
                          "debug-gated")
+
+    def test_gone_pid_gets_a_step_that_changes_the_outcome(self):
+        """S9-2：`no such process` 是 pid 不存在——最常见的操作失误。未改实现里这条
+        真机原文落进 catch-all（断言今天红在 cause == "debug-gated"）。"""
+        cause, remedy = gb.no_payload_cause(self.NO_SUCH_PROCESS_STDERR, "", "/tmp/b.py")
+        self.assertNotEqual(cause, "debug-gated", "不存在的 pid 不许被折成权限猜测：%s" % cause)
+        self.assertEqual(cause, "target-gone")
+        self.assertNotIn("Developer Tools", remedy, "补救不许指向那张治不了它的席位：%s" % remedy)
+        for part in ("no such process", "ps -p", "recycled"):
+            self.assertIn(part, remedy, remedy)
+
+    def test_cross_user_attach_gets_a_step_that_changes_the_outcome(self):
+        """S9-2：跨用户/SIP 的 attach 拒绝（两侧属户不同）同样不许收 catch-all 的席位
+        补救。未改实现里这条真机原文今天也红。"""
+        cause, remedy = gb.no_payload_cause(self.PEER_USER_STDERR, "", "/tmp/b.py")
+        self.assertNotEqual(cause, "debug-gated", cause)
+        self.assertEqual(cause, "peer-user-or-sip")
+        self.assertNotIn("Developer Tools", remedy, remedy)
+        for part in ("user boundary", "ps -p", "sudo"):
+            self.assertIn(part, remedy, remedy)
+
+    def test_catch_all_admits_it_is_a_default_guess_not_a_measurement(self):
+        """补臂之后 catch-all 仍然在（并仍给席位补救，控制项不许丢），但它必须**自陈**
+        这不是测量——从前那句 "debug attach/launch is permission-gated on this machine"
+        是一个从没测过的断言。"""
+        cause, remedy = gb.no_payload_cause("some unclassified lldb line\n", "", "/tmp/b.py")
+        self.assertEqual(cause, "debug-gated")
+        self.assertIn("Developer Tools", remedy)
+        self.assertIn("NOT a measurement", remedy, "catch-all 必须明写这是缺省猜测：%s" % remedy)
 
 
 class RealMachineCrashScene(unittest.TestCase):
@@ -3155,6 +3208,292 @@ class StopHookInstallDrivesBothSeamArms(unittest.TestCase):
         dbg = StubDebugger(StubProcess(threads=[]))
         self.assertFalse(dbg.HandleCommand("script do-something-the-bridge-never-runs()"),
                          "不是桥会发的那一类命令，桩不许无条件说是")
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-29 泳道 9（S9-1..S9-4）。每条都是先对着**未改的实现**跑红的，红的名字
+# 写在各自的注释里；反向变异备份在 /var/tmp/glasspane-main-check/2026-10-29-main/lane9/。
+# ---------------------------------------------------------------------------
+
+class TimeoutIsFiniteAndEscapeArmsLeaveJson(unittest.TestCase):
+    """S9-1：`--timeout` 从前什么 float 都收。本机实测复现：
+    `capture --pid 999999 --timeout nan` ⇒ `communicate()` 里
+    `ValueError: cannot convert float NaN to integer` 整段 traceback、rc 1、
+    stdout 零个哨兵（`inf` 同理 OverflowError）；而 `resume_frozen_target` 只跑在
+    `timed_out` 臂——非超时的逃逸路径把 `--pid` 附上的用户进程留在 SIGSTOP，
+    既无 SIGCONT、也无 "IT IS NOT CONFIRMED RESUMED"、也无 `kill -CONT` 补救行。
+    现在：`timeout_refusal` 在起孩子之前把"有限且 >0"收掉（JSON 离场，rc 2），
+    `run_outer` 的 except 从 OSError 放宽到 BaseException——先 resume、再结构化失败。
+    """
+
+    def test_non_finite_and_non_positive_timeouts_leave_json_at_rc_two(self):
+        # 一律用 `--timeout=<值>` 的等号形：空格形下 argparse 会把 "-inf" 当成另一枚
+        # 选项拒在 parse 处，等号形才把值递到 `timeout_refusal` 面前（两条臂都得有人管）。
+        for raw in ("nan", "inf", "-inf", "-1", "0"):
+            with self.subTest(raw=raw):
+                child = mock.Mock(side_effect=AssertionError(
+                    "坏 timeout 的拒收必须发生在 spawn 之前"))
+                out, err = io.StringIO(), io.StringIO()
+                with mock.patch.object(gb, "run_child_captured", child), \
+                        contextlib.redirect_stdout(out), \
+                        contextlib.redirect_stderr(err):
+                    code = gb.main(["capture", "--pid", "999999", "--timeout=%s" % raw])
+                self.assertEqual(0, child.call_count, "被拒的那条一次都不许去起 lldb")
+                self.assertEqual(2, code)
+                text = out.getvalue()
+                self.assertIn(gb.SENTINEL_BEGIN, text, "§6.2：失败也以 JSON 离场：%r" % text)
+                self.assertNotIn("Traceback", text)
+                emitted = _emitted_payload(text)
+                self.assertEqual("failed", emitted["status"])
+                joined = " ".join(emitted["errors"])
+                self.assertIn("--timeout", joined)
+                self.assertIn(raw, joined, "拒因必须点名原值：%s" % joined)
+
+    def test_timeout_refusal_is_a_pure_judge_with_a_control_arm(self):
+        self.assertIsNone(gb.timeout_refusal(600.0))
+        self.assertIsNone(gb.timeout_refusal(0.5), "合法小值不许被误杀（判据是>0，不是>=30）")
+        for bad in (float("nan"), float("inf"), float("-inf"), 0.0, -5.0, None):
+            self.assertIsNotNone(gb.timeout_refusal(bad), bad)
+
+    def test_non_timeout_child_exception_resumes_target_exactly_once(self):
+        """未改实现的红：`ValueError` 穿透 `except OSError`，main 抛栈，
+        resume_frozen_target 被调用 **0 次**（今天 0 次，这条断它恰好 1 次）。"""
+        calls = []
+
+        def exploding(argv, timeout, env=None):
+            raise ValueError("cannot convert float NaN to integer")
+
+        def watch_resume(pid):
+            calls.append(pid)
+            return (True, "stubbed measurement: pid %s was sent SIGCONT and reads as running" % pid)
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(gb, "run_child_captured", exploding), \
+                mock.patch.object(gb, "resume_frozen_target", watch_resume), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = gb.main(["capture", "--pid", "4242", "--timeout", "5"])
+        self.assertEqual([4242], calls, "逃逸臂必须唤醒目标，恰好一次")
+        self.assertEqual(2, code)
+        text = out.getvalue()
+        self.assertIn(gb.SENTINEL_BEGIN, text, "异常不许再以 traceback 离场")
+        self.assertNotIn("Traceback", text)
+        emitted = _emitted_payload(text)
+        self.assertEqual("failed", emitted["status"])
+        joined = " ".join(emitted["errors"])
+        self.assertIn("non-timeout", joined)
+        self.assertIn("it was resumed", joined)
+
+    def test_keyboard_interrupt_cleans_up_then_propagates(self):
+        """BaseException 那一层是"接住 + 收尾 + 上抛"，不是吞掉退场原因。"""
+        calls = []
+
+        def exploding(argv, timeout, env=None):
+            raise KeyboardInterrupt("injected interrupt mid-drain")
+
+        def watch_resume(pid):
+            calls.append(pid)
+            return (False, "stubbed: SIGCONT refused, the target is STILL held stopped")
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(gb, "run_child_captured", exploding), \
+                mock.patch.object(gb, "resume_frozen_target", watch_resume), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with self.assertRaises(KeyboardInterrupt):
+                gb.main(["capture", "--pid", "4242", "--timeout", "5"])
+        self.assertEqual([4242], calls)
+        joined = " ".join(_emitted_payload(out.getvalue())["errors"])
+        self.assertIn("IT IS NOT CONFIRMED RESUMED", joined)
+        self.assertIn("kill -CONT 4242", joined, "F7 的补救行在非超时逃逸臂同样要在场")
+
+
+class StubLaunchTarget(object):
+    """`run_capture_cli` 启动臂里 `debugger.CreateTarget(exe)` 的返回物。只答启动：
+    `LaunchSimple` 交出测试注入的进程，等待环的状态由 StubProcess 自己读。"""
+
+    def __init__(self, process):
+        self._process = process
+        self.launch_calls = []
+
+    def IsValid(self):
+        return True
+
+    def LaunchSimple(self, args, env, cwd):
+        self.launch_calls.append((args, env, cwd))
+        return self._process
+
+
+class StubLaunchDebugger(object):
+    """启动臂要的 debugger 面：`SetAsync` / `CreateTarget`，别的一律不在桩的视野里。"""
+
+    def __init__(self, process):
+        self._target = StubLaunchTarget(process)
+        self.async_flags = []
+
+    def SetAsync(self, value):
+        self.async_flags.append(value)
+
+    def CreateTarget(self, exe):
+        return self._target
+
+
+class LaunchedTargetTeardownIsRead(unittest.TestCase):
+    """S9-3：`run_capture_cli` 的 `process.Kill()` 从前包在 `except Exception: pass`
+    里，且载荷在那之前已经 print——桥**自己启动**的目标可能没收拢而 errors[] 一字不提；
+    对照 attach 臂的 F7 三态读回，这条不对称就是"守卫跑了但判决没读者"。桩里今天根本
+    没有 Kill()，所以未改实现的红是：载荷 errors[] 读不到任何收拢判决（`pass` 把
+    AttributeError 也咽了）。现在判决在**尚未打印**的 payload 上追加。"""
+
+    def _emitted_from_launch(self, process):
+        fake_lldb = types.SimpleNamespace(
+            eStateStopped=5, eStateRunning=6, eStateCrashed=7, eStateExited=8,
+            eStateDetached=10, SBEvent=lambda: None, SBListener=lambda name: object())
+        spec = json.dumps({"exe": "/bin/echo", "args": None, "mode": "capture",
+                           "budget_s": 5.0})
+        buffer = io.StringIO()
+        with mock.patch.object(gb, "_LIVE_DEBUGGER", StubLaunchDebugger(process)), \
+                mock.patch.object(gb, "_WATCH_QUEUE", gb.WatchQueue()), \
+                mock.patch.object(gb, "_LIVE_WATCHPOINTS", {}), \
+                mock.patch.dict(sys.modules, {"lldb": fake_lldb}), \
+                contextlib.redirect_stdout(buffer):
+            gb.run_capture_cli(spec)
+        payload, _raw = gb.extract_sentinel(buffer.getvalue())
+        self.assertIsNotNone(payload, buffer.getvalue())
+        return payload
+
+    @staticmethod
+    def _stopped_process(**kwargs):
+        return StubProcess(threads=[StubThread(tid=7, frames=[StubFrame(function="main")])],
+                           **kwargs)
+
+    def test_kill_verdict_helpers_answer_all_four_shapes(self):
+        self.assertIsNone(gb.capture_teardown_note(True, None, 4242),
+                          "确认收拢时不许编出一条 note")
+        note = gb.capture_teardown_note(False, "the debugger call reported failure", 4242)
+        for part in ("NOT confirmed collected", "ps -p 4242", "kill -9 4242"):
+            self.assertIn(part, note, note)
+        self.assertEqual((True, None), gb.kill_launched_target(self._stopped_process()))
+        ok, detail = gb.kill_launched_target(self._stopped_process(kill_results=[False]))
+        self.assertFalse(ok, detail)
+        self.assertIn("reported failure", detail)
+        ok, detail = gb.kill_launched_target(
+            self._stopped_process(kill_results=[RuntimeError("debugserver vanished")]))
+        self.assertFalse(ok, detail)
+        self.assertIn("Kill() raised", detail)
+        self.assertIn("debugserver vanished", detail)
+
+        class NoKill(object):
+            pass
+
+        ok, detail = gb.kill_launched_target(NoKill())
+        self.assertFalse(ok, detail)
+        self.assertIn("no SBProcess.Kill()", detail)
+
+    def test_kill_failure_rides_on_the_emitted_payload(self):
+        process = self._stopped_process(pid=4242, kill_results=[False])
+        payload = self._emitted_from_launch(process)
+        self.assertEqual(1, process.kill_calls, "判决必须先于打印去取")
+        joined = " ".join(payload.get("errors", []))
+        self.assertIn("NOT confirmed collected", joined, payload)
+        self.assertIn("ps -p 4242", joined)
+        self.assertIn("kill -9 4242", joined)
+
+    def test_kill_raising_is_reported_not_swallowed(self):
+        payload = self._emitted_from_launch(
+            self._stopped_process(pid=4243,
+                                  kill_results=[RuntimeError("mid-kill binding failure")]))
+        joined = " ".join(payload.get("errors", []))
+        self.assertIn("NOT confirmed collected", joined)
+        self.assertIn("Kill() raised", joined)
+        self.assertIn("mid-kill binding failure", joined)
+
+    def test_confirmed_kill_leaves_the_payload_without_the_note(self):
+        """控制项：这条闸不许只会拒绝——成功收拢时载荷保持原样。"""
+        payload = self._emitted_from_launch(self._stopped_process(kill_results=[True]))
+        joined = " ".join(payload.get("errors", []))
+        self.assertNotIn("NOT confirmed collected", joined)
+        self.assertTrue(gb.capture_succeeded(payload), payload)
+
+
+class NonceForgedPairIsAmbiguousNotTrusted(unittest.TestCase):
+    """S9-4：nonce 经**子进程环境**交给 lldb，`--exe` 启动档里目标继承那份环境
+    （`target.inherit-env` 默认 true）⇒ 目标读得到本轮 nonce，能把自己伪造的那一对
+    写成**最右**。`extract_sentinel` 从前"最后一个可解析对获胜"会静默采信它，而
+    :1124-1128 注释还宣称通道已被完全堵死。同 uid 下藏不住秘密——修法不是换更隐蔽
+    的通道（那仍是背书），而是**如实标**：多于一对带本轮 nonce 的可解析载荷 ⇒
+    `stdoutAmbiguous: true` + errors[] 一句"哪一对来自桥无法区分"，`outer_exit_code`
+    从"实测"降回 1。"早期伪造输给真载荷"的次序语义（SentinelExtraction 那组）不动。
+    """
+
+    @staticmethod
+    def _scene():
+        nonce = gb.new_sentinel_nonce()
+        real = {"mode": "capture", "status": "eStateStopped", "errors": [],
+                "threads": [{"id": 7, "frames": [{"function": "real"}]}]}
+        forged = {"mode": "capture", "status": "eStateStopped", "errors": [],
+                  "threads": [{"id": 999, "frames": [{"fake": True}]}]}
+        return nonce, real, forged
+
+    def test_rightmost_nonce_forgery_is_declared_ambiguous_not_endorsed(self):
+        nonce, real, forged = self._scene()
+        stdout = ("noise\n" + gb.wrap_sentinel(json.dumps(real), nonce=nonce) +
+                  "\ntarget noise\n" + gb.wrap_sentinel(json.dumps(forged), nonce=nonce))
+        found, _raw = gb.extract_sentinel(stdout, nonce=nonce)
+        # 未改实现今天在这里**静默取到 forged**（下面第一行钉住"最右内容仍被尽力返回"，
+        # 第二、三行是修后的判决：必须给"有歧义"而不是采信）。
+        self.assertEqual(forged["threads"], found["threads"])
+        self.assertIs(True, found.get("stdoutAmbiguous"),
+                      "两对带本轮 nonce 的可解析载荷不许再被静默采信：%r" % (found,))
+        joined = " ".join(found["errors"])
+        self.assertIn("cannot tell which one the bridge wrote", joined)
+        self.assertEqual(1, gb.outer_exit_code(found), "歧义判决不许以 0/3 离场")
+
+    def test_single_nonce_pair_is_still_trusted_and_exits_clean(self):
+        nonce, real, _forged = self._scene()
+        stdout = "noise\n" + gb.wrap_sentinel(json.dumps(real), nonce=nonce) + "\n"
+        found, _raw = gb.extract_sentinel(stdout, nonce=nonce)
+        self.assertEqual(real, found)
+        self.assertNotIn("stdoutAmbiguous", found, "单对载荷不许被这条闸误伤")
+        self.assertEqual(0, gb.outer_exit_code(found))
+
+    def test_a_second_unparseable_pair_does_not_manufacture_ambiguity(self):
+        """歧义判据吃的是"**可解析**对"的计数：尾部那条坏的照旧被跳过（B-27 的
+        "late malformed pair 不许遮蔽真载荷"语义保持），且不打歧义标。"""
+        nonce, real, _forged = self._scene()
+        stdout = (gb.wrap_sentinel(json.dumps(real), nonce=nonce) + "\n" +
+                  gb.sentinel_begin(nonce) + "{truncated by the pipe" + gb.SENTINEL_END)
+        found, _raw = gb.extract_sentinel(stdout, nonce=nonce)
+        self.assertEqual(real, found)
+        self.assertEqual(0, gb.outer_exit_code(found))
+
+    def test_run_outer_downgrades_an_ambiguous_stream_before_emitting(self):
+        def fake_child(argv, timeout, env=None):
+            nonce = (env or {}).get(gb.SENTINEL_NONCE_ENV)
+            real = {"mode": "capture", "status": "eStateStopped", "errors": [], "threads": [{"id": 7}]}
+            forged = {"mode": "capture", "status": "eStateStopped", "errors": [],
+                      "threads": [{"id": 999, "frames": [{"fake": True}]}]}
+            stdout = (gb.wrap_sentinel(json.dumps(real), nonce=nonce) + "\n" +
+                      gb.wrap_sentinel(json.dumps(forged), nonce=nonce))
+            return gb._Completed(0, stdout, ""), False
+
+        out = io.StringIO()
+        with mock.patch.object(gb, "run_child_captured", fake_child), \
+                contextlib.redirect_stdout(out):
+            code = gb.main(["capture", "--exe", "/bin/false", "--timeout", "60"])
+        self.assertEqual(1, code, "歧义交付必须被降级，而不是 0/3 那两档实测码")
+        emitted = _emitted_payload(out.getvalue())
+        self.assertIs(True, emitted.get("stdoutAmbiguous"))
+        self.assertIn("cannot tell which one the bridge wrote", " ".join(emitted["errors"]))
+
+    def test_the_overclaiming_comments_were_corrected_in_place(self):
+        """主张本身也在闸里：`never read from the target` 与"通道已被完全堵死"那两句
+        是伪造拿到"实测"外观的一半；改回旧文案，这一条立刻红。"""
+        with open(os.path.abspath(gb.__file__), encoding="utf-8") as handle:
+            source = handle.read()
+        self.assertNotIn("never read from the target",
+                         gb.new_sentinel_nonce.__doc__ or "")
+        self.assertNotIn("两路都堵上", source, "run_outer 里那句假主张不许回来")
+        self.assertIn("target.inherit-env", source, "残余风险必须写在明面上")
+        self.assertIn("stdoutAmbiguous", source)
 
 
 if __name__ == "__main__":
