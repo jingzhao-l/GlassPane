@@ -14,7 +14,7 @@
     "mcpShell": {
       "loc": 12325,
       "files": 16,
-      "ratio": 0.2162,
+      "ratio": 0.216,
       "byFile": {
         "mcp-shell/src/tools.ts": 3120,
         "mcp-shell/src/engine-client.ts": 2057,
@@ -35,7 +35,7 @@
       }
     },
     "fork": {
-      "loc": 11990,
+      "loc": 12040,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -55,7 +55,7 @@
         {
           "file": "packages/opencode/script/installer-selftest.sh",
           "kind": "added",
-          "lines": 884
+          "lines": 934
         },
         {
           "file": "packages/opencode/script/provenance-verdict.ts",
@@ -1183,14 +1183,14 @@
           "lines": 0
         }
       ],
-      "ratio": 0.2103,
+      "ratio": 0.211,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
       },
       "testsExcluded": {
         "files": 48,
-        "lines": 6625
+        "lines": 6629
       },
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {
@@ -1199,7 +1199,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 24315,
+  "totalToolSurfaceLoc": 24365,
   "note": null,
   "carried": null
 }
