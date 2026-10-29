@@ -247,7 +247,18 @@ function scan() {
         if (count > 0) hits.push({ file: path.relative(repoRoot, file), rule: rule.id, count })
       }
     }
-    out[name] = { caliber: surface.caliber, filesScanned: surface.files.length, files: [...surface.files].sort(), hits }
+    // Repo-relative, same caliber as `hits`. The first version stored the absolute paths this run
+    // happened to read, which made the golden machine-specific: CI on `/home/runner/work/…` compares
+    // its own absolute list against a `/Volumes/Eng-Dev/…` record and calls the identity a change —
+    // caught here by the parent CI going red on a tree that was green locally, which is the whole
+    // reason this ruler's caliber is asserted against a record rather than against "whatever path
+    // the person who recorded it was standing on".
+    out[name] = {
+      caliber: surface.caliber,
+      filesScanned: surface.files.length,
+      files: surface.files.map((file) => path.relative(repoRoot, file)).sort(),
+      hits,
+    }
   }
   return out
 }
@@ -325,6 +336,10 @@ for (const [name, surface] of Object.entries(observed.surfaces)) {
   // `filesScanned` exactly where it was and reports 0 hits, which is indistinguishable from clean.
   // The names are the claim; the number is only its shadow.
   if (Array.isArray(was.files)) {
+    const absolute = was.files.filter((f) => path.isAbsolute(f))
+    if (absolute.length) {
+      coverage.push(`${name}: the golden records ${absolute.length} absolute path(s) (e.g. ${absolute[0]}) — a record that names one machine's working directory cannot be compared on any other, and this ruler runs in CI. Re-record.`)
+    }
     const now = [...surface.files].sort()
     const before = [...was.files].sort()
     if (JSON.stringify(before) !== JSON.stringify(now)) {

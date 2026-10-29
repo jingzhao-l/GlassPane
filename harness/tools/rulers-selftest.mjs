@@ -472,6 +472,19 @@ mustGoRed(
   ["the scan set changed identity"],
 )
 
+mustGoRed(
+  "harness/contracts/surface-semantics.json",
+  "surface-semantics: a golden that recorded absolute paths is red, not merely unmatched",
+  (text) => json(text, (g) => {
+    const surface = Object.values(g.surfaces ?? {})[0]
+    if (Array.isArray(surface?.files) && surface.files.length) surface.files[0] = "/Volumes/Eng-Dev/GlassPane/" + surface.files[0]
+  }),
+  "harness/tools/surface-semantics.mjs",
+  ["--check"],
+  1,
+  ["the golden records", "absolute path(s)"],
+)
+
 if (git("status", "--porcelain").split("\n").filter((l) => l && !l.startsWith("??")).length > 0) {
   bad("closure: the battery left tracked files modified in the worktree:\n" + git("status", "--porcelain"))
 } else ok("closure: no tracked file left modified")
