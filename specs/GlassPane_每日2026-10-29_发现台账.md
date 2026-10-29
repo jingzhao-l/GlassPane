@@ -250,6 +250,22 @@ bridge+probe+信号闸、scripts+workflows、信任边界安全）全部通读�
   **合法的读数丢失**记成 `rejectedFrames += 1`（协议违规），新计数器则零读者。
   读补齐在 `daily/main-20261029-swift6`（`ProbeWire`/`ProbeSocketServer`/`ProbeInbox`），同一版发出。
 
+## 查过之后**判定不是缺陷**的一条（记下来，免得下一轮又当新发现去"修"）
+
+- **上一轮那格"未观测"：`npx glasspane-mcp` 干净前缀装的 `initialize` 回包"没有输出、进程直接结束"。**
+  本轮在 `mcp-shell/dist/index.js`（同一份发布形态产物）上重打，实测两条都答：
+  - 送完整三帧握手（initialize + initialized 通知 + tools/list）后立刻 EOF ⇒ stdout 13011 字节、
+    rc 0、stderr 0 行，回包 `serverInfo {name:"glasspane-mcp", version:"1.26.0"}`、`tools/list` 16 条工具；
+  - 只送 initialize 一帧然后 EOF ⇒ stdout 171 字节、rc 0、stderr 0。
+  上一轮量到 0 字节的**成因是送出去的字节根本不是 JSON**：那条命令写在外层
+  `/bin/bash -c '…'` 的单引号里，`echo '{"jsonrpc":…}'` 的内层单引号提前闭合，落盘的
+  `/tmp/init.jsonl` 实测只有 `jsonrpc:2.0\n` 11 个字节（`od -c` 可查）——对一行垃圾，
+  `Parse error`(-32700) 才是正确答案。所以"stdin 关闭把在途答复静默丢掉"这条候选缺陷**不成立**，
+  本轮不修（修一个不存在的形状＝给产品加一条没人要的守卫）。
+  补那一格的确切命令（发布物版，本轮发完后按此再跑一次）：
+  `mktemp -d` 前缀 `npm i <tarball>` → `printf '%s\n' <三帧握手> | $PREFIX/bin/glasspane-mcp`，
+  握手文件必须用**文件**递交而不是把 JSON 嵌进被外层引号包住的那条命令里。
+
 ## 基线读数（逐字命令，2026-10-29 07:31–07:36）
 
 | 闸 | 读数 |
