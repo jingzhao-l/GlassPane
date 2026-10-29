@@ -146,6 +146,43 @@ mustGoRed(
   ["no divergence", "the two surfaces' provider registrations no longer reconcile"],
 )
 
+// 5. counts-are-mandatory — the two method-count assertions used to be guarded by
+// `goldenCount !== undefined`, so deleting the `counts` object from the golden made them both
+// vacuous and the lane still printed "the asymmetry is the recorded one". A golden that stopped
+// carrying a number is the ruler losing its marks, not the subject getting cleaner.
+mustGoRed(
+  "counts-missing-is-red",
+  GOLDEN,
+  '  "counts": {\n    "harnessMethods": 5,\n    "shellMethods": 3,\n    "overlap": 3\n  },',
+  "  \"counts\": {},",
+  1,
+  ["counts.harnessMethods: the golden does not carry a number"],
+  ["both surfaces register the same ids"],
+)
+
+// 6. the overlap number has its own reader now. Both surfaces can lose a shared method while each
+// keeps its own count, and neither per-surface assertion would move.
+mustGoRed(
+  "overlap-count-moved",
+  GOLDEN,
+  '"overlap": 3',
+  '"overlap": 2',
+  1,
+  ["counts.overlap: 3 method(s) are registered on both surfaces, golden records 2"],
+)
+
+// 7. per-method contract — `surfaces.*` was written by `--record` and read by nothing, so a
+// prerequisite list that moved identically on both sides was invisible: agreement held, the
+// contract did not. This mutation edits ONE recorded `requires` and must be named per surface.
+mustGoRed(
+  "per-method-contract-moved",
+  GOLDEN,
+  '        "method": "diagnose",\n        "requires": [\n          "attribution",\n          "ax-event",\n          "circuit-breaker"\n        ]',
+  '        "method": "diagnose",\n        "requires": [\n          "attribution",\n          "ax-event",\n          "circuit-breaker",\n          "selftest-extra-prerequisite"\n        ]',
+  1,
+  ["per-method contract moved"],
+)
+
 if (failures > 0) {
   console.error(`provider-surface-selftest: ${failures} control(s) failed to behave as claimed`)
   process.exit(1)

@@ -391,6 +391,87 @@ mustGoRed(
   ["[selftest-wired] harness/tools/kernel-pin-selftest.mjs is invoked by NO workflow step"],
 )
 
+// 15-19. the four guards this batch added to the rulers must each be able to go red, by name.
+// A guard that only ever prints a green line is the defect class this battery exists for: it reads
+// as coverage while measuring nothing, and the next person trusts it. Each control below attacks the
+// guard's own input — the golden, or the comparison — and demands the diagnosis this batch wrote.
+mustGoRed(
+  "harness/contracts/brand-surface.json",
+  "brand-surface: a golden that stopped carrying shippedFiles is red, not waived",
+  (text) => json(text, (g) => {
+    delete g.shippedFiles
+  }),
+  "harness/tools/brand-surface.mjs",
+  ["--check"],
+  1,
+  ["shipped-file scan count: the golden does not carry it"],
+)
+mustGoRed(
+  "harness/contracts/brand-surface.json",
+  "brand-surface: the shipped-source directory list has a reader",
+  (text) => json(text, (g) => {
+    g.shippedSrc = g.shippedSrc + 1
+  }),
+  "harness/tools/brand-surface.mjs",
+  ["--check"],
+  1,
+  ["shipped-source directory list moved"],
+)
+// The five shipped-code rules were added to `observed.rules` precisely because they had no reader;
+// this is the proof they now have one. It cannot reuse control 6 (which deletes from the `RULES`
+// array) — these five are literals outside `RULES`, so a `RULES`-only probe would pass while the
+// new entries stayed unguarded.
+mustGoRed(
+  "harness/tools/brand-surface.mjs",
+  "brand-surface: removing a shipped-code rule from the recorded set is red",
+  (text) => text.replace(`    { id: "removed-tree", why: `, `    // removed by rulers-selftest\n    { id: "removed-tree-disabled", why: `),
+  "harness/tools/brand-surface.mjs",
+  ["--check"],
+  1,
+  ["the rule set no longer matches the record", "removed-tree"],
+)
+// hook-liveness: `kind` is a count, the fire-site file set is the fact. Moving the recorded site
+// without moving the kind is exactly the accident that used to read as "no drift".
+mustGoRed(
+  "harness/contracts/hook-liveness.json",
+  "hook-liveness: a recorded dispatch site that moved is red even while kind still says live",
+  (text) => json(text, (g) => {
+    const live = g.hooks.find((h) => h.kind === "live" && Array.isArray(h.fireSites) && h.fireSites.length)
+    if (live) live.fireSites = live.fireSites.map((s) => ({ ...s, file: s.file.replace(/\/[^/]+$/, "/moved-out-of-the-engine-path.ts") }))
+  }),
+  "harness/tools/hook-liveness.mjs",
+  ["--check"],
+  1,
+  ["the dispatch sites moved"],
+)
+// surface-semantics: coverage compared counts, so a same-length substitution was green. Two probes —
+// a golden that stopped carrying names, and one whose names are foreign but the same length.
+mustGoRed(
+  "harness/contracts/surface-semantics.json",
+  "surface-semantics: a golden with no file-name list cannot claim to have cleared the surface",
+  (text) => json(text, (g) => {
+    for (const surface of Object.values(g.surfaces ?? {})) delete surface.files
+  }),
+  "harness/tools/surface-semantics.mjs",
+  ["--check"],
+  1,
+  ["the golden carries no file-name list"],
+)
+mustGoRed(
+  "harness/contracts/surface-semantics.json",
+  "surface-semantics: a same-count substitution of the scan set is red by name",
+  (text) => json(text, (g) => {
+    for (const surface of Object.values(g.surfaces ?? {})) {
+      if (Array.isArray(surface.files) && surface.files.length)
+        surface.files = surface.files.map((f, i) => (i === 0 ? `${f}`.replace(/[^/]+$/, "somewhere-else.ts") : f))
+    }
+  }),
+  "harness/tools/surface-semantics.mjs",
+  ["--check"],
+  1,
+  ["the scan set changed identity"],
+)
+
 if (git("status", "--porcelain").split("\n").filter((l) => l && !l.startsWith("??")).length > 0) {
   bad("closure: the battery left tracked files modified in the worktree:\n" + git("status", "--porcelain"))
 } else ok("closure: no tracked file left modified")
