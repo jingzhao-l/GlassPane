@@ -140,10 +140,23 @@ final class DailyRound20261028UsageAndHonestyTests: XCTestCase {
     /// 跨线程直读正是那条数据竞争（waiter 线程读、service 线程写，无同步）。waiter 从此
     /// 走取值方法 `inFlightOperationId()`（锁内读数），这一支改钉新形状；本文件的同线程
     /// 用例 `testActiveOperationIdIsVisibleDuringActAndClearedAfter` 逐字保持绿。
+    ///
+    /// 每日 2026-10-30 S1-2 把形状又推进了一层：**指向核心的那一个引用本身**也是跨线程
+    /// 读的裸存储（`var daemonCore: EngineCore?` 在主线程 store，waiter 在信号到达时读），
+    /// 于是它进了 `DaemonCoreHolder`（同一把锁、同一个规矩）。这一支跟着改钉的是"waiter
+    /// 问的是带锁的盒子"，而不是某个具体变量名——判据没有放松：
+    ///  · 正向：waiter 的闭包必须经 `inFlightOperationId()`（盒子里或核心上都是锁内读数）；
+    ///  · 反向：源码里不许再出现 `daemonCore?.`（那是回退到裸引用直读）或
+    ///    `activeOperationId`（那是绕开 `inFlightOperationId()` 直接读属性）。
     func testShutdownWaiterReadsTheInFlightActAndSaysSo() throws {
         let source = try sourceText("Sources/glasspaned/main.swift")
-        XCTAssertTrue(source.contains("inFlightAct: { daemonCore?.inFlightOperationId() }"),
-                      "waiter 不再问在途 act 了：那一句\"少了一条证据\"永远不会被写出来")
+        XCTAssertTrue(source.contains("startShutdownWaiter"), "收尾 waiter 的创建点没了：这一支看不见任何东西")
+        XCTAssertTrue(
+            source.contains("inFlightAct: { daemonCore.inFlightOperationId() }"),
+            "waiter 不再问在途 act 了（或问法退回裸引用直读）：那一句\"少了一条证据\"永远不会被写出来",
+        )
+        XCTAssertFalse(source.contains("daemonCore?."),
+                       "S1-2：指向核心的引用又被跨线程裸读了——它必须在 DaemonCoreHolder 的锁后面")
         XCTAssertFalse(source.contains("inFlightAct: { daemonCore?.activeOperationId }"),
                        "S3-2：waiter 又绕着锁裸读属性了——收尾读数与被 service 线程写的字段赛跑")
         XCTAssertTrue(source.contains("the shutdown signal arrived while operation"),
