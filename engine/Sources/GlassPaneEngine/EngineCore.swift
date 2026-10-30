@@ -1281,6 +1281,35 @@ public final class EngineCore {
                         + "handlerProbe.hitCount and its handler list are a lower bound, not a complete measurement"
                 )
             }
+            // 每日 2026-10-30 缺陷 1：同一个通道还在**更里一层**被静默截短。
+            // 环没溢出的时候（40 条不同 handler 装得下 512 的环），上面那一句不 fire，
+            // 而 `HandlerProbeSignal.init` 仍然把清单截到 32 条、`StateDiffSignal.init`
+            // 截到 64 条——于是这份档案对外宣称"一共 32 个 handler 站点"，
+            // `EvidenceReportGenerator` 那句 `+N more` 也就跟着少算 8 条（一个假数，
+            // 不只是没说）。截断发生在归档这一步、由这份代码亲手做，所以实话必须由
+            // 这一边说；它没有新键可装（strictObject），家还是 `circuitBreaker.reason`。
+            if let handlerProbe = probeSignals?.handlerProbe,
+               handlerProbe.distinctHandlersInWindow > handlerProbe.handlers.count {
+                level = .degraded
+                reasons.append(
+                    "handler-list-truncated: \(handlerProbe.handlers.count) of "
+                        + "\(handlerProbe.distinctHandlersInWindow) distinct handlers kept, "
+                        + "\(handlerProbe.distinctHandlersInWindow - handlerProbe.handlers.count) dropped by the "
+                        + "\(HandlerProbeSignal.maxHandlers)-handler archive cap; handlers[] is a truncated set, "
+                        + "not the complete one"
+                )
+            }
+            if let stateDiff = probeSignals?.stateDiff,
+               stateDiff.changedKeysInWindow > stateDiff.entries.count {
+                level = .degraded
+                reasons.append(
+                    "state-entries-truncated: \(stateDiff.entries.count) of "
+                        + "\(stateDiff.changedKeysInWindow) changed keys kept, "
+                        + "\(stateDiff.changedKeysInWindow - stateDiff.entries.count) dropped by the "
+                        + "\(StateDiffSignal.maxEntries)-entry archive cap; entries[] is a truncated set, "
+                        + "not the complete one (changed: true alone does not say how many moved)"
+                )
+            }
         }
         let reason: String? = reasons.isEmpty ? nil : reasons.joined(separator: "; ")
 

@@ -307,13 +307,27 @@ public enum EvidenceReportGenerator {
     /// two views of one pack cannot describe the probe differently.
     private static func handlerProbeText(_ handlerProbe: HandlerProbeSignal) -> String {
         var refs = handlerProbe.handlers.prefix(maxHandlersShown).map { "\($0.file):\($0.line)" }
-        let hidden = handlerProbe.handlers.count - refs.count
+        let archived = handlerProbe.handlers.count
+        let hidden = archived - refs.count
         if hidden > 0 {
             refs.append("+\(hidden) more")
         }
         let list = refs.isEmpty ? "no localized hits" : refs.joined(separator: ", ")
-        return "handlerProbe: probeVersion=\(handlerProbe.probeVersion)"
+        var line = "handlerProbe: probeVersion=\(handlerProbe.probeVersion)"
             + " hitCount=\(handlerProbe.hitCount) late=\(handlerProbe.lateCount) handlers=[\(list)]"
+        // 每日 2026-10-30 缺陷 1 的另一半：`+N more` 一直是对**归档清单**算的，
+        // 于是"念出 8 条 + 还有 24 条"在 40 条进、32 条归档的窗口里读起来就是
+        // "一共 32 条"——那 8 条被归档上限截掉、不在这个 pack 里，这一行一个字没说。
+        // 数字本身没错，错在它被读成全体，所以这里把两个总数一起念出来：
+        // 留在 pack 里的条数、窗口量到的条数、以及两者之差从哪儿消失。
+        // 从句只在真被截过时出现（≤32 的窗口一个字不多，`+N more` 那时已经说全了）。
+        if handlerProbe.distinctHandlersInWindow > archived {
+            line += " — handlers[] holds \(archived) of the "
+                + "\(handlerProbe.distinctHandlersInWindow) distinct handlers this window measured, "
+                + "\(handlerProbe.distinctHandlersInWindow - archived) are not in this pack "
+                + "(archive cap \(HandlerProbeSignal.maxHandlers))"
+        }
+        return line
     }
 
     /// The state channel in the same shape, with `key "before" -> "after"`
@@ -322,13 +336,21 @@ public enum EvidenceReportGenerator {
         var rendered = stateDiff.entries.prefix(maxEntriesShown).map {
             "\($0.key) \"\($0.before)\" -> \"\($0.after)\""
         }
-        let hidden = stateDiff.entries.count - rendered.count
+        let archived = stateDiff.entries.count
+        let hidden = archived - rendered.count
         if hidden > 0 {
             rendered.append("+\(hidden) more")
         }
         let list = rendered.isEmpty ? "no key changes" : rendered.joined(separator: ", ")
-        return "stateDiff: source=\(stateDiff.source.rawValue)"
+        var line = "stateDiff: source=\(stateDiff.source.rawValue)"
             + " changed=\(stateDiff.changed) entries=[\(list)]"
+        if stateDiff.changedKeysInWindow > archived {
+            line += " — entries[] holds \(archived) of the "
+                + "\(stateDiff.changedKeysInWindow) changed keys this window measured, "
+                + "\(stateDiff.changedKeysInWindow - archived) are not in this pack "
+                + "(archive cap \(StateDiffSignal.maxEntries))"
+        }
+        return line
     }
 
     private static func measureLabel(_ pack: EvidencePack) -> String {
