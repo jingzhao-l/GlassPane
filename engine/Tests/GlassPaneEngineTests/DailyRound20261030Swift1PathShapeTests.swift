@@ -186,6 +186,28 @@ final class DailyRound20261030Swift1PathShapeTests: XCTestCase {
         XCTAssertEqual(good.status, 0, good.combined)
     }
 
+    /// 反漂移：socket 那一条不许再抄一份"这是不是家目录"的比较——两份判据各漂各的正是本轮
+    /// 缺陷的形状。它问的是同一个函数，只写自己的措辞。
+    /// REVERSE：把 `homeDirectoryForCurrentUser` 那一份比较抄回 `SocketDirectoryRule` → 红。
+    func testTheSocketRuleSharesTheOneMeasurement() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/GlassPaneEngine/SocketDirectoryRule.swift")
+        let text = try XCTUnwrap(try? String(contentsOf: url, encoding: .utf8), "读不到 \(url.path)")
+        let code = text.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.hasPrefix("//") && !$0.hasPrefix("/*") && !$0.hasPrefix("*") }
+            .joined(separator: "\n")
+        XCTAssertEqual(
+            code.components(separatedBy: "StateRootArgument.dedicatedness(").count - 1, 1,
+            "兜底不再问那一份测量，或者问了不止一遍"
+        )
+        XCTAssertNil(code.range(of: "homeDirectoryForCurrentUser"),
+                     "socket 那一条又自己写了一份家目录比较——判据就有两份了")
+        XCTAssertEqual(code.components(separatedBy: "Nothing was chmod-ed").count - 1, 3,
+                       "三种拒绝（`/`、家目录、`.`/`..`）都得各自说清什么都没 chmod")
+    }
+
     // MARK: - 真二进制夹具
 
     private struct DaemonRun {

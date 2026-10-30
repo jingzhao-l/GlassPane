@@ -386,8 +386,9 @@ public enum StateRootArgument: Equatable {
     }
 
     /// Why `raw` cannot serve as *this* product's state root even though it is a
-    /// well-formed absolute path: the filesystem root, or the account's home
-    /// directory itself. `nil` means the path is dedicated enough to tighten.
+    /// well-formed absolute path: the filesystem root, the account's home directory
+    /// itself, or a spelling that reaches one of the two through a `.` / `..`
+    /// component. `nil` means the path is dedicated enough to tighten.
     ///
     /// Trailing slashes and `~`-normalised spellings are folded onto the same
     /// comparison because that is what `StateRoot(path:)` does with them: a refusal
@@ -405,11 +406,14 @@ public enum StateRootArgument: Equatable {
             // would make the refusal depend on the environment while the root the daemon
             // actually defaults to does not — one typo, two answers about where state lives.
             return "would be the home directory itself — the daemon tightens the root it is given to 0700 and writes its socket, registry and archive under it, so this would re-permission everything in \(home) and scatter engine files beside the user's own. Name a directory for the engine's state, e.g. `--state-dir \(RemedyCommand.quote(home + "/.glasspane"))`"
+        case .relativeComponent(let component):
+            return "contains a \"\(component)\" component — POSIX resolves that as a directory entry, so the name typed here and the directory it reaches are not the same thing: `\(NSHomeDirectory())/Desktop/..` **is** \(NSHomeDirectory()), and `\(NSHomeDirectory())/.` is too. The tightening sweep chmods the root it is given to 0700, so this run would re-permission the home directory or the filesystem root while a comparison of the spelling still said it had named something else. Nothing was chmod-ed here and no directory was created. Name a dedicated directory with no \".\" or \"..\" component, e.g. `--state-dir \(RemedyCommand.quote(NSHomeDirectory() + "/.glasspane"))`"
         }
     }
 
-    /// The one measurement behind both refusals: is this path a location this
-    /// product owns, or is it home / the filesystem root?
+    /// The one measurement behind all three refusals: is this path a location this
+    /// product owns, or is it home / the filesystem root / a spelling that walks back
+    /// to one of them?
     ///
     /// Split out of the sentences above because the *same hazard* now has two
     /// entry points (`--state-dir`, and the parent directory of `--socket-path`
@@ -418,27 +422,53 @@ public enum StateRootArgument: Equatable {
     /// was refused, `--socket-path "$HOME/engine.sock"` was not, and both end in
     /// a `chmod(0700)`. Each entry point writes its own next step from this
     /// verdict; the verdict itself has one home.
-    private static func dedicatedness(_ raw: String) -> Dedicatedness {
-        var normalized = raw
-        while normalized.count > 1, normalized.hasSuffix("/") {
-            normalized.removeLast()
-        }
+    ///
+    /// The `.`/`..` rule (2026-10-30 S1-1) is checked **first**, on the raw spelling,
+    /// because it is the one that no location comparison can survive: the two
+    /// sentences above exist to catch a path that *is* home, and a path that resolves
+    /// to home answers "no" to every string comparison. Same pair of shapes, same
+    /// refusal, as `EngineCore.storedPathShapeDefect` for a stored archive path.
+    static func dedicatedness(_ raw: String) -> Dedicatedness {
+        if let component = relativeComponent(in: raw) { return .relativeComponent(component) }
+        let normalized = locatedPath(raw)
         if normalized == "/" { return .filesystemRoot }
         for home in Array(Set([
             NSHomeDirectory(),
             FileManager.default.homeDirectoryForCurrentUser.path,
         ])) {
-            var root = home
-            while root.count > 1, root.hasSuffix("/") { root.removeLast() }
-            if normalized == root { return .homeDirectory(home) }
+            if normalized == locatedPath(home) { return .homeDirectory(home) }
         }
         return .dedicated
     }
 
-    private enum Dedicatedness {
+    /// The `.` / `..` shape rule, shared by both chmod entry points so the two
+    /// cannot drift: which component is the first offender, or nil when the path has
+    /// none. Pure, no filesystem — POSIX resolves these against the *directory*, so
+    /// a name carrying one is not the location its spelling suggests, and every
+    /// comparison of locations below is a comparison of strings the kernel ignores.
+    static func relativeComponent(in raw: String) -> String? {
+        for component in raw.split(separator: "/", omittingEmptySubsequences: true)
+        where component == "." || component == ".." {
+            return String(component)
+        }
+        return nil
+    }
+
+    /// One location per spelling — `/a/b/`, `/a//b` and `/a/b` all compare as the
+    /// directory they name. Lexical only (`standardizedFileURL`, not
+    /// `resolvingSymlinksInPath`): this predicate runs before anything touches the
+    /// disk and must keep answering for a root that does not exist yet, and symlinked
+    /// leaves are refused by `StateRoot.leafSymlinkDefect` /
+    /// `SocketDirectoryRule.leafSymlinkDefect` on their own terms.
+    private static func locatedPath(_ raw: String) -> String {
+        URL(fileURLWithPath: raw, isDirectory: true).standardizedFileURL.path
+    }
+
+    enum Dedicatedness {
         case dedicated
         case filesystemRoot
         case homeDirectory(String)
+        case relativeComponent(String)
     }
 
     /// Why `raw` cannot serve as a **socket** name: the listener chmods the
@@ -453,10 +483,18 @@ public enum StateRootArgument: Equatable {
     /// engine's own folder, not the home directory). Empty parent (a bare name) is
     /// answered by `classify` — the absolute-path rule — and is not re-refused here.
     public static func rejectionForSocketParent(of raw: String) -> String? {
+        // The shape rule reads the **whole** name, not only the parent: the offending
+        // component can be the last one (`--socket-path "$HOME/engine.sock/.."`), and
+        // there it renames the directory the listener is about to chmod.
+        if let component = relativeComponent(in: raw) {
+            return "names a path containing a \"\(component)\" component — POSIX resolves it as a directory entry, so the directory this socket would sit in is not the one the spelling suggests, and this run brings the directory holding a socket to 0700 before it binds. Nothing was chmod-ed here. Put the socket inside a directory this install owns, e.g. --socket-path \(RemedyCommand.quote(NSHomeDirectory() + "/.glasspane/engine.sock")), or name --state-dir and let the socket default to living under it"
+        }
         let directory = (raw as NSString).deletingLastPathComponent
         guard !directory.isEmpty else { return nil }
         switch dedicatedness(directory) {
-        case .dedicated:
+        case .dedicated, .relativeComponent:
+            // `.relativeComponent` is unreachable here: `raw` was already shape-checked
+            // above, and a parent cannot grow a `.`/`..` component the child did not have.
             return nil
         case .filesystemRoot:
             return "would put the socket directly in `/` — this run brings the directory holding a socket to 0700 before it binds, and `/` is not this install's directory to re-permission. Put the socket inside a directory this install owns, e.g. let it default under --state-dir, or pass --socket-path \(RemedyCommand.quote(NSHomeDirectory() + "/.glasspane/engine.sock"))"
