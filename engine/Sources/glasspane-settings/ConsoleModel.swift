@@ -993,9 +993,21 @@ final class ConsoleModel: ObservableObject {
         }
         if group.wait(timeout: .now() + timeoutSeconds) == .timedOut {
             process.terminate()
+            // `terminate()` 只是发 SIGTERM，不 reap：那个孩子会留在面板自己的进程表里，
+            // 每点一次「清理」多一个僵尸，而面板是长命进程。实测的管道语义决定了顺序——
+            // 两条 `readDataToEndOfFile()` 要等"所有写端关闭"才见得到 EOF，写端在子进程手里，
+            // 所以是 terminate → waitUntilExit（收尸，同时解掉两条 reader）→ join → 关读端。
+            // 预算 `timeoutSeconds` 一个字没动：一个只在安静时成立的时限判断不是控制。
+            process.waitUntilExit()
+            group.wait()
+            pipe.fileHandleForReading.closeFile()
+            errorPipe.fileHandleForReading.closeFile()
             return nil
         }
         process.waitUntilExit()
+        // 正常那一趟也一样把句柄还回去（上面的 group 已经 ended，EOF 早已发生）。
+        pipe.fileHandleForReading.closeFile()
+        errorPipe.fileHandleForReading.closeFile()
         guard let text = String(data: outBox.value, encoding: .utf8),
               let errorText = String(data: errBox.value, encoding: .utf8) else { return nil }
         return (text, errorText, process.terminationStatus)
