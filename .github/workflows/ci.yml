@@ -213,7 +213,17 @@ jobs:
         with:
           node-version: 20
       - name: Check links, anchors and bilingual pairing across public docs
-        run: node scripts/check-doc-links.mjs
+        # `--self-test` runs **before** the bare check (2026-10-30, closing the "advisory with no
+        # receiver" family): this repo's own rule is that a rule nobody has seen go red is not a
+        # rule, and the battery exists in this script (`…--self-test: 8 case(s) each verified to
+        # fail — 5 mutation(s) … 3 legal shape(s)`) while CI only ever ran the bare check. Any of
+        # doc-links' six rule classes could be degraded to always-green and CI would have printed
+        # "clean". `updater/test/scripts-check-doc-links.test.mjs` counts the printed `ok self-test`
+        # lines against the number in that summary, exactly as the workflow-lint step's twin does.
+        run: |
+          set -euo pipefail
+          node scripts/check-doc-links.mjs --self-test
+          node scripts/check-doc-links.mjs
 
   # 版本线守卫：根 workspace / 两个 npm 包 / kernel / MCP 自报 / daemon 自报 /
   # .app bundle / install.sh 钉的 tag / lockfile 必须是同一个数字。漂移的后果不是
