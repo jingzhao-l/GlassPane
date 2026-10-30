@@ -282,15 +282,23 @@ export class McpServer {
    * actually answers. A JSON-RPC reader cannot open a source symbol, and an example naming a
    * tool this surface does not publish would be a second refusal waiting to happen — so the
    * preference is a published tool that is legal to call with an empty `arguments`.
-   * `test/dispatch.test.mjs` checks every name in this sentence against `tools/list`, and
-   * checks it again on a server deliberately built with a one-tool list.
+   *
+   * "Legal with an empty arguments" is measured by running the same `validate` the call path
+   * runs (`executeTool(spec, params.arguments ?? {}, …)`), not by reading `required` off the
+   * advertised JSON Schema. Those two are not the same question: `gp_attach` publishes
+   * `oneOf: [{required:[bundleId]}, {required:[pid]}]` with no top-level `required` key, so the
+   * schema read called it "takes nothing" while its own refinement refuses `{}` — and measured
+   * on the delivered artifact, the remedy this sentence prints sent the agent to a call answered
+   * `GP_E_BAD_PARAMS: attach takes exactly one of bundleId or pid`. An example the caller is
+   * guaranteed to fail is worse than no example, which is the rule `publishedNamesNear` below
+   * already states for the *name* half of the same sentence.
+   * `test/dispatch.test.mjs` checks every name in this sentence against `tools/list`, checks it
+   * again on a server deliberately built with a one-tool list, and now checks that the named
+   * tool really answers `arguments: {}` without a params refusal.
    */
   private callShapeRemedy(): string {
-    const takesNothing = this.specs.filter((spec) => {
-      const required = (spec.inputSchema as { required?: unknown }).required;
-      return !Array.isArray(required) || required.length === 0;
-    });
-    const example = (takesNothing[0] ?? this.specs[0])?.name;
+    const takesNothing = this.specs.filter((spec) => spec.validate({}).ok);
+    const example = takesNothing[0]?.name;
     if (example === undefined) {
       return "no tool is published on this connection; call tools/list to read what it answers";
     }
