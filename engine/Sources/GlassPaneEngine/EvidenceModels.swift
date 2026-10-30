@@ -304,6 +304,20 @@ public struct HandlerProbeSignal: Codable, Equatable {
     public let hitCount: Int
     public let handlers: [HandlerRef]
     public let lateCount: Int
+    /// 这个窗口**量到**过多少个不同的 handler 站点——截断之前的那个数。
+    ///
+    /// 它不进编码、不进 `==`，因为它不是发布面的一部分，而是**生产端的来源信息**：
+    /// `handlers` 被 `maxHandlers` 截掉的那几条在档案里没有任何键可以安身
+    /// （`kernel/schemas/evidence-pack.schema.json` 的 `handlerProbeSignal` 是
+    /// strictObject 且 `handlers` 带 `maxItems: 32`），于是"40 条进、32 条归档"
+    /// 这件事从前一个字都没说。`EngineCore.act` 拿它与 `handlers.count` 一比，
+    /// 就知道要不要往 `circuitBreaker.reason` 里追加
+    /// `handler-list-truncated`——那是这个 pack 里"有一条测量通道没测完"的既有归宿
+    /// （`probe-events-evicted` / `late-arrivals-unmeasured` 用的同一个家）。
+    ///
+    /// 从档案读回来时它只能等于留下的条数：磁盘上那一份无法对没留下的几条作保，
+    /// 而那句实话已经随 `circuitBreaker.reason` 一起持久化了。
+    let distinctHandlersInWindow: Int
 
     public init(probeVersion: String, hitCount: Int, handlers: [HandlerRef], lateCount: Int = 0) {
         // `maxLength: 64`, same $defs block as `handlers[].file`.
@@ -311,8 +325,41 @@ public struct HandlerProbeSignal: Codable, Equatable {
             probeVersion, maxUTF16Units: ArchiveFieldBounds.probeVersionMaxUTF16Units
         )
         self.hitCount = hitCount
+        self.distinctHandlersInWindow = handlers.count
         self.handlers = Array(handlers.prefix(Self.maxHandlers))
         self.lateCount = lateCount
+    }
+
+    /// 冻结的四个键，一个字不多（`additionalProperties: false`）。显式实现
+    /// `Codable` 只为把 `distinctHandlersInWindow` 挡在编码面之外。
+    enum CodingKeys: String, CodingKey {
+        case probeVersion, hitCount, handlers, lateCount
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.probeVersion = try container.decode(String.self, forKey: .probeVersion)
+        self.hitCount = try container.decode(Int.self, forKey: .hitCount)
+        self.handlers = try container.decode([HandlerRef].self, forKey: .handlers)
+        self.lateCount = try container.decode(Int.self, forKey: .lateCount)
+        self.distinctHandlersInWindow = self.handlers.count
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(probeVersion, forKey: .probeVersion)
+        try container.encode(hitCount, forKey: .hitCount)
+        try container.encode(handlers, forKey: .handlers)
+        try container.encode(lateCount, forKey: .lateCount)
+    }
+
+    /// 显式实现：来源信息不参与相等判定，比较的就是发布的那四个字段——与加入
+    /// `distinctHandlersInWindow` 之前合成出来的 `==` 逐字等价。
+    public static func == (lhs: HandlerProbeSignal, rhs: HandlerProbeSignal) -> Bool {
+        lhs.probeVersion == rhs.probeVersion
+            && lhs.hitCount == rhs.hitCount
+            && lhs.handlers == rhs.handlers
+            && lhs.lateCount == rhs.lateCount
     }
 }
 
@@ -345,11 +392,43 @@ public struct StateDiffSignal: Codable, Equatable {
     public let source: StateDiffSource
     public let changed: Bool
     public let entries: [StateEntry]
+    /// 这一轮真的变了多少个键（截断之前的数），与 `HandlerProbeSignal
+    /// .distinctHandlersInWindow` 同一个道理：`entries` 被 `maxEntries` 截到 64 条时，
+    /// 档案里只剩 `changed: true`，"64 之外的还有 6 个键"这件事没有一个字说过。
+    /// 它不进编码、不进 `==`；从档案读回来时只能等于留下的条数。
+    let changedKeysInWindow: Int
 
     public init(source: StateDiffSource, changed: Bool, entries: [StateEntry]) {
         self.source = source
         self.changed = changed
+        self.changedKeysInWindow = entries.count
         self.entries = Array(entries.sorted { $0.key < $1.key }.prefix(Self.maxEntries))
+    }
+
+    /// 冻结的三个键（`stateDiffSignal` 同样是 strictObject）。
+    enum CodingKeys: String, CodingKey {
+        case source, changed, entries
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.source = try container.decode(StateDiffSource.self, forKey: .source)
+        self.changed = try container.decode(Bool.self, forKey: .changed)
+        self.entries = try container.decode([StateEntry].self, forKey: .entries)
+        self.changedKeysInWindow = self.entries.count
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(source, forKey: .source)
+        try container.encode(changed, forKey: .changed)
+        try container.encode(entries, forKey: .entries)
+    }
+
+    public static func == (lhs: StateDiffSignal, rhs: StateDiffSignal) -> Bool {
+        lhs.source == rhs.source
+            && lhs.changed == rhs.changed
+            && lhs.entries == rhs.entries
     }
 }
 
