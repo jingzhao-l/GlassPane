@@ -58,12 +58,12 @@
     "ai-agents"
   ],
   "dependencies": {
+    "iterate-kernel": "0.1.10",
     "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/node": "26.5.1",
     "esbuild": "^0.28.2",
-    "iterate-kernel": "0.1.10",
     "typescript": "5.9.3"
   }
 }
