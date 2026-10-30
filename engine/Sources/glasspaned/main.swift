@@ -534,10 +534,14 @@ private func printUsage() {
                                  agent-runnable fix; for the daemon's own seat use
                                  --request-permission accessibility.
         --check-screen-permission   Print screen recording permission state
-                                 (granted | notDetermined) and exit — the API behind
+                                 (granted | unverifiable) and exit — the API behind
                                  this seat answers only "is it on", so a seat that is
-                                 switched off and one that was never asked print the
-                                 same word; nothing here may claim the system decided
+                                 switched off, one that was never asked and one refused
+                                 in an earlier run all print the same word; nothing here
+                                 may claim what the system decided. Unlike
+                                 --permissions, exit 0 only means this run took the
+                                 measurement; the verdict is the printed word, never
+                                 the code
         --guide-screen-permission   Prompt for screen recording permission
                                  (no-op when already granted) and exit; exit 0 only
                                  when the seat reads granted afterwards, 1 for every
@@ -545,14 +549,20 @@ private func printUsage() {
                                  follows, because a script that branches on the code
                                  must not read a failed onboarding as a grant.
         --check-input-permission    Print input monitoring permission state
-                                 (granted | notDetermined | unverifiable) and exit —
-                                 unverifiable means "a request went out this run and
-                                 the system has not answered", which is not a denial
+                                 (granted | unverifiable) and exit — unverifiable means
+                                 this run measured no grant. One boolean cannot say which
+                                 of "never asked", "asked and still waiting", "asked and
+                                 refused" or "refused in an earlier run" it is, so the
+                                 printed word is no verdict about that history. Exit 0
+                                 only means the measurement ran; the verdict is the
+                                 printed word, not the code
         --check-accessibility      Print this process's accessibility seat
                                  (granted | unverifiable — AX answers one boolean, so a
                                  seat never asked about and a seat switched off cannot be
                                  told apart, and the honest word for that pair is the
-                                 second one here) and exit
+                                 second one here) and exit. Exit 0 only means this run
+                                 took the measurement; the verdict is the printed word,
+                                 not the code
         --version                  Print `glasspaned <version>` and exit 0 — the same literal the
                                  `hello` frame reports, which is the reading
                                  `updater/lib/version.js` pairs with the bundle plist. Reads no state,
@@ -590,9 +600,11 @@ private func printUsage() {
                                  daemon's own identity instead of its launcher's.
                                  The exit code states what the seat **reads**, not
                                  that the ask ran: 0 only for `granted`, nonzero
-                                 (1) for every other reading — `denied`,
-                                 `notDetermined` and `unverifiable` included, so an
-                                 asked-but-unanswered seat is 1 too, never a grant.
+                                 (1) for every other reading — the seats this build's
+                                 probes can light answer `unverifiable` when the
+                                 preflight says nothing more, so an asked-but-unanswered
+                                 seat is 1 too, never a grant (a `notDetermined` from an
+                                 older daemon's report is 1 as well).
                                  The JSON is printed either way: the report is the
                                  answer, the exit code is the verdict on it.
         --check-developer-tools     Probe debugger capability (launch/attach
@@ -889,16 +901,19 @@ private func runGuideScreenPermission(_ probe: ScreenCapturePermissionProbe) -> 
     case .granted:
         print("screen recording permission already granted — no action needed.")
         return .granted
-    case .notDetermined, .denied:
+    case .notDetermined, .denied, .unverifiable:
         // Option (b) for the unreachable-denial defect: `ScreenCapturePermissionProbe.state`
         // is a boolean preflight (`CGPreflightScreenCaptureAccess()` returns true/false; see
-        // ScreenCapturePermission.swift) — it yields `.granted` or `.notDetermined` and can
+        // ScreenCapturePermission.swift) — it yields `.granted` or `.unverifiable` and can
         // never yield `.denied`. The SDK offers no call that separates granted / denied /
         // not-determined for screen recording, so a denial is not something this command
         // measures. The old separate `.denied` arm printed an outright-denial sentence as if
         // it had read one; that arm was unreachable AND it lit an indicator from an inference,
         // violating the core rule. Both not-granted readings now report only what was actually
         // measured: preflight came back false, i.e. "has not been granted yet".
+        // `.notDetermined` / `.denied` stay in the switch because the seat model still names
+        // them (a reading this probe cannot take); the arm a probe-produced value reaches is
+        // `.unverifiable`, and every one of them prints the same measured sentence.
         print("Screen recording permission has not been granted yet. A system authorization dialog is being requested now.")
         let outcome = probe.guideAccess()
         openScreenRecordingPane()
@@ -1202,7 +1217,8 @@ if options.checkDeveloperTools {
 }
 if options.checkInputPermission {
     // P2 §17.2 真机冒烟前置：C33 输入监控 TCC 状态对外如实输出
-    // （granted | notDetermined | unverifiable——问过而系统未答不是"被拒"）。取值表由
+    // （granted | unverifiable——一枚预检布尔说不出"没问过 / 问过挂着 / 问过被拒 / 上次被拒"，
+    // 所以没量到授权时只能说"未验证"，不能说"未请求"）。取值表由
     // `DaemonPermissionVocabularyTests` 与 `--help` 钉在一起：那张表是 agent 与冒烟脚本
     // 据以分叉的契约，写一个探针打印不出来的词，比不写更坏。
     let probe = InputMonitoringPermissionProbe()
