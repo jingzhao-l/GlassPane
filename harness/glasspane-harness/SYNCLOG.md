@@ -105,6 +105,65 @@
   `realpathSync` 之后用 `path.join` 拼回缺失部分，而 `path.join` 自己就折叠 `..`，所以物理那一支
   兜住了词法那一支漏掉的情形。
 
+### 收尾读数（同一会话）· 两个号的三格、真签名那一格、与本轮删了什么
+
+**发布三格（两号都齐）。** 0.12.4 与 0.12.5 各自：
+
+| 格 | 0.12.4 | 0.12.5 |
+| --- | --- | --- |
+| 搬运仓 main | `6db4a500`（tree `7926a2e3`） | `3386ec09`（tree `637ac281`） |
+| tag | `v0.12.4` 签名（`0929EA31…1298`），peel == 该 tree | `v0.12.5` 同一把 key，peel == 该 tree |
+| Release | `isDraft=false`、6 件资产、`targetCommitish` 是 commit 而非分支名 | 同左 |
+| registry | wrapper / arm64 / x64 三个 `0.12.4`（`--prefer-online` 逐个点名） | 同左三个 `0.12.5`，且 `npm view glasspane-harness version` == `0.12.5` |
+| `verify-published` | 13 条 ok / exit 0 | 13 条 ok / exit 0 |
+| 端到端装 | `npm i -g --prefix $HOME/.local` → 两条命令都回 `0.12.4`；`bun add -g` 两条 bin 都在 | 同两条命令都回 `0.12.5`；`bun add -g` 亦 `0.12.5` |
+
+`release-artifact` 在 `a65c86f3` 上的读数是**两格全 ✓、0 格容忍滞后**——本轮第一次做到
+"发布物 == 主干"一格豁免都不需要（台账写完了才打 tag 的顺序，是上一段那条教训的实际收益）。
+
+**中途红过、又按判据转绿的三格**（不是"最后绿了就行"，红的原因都记下来）：
+1. 父仓 `harness-rulers` lane 在 `0e9bc193` 上红在 `Neither surface started judging evidence semantics`
+   —— 本轮修复自己引入的绝对路径金样（见上一段第二条）。
+2. 搬运仓 CI 在同一条 commit 上红在 `Fixed-point tests` —— 本轮新增断言假设父仓目录布局。
+3. 两个 Release/npm run 因**时序**红过：`v0.12.4` 那次红在 `CI for the commit this tag points at
+   must already be green`（它指的树当时确实还没绿），`v0.12.5` 那次 npm 的 darwin-arm64 job 被
+   runner **cancelled**（x64 已发成功，wrapper 因收件不齐而 skip）——两次都是 `--failed` 重跑转绿，
+   重跑对 x64 走的是"已发布就证明存在"那一支，不会重复发版。
+
+**真签名那一格，本轮补上了以前没有的那半。** `installer-selftest.sh` 那 188 条把 `.asc` 与 `gpg`
+都是桩，所以"发布物被自己的安装器验过"此前只有推理。本轮用真字节跑了一遍（`gh api` 取回
+`SHA256SUMS.txt` 与其 `.asc`，`GNUPGHOME` 用一次性目录，不碰用户钥匙串）：
+安装器内联的那把公钥指纹 == 它自己比较 `VALIDSIG` 用的常数 ==
+`0929EA31DF4F7429F63FC53189D88B1D043A1298`，manifest 的 `GOODSIG` + `VALIDSIG` 命中该指纹，
+且 manifest 两行 sha256 与 GitHub 自己记的 `assets[].digest` 逐字相等
+（`4bd79d5d…` / `8f16e167…`）。**仍缺的一格**：从 `release-assets.githubusercontent.com`
+把 46 MB 的 zip 真下一个来（本机 curl 恒退 97，`gh api` 侧 ~3 KB/s）——
+所以"安装器自己走下载 leg 验完真资产"仍是未观测，补法写在上面第五段那条命令。
+
+**反向控制这一格本轮是实跑的，不是纸面的**（`/var/tmp/glasspane-harness/daily-20261029-harness/mutate.py`）：
+逐条把修复拆掉，要求**具名**用例变红，恢复只走自建字节副本 + sha256 相等核对，全程不碰
+`git checkout` / `git stash`（这棵树与 07:30 那条线共享）：
+`server auth` 拆产品名解析 → `the product name alone enables authentication` 红；
+`daemon.ts` 席位恢复 `as` 洗 → `a non-string seat keeps its name…` 红；
+`registry.ts` 恢复第一方析取支 → `a first-party gateway id enables nothing on its own` 红；
+`npmAnswer` 的 404 那一臂改成不可达 → `the registry's own 404 is absence` 红；
+`install.sh` 别名那一行改指不存在的名字 → `gp-harness is missing or not executable` 红。
+5/5 全部具名变红、5/5 sha256 核回。
+
+**本轮删了什么、留什么（收口清理）。**
+删：本轮自建的隔离 worktree（`git worktree remove` + `prune`）；本地搬运分支
+`split/glasspane-harness`（用仓里既有的办法——`--set-upstream-to=harness/main` 之后 `git branch -d`
+自己判"已并入其上游"，**不用 `-D`**，因为它的内容已由 `harness/main` 与两个 tag 承载）；
+`/var/tmp/glasspane-harness/daily-20261029-harness/` 整个本轮暂存（日志、金样备份、变异脚本、
+临时 origin）与 `/var/tmp/glasspane-harness/daily-20261029-harness/scratch-f4/`。
+留：`ca-bundle.pem`（环境，构建要用）、`.external/opencode`（223 MB 参照克隆，环境不是遗留）、
+`node_modules`（4,671 包）、两个远端的 tag、以及并行会话此刻正在飞的批次。
+两边远端都盘过：主仓远端分支只剩 `main`，搬运仓远端分支只剩 `main`，两边 open PR 均为 0，
+无悬挂 draft Release，无待批 staged publish。
+主树里 07:30 那条线的 `daily-20261030-*` 未提交批次（`mcp-shell/*`、`install.sh`、
+`scripts/check-workflows.mjs`、`.github/workflows/ci.yml` 等 14 改 4 新）保持原状：
+本轮 7 笔提交的**全部路径都在 `harness/` 之下**（`git log --name-only` 实数核过），与它们零重叠。
+
 ### 维持现状的三条（依据与代价都写清楚，不是"下一轮再看"）
 
 - 不加 `status` 一类的"不经模型读引擎连通性"命令：那是新增 CLI 形状 = minor，且要连 docs 双语、
