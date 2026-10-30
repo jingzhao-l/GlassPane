@@ -398,11 +398,31 @@ for _arg in "$@"; do
     --repo) _want_repo_arg=1 ;;
     --no-bootstrap) _no_bootstrap=1 ;;
     # --help 排在这里而不是另起一轮扫描：`--repo --help` 在 installer/cli.js 里是"值被 --repo 吃掉"
-    # （parseArgs 的 case '--repo' 直接吞下一枚），这里跟着同一个形状走，两条入口才对同一串 argv
-    # 给出同一个结论。另起一轮"看见 --help 就算"会和它分叉。
+    # （parseArgs 的 case '--repo' 直接吞下一枚），这里跟着同一个形状走。跟着**吞**，不跟着**答**：
+    # cli.js 对吞下去的那一枚还有一条判据——以 `--` 开头就不是目录，退 2 并打 usage
+    # （"--repo 需要一个目录参数"）。这一层从前只把它当坏目录拒回 1，于是同一串 argv 在两条一键
+    # 入口上是两个退出码、两句话；下面 2e 把这一支对齐到同一答案。
     --help|-h) _wants_help=1 ;;
   esac
 done
+
+# --- 2c'）--repo 吞下的那一枚若是一面旗标，那是用法错，不是坏目录 ------------------
+# cli.js 对 `--repo --help` 答的是 rc 2 + "--repo 需要一个目录参数"（parseArgs 里
+# `startsWith("--")` 那一条），这一层从前只把它当坏目录答 rc 1 + 判据说明——同一串 argv 在两条
+# 一键入口上两个退出码、两句话，而按 rc 分叉的调用方会把它读成"这个目录不存在"。
+# 位置排在 usage 闸**之前**，这不是随手放的：实测 `--repo --no-prompt --help` 时，把它放在 2d 之后
+# 会让这一层回 0（帮助短路在前、旗标形状判定在后）而 cli.js 回 2——又造出一格新的两入口分叉，
+# 正是这条修复要消灭的形状。它与 HOME 闸、两个覆盖位的形状闸同一族："这一趟根本没法谈"，
+# 带不带 --help 都该听见。判据也排在 looks_like_repo **之前**："--help" 同样"不像一棵仓库"，
+# 两条都跑就会先撞上那一句。
+case "$_explicit_repo" in
+  --*)
+    say "参数错误：--repo 需要一个目录参数（收到的是旗标：${_explicit_repo}）"
+    say "本轮没有 clone、没有写入任何东西。"
+    usage
+    exit 2
+    ;;
+esac
 
 # --- 2d) usage 闸（2026-10-29 S7-3：这一层从前压根不认 --help/-h）---------------
 # 从前 --help 走的是"什么都不认识 → 原样透传"那一条：非 macOS 上脚本先被平台闸拒回 1，而
@@ -428,6 +448,7 @@ fi
 # 形状也与 --no-bootstrap 那一支同句（say + exit 1，dry-run 不豁免）。
 # 排在定位级联**之前**也带着另一条理由：`$PWD` 恰好是一棵真仓库时，级联会命中 cwd 那一支而
 # 让 REPO 非空——坏旗标就再也没被问过，照样原样透传。给了就要么合判据、要么当场拒，不给兜底的机会。
+# 旗标形状的取值（`--repo --help`）已经在 2c' 里按用法错退回 2，跑到这里的都是真路径。
 if [ -n "$_explicit_repo" ] && ! looks_like_repo "$_explicit_repo"; then
   say "--repo 给了这个目录，而它不合判据：${_explicit_repo}"
   say "  判据（与 looks_like_repo 同一份）：目录里要同时有 engine/Package.swift 与 mcp-shell/package.json。"
