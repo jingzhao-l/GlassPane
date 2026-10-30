@@ -681,11 +681,28 @@ function setHeaderFindings(shells) {
       // the last stage's, so `swift test | tee log` reports tee's zero when the suite died
       // (ci.yml's own comment at lines 107-110 documents this for the block form). The
       // verdict only becomes the command's when the same line declares `pipefail`.
+      //
+      // Neither does a **chained** one-liner (`a && b`, `a || b`, `a; b`): the step's status is
+      // the last command's, `&&`/`||` decide which command even runs, and a one-line body has no
+      // room to state a gate — so `node x || echo ok` reports zero for a failed build. Ported
+      // 2026-10-30 from the harness root's own gate (`script/check-workflows.mjs:224`), which
+      // has judged this shape for its workflows all along while ours audited only `|`.
       const one = (block.lines ?? []).join(" ")
-      if (!/\|/.test(one)) continue
+      // A `|` is a pipeline; `||` is a chain operator and is *not* one. The first version of this
+      // line tested `/\|/`, so `node x || echo skipped` was filed under "pipelines and never
+      // declares pipefail" — a true accusation about the wrong shape, and the remedy text told the
+      // reader to add pipefail to a body with no pipe in it.
+      const piped = one.replace(/\|\|/g, "").includes("|")
+      const chained = /&&|\|\||;\s*\S/.test(one)
+      if (!piped && !chained) continue
       const flags = setGateFlags(/^\s*set\s+[^;]*;/.exec(one)?.[0]?.replace(/;\s*$/, "") ?? "")
-      if (flags === null || !flags.has("pipefail")) {
-        out.push({ line: block.line, head: one, missing: flags === null ? ["pipefail"] : SHELL_GATES.filter((g) => !flags.has(g)) })
+      if (flags === null || (piped && !flags.has("pipefail")) || (chained && SHELL_GATES.some((g) => !flags.has(g)))) {
+        out.push({
+          line: block.line,
+          head: one,
+          chained: chained && !piped,
+          missing: flags === null ? (chained && !piped ? [...SHELL_GATES] : ["pipefail"]) : SHELL_GATES.filter((g) => !flags.has(g)),
+        })
       }
       continue
     }
@@ -712,6 +729,13 @@ function setHeaderFindings(shells) {
 
 function setHeaderProblems(shells) {
   return setHeaderFindings(shells).map((f) => {
+    if (f.chained) {
+      return `line ${f.line}: this one-line \`run:\` chains statements (\`${f.head.slice(0, 80)}\`) and never declares `
+        + `${f.missing.map((g) => (g === "pipefail" ? "pipefail" : `-${g}`)).join("/")} — with \`&&\`/\`||\`/\`;\" on one line the `
+        + `step's status is whichever command the chain leaves standing, so \`node build || echo skipped\` reports zero for a `
+        + `failed build. There is no room for a gate on a single line: make it a \`run: |\` block whose first line is `
+        + `\`set -euo pipefail\`.`
+    }
     if (/\|/.test(f.head) && !f.head.includes("\n")) {
       return `line ${f.line}: this one-line \`run:\` pipelines (\`${f.head.slice(0, 80)}\`) and never declares `
         + `pipefail — the step's exit code is the **last** stage's, so a suite that died upstream is `
@@ -1071,11 +1095,27 @@ function sigPipeExitProblems(lines, shells) {
         `\`set -e\` aborts the whole step with no \`::error::\` text, so a reader cannot tell "refused" from "the check could not finish". ${SIGPIPE_REMEDY} Offending line: \`${f.text}\``)
 }
 
+/**
+ * The sentence both no-receiver advisories end with, in ONE place (2026-10-30).
+ *
+ * It used to read "reported to that root's own gate, not enforced from here" — a claim about a
+ * receiver that was never measured. Measured now: `harness/glasspane-harness/script/check-workflows.mjs`
+ * declares four rules (action pins, `timeout-minutes`, shell gates, the npm pin) plus the chained
+ * one-line case, and implements **neither** the producer→first-match-consumer (141) rule nor the
+ * publishing-`concurrency` rule. Those two findings were therefore a paper record of an unguarded
+ * shape: printed here, blocked nowhere. The wording says what is true instead of naming a reader
+ * that does not read, and `updater/test/daily-20261030-gate-handoff.test.mjs` reddens if the
+ * sentence starts promising a receiver again.
+ */
+const NO_RECEIVER = "— not enforced from here and blocked by nobody: this file belongs to the harness line "
+  + "(its own 10:30 task), and that root's linter implements neither of these two rules — filed in the "
+  + "daily ledger for it to absorb"
+
 function sigPipeExitAdvisories(lines, shells) {
   const found = sigPipeExitFindings(lines, shells)
   if (!found.length) return []
   return [`${found.length} producer→first-match-consumer pipeline(s) under a pipefail body (lines ${found.map((f) => f.line).join(", ")}) ` +
-    "— the 141 class above; reported to that root's own gate, not enforced from here"]
+    "— the 141 class above; " + NO_RECEIVER]
 }
 
 /**
@@ -1133,7 +1173,7 @@ function publishConcurrencyProblems(found) {
 function publishConcurrencyAdvisories(found) {
   if (!found.length) return []
   return [`${found.length} publishing job(s) without a queue of their own (${found.map((j) => `${j.name}@${j.line}`).join(", ")}) ` +
-    "— same-tag writers overwrite one release; reported to that root's own gate, not enforced from here"]
+    "— same-tag writers overwrite one release; " + NO_RECEIVER]
 }
 
 function jobPolicyProblems(lines) {
@@ -1773,6 +1813,31 @@ jobs:
       // judges the shape it was written for and nothing else.
       apply: (t) => t,
       absent: /one-line `run:` pipelines/,
+    },
+    {
+      id: "a one-line `run:` that chains statements (D6-b's blind spot, 2026-10-30)",
+      // `a || b` on one line has no room for a gate, and the step's status is whatever the chain
+      // leaves standing — `node build || echo skipped` is a zero for a failed build. Ported from
+      // the harness root's own gate, which has judged this shape since its line 224 while ours
+      // audited only `|`.
+      apply: (t) =>
+        t.replace(
+          "      - name: run the real script\n        run: node scripts/check-version.mjs\n",
+          "      - name: run the real script\n        run: node scripts/check-version.mjs || echo skipped\n",
+        ),
+      expect: /chains statements/,
+    },
+    {
+      id: "that same chain once it sits in a block that declares its gates stays silent",
+      // Counter-case for the rule above: the ask is a gate, not "no `||` ever". A block body that
+      // opens with `set -euo pipefail` keeps the chain and stays legal — otherwise the next
+      // reader widens the rule away instead of fixing the step.
+      apply: (t) =>
+        t.replace(
+          "      - name: run the real script\n        run: node scripts/check-version.mjs\n",
+          "      - name: run the real script\n        run: |\n          set -euo pipefail\n          node scripts/check-version.mjs || echo skipped\n",
+        ),
+      absent: /chains statements/,
     },
     {
       id: "a gh call whose step declares no GH_TOKEN (D6-c)",
