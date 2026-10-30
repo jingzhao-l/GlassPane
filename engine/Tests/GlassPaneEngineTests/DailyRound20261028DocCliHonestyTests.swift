@@ -121,14 +121,17 @@ final class DailyRound20261028DocCliHonestyTests: XCTestCase {
             "请求后仍未批的那句诚实回执必须还在（旧 DaemonPermissionVocabulary 闸同源）")
     }
 
-    /// 探针的 `state` 用注入的 preflight 真算：预检恒 false 也只会得到 `.notDetermined`，
-    /// 永远拿不到 `.denied`——这正是那句拒绝打印够不到的根据。
+    /// 探针的 `state` 用注入的 preflight 真算：预检恒 false 只会得到 `.unverifiable`（"这次没量到
+    /// 授权"），永远拿不到 `.denied`——这正是那句拒绝打印够不到的根据。2026-10-30 S1-3 之后
+    /// `.notDetermined` 也不够到了：它说的是"没问过/尚未决定"，同一段没人量过的历史。
     func testScreenCaptureStateNeverObservesDenied() {
         let ungranted = ScreenCapturePermissionProbe(preflight: { false }, requestAccess: {})
-        XCTAssertEqual(ungranted.state, .notDetermined)
+        XCTAssertEqual(ungranted.state, .unverifiable)
         _ = ungranted.guideAccess()
         XCTAssertNotEqual(ungranted.state, .denied,
             "state 又能给出 denied：option (b) 的删除依据就没了")
+        XCTAssertNotEqual(ungranted.state, .notDetermined,
+            "state 又能给出 notDetermined：那张卡就又在替系统声明一段它没量过的历史")
     }
 
     // MARK: - DEFECT 4 (part 2) — 没有读者的 `bannerHint` 已删除，活的 `bannerTitle` 保留

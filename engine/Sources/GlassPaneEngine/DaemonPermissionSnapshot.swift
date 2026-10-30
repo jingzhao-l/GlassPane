@@ -305,9 +305,11 @@ public final class PermissionProbeSet {
 
     /// 当前快照（本进程身份下的四类席位）。
     ///
-    /// 屏幕录制走 `panelStatus` 而不是 `state.panelStatus`：`state` 的三态里"从未请求"
-    /// 与"已请求、系统尚未回答"同为 `notDetermined`，而这一面是面板唯一读的席位值，
-    /// 它必须能把后者说成「未验证」而不是「已拒绝」或「未请求」。
+    /// 三个测量席位在这里给出的是同一句话：`granted`，或者"这一次没量到授权"
+    /// （`unverifiable`）。屏幕上没有第三种词——`notDetermined` 说的是"系统还没决定/没问过"，
+    /// 而那是一段任何进程内布尔都读不到的历史（2026-10-30 S1-3：输入监控与屏幕录制两支从前
+    /// 都还发它）。屏幕录制走 `panelStatus` 而不是 `state`，因为发布出去的那一面是
+    /// `PermissionStatus`；两支现在同一个事实源，答案不会分叉。
     public func snapshot() -> DaemonPermissionSnapshot {
         DaemonPermissionSnapshot(
             subject: subjectProvider(),

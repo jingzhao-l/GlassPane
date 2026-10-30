@@ -258,7 +258,11 @@ def main():
         [daemon_bin, "--check-input-permission"], capture_output=True, text=True, timeout=30
     )
     state = (probe.stdout or "").strip()
-    if probe.returncode != 0 or state not in ("granted", "denied", "notDetermined"):
+    # 取值表与 `--help`/探针同源（`DaemonPermissionVocabularyTests` 钉那两侧）。2026-10-30 起
+    # 预检 false 打印的是 unverifiable —— "这次没量到授权"；notDetermined 仍认得，因为它是
+    # 一个**旧 daemon 报文**里会出现的词。把新词判成"输出异常"会让这台机器上一个未授权的
+    # 会话从 SKIP 变成 fail，那条 SKIP 本来就是给"没批权限"准备的出口。
+    if probe.returncode != 0 or state not in ("granted", "denied", "notDetermined", "unverifiable"):
         fail(f"--check-input-permission 输出异常：rc={probe.returncode} stdout={probe.stdout!r} stderr={probe.stderr!r}")
     if state != "granted":
         print(

@@ -25,10 +25,19 @@ import XCTest
 /// `.granted` stays `.granted` on every path that observes it, and `.denied` stays
 /// available for a denial that is actually observed rather than inferred from a
 /// preflight that has not been answered yet.
+///
+/// 2026-10-30 续（S1-3）：同一枚布尔剩下的那句超额主张在这里被救掉——"没问过"（`notDetermined`，
+/// 面板：「未请求」）也是一段历史，而 TCC 是持久的、`hasRequestedThisRun` 是每进程的。两个席位
+/// 现在对 false 只回 `unverifiable`，"这次问过了"由 `hasPendingRequestThisRun` 的**措辞**承担。
+/// 上面那条"问过之后不得回退"的单调性约定原样保留（它记的是真出过的事故），钉的值跟着换成诚实值。
 final class Qoder20261019PendingRequestStateTests: XCTestCase {
 
     // MARK: - input monitoring (`PermissionStatus` surface)
 
+    /// 2026-10-30 S1-3 把"没问过"那一支也从 `notDetermined` 救了：一枚预检布尔说不出这段历史
+    /// （TCC 持久、`hasRequestedThisRun` 每进程），所以 false 一律 `.unverifiable`。这一条原来
+    /// 的第一句断言跟着改值，**它守的规矩一个字没动**：没人回答的询问不是一次拒绝，也不是一句
+    /// 关于"问没问过"的陈述。
     func testRequestedButUnansweredInputMonitoringIsNotReportedAsDenied() {
         var requestCalls = 0
         let probe = InputMonitoringPermissionProbe(
@@ -36,8 +45,9 @@ final class Qoder20261019PendingRequestStateTests: XCTestCase {
             requestAccess: { requestCalls += 1 },
             openPane: {}
         )
-        // Before anything was asked, "not determined" is the truthful reading.
-        XCTAssertEqual(probe.state, .notDetermined)
+        // Before anything was asked, the probe has measured nothing beyond "no grant seen".
+        XCTAssertEqual(probe.state, .unverifiable)
+        XCTAssertFalse(probe.hasPendingRequestThisRun, "措辞面：这次确实还没问过")
 
         let observed = probe.requestAccess()
         XCTAssertEqual(requestCalls, 1, "the system prompt really was invoked")
@@ -46,6 +56,7 @@ final class Qoder20261019PendingRequestStateTests: XCTestCase {
         XCTAssertEqual(observed, .unverifiable, "the product's honest not-measured value")
         XCTAssertNotEqual(probe.state, .denied)
         XCTAssertEqual(probe.state, .unverifiable)
+        XCTAssertTrue(probe.hasPendingRequestThisRun, "问过没答与没问过：判定同一个词，措辞两个样")
     }
 
     /// `requestOnly()` is the daemon-side path (P1 v1.2 §11.2: the daemon registers the
@@ -85,41 +96,45 @@ final class Qoder20261019PendingRequestStateTests: XCTestCase {
         let probe = InputMonitoringPermissionProbe(
             preflight: { granted }, requestAccess: { granted = true }, openPane: {}
         )
-        XCTAssertEqual(probe.state, .notDetermined)
+        XCTAssertEqual(probe.state, .unverifiable)
         XCTAssertEqual(probe.requestAccess(), .granted)
         XCTAssertEqual(probe.state, .granted)
     }
 
-    // MARK: - screen recording (its own three-case state)
+    // MARK: - screen recording (its own seat model)
 
+    /// The seat model's own vocabulary: preflight false is `unverifiable`, and neither a
+    /// decision nobody observed (`denied`) nor a history nobody observed (`notDetermined`)
+    /// is available to this probe.
     func testPendingScreenRecordingRequestIsNotADenial() {
         var requestCalls = 0
         let probe = ScreenCapturePermissionProbe(preflight: { false }, requestAccess: { requestCalls += 1 })
-        XCTAssertEqual(probe.state, .notDetermined, "nothing asked yet")
+        XCTAssertEqual(probe.state, .unverifiable, "nothing measured beyond \"no grant seen\"")
 
         let observed = probe.guideAccess()
         XCTAssertEqual(requestCalls, 1)
         XCTAssertNotEqual(observed, .denied, "guideAccess used to hard-code a decision here")
         XCTAssertNotEqual(probe.state, .denied)
-        XCTAssertEqual(
-            probe.state, .notDetermined,
-            "of granted/denied/notDetermined the case that means \"the system has not determined\" is notDetermined"
-        )
+        XCTAssertNotEqual(probe.state, .notDetermined, "\"系统还没决定\"同样是一次没做过的测量")
+        XCTAssertEqual(probe.state, .unverifiable)
     }
 
     /// The published surface must not read 未请求 about a prompt the user is looking at
-    /// either — that separation is what `ScreenCapturePermissionProbe.panelStatus` is for
-    /// (the value the daemon snapshot publishes), asserted below.
+    /// either — and, since 2026-10-30, it must not read 未请求 about a seat it never asked
+    /// either, because "never asked" is a claim about a history this process cannot see.
+    /// What separates the two is the *wording* flag, not the state (`hasPendingRequestThisRun`).
     func testSnapshotSeparatesPendingScreenRecordingFromADenialAndFromNeverAsked() {
         let pending = ScreenCapturePermissionProbe(preflight: { false }, requestAccess: {})
         pending.requestOnly()
         XCTAssertNotEqual(pending.panelStatus, .denied)
         XCTAssertEqual(pending.panelStatus, .unverifiable, "已请求、系统未决定 → 未验证")
-        XCTAssertNotEqual(pending.panelStatus, .notDetermined,
-                          "and it is not \"never asked\" either — the request went out")
+        XCTAssertTrue(pending.hasPendingRequestThisRun, "「这次问过了」这句话仍然说得出，它只在措辞面")
 
         let neverAsked = ScreenCapturePermissionProbe(preflight: { false }, requestAccess: {})
-        XCTAssertEqual(neverAsked.panelStatus, .notDetermined, "未请求 is the truth here")
+        XCTAssertEqual(neverAsked.panelStatus, .unverifiable,
+                       "没问过也只支持「没量到授权」——未请求是一段看不见的历史")
+        XCTAssertFalse(neverAsked.hasPendingRequestThisRun)
+        XCTAssertNotEqual(neverAsked.panelStatus, .notDetermined)
 
         let granted = ScreenCapturePermissionProbe(preflight: { true }, requestAccess: {})
         XCTAssertEqual(granted.panelStatus, .granted)
@@ -198,18 +213,25 @@ final class Qoder20261019PendingRequestStateTests: XCTestCase {
                            "the two states must stay two identifiers")
     }
 
-    /// The `ScreenCapturePermissionState` mapping keeps its shape for the states it can
-    /// actually name, and the three-case enum gains no new case in this batch.
+    /// The `ScreenCapturePermissionState` mapping keeps its shape for every state the model
+    /// can name: it is a name-for-name transport, not a second verdict. 2026-10-30 added
+    /// `unverifiable` (the one value a boolean preflight leaves available) and kept
+    /// `notDetermined` / `denied` as names the probe can no longer take.
     func testScreenCaptureStateMappingIsUnchangedForTheStatesThatExist() {
         XCTAssertEqual(ScreenCapturePermissionState.granted.panelStatus, .granted)
         XCTAssertEqual(ScreenCapturePermissionState.denied.panelStatus, .denied)
         XCTAssertEqual(ScreenCapturePermissionState.notDetermined.panelStatus, .notDetermined)
+        XCTAssertEqual(ScreenCapturePermissionState.unverifiable.panelStatus, .unverifiable)
         XCTAssertEqual(
             [ScreenCapturePermissionState.granted.rawValue,
              ScreenCapturePermissionState.denied.rawValue,
-             ScreenCapturePermissionState.notDetermined.rawValue],
-            ["granted", "denied", "notDetermined"],
-            "the wire vocabulary of the seat model is frozen"
+             ScreenCapturePermissionState.notDetermined.rawValue,
+             ScreenCapturePermissionState.unverifiable.rawValue],
+            ["granted", "denied", "notDetermined", "unverifiable"],
+            "the wire vocabulary of the seat model is frozen — a case may be added, never renamed"
         )
+        // 探针现在只能取其中的两支；第三支仍从线路上来（旧 daemon 的报文），不是本进程量的。
+        let probe = ScreenCapturePermissionProbe(preflight: { false }, requestAccess: {})
+        XCTAssertTrue([probe.state].allSatisfy { $0 == .granted || $0 == .unverifiable })
     }
 }

@@ -87,20 +87,17 @@ final class DaemonPermissionVocabularyTests: XCTestCase {
 
     // MARK: - 闸
 
-    /// `--check-screen-permission` 打印的是 `state`（不是 `panelStatus`），所以可达集合就是
-    /// 那一个属性的取值；帮助段里不许出现它打印不出来的词。
+    /// `--check-screen-permission` 打印的是 `state`（面板读的那一面另有 `panelStatus`），可达集合
+    /// 由探针自己算——两侧都不抄字面量。2026-10-30 S1-3 之前这里写着一条硬编码的
+    /// `printed = ["granted", "notDetermined"]`：那条闸因此会跟着旧行为一起绿，而"表里出现一个
+    /// 打印不出来的值"正是它要防的事，抄字面量等于让闸自己背书。
     func testCheckScreenPermissionHelpNamesOnlyWhatItCanPrint() throws {
         let segment = try helpSegment(for: "--check-screen-permission", in: mainSource())
-        let printed: Set<String> = ["granted", "notDetermined"]
-        for value in printed {
-            XCTAssertTrue(
-                tokensNamed(in: segment).contains(value),
-                "--check-screen-permission 打印得出 \(value)，取值表却漏了它：\(segment)"
-            )
-        }
-        for value in tokensNamed(in: segment).subtracting(printed) {
-            XCTFail("帮助教调用方分叉到一个这条命令打印不出来的值 \(value)：\(segment)")
-        }
+        let reachable = reachableScreenRecording()
+        XCTAssertFalse(reachable.contains("notDetermined"),
+                       "屏幕录制的席位又能报 notDetermined 了——那是面板念成「未请求」的那句历史")
+        XCTAssertEqual(tokensNamed(in: segment), reachable,
+                       "--check-screen-permission 的取值表与可达集合不等：表=\(segment) 可达=\(reachable)")
     }
 
     func testCheckInputPermissionHelpEqualsItsReachableSet() throws {

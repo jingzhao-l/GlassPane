@@ -2,8 +2,18 @@ import Foundation
 
 /// 权限状态枚举（P1 spec v1.2 §6.1）。
 ///
-/// 四类权限共享该状态面：辅助功能/输入监控/屏幕录制为三态（granted/denied/
-/// notDetermined），开发者工具因无公开 TCC 查询 API 恒为 unverifiable。
+/// 四个席位共享这一个状态面，而每个席位只说自己量得到的那部分：
+///  - `granted`        —— 预检/信任查回 true（三个 CG/AX 席位的观测值）；
+///  - `unverifiable`   —— 量不到正向答案。预检 false 最多支持这一句（辅助功能自 2026-10-19、
+///    输入监控与屏幕录制自 2026-10-30），开发者工具因无公开 TCC 查询接口恒为此值；
+///  - `denied`         —— **观测到**的拒绝（一次真读到的判决，例如 `DebugCapabilityProbe`），
+///    不是由布尔预检推出来的；
+///  - `notDetermined`  —— 「系统尚未做出决定」这一次读得到的观察。本仓库的探针量不到它：一句
+///    "这次没问过"说的是历史，而 TCC 是持久的、`hasRequestedThisRun` 是每进程的，两者凑不出
+///    这句话（面板把它渲染成「未请求」，见 `PermissionBadge.make`）。它还留着的理由是线路兼容：
+///    `DaemonPermissionSnapshot.statuses(from:)` 仍要把**旧 daemon** 发来的 `notDetermined`
+///    解成这个值，`ScreenCapturePermissionState.notDetermined` 也照旧映射过来——即"别人报的"，
+///    不是"本进程量的"。
 public enum PermissionStatus: String, Equatable, Sendable, CaseIterable {
     case granted
     case denied
@@ -128,6 +138,11 @@ public struct PermissionDescriptor: Equatable, Sendable {
 
 extension ScreenCapturePermissionState {
     /// 映射到面板通用状态枚举（P1 spec v1.2 §6.1，单一真源）。
+    ///
+    /// 一条不改口的机械映射：席位模型与统一状态面**同名同值**，谁也不替谁做加判——
+    /// 从前这里把 `notDetermined` 原样搬过去，而探针在预检 false 时给的正是 `notDetermined`，
+    /// 于是"未请求"这句话顺着 `hello` 走到了卡片上（2026-10-30 S1-3）。现在探针给
+    /// `unverifiable`，映射只做搬运。
     public var panelStatus: PermissionStatus {
         switch self {
         case .granted:
@@ -136,6 +151,8 @@ extension ScreenCapturePermissionState {
             return .denied
         case .notDetermined:
             return .notDetermined
+        case .unverifiable:
+            return .unverifiable
         }
     }
 }

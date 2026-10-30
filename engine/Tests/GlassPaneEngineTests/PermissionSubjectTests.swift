@@ -196,7 +196,9 @@ final class PermissionSubjectTests: XCTestCase {
         let (set, _) = fakeProbes(accessibilityTrusted: true, inputGranted: false, screenGranted: true)
         let snapshot = set.snapshot()
         XCTAssertEqual(snapshot.status(for: .accessibility), .granted)
-        XCTAssertEqual(snapshot.status(for: .inputMonitoring), .notDetermined)
+        // 预检 false 的席位只支持"这次没量到授权"——`notDetermined`（面板：「未请求」）说的是一段
+        // 本进程看不见的历史（2026-10-30 S1-3）。
+        XCTAssertEqual(snapshot.status(for: .inputMonitoring), .unverifiable)
         XCTAssertEqual(snapshot.status(for: .screenRecording), .granted)
         XCTAssertEqual(snapshot.status(for: .developerTools), .unverifiable)
         XCTAssertEqual(snapshot.subject.tccEntryName, "GlassPane Daemon")
@@ -209,7 +211,7 @@ final class PermissionSubjectTests: XCTestCase {
             [
                 "accessibility": "granted",
                 "inputMonitoring": "granted",
-                "screenRecording": "notDetermined",
+                "screenRecording": "unverifiable",
                 "developerTools": "unverifiable",
             ]
         )

@@ -33,6 +33,8 @@ final class EngineP1Batch3Tests: XCTestCase {
         XCTAssertEqual(ScreenCapturePermissionState.granted.panelStatus, .granted)
         XCTAssertEqual(ScreenCapturePermissionState.denied.panelStatus, .denied)
         XCTAssertEqual(ScreenCapturePermissionState.notDetermined.panelStatus, .notDetermined)
+        // 2026-10-30：预检 false 唯一说得出口的那一支（本探针现在只回 granted / unverifiable）。
+        XCTAssertEqual(ScreenCapturePermissionState.unverifiable.panelStatus, .unverifiable)
     }
 
     // MARK: - P1-C1: 探针注入式判定
@@ -73,16 +75,16 @@ final class EngineP1Batch3Tests: XCTestCase {
         let granted = InputMonitoringPermissionProbe(preflight: { true })
         XCTAssertEqual(granted.state, .granted)
 
-        // 未请求 → notDetermined；请求后预检仍 false → 系统还没做决定，探针也不许替它做
-        // （从前这一格断言 denied，而 `--permissions`/面板把 denied 念成「已拒绝」，
-        // 用户当时大概率正看着那个弹窗）。
+        // 没量到授权 → unverifiable；请求后预检仍 false 还是同一句（从前这一格断言 denied，而
+        // `--permissions`/面板把 denied 念成「已拒绝」，用户当时大概率正看着那个弹窗；2026-10-30
+        // 又救掉第二句——"没问过"（notDetermined，面板：「未请求」）同样是一段量不到的历史）。
         var approved = false
         let probe = InputMonitoringPermissionProbe(
             preflight: { approved },
             requestAccess: { approved = false },
             openPane: {}
         )
-        XCTAssertEqual(probe.state, .notDetermined)
+        XCTAssertEqual(probe.state, .unverifiable)
         let outcome = probe.requestAccess()
         XCTAssertNotEqual(outcome, .granted, "预检仍是 false，不能点亮")
         XCTAssertNotEqual(outcome, .denied, "没人回答的询问不是一次拒绝")

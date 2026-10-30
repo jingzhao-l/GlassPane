@@ -28,62 +28,72 @@ final class ScreenCapturePermissionTests: XCTestCase {
         XCTAssertEqual(probe.state, .granted)
     }
 
-    // MARK: - 前态（notDetermined）
+    // MARK: - 没量到授权（unverifiable）
 
-    func testNotDeterminedBeforeAnyRequest() {
-        // 未被授权、本次进程尚未请求 → notDetermined（spec §3.1 前态）。
+    /// 2026-10-30 S1-3 之前这条叫 `testNotDeterminedBeforeAnyRequest`，钉的是"没问过 ⇒
+    /// notDetermined"。那句是一个关于历史的陈述，而本探针只有一个布尔：false 同样装着"上一次
+    /// 运行被拒"（TCC 持久，`hasRequestedThisRun` 每进程）。意图原样保留——**不许点亮成 granted，
+    /// 也不许替系统作判决**——钉的值换成产品对"没量到"的既有说法。
+    func testUnverifiableBeforeAnyRequest() {
         let probe = makeProbe(preflight: { false }, requestAccess: {})
-        XCTAssertEqual(probe.state, .notDetermined)
+        XCTAssertEqual(probe.state, .unverifiable)
+        XCTAssertFalse(probe.hasPendingRequestThisRun, "措辞那一面仍然要说这次没问过")
     }
 
-    func testDeniedAfterRequestWhenStillRejected() {
-        // 请求后 preflight 仍 false，这句只支持"系统还没答应"，不支持"系统拒绝了"。
-        // 从前这里断言 `.denied`，而 `--permissions`/面板把 `.denied` 渲染成「已拒绝」
-        // （`SettingsPanelView.swift:789`）——一个 TCC 没有做过的决定被写成了事实。
-        // 保护意图原样留着：没量到正解时不许点亮成 granted；对外发的那一面也不
-        // 许再说"未请求"（刚问过），它只能说"未验证"。
+    /// 请求后 preflight 仍 false，这句只支持"这次没量到授权"，不支持"系统拒绝了"，也不支持
+    /// "系统还没决定"。从前这里断言 `.denied`（一个 TCC 没做过的决定被写成事实，面板据此打
+    /// 「已拒绝」），2026-10-19 那轮把它救到 `notDetermined`，本轮把同一枚布尔撑不起的第二句
+    /// （"尚未决定"／「未请求」）也救掉。保护意图一条没动：没量到正解时不许点亮成 granted，
+    /// 对外发的那一面也不许说"未请求"或"已拒绝"。
+    func testUnverifiableAfterRequestWhenNobodyAnswered() {
         var requestCount = 0
         let probe = makeProbe(preflight: { false }, requestAccess: { requestCount += 1 })
         let outcome = probe.guideAccess()
         XCTAssertNotEqual(outcome, .granted, "预检仍然 false，请求没有被回答时不许点亮")
         XCTAssertNotEqual(outcome, .denied, "没人回答的询问不是一次拒绝")
-        XCTAssertEqual(outcome, .notDetermined,
-                       "granted/denied/notDetermined 三态里，\"系统尚未决定\"就是 notDetermined")
+        XCTAssertNotEqual(outcome, .notDetermined, "「系统尚未决定」同样是一次没做过的测量")
+        XCTAssertEqual(outcome, .unverifiable, "产品对「没量到」的说法就是这一个值")
         XCTAssertEqual(requestCount, 1)
         XCTAssertNotEqual(probe.state, .granted)
         XCTAssertNotEqual(probe.state, .denied)
         XCTAssertEqual(probe.panelStatus, .unverifiable,
-                       "面板读的那一面既不能是「已拒绝」也不能是「未请求」：已请求、未回答 → 未验证")
+                       "面板读的那一面既不能是「已拒绝」也不能是「未请求」")
     }
 
     // MARK: - 边界：请求后授权成功
 
     func testGrantedAfterGuideAccessWhenRequestEnablesPermission() {
         // 授权弹窗确认后 preflight 翻转 true → guideAccess 返回 granted。
+        // 起点从前钉 `notDetermined`（「未请求」）——那是替读者断言一段历史，而
+        // `CGPreflightScreenCaptureAccess()` 的一个 false 分不清"没问过 / 问过还在等 /
+        // 早前被拒 / 条目被删"（2026-10-30 S1-3，与 `AccessibilityPermissionProbe` 同一
+        // 条理由）。这一支现在钉的是探针真正答得出的那一句。
         var granted = false
         let probe = makeProbe(
             preflight: { granted },
             requestAccess: { granted = true }
         )
-        XCTAssertEqual(probe.state, .notDetermined)
+        XCTAssertEqual(probe.state, .unverifiable)
         XCTAssertEqual(probe.guideAccess(), .granted)
         XCTAssertEqual(probe.state, .granted)
     }
 
     func testStateTransitionNotDeterminedToDeniedPersists() {
-        // 同一实例多次观测：请求后 preflight 维持 false 时不再回落 notDetermined。
+        // 同一实例多次观测：请求后 preflight 维持 false 时不许回落到"这次没问过"。
         // 这条单调性是真实缺陷的记忆，原话保留：问过之后还对读者说"未请求"，就是
         // 把这次询问抹掉了。它原来钉的值是 `denied`，而那个值从没有人量到过——所以
-        // 这里把它钉在面板真正读的那一面（`panelStatus`）上：未请求 → 未验证，且
-        // 后续每次观测都停在未验证，不回退、也不冒充拒绝。
+        // 这里把它钉在面板真正读的那一面（`panelStatus`）上。2026-10-30 S1-3 把起点
+        // 也一起改了：一个 false 分不清"没问过 / 早前被拒 / 条目被删"，因此未请求那一档
+        // 同样是 `unverifiable`；`notDetermined` 从这里开始不再由预检产生。
         var allowed = false
         var requested = false
         let probe = makeProbe(
             preflight: { allowed },
             requestAccess: { requested = true }
         )
-        XCTAssertEqual(probe.state, .notDetermined)
-        XCTAssertEqual(probe.panelStatus, .notDetermined, "还没问过：\"未请求\"在这里是实话")
+        XCTAssertEqual(probe.state, .unverifiable)
+        XCTAssertEqual(probe.panelStatus, .unverifiable,
+                       "还没问过：一个布尔撑不起\"没问过\"这段历史，诚实值是未验证")
         _ = probe.guideAccess()
         XCTAssertTrue(requested)
         XCTAssertNotEqual(probe.panelStatus, .denied, "没有一次观测到的拒绝，就不许说已拒绝")
