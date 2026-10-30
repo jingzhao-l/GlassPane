@@ -84,38 +84,32 @@ enum SocketDirectoryRule {
     }
 
     /// 这个名字**永远不该被本规则 chmod**：`/` 本身，或者账号的家目录本身（两种拼写
-    /// 都算：`NSHomeDirectory()` 与 `homeDirectoryForCurrentUser`，`--state-dir` 那一条
-    /// 判据量的就是这一对，见 `StateRootArgument.notADedicatedRoot`）。尾斜杠与多个尾斜杠
-    /// 折叠成同一个比较，因为"只认一种拼写"的拒绝下一次打错字就走过去了。
+    /// 都算：`NSHomeDirectory()` 与 `homeDirectoryForCurrentUser`），**以及走到这两个地方
+    /// 的任何 `.` / `..` 拼法**。判据只有一份——`StateRootArgument.dedicatedness`：`--state-dir`
+    /// 那一条量的就是它，两处各写一份正是 2026-10-30 S1-1 的缺陷本体（那条只做字符串折算，
+    /// `home/proj/..` 因此"看起来不像家目录"而被放行，随后被 chmod 的却是家目录）。
     ///
-    /// 纯读，不碰磁盘——它唯一的动作是比字符串。缺目录（ENOENT）在这里也不是 defect：
+    /// 纯读，不碰磁盘——它唯一的动作是比位置。缺目录（ENOENT）在这里也不是 defect：
     /// "daemon 会自己建"仍然是常态，只是建之前先问这一句。
     static func ownsItNeverChmodDefect(_ directory: String) -> String? {
-        var normalized = directory
-        while normalized.count > 1, normalized.hasSuffix("/") {
-            normalized.removeLast()
-        }
-        if normalized == "/" {
+        switch StateRootArgument.dedicatedness(directory) {
+        case .dedicated:
+            return nil
+        case .relativeComponent(let component):
+            return "\(directory) contains a \"\(component)\" component — POSIX resolves it as a directory entry, so the directory named here is not the one the spelling points at, and a socket directory is brought to 0700 before it binds: `…/proj/..` is the parent it walks back to, which may be this account's home directory or `/`. Nothing was chmod-ed here. Put the socket inside a directory this install owns, e.g. let it default under --state-dir, or pass --socket-path " + RemedyCommand.quote(NSHomeDirectory() + "/.glasspane/engine.sock")
+        case .filesystemRoot:
             return "\(directory) is the filesystem root — a socket directory is brought to 0700 before it "
                 + "binds, and `/` is nobody's directory to re-permission: every account's files, every "
                 + "mounted volume and every system path sit under it. Nothing was chmod-ed here. Put the "
                 + "socket inside a directory this install owns, e.g. let it default under --state-dir, or "
                 + "pass --socket-path " + RemedyCommand.quote(NSHomeDirectory() + "/.glasspane/engine.sock")
-        }
-        for home in Array(Set([
-            NSHomeDirectory(),
-            FileManager.default.homeDirectoryForCurrentUser.path,
-        ])) {
-            var root = home
-            while root.count > 1, root.hasSuffix("/") { root.removeLast() }
-            guard normalized == root else { continue }
+        case .homeDirectory(let home):
             return "\(directory) is a home directory — a socket directory is brought to 0700 before it binds, "
                 + "which would re-permission everything this user owns and drop engine files beside their "
                 + "own documents. Nothing was chmod-ed here. Put the socket inside the engine's own "
                 + "directory, e.g. --socket-path " + RemedyCommand.quote(home + "/.glasspane/engine.sock")
                 + ", or name --state-dir and let the socket default to living under it"
         }
-        return nil
     }
 
     /// The leaf's own type, taken without following it. A symlink at the end of the

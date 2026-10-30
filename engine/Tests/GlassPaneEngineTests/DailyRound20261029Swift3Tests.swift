@@ -713,8 +713,18 @@ final class DailyRound20261029Swift3SocketParentTests: XCTestCase {
                        "「这是不是家目录/根」被量了两遍：两处判据会各漂各的")
         XCTAssertEqual(S3Source.codeOccurrences(engine, "dedicatedness(directory)"), 1,
                        "socket 那一条不再走同一份测量：它就成了第三份判据")
-        XCTAssertEqual(S3Source.codeOccurrences(engine, "private static func dedicatedness("), 1,
+        // 定义恰好一处。2026-10-30 S1-1 之后它不再是 `private`：socket 那一条（`SocketDirectoryRule
+        // .ownsItNeverChmodDefect`）现在**问的是同一个函数**，而不是再抄一份字符串折算——抄的那一份
+        // 正是缺陷本体（`home/proj/..` 看着不像家目录，被 chmod 的却是家目录）。
+        XCTAssertEqual(S3Source.codeOccurrences(engine, "static func dedicatedness("), 1,
                        "测量本体不止一处定义")
+        XCTAssertEqual(
+            S3Source.codeOccurrences(
+                try S3Source.engineFile("GlassPaneEngine/SocketDirectoryRule.swift"),
+                "StateRootArgument.dedicatedness("
+            ), 1,
+            "socket 的兜底不再问那一份测量，或者问了两遍：判据必须只有一处测量、两处措辞"
+        )
     }
 
     /// 端到端：真二进制把 socket 指向 `/` 下面一个名字。修后必须在解析期就拒，`/` 的模式一个
