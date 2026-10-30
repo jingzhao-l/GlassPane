@@ -27,6 +27,44 @@ import path from 'node:path'
 import process from 'node:process'
 import net from 'node:net'
 
+/**
+ * One value, quoted as one shell word — the installer-side copy of the product rule.
+ *
+ * The rule already has three executable bodies in this product (`mcp-shell/src/errors.ts`'s
+ * `quoteShellArg`, `engine/Sources/GlassPaneEngine/StateRoot.swift`'s `RemedyCommand.quote`,
+ * `updater/lib/shell-quote.js`), and a fourth is legitimate here for the same reason the third
+ * one is: this package ships standalone — `installer/package.json`'s `files` is `cli.js` +
+ * `glasspane.js`, and `npx glasspane-install` installs nothing beside it, so importing
+ * `mcp-shell/dist` from here is impossible. What the packages share is therefore the *gate*:
+ * `mcp-shell/test/remedy-shell-quoting.test.mjs` scans `installer/*.js` with the same
+ * argument-position judgement it applies to `src/` and `updater/`, so a bare interpolation at a
+ * command operand reddens all three sides in one run, and `installer/test/shell-quoting.test.mjs`
+ * pins this table against the shipped behaviour.
+ *
+ * Why it was needed at all: every one of these commands interpolates a path this process did
+ * not author — `tree.cli` / `update.updaterCli` come from `--repo`, `GLASSPANE_REPO` and
+ * `GLASSPANE_INSTALL_DIR` — and they were wrapped in DOUBLE quotes. Double quotes are not inert:
+ * `$(` and a backtick still expand inside them, so "run this restore command" became "run what
+ * the directory name says", with the agent's own privileges.
+ */
+
+/** Characters a shell cannot act on inside an unquoted word. */
+const SHELL_INERT_WORD = /^[A-Za-z0-9@%+=:,./_-]+$/
+
+/**
+ * `value` as one shell word: left bare when it is made only of characters a shell cannot act on,
+ * single-quoted with `'\''` splices for anything else — a space, a quote, a dollar sign, a glob,
+ * the empty string (an argument that vanished is a different command line), or a leading hyphen
+ * (read as an option otherwise). Same table as `updater/lib/shell-quote.js` and
+ * `mcp-shell/src/errors.ts`.
+ */
+export function quoteShellArg(value) {
+  const text = String(value)
+  return SHELL_INERT_WORD.test(text) && !text.startsWith('-')
+    ? text
+    : `'${text.split("'").join("'\\''")}'`
+}
+
 // 显式常量，避免散落魔法字符串。
 export const MIN_NODE_MAJOR = 18
 export const SOCKET_DIR_NAME = '.glasspane'
@@ -1498,7 +1536,7 @@ export function tagVerifyDecision({ sig, pinRef, repoDir, acceptUnverified = fal
           + `git -C "${repoDir}" tag -v ${pinRef}\n`
           + '确实在没有 gpg 的机器上要装，就修好工具链再重跑（`brew install gnupg` 或 `xcode-select --install`）；'
           + '理解风险、决定就在这一档缺结论的情况下继续，才显式带上放行旗标重跑：\n'
-          + `  node installer/cli.js --repo "${repoDir}" --accept-unverified-signature\n`
+          + `  node installer/cli.js --repo ${quoteShellArg(repoDir)} --accept-unverified-signature\n`
           + `  curl -fsSL ${INSTALL_SH_URL} | sh -s -- --accept-unverified-signature\n`
           + '它与 updater 的 `--consent unsigned-release` 同一形态：只批"缺证明"，'
           + '签名存在而验不过（invalid）永不被它覆盖；`--no-prompt` 也不是这里说的同意。',
@@ -1817,7 +1855,7 @@ export async function registerAutoUpdate({
     caRoots: outcome.state && outcome.state.caRoots ? outcome.state.caRoots : null,
   }
   if (registered) {
-    say(`每日自动更新已注册（${agentLabel}，${summary.scheduleMeasured ? `在册作业跑在 ${schedule}` : `默认 ${schedule}——这一档没能从在册作业读回实际时刻，所以下一句是默认值而不是实测`}，状态根 ${stateRoot}；指针 ${written.path}）——一键关：node "${tree.cli}" disable`)
+    say(`每日自动更新已注册（${agentLabel}，${summary.scheduleMeasured ? `在册作业跑在 ${schedule}` : `默认 ${schedule}——这一档没能从在册作业读回实际时刻，所以下一句是默认值而不是实测`}，状态根 ${stateRoot}；指针 ${written.path}）——一键关：node ${quoteShellArg(tree.cli)} disable`)
     // "已注册"这三个字的证据是 updater 把在册作业读回来核对过。launchd 装载成功但读不回在册作业时，
     // 这句话只能算一半成立，而那另一半（原话）必须跟着说出来——否则这台机器看起来有每日作业，实际
     // 有没有人跑没人知道。措辞仍来自唯一作者 outcome.message，这里只转述。
@@ -1837,13 +1875,13 @@ export async function registerAutoUpdate({
     } else if (ca) {
       say(paint(`注意（自动更新的网络这一跳）：${outcome.message}`, 'yellow'))
     } else {
-      say(paint(`注意：这份 updater 没有回报根证书束的导出结果（旧版本）；若本机 HTTPS 被中间人替换，每日检查会在第一道校验上失败，跑 node "${tree.cli}" enable 可重新导出。`, 'yellow'))
+      say(paint(`注意：这份 updater 没有回报根证书束的导出结果（旧版本）；若本机 HTTPS 被中间人替换，每日检查会在第一道校验上失败，跑 node ${quoteShellArg(tree.cli)} enable 可重新导出。`, 'yellow'))
     }
   } else {
     say(
       `自动更新已关闭（${switchedOffByEnv ? 'updater 报环境变量已关，见下面它自己的原话' : '--no-auto-update'}）：`
       + `${agentLabel} 未注册/已卸载，状态里记 disabled=true——面板显示"自动更新已关闭（上次检查 …）"而不是"从未检查"。`
-      + `手动 node "${tree.cli}" check / apply 仍可用；重开：node "${tree.cli}" enable。`
+      + `手动 node ${quoteShellArg(tree.cli)} check / apply 仍可用；重开：node ${quoteShellArg(tree.cli)} enable。`
       + `（updater 原话：${outcome.message}）`,
     )
   }
@@ -1868,7 +1906,7 @@ export function updateGuidanceText(update) {
   if (update.state === 'registered') {
     const ca = update.caRoots
     const caLine = !ca
-      ? `   ⚠ 这份 updater 没有回报 node 要用的系统根证书束（旧版本）；本机 HTTPS 若被中间人替换，每日检查会在第一道校验上失败。补上：node "${update.updaterCli}" enable。`
+      ? `   ⚠ 这份 updater 没有回报 node 要用的系统根证书束（旧版本）；本机 HTTPS 若被中间人替换，每日检查会在第一道校验上失败。补上：node ${quoteShellArg(update.updaterCli)} enable。`
       : ca.status === 'ok'
         ? `   node 用本机导出的系统根证书束 ${ca.certs} 张（${ca.path}，已写进作业的 NODE_EXTRA_CA_CERTS）。`
         : `   ⚠ 本机没能导出 node 要用的系统根证书束（${ca.status}）；HTTPS 被中间人替换的机器上，每日检查会在第一道校验上失败，`
@@ -1878,7 +1916,7 @@ export function updateGuidanceText(update) {
       `   （作业 ${update.agentLabel}，RunAtLoad=false，日志 ${update.stateRoot}/update.log）；`,
       '   只在 daemon 空闲应答探针、且候选发布版的八道校验全部通过时才换版，major 永远等人点按钮。',
       ...(caLine ? [caLine] : []),
-      `   一键关：node "${update.updaterCli}" disable（卸该作业 + 状态记 disabled=true）；重开：enable。`,
+      `   一键关：node ${quoteShellArg(update.updaterCli)} disable（卸该作业 + 状态记 disabled=true）；重开：enable。`,
       `   卸载本机安装时：bootout daemon 作业的同时**也必须** bootout ${update.agentLabel} 并删它的 plist。`,
     ]
   }
@@ -1886,7 +1924,7 @@ export function updateGuidanceText(update) {
     `6. 自动更新：已关闭（${update.reason === 'env' ? 'updater 判定环境变量为关，安装器没有第二套解读' : '--no-auto-update'}）。`,
     `   ${update.agentLabel} 未注册，状态记 disabled=true：面板显示"自动更新已关闭（上次检查 …）"，`,
     '   不会静默消失；手动检查/安装仍是同一条 CLI（面板上那两个按钮也是它）。',
-    `   重开：node "${update.updaterCli}" enable${update.reason === 'env' ? '（先把那个环境变量去掉，否则 updater 会拒绝注册）' : ''}。`,
+    `   重开：node ${quoteShellArg(update.updaterCli)} enable${update.reason === 'env' ? '（先把那个环境变量去掉，否则 updater 会拒绝注册）' : ''}。`,
     `   它也负责卸载：bootout ${update.agentLabel} + 删 ~/Library/LaunchAgents 下那份 plist。`,
   ]
 }
@@ -2244,7 +2282,11 @@ export function usageText() {
     '退出码（脚本/agent 调用方读这个，别读屏幕文案）:',
     '  0  安装完成且 daemon 实测应答 hello；或本轮按要求压根不该有 daemon',
     '     （--no-daemon 且 --no-launchd）',
-    '  1  收尾未通过 hello 校验（daemon 没起来/不应答），或构建/产物/launchd 出错',
+    '  1  收尾未通过 hello 校验（daemon 没起来/不应答），或构建/产物/launchd 出错；',
+    '     也包括这两条**什么都没构建就停下**的支路——它们同样回 1，按 rc 分叉的调用方别把 1',
+    '     读成"跑过但没成"：① 平台拒绝（`process.platform` 不是 darwin，见 platformRefusal），',
+    '     ② 环境预检未通过（缺 node/swift/npm 那一族，`checkEnvironment` 报的每条都列在输出里）。',
+    '     这两条的正文各自点名了下一步，读正文才知道该装什么。',
     '  2  命令行参数错误',
     '  跨二进制的用法错对照（**这是在记录一处已知分歧，不是修它**——那些码都是发出去的契约，',
     '     本轮一个都没改）：同样是"命令行参数错误"，`node updater/cli.js` 回 2（与本文件一致），',
@@ -2307,7 +2349,7 @@ export function nextStepsText({
     // 已经拿到 rootDir），印 "<仓库目录>" 占位符等于没给可执行的东西。
     ...(daemonVerified ? [] : [
       paint('⚠ 后台服务未通过 hello 校验：下面第 1 步接好的 MCP 客户端会连不上 daemon。', 'red'),
-      `   先修这一步：node "${path.join(rootDir, 'installer', 'cli.js')}" --restore-launchd`,
+      `   先修这一步：node ${quoteShellArg(path.join(rootDir, 'installer', 'cli.js'))} --restore-launchd`,
       '',
     ]),
     '1. MCP 客户端（Claude Desktop / Cursor / 任意 MCP host）接入配置片段：',
@@ -2339,7 +2381,7 @@ export function nextStepsText({
     '3. daemon 已注册 launchd 开机自启（--no-launchd 可跳过）；维护命令：',
     '   glasspaned --approval-audit / --approval-verify / --prune-evidence / --evidence-stats',
     `   作业被 bootout（等授权期间常发生）后的恢复**不需要手敲 launchctl**：`,
-    `   node "${path.join(rootDir, 'installer', 'cli.js')}" --restore-launchd`,
+    `   node ${quoteShellArg(path.join(rootDir, 'installer', 'cli.js'))} --restore-launchd`,
     `   （检测→bootstrap→hello 校验自报席位；勾完 TCC 框重跑即自动换进程复验）`,
 `4. 主体名核对：设置面板「Daemon 状态 → 主体」应与上面「${entryName}」一致；不一致说明连到了别的构建实例。`,
     '5. registry 发布形态：MCP 服务器已可独立安装（`npm i -g glasspane-mcp`，命令名',
@@ -3060,7 +3102,7 @@ export function panelOpenHint({ panel, rootDir, settingsApp = null, exists = (p)
     runnable: true,
     target,
     text: info.viaBundle
-      ? `open "${target}"`
+      ? `open ${quoteShellArg(target)}`
       : `直接执行裸二进制面板："${target}"（当前没有 .app bundle，所以不经 open、没有 bundle 身份）`,
   }
 }
@@ -3093,7 +3135,7 @@ export function verificationFailureText({
       ? `安装未完成：socket 在（${socketPath}），但 daemon 没有正确应答 hello——见 ${daemonLog}`
       : `安装未完成：没有等到 daemon 在 ${socketPath} 应答 hello——见 ${daemonLog}`,
     `本命令退出码 ${exitCode}：install.sh 与调用它的脚本/agent 按安装失败处理，先别接 MCP。`,
-    `补救（不需要手敲 launchctl）：node "${cliPath}" --restore-launchd`,
+    `补救（不需要手敲 launchctl）：node ${quoteShellArg(cliPath)} --restore-launchd`,
     '修好后重跑安装器即可（它会覆盖式重建产物与 plist）。',
   ].join('\n')
 }

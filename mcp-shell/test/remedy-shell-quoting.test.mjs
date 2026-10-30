@@ -43,16 +43,22 @@ import { privateSandbox } from "./support/sandbox.mjs";
 
 const SRC = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "src");
 const UPDATER = path.resolve(SRC, "..", "..", "updater");
+const INSTALLER = path.resolve(SRC, "..", "..", "installer");
 
 /**
- * The scan set: this package's TypeScript sources, and the standalone updater's plain-JS
- * sources (lib/ plus the two package-root scripts). Same argument-position judgement for
- * all of them — only the file set widened, never the rule.
+ * The scan set: this package's TypeScript sources, the standalone updater's plain-JS
+ * sources (lib/ plus the two package-root scripts), and the standalone installer's two
+ * shipped scripts (2026-10-30: `installer/cli.js` printed `node "${tree.cli}" --restore-launchd`
+ * for twelve of its repair lines, where `tree.cli` comes from `--repo` / `GLASSPANE_REPO` /
+ * `GLASSPANE_INSTALL_DIR` — a double-quoted run still expands `$()` and backticks, so the
+ * "copy this command" line was a command-execution channel from a directory name).
+ * Same argument-position judgement for all of them — only the file set widened, never the rule.
  */
 const SCAN_TARGETS = [
   { label: "src", dir: SRC, ext: ".ts" },
   { label: "updater/lib", dir: path.join(UPDATER, "lib"), ext: ".js" },
   { label: "updater", dir: UPDATER, ext: ".js" },
+  { label: "installer", dir: INSTALLER, ext: ".js" },
 ];
 
 /** The three payloads: command substitution via backtick, a space, and a single quote. */
@@ -488,4 +494,12 @@ test("every interpolated value inside a command-shaped literal in src and update
   assert.ok(updaterInspected.length >= 1,
     `扫描集里 updater 那半边一处命令位都没看见（src 侧 ${inspected.length - updaterInspected.length} 处）——扩集只是装饰：${inspected.join(" | ")}`);
   assert.ok(updaterInspected.some((entry) => entry.includes("ls -lO")), "updater 的 `ls -lO` 分辨命令不在扫描结果里");
+  // The installer half of the widening, same test as above: 2026-10-30 found twelve
+  // double-quoted `node "${tree.cli}" …` repair lines here that no gate was reading, so
+  // "the scan now covers installer/" has to be checkable from a run, not from the comment.
+  const installerInspected = inspected.filter((entry) => entry.startsWith("installer/"));
+  assert.ok(installerInspected.length >= 1,
+    `扫描集里 installer 那半边一处命令位都没看见（其余 ${inspected.length - installerInspected.length} 处）——扩集只是装饰：${inspected.join(" | ")}`);
+  assert.ok(installerInspected.some((entry) => entry.includes("--restore-launchd")),
+    "installer 的 `--restore-launchd` 补救命令不在扫描结果里");
 });
