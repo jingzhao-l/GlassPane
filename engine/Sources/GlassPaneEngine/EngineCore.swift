@@ -199,6 +199,20 @@ public final class EngineCore {
     /// Z5-only black-box form: handlerProbe/stateDiff stay null and act()
     /// behaves exactly like v5.0 — the honest absence is preserved verbatim.
     private let probeInbox: ProbeInbox?
+    /// `probeListener` 在「没有监听者」一侧说的那一个原因，由**起这个引擎的那一段**
+    /// 申报——与 `inputMonitorAbsenceReason` 同一个形状：引擎量不到自己没被起来的东西。
+    ///
+    /// 为什么这一句非要说：这一面缺席有三条路，而三条对 agent 的下一步**不一样**。
+    /// `--no-probe` 是这一趟不想起；A-18（`main.swift:1955-1962`）是这个名字已经被
+    /// 别的监听者占着，此时"给 app 接上探针"会把 app 接到**另一个**引擎上，那个引擎
+    /// 记的证据不是眼前这份 `probe_status` 在回答的那一份；`server.start()` 抛则是
+    /// 想起而没起来。没有申报时只说量到的那一句（这个进程没有监听者），不猜原因——
+    /// 一个编出来的原因与一个没有原因的缺席，是同一件事的两种说法，都不诚实。
+    public enum ProbeListenerAbsence: String, Equatable {
+        case noProbeFlag = "--no-probe"
+        case nameOwnedByAnotherListener = "name owned by another listener"
+    }
+    private let probeListenerAbsence: ProbeListenerAbsence?
     /// TCC 席位自报钩子（P1 spec v1.2 §11.2）：daemon 注入自身探针，`hello`
     /// 因此带上 `identity` + `permissions`，让设置面板读到的是**授权主体
     /// （daemon 进程）**的状态而非面板进程的。缺省 nil 表示不上报（旧行为，
@@ -329,6 +343,7 @@ public final class EngineCore {
         approvalGate: ApprovalGate? = nil,
         snapshotProbe: (() -> SnapshotProbeInfo?)? = nil,
         probeInbox: ProbeInbox? = nil,
+        probeListenerAbsence: ProbeListenerAbsence? = nil,
         permissionsReport: (() -> DaemonPermissionSnapshot?)? = nil,
         inputMonitorAbsenceReason: String? = nil,
         declaresUnattendedWindow: Bool = false,
@@ -345,6 +360,7 @@ public final class EngineCore {
         self.approvalGate = approvalGate
         self.snapshotProbe = snapshotProbe
         self.probeInbox = probeInbox
+        self.probeListenerAbsence = probeListenerAbsence
         self.permissionsReport = permissionsReport
         self.inputMonitorAbsenceReason = inputMonitorAbsenceReason
         self.declaresUnattendedWindow = declaresUnattendedWindow
@@ -1922,18 +1938,43 @@ public final class EngineCore {
         ]
     }
 
+    /// `probe_status` 里 `probeListener` 那一句，也是 `restore` 的档 1 拒绝要引的那一句。
+    /// 三态：有 inbox 就是 `live`；没有 inbox 时，申报过的原因直接进括号，
+    /// 没申报过就只能说量到的那一句（这个进程没有监听者）——不猜是 `--no-probe`
+    /// 还是名字被占，因为那两个词对 agent 意味着完全不同的下一步。
+    private var probeListenerText: String {
+        if probeInbox != nil { return "live" }
+        if let absence = probeListenerAbsence { return "absent (\(absence.rawValue))" }
+        return "absent (no probe listener in this process)"
+    }
+
     /// P6 §5.4: probe connectivity snapshot. Agents use this to learn whether
     /// T4/T5/T7/T8 verdicts are decidable for the attached app *before*
-    /// spending a cycle, and to surface the GP_E_PROBE_UNAVAILABLE remedy.
+    /// spending a cycle, and to surface the GP_E_PROBE_UNAVAILABLE remedy
+    /// (`restore(mode: rollback_full)` on a `gpz1-json-v1` checkpoint produces it).
+    ///
+    /// 每日 2026-10-30 缺陷 2：`probes` / `attachedHasProbe` 从前是**无条件**放进来的，
+    /// 于是没有 inbox 的回话与"有 inbox、app 没接探针"的回话逐字节相同（实测键集就
+    /// 是 `["attachedHasProbe", "probes"]`），agent 因此被指去给 app 接探针，而这一侧
+    /// 没有任何 socket 能接受它。下面四个兄弟键早就按"`--no-probe` 是这一面不存在，
+    /// 而一个测到的零需要有东西去量"省略了（见 `disconnections` 那段）——规矩是对的，
+    /// 漏的是这两项。现在由 `probeListener` 把监听者本身的状态说出来；
+    /// `probes`/`attachedHasProbe` 保持原义、一个字不动（壳侧发布的工具说明写的就是它们）。
     public func probeStatus() -> [String: Any] {
         let probes = probeInbox?.statusJSON() ?? []
         var attachedHasProbe = false
         if let inbox = probeInbox, let app = attachedApp, inbox.connection(for: app.pid) != nil {
             attachedHasProbe = true
         }
+        // 量到的是"这一个进程有没有一个能接受探针的 socket"，不是猜测：
+        // inbox 在就是 live（申报过什么原因都不许把它说成缺席），不在就是 absent，
+        // 缺席的原因由起 daemon 的那一段报（见 `ProbeListenerAbsence`）。
+        // 这句与 `restore(mode: rollback_full)` 的拒绝引的是同一个来源
+        // （`probeListenerText`）：一个事实不许有两份说法。
         var payload: [String: Any] = [
             "probes": probes,
             "attachedHasProbe": attachedHasProbe,
+            "probeListener": probeListenerText,
         ]
         // X-13: `ProbeInbox` has recorded every drop-off since start; without
         // this number the list of currently-live probes still cannot tell an
@@ -2406,9 +2447,59 @@ public final class EngineCore {
             // probe retained the export under this snapshot's ref, so the
             // daemon can command a rewrite and verify the post-restore digest
             // against the plan. Any other format keeps the P5 plan-only answer.
-            if probe.checkpointFormat == "gpz1-json-v1",
-               let inbox = probeInbox, let pid = attachedApp?.pid,
-               inbox.connection(for: pid) != nil {
+            if probe.checkpointFormat == "gpz1-json-v1" {
+                guard let inbox = probeInbox, let pid = attachedApp?.pid,
+                      inbox.connection(for: pid) != nil else {
+                    // 每日 2026-10-30 缺陷 2(b)：`GP_E_PROBE_UNAVAILABLE` 从前没有产地
+                    // （`git grep -c "code: \.probeUnavailable" -- engine/Sources` 量得 0），
+                    // 而这一条是本仓库里唯一**实现了**、且只有活探针能执行的操作：
+                    // gpz1 检查点的重写命令只能从那条 socket 发出去。连接没了的时候
+                    // 这里从前不拒绝，而是落到下面那份成功形状的载荷——`planValid:true`、
+                    // `consistent:true`（basis 写着 plan-only）、`rollbackExecuted:false`，
+                    // 外加一个 `executionSurface:"z5-probe-runtime"`：一个这台机器上
+                    // 从来没有的运行面。声明过的码与 remedy 从此有了出处。
+                    let listener = probeListenerText
+                    let pidText = (attachedApp?.pid).map { String($0) } ?? "the attached pid"
+                    let refusal: String
+                    let remedy: String
+                    // 措辞的约束：`EngineTier1RemedyFieldTests` 会把本文件里每一行点到
+                    // 探针状态面的建议按 A-10 之后的真实形状核对（`recentDisconnections`
+                    // 才是掉线史，`disconnections` 只是一个总数）。这里要说同一件事，
+                    // 就按同一套字段名说，且不再新增一处点名的建议让那条闸被推去放宽。
+                    if probeInbox == nil {
+                        refusal = "this daemon started no probe listener — `probeListener` reads "
+                            + "\"\(listener)\" — so nothing in this process can command the checkpoint "
+                            + "export this snapshot's `gpz1-json-v1` payload refers to"
+                        remedy = GPError.remedy(for: .probeUnavailable)
+                            + " — and here the missing piece is the listener, not the app's SDK: with no "
+                            + "probe socket in this process, GP.start() in the app has nothing to connect "
+                            + "to, so `probes` stays empty however carefully the app is instrumented. Bring "
+                            + "the background service up with a probe listener (drop --no-probe from its "
+                            + "arguments, then `launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`) "
+                            + "and re-read this status until `probeListener` says live, then take a fresh "
+                            + "gp_snapshot and restore again. Tier-2 ffwd needs none of that — pass `steps` "
+                            + "and the rollback runs on the UI"
+                    } else {
+                        refusal = "the probe connection for pid \(pidText) is gone — `probeListener` reads "
+                            + "\"\(listener)\" while `probes` lists live registrations only and has no row "
+                            + "for \(pidText) (the drop itself is in `recentDisconnections`, with its "
+                            + "`disconnectReason`, `disconnectedAt` and the per-pid `drops` count; "
+                            + "`disconnections` is only the total number of drops since start), so nothing "
+                            + "here can command the checkpoint export this snapshot's `gpz1-json-v1` payload "
+                            + "refers to"
+                        remedy = GPError.remedy(for: .probeUnavailable)
+                            + " — and this snapshot's checkpoint lives in the app process that exported it, "
+                            + "so a dropped connection is not recoverable from the daemon side: re-establish "
+                            + "the probe in the app (GP.start()), take a fresh gp_snapshot against the live "
+                            + "probe, then restore again. Tier-2 ffwd needs none of that — pass `steps` and "
+                            + "the rollback runs on the UI"
+                    }
+                    throw GPError(
+                        code: .probeUnavailable,
+                        message: "tier-1 restore of snapshot '\(snapshotId)' has no execution surface: \(refusal)",
+                        remedy: remedy
+                    )
+                }
                 if let post = inbox.checkpointRestore(pid: pid, ref: snapshot.snapshotId, domains: plan.domains) {
                     registerRestoreApproval(
                         snapshotId: snapshotId, mode: "rollback_full", hasSteps: false,
