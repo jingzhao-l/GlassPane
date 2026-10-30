@@ -1980,7 +1980,13 @@ blockShutdownSignalsEarly()
 // read as unkillable. That is the shape R5-07 removed for the single-instance guard,
 // reappearing one function later. Starting the thread first costs nothing: the
 // registry is empty until a listener really binds, so an early exit unlinks nothing.
-startShutdownWaiter(registry: shutdownSockets, inFlightAct: { daemonCore?.inFlightOperationId() })
+//
+// S1-2（每日 2026-10-30）：读的那一个核心从前是下面那一句裸的 `var daemonCore: EngineCore?`。
+// 盒子（`DaemonCoreHolder`）住在库里、读写共用一把 `NSLock`，所以**这段窗口里到达的 SIGTERM**
+// 读到的是"还没接好"（nil），而不是一个正在被主线程写的非原子 Optional。声明挪到消费线程之前，
+// 是为了让闭包读到的永远是同一个已初始化的引用；启动顺序一条没动。
+let daemonCore = DaemonCoreHolder()
+startShutdownWaiter(registry: shutdownSockets, inFlightAct: { daemonCore.inFlightOperationId() })
 let channel = AXChannel()
 // T9 progressive degradation is on by default: it needs no TCC permission
 // (proc_pidinfo is same-user process inspection). C33 is injected by default
@@ -2019,9 +2025,9 @@ if options.unattendedWindowDeclared {
 // form (handlerProbe/stateDiff null). --no-probe skips the listener entirely.
 var probeInbox: ProbeInbox?
 var probeServer: ProbeSocketServer?
-/// 收尾 waiter 唯一要问的那一个读数（本次实例有没有一份 act 正握着操作权）。核心在下面
-/// 才建，而 waiter 的闭包在信号到达时才跑，所以这里挂一个可写的引用而不是把它当参数传。
-var daemonCore: EngineCore?
+// 收尾 waiter 唯一要问的那一个读数（本次实例有没有一份 act 正握着操作权）住在
+// `daemonCore`——它已在遮罩点之后、消费线程创建之前声明（见上面 R6-07 + S1-2 那段），
+// 核心在这一行之后才建出来，写的那一次走 `daemonCore.store(...)`。
 if options.probeEnabled, probeListenerAllowed {
     let inbox = ProbeInbox()
     let server = ProbeSocketServer(
@@ -2067,7 +2073,7 @@ let core = EngineCore(
     inputMonitorAbsenceReason: inputMonitorAbsenceReason,
     declaresUnattendedWindow: options.unattendedWindowDeclared
 )
-daemonCore = core
+daemonCore.store(core)
 // X-22's read side: the root resolved above is the fact the console and the HTTP
 // gateway both need, and until now it lived only in this process's argv.
 core.stateRootPath = stateRoot.path
