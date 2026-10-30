@@ -492,9 +492,14 @@ export function readUpdateState(env: NodeJS.ProcessEnv = process.env, stateRootO
   // （包括那句 "Nothing to do"）。同仓的 sibling `project-registry.ts` 对它的状态文件是
   // "核模式、读回来、不合格就拒"（tightenMode），这里对齐那条口径：判据落在读之前，
   // 拒绝的那句话说得出路径、当前模式和可执行的修法。
-  let stat: ReturnType<typeof fs.statSync>;
+  let stat: ReturnType<typeof fs.lstatSync>;
   try {
-    stat = fs.statSync(stateFile);
+    // `lstat`, not `stat`: `stat` follows a link planted at this path, so the file type and the
+    // mode judged below — and the summary presented as this machine's freshness — would all be
+    // facts about whatever the link points at. The daemon refuses that shape by name
+    // (`StateRoot.swift:140-147` `leafSymlinkDefect`: "its owner-only mode cannot be set without
+    // acting on the file or directory it points at"); this reader must not present it as data.
+    stat = fs.lstatSync(stateFile);
   } catch (error) {
     return {
       kind: "unreadable",
@@ -507,7 +512,9 @@ export function readUpdateState(env: NodeJS.ProcessEnv = process.env, stateRootO
     return {
       kind: "unreadable",
       stateFile,
-      summary: `update state: ${stateFile} is not a regular file (mode ${(stat.mode & 0o777).toString(8)}), so nothing `
+      summary: `update state: ${stateFile} is not a regular file`
+        + (stat.isSymbolicLink() ? " (it is a symlink, so the bytes read through it belong to whatever it points at)" : "")
+        + ` (mode ${(stat.mode & 0o777).toString(8)}), so nothing `
         + "was parsed from it; freshness is unknown, which is not the same as up to date",
     };
   }

@@ -928,7 +928,20 @@ function saveProjects(filePath: string, entries: ProjectEntry[]): void {
     // (engine/Sources/GlassPaneEngine/DurableFileWrite.swift) fsync the fd before the
     // rename; this file is the *other* production writer of the same table, and a fix on
     // one face only is what makes the other face's promise false.
-    const fd = fs.openSync(tmpPath, "w", STATE_FILE_MODE);
+    // `w` is `O_CREAT|O_WRONLY|O_TRUNC` — it *follows* whatever is at the temp name. The daemon's
+    // own writers do not: `DurableFileWrite.swift:88` opens `O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC`
+    // and `EvidenceReportGenerator.swift:189` adds `O_NOFOLLOW`, and `bridge/glasspane_bridge.py`
+    // refuses to follow too. This file is the other production writer of the same table, so a
+    // same-uid process that planted a symlink (or a directory) at a guessed temp name — the name
+    // is `${filePath}.tmp-${pid}-${ts}-${n}-${4 hex}` from `uniqueToken()` — used to have the
+    // registry bytes written through it, outside the archive, while this call still reported
+    // success. Exclusive + no-follow makes the open fail instead, and the refusal is raised by
+    // the existing catch below with the path in its words.
+    const fd = fs.openSync(
+      tmpPath,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+      STATE_FILE_MODE,
+    );
     try {
       fs.writeFileSync(fd, JSON.stringify(entries, null, 2), "utf8");
       fs.fsyncSync(fd);
