@@ -453,11 +453,30 @@ GlassPane has one configuration surface for the engine and one for each consumer
 | Variable | Read by | Effect |
 |---|---|---|
 | `GLASSPANE_ENGINE_SOCK` | `glasspane-mcp`, `glasspane-http` | Daemon socket path; defaults to `~/.glasspane/engine.sock` |
+| `GLASSPANE_STATE_DIR` | the settings panel, the updater, the probe SDK | Root the panel/updater read and write when no `--state-dir` was given. **`glasspaned` itself does not read it** — the daemon's default comes from the passwd home entry, so pointing `HOME` or this variable at a sandbox does not isolate a daemon run; pass `--state-dir <path>` |
+| `GLASSPANE_PROBE_SOCK` | the in-app probe SDK (`GlassPaneProbe`) | Socket the linked probe connects to when `GP.start(socketPath:)` was given none; defaults to `~/.glasspane/probe.sock` |
+| `GLASSPANE_PROJECTS_FILE` | `glasspane-mcp` | File `gp_project_*` reads and writes instead of `<state root>/projects.json`. A value naming a directory this process would have to create and re-permission is refused (`GP_E_STATE_ROOT_REFUSED`), not obeyed |
+| `GLASSPANE_PROJECTS_FORCE_OVERWRITE` | `glasspane-mcp`, daemon CLI | Let a registry that cannot be decoded be rebuilt from scratch: the damaged file is moved aside as `<path>.unreadable-<id>`, never deleted, and every entry still inside it is lost |
 | `GLASSPANE_REF` | `install.sh`, installer | Release tag to install; `main` tracks the trunk, which is not a fixed artifact |
 | `GLASSPANE_UPDATE_DISABLE` | updater | Set to `1` to refuse enabling the scheduled update, including through a later re-install |
 | `GLASSPANE_DECISION_LOG` | GlassPane Harness | Where the decision ledger is written instead of `~/.local/share/glasspane-harness/decisions.jsonl` |
 | `GLASSPANE_RUN_PLAN` | GlassPane Harness | Run plan that decides which dimension history is dropped first when a session is compacted |
 | `GLASSPANE_RECIPE` | GlassPane Harness | Recipe the fix gate reads, when the run plan does not name a `recipeConfigPath` |
+| `GLASSPANE_HTTP_TOKEN` | `glasspane-http` | Bearer token the HTTP gateway requires; an unset or empty value is a refusal to start an unauthenticated gateway, not a tokenless one |
+| `GLASSPANE_INSTALL_DIR` | installer | Where the tree and `.app` are placed; a value starting with `-` is refused (it would reach git/node as an option, not a path) |
+| `GLASSPANE_REPO` | installer | Repository root to install from, when `$PWD` is not it. Must satisfy the same two-file shape `--repo` checks |
+| `GLASSPANE_REPO_URL` | installer | Clone source, only `git@github.com:`/`https://github.com/` prefixes; used when the local tree is absent |
+| `GLASSPANE_RELEASE` | `install.sh` | The tag this script pins (set by the script, read back by the installer); `main` is not a fixed artifact |
+| `GLASSPANE_INSTALL_DRY_RUN` | `install.sh` | `1` reports the decisions it made — no clone, no delegation to the installer |
+| `GLASSPANE_APPS_DIR` | updater | Directory holding `GlassPane Daemon.app`; `--apps-dir` on the command line wins over it |
+| `GLASSPANE_DAEMON_BIN` | updater | Path of the daemon executable inside that bundle, when the default `Contents/MacOS/…` layout is not what you run |
+| `GLASSPANE_NODE_BIN` | settings panel, updater | The `node` the panel/updater execs. Default is this process's own executable — set it only when the launcher's `PATH` differs from the one that should run the CLI |
+| `GLASSPANE_GPG` | updater | The `gpg` binary used to verify a release signature; one substitution re-executes the updater with the CA bundle it needs (`GLASSPANE_CA_REEXEC` is that marker, not a knob you set) |
+| `GLASSPANE_UPDATE_BASE` | updater | Release source used when checking for an update; defaults to the GitHub releases of this repository |
+| `GLASSPANE_PYTHON` | `engine/scripts/make-app.sh` | Interpreter used to build the `.app`; falls back to `python3` on `PATH` |
+| `GLASSPANE_REAL_LLDB` | `bridge/` tests | `1` opts the LLDB bridge into the real-`lldb` scenario; without it that case reports skipped, and nothing fakes its verdict |
+| `GLASSPANE_KERNEL_CORPUS_ALLOW_SKIP` | `scripts/check-kernel-corpus.mjs` | Escape hatch for a pinned corpus file that legitimately cannot be checked; scoped inside that script and set by no CI job — an unset value is the normal, guarded state |
+| `GLASSPANE_GATE_ALLOW_TEST_PIN` / `GLASSPANE_GATE_SIGNATURE_MODULE` | `tools/release-signing-gate.sh` | Gate-internal: let a fixture name its own fingerprint pin, and point at a moved signing module. Neither belongs in a human's release run |
 
 ### Per-app configuration
 

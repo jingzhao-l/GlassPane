@@ -581,11 +581,30 @@ GlassPane 的配置面分两层：引擎一层，每个消费者各一层。没�
 | 变量 | 读取方 | 作用 |
 |---|---|---|
 | `GLASSPANE_ENGINE_SOCK` | `glasspane-mcp`、`glasspane-http` | daemon socket 路径；默认 `~/.glasspane/engine.sock` |
+| `GLASSPANE_STATE_DIR` | 设置面板、更新器、探针 SDK | 没给 `--state-dir` 时面板/更新器读写的那个根。**`glasspaned` 自己不读它**——daemon 的默认来自 passwd 里的 home，把 `HOME` 或这个变量指到沙箱都隔离不了 daemon 那一趟；要隔离就传 `--state-dir <path>` |
+| `GLASSPANE_PROBE_SOCK` | 应用内探针 SDK（`GlassPaneProbe`） | `GP.start(socketPath:)` 没给路径时探针去连的那个 socket；默认 `~/.glasspane/probe.sock` |
+| `GLASSPANE_PROJECTS_FILE` | `glasspane-mcp` | `gp_project_*` 读写这个文件，取代 `<状态根>/projects.json`。它指到一个本进程得先创建、再改权限的目录时是被拒（`GP_E_STATE_ROOT_REFUSED`），不是被照做 |
+| `GLASSPANE_PROJECTS_FORCE_OVERWRITE` | `glasspane-mcp`、daemon CLI | 允许把解不开的注册表重建：坏文件被挪成 `<path>.unreadable-<id>` 而非删掉，而其中每一条 entry 就此丢失 |
 | `GLASSPANE_REF` | `install.sh`、安装器 | 要装的发布 tag；`main` 追主干，而主干不是固定产物 |
 | `GLASSPANE_UPDATE_DISABLE` | 更新器 | 设为 `1` 后连之后的 `enable` 都拒绝，重装也不会把定时作业带回来 |
 | `GLASSPANE_DECISION_LOG` | GlassPane Harness | 决策账本的写入位置，默认 `~/.local/share/glasspane-harness/decisions.jsonl` |
 | `GLASSPANE_RUN_PLAN` | GlassPane Harness | 运行计划，决定会话压缩时先丢哪一维的历史 |
 | `GLASSPANE_RECIPE` | GlassPane Harness | 运行计划没给 `recipeConfigPath` 时，修复闸读的配方 |
+| `GLASSPANE_HTTP_TOKEN` | `glasspane-http` | HTTP 网关必需的 bearer token；没设或设成空是**拒绝启动**一个无鉴权网关，而不是启动一个不带 token 的 |
+| `GLASSPANE_INSTALL_DIR` | 安装器 | 树与 `.app` 的落点；以 `-` 开头的值直接拒（它会以"选项"而不是路径的身份传到 git/node 手里） |
+| `GLASSPANE_REPO` | 安装器 | `$PWD` 不是仓库根时指过去；被指的目录必须自己满足 `--repo` 那两条文件判据 |
+| `GLASSPANE_REPO_URL` | 安装器 | clone 源，只收 `git@github.com:`/`https://github.com/` 前缀；本地没有树时用它 |
+| `GLASSPANE_RELEASE` | `install.sh` | 本脚本钉的发布 tag（脚本自己写、installer 读回来）；`main` 不是固定产物 |
+| `GLASSPANE_INSTALL_DRY_RUN` | `install.sh` | 置 `1` 只报告这一趟做的决策：不 clone、不委托给 installer |
+| `GLASSPANE_APPS_DIR` | 更新器 | 放 `GlassPane Daemon.app` 的目录；命令行上的 `--apps-dir` 优先于它 |
+| `GLASSPANE_DAEMON_BIN` | 更新器 | 那个 bundle 里 daemon 可执行文件的路径；不是默认 `Contents/MacOS/…` 布局时指名 |
+| `GLASSPANE_NODE_BIN` | 设置面板、更新器 | 面板/更新器 exec 的那个 `node`。默认是**本进程自己那份可执行文件**——只在启动器的 `PATH` 与"该跑 CLI 的那一个"不同时才设 |
+| `GLASSPANE_GPG` | 更新器 | 验发布签名用的 `gpg` 可执行文件；一次替换会用它需要的根证书束重跑更新器（`GLASSPANE_CA_REEXEC` 是那次重跑的标记位，不是给人设的开关） |
+| `GLASSPANE_UPDATE_BASE` | 更新器 | 检查更新时读的发布源；默认是本仓的 GitHub Releases |
+| `GLASSPANE_PYTHON` | `engine/scripts/make-app.sh` | 构建 `.app` 用的解释器；缺省退回 `PATH` 上的 `python3` |
+| `GLASSPANE_REAL_LLDB` | `bridge/` 测试 | 置 `1` 才让 LLDB 桥跑真 `lldb` 那一档；不给就是如实报 skip，绝不拿假结论顶上去 |
+| `GLASSPANE_KERNEL_CORPUS_ALLOW_SKIP` | `scripts/check-kernel-corpus.mjs` | 给"这份被钉语料本轮确实没法核"留的出口；作用域收在该脚本内，CI 一个 job 都不设它——不设才是常态 |
+| `GLASSPANE_GATE_ALLOW_TEST_PIN` / `GLASSPANE_GATE_SIGNATURE_MODULE` | `tools/release-signing-gate.sh` | 闸内部用：让夹具自己点名它要的指纹锚，以及把搬了位置的签名模块指对。这两个都不该出现在人跑的发布流程里 |
 
 ### 每应用配置
 
