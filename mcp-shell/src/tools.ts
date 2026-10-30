@@ -2418,7 +2418,7 @@ function passedThroughRegistryError(
  * "check the tool's input schema" (the old non-limit default) states a cause
  * the message already ruled out.
  */
-function projectErrorRemedy(code: string): string {
+export function projectErrorRemedy(code: string): string {
   if (code === GP_E_PROJECT_LIMIT) {
     // What is actually possible. This sentence has been wrong twice in opposite
     // directions: first it ordered `glasspaned --list-projects` ("delete unused
@@ -2452,7 +2452,7 @@ function projectErrorRemedy(code: string): string {
     // 一个本壳不会去创建、也不会改权限的根。把 `GP_E_INTERNAL` 那条"去读并修这个文件"
     // 的兜底套在它身上，等于支使 agent 去改一份根本没被碰过的表。能做的动作在 daemon
     // 那一侧：换一个它自己拥有的根重启，或先问清它到底报了哪个根。
-    return "the running service named a state root this shell will not create or re-permission, so nothing was read or written by this call: ask the service which root it resolved (`glasspaned --permissions` prints its own reading, and `launchctl print gui/$(id -u)/com.glasspane.daemon` shows the `--state-dir` the job was started with), then start it with a directory this install owns (`glasspaned --state-dir <path>`). Do not repair projects.json for this one — the refusal names a root, not a file, and no path under that root was touched";
+    return "the running service named a state root this shell will not create or re-permission, so nothing was read or written by this call: the refused root is named in the message above, so nothing has to be asked again. To see which root the job really starts with, run `launchctl print gui/$(id -u)/com.glasspane.daemon` (read-only — it prints the job's own arguments), and `glasspaned --state-dir <path> --evidence-stats` echoes that run's `dir` under the root it resolved, which is how to confirm a candidate without writing anything. Then start the service with a directory this install owns (`glasspaned --state-dir <path>`). Do not repair projects.json for this one — the refusal names a root, not a file, and no path under that root was touched";
   }
   if (code === GP_E_INTERNAL) {
     // The readers come from `registryReaders` — the same sentence the registry's own message
