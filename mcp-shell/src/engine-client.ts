@@ -19,6 +19,7 @@ import {
   GP_E_ENGINE_UNREACHABLE,
   GP_E_INTERNAL,
   GP_E_PAYLOAD_TOO_LARGE,
+  GP_E_SOCKET_TRUST,
   GP_E_UNKNOWN,
   quoteShellArg,
 } from "./errors.js";
@@ -71,6 +72,9 @@ export function daemonUnreachableRemedy(): string {
 
 /** Env override for the daemon socket path (default below). */
 export const ENGINE_SOCKET_ENV = "GLASSPANE_ENGINE_SOCK";
+
+/** The launchd job this product installs — remedies name it so an agent can read the running job. */
+export const LAUNCHD_JOB_LABEL = "com.glasspane.daemon";
 
 /**
  * Where this shell connects when nothing was named, in order: `GLASSPANE_ENGINE_SOCK`
@@ -188,6 +192,134 @@ export function refuseEmptySocketPath(value: string, flag: string): void {
       + `it), or drop the flag and let this shell use ${ENGINE_SOCKET_ENV} or its own fallback guess`,
     );
   }
+}
+
+/**
+ * The stat facts {@link trustSocket} needs, as a type so a test can hand it a real
+ * socket it made unreachable-by-permission without needing a second account.
+ */
+export type SocketEvidence = Pick<fs.Stats, "uid" | "mode" | "isSocket">;
+
+/**
+ * May this path carry the engine's word? `null` means yes; anything else is a
+ * three-field refusal to be handed to the caller before a single byte is written.
+ *
+ * Why this exists at all: the engine socket is owner-only (`chmod 0600`) and carries **no peer
+ * authentication** (SECURITY.md — same uid = full authority), so the socket *path* is what makes
+ * a reply mean anything. `GLASSPANE_ENGINE_SOCK` therefore is a trust root, not just a location:
+ * whatever this function lets through is a thing whose answers this shell renders as the engine's
+ * verified word, evidence pack included. Four facts disqualify a path:
+ *  - the runtime cannot say which account it is running as, so ownership is unaskable;
+ *  - the leaf is not a socket — a plain file planted there must be named as such instead of
+ *    producing a connect error that reads like "the daemon is down";
+ *  - the leaf or the directory holding it belongs to another uid, so this account did not place
+ *    it there;
+ *  - either carries a **write** bit for group or other. Write is the bit that matters: on a
+ *    socket it grants the ability to send, on a directory the ability to create or replace the
+ *    entry. Execute-only for others (`0755` — which is what a listener created by node itself
+ *    carries before any chmod, measured on this machine) lets a reader look, not talk, so the
+ *    daemon's own socket passes. A listener granting `0666` is advertising itself to the machine.
+ *
+ * `ENOENT` deliberately returns `null`: no file at the path is the daemon-not-running case, which
+ * the transport already renders as `GP_E_ENGINE_UNREACHABLE` with the restart command. Turning it
+ * into a trust refusal here would rename a known condition and break the remedy an agent is
+ * supposed to copy. A stat that fails for any **other** reason is a refusal, because "could not
+ * ask" is not evidence of trust.
+ *
+ * `read` and `euid` are seams, not abstractions: the other-account branches cannot be produced by
+ * an unprivileged test process, and a check whose only exercised path is the friendly one has not
+ * been checked. Everything else runs against a real socket on a real filesystem.
+ */
+export function trustSocket(
+  target: string,
+  read: (p: string) => SocketEvidence = (p) => fs.statSync(p),
+  euid: number | null = process.geteuid?.() ?? null,
+): { code: string; message: string; remedy: string } | null {
+  const refusal = (message: string, remedy: string) => ({ code: GP_E_SOCKET_TRUST, message, remedy });
+  const where = (p: string) => quoteShellArg(p);
+  // A trust refusal measures the *path*, not the daemon's liveness, so it must never order a
+  // lifecycle action: `livenessProbeDecision` reserves the right to name a restart for
+  // `GP_E_ENGINE_UNREACHABLE` alone, and kicking a service that is mid-`act` on the user's
+  // screen is exactly the harm that rule exists to prevent. `launchctl print` is the read-only
+  // twin — it shows the running job's own arguments, which is how an agent finds the root the
+  // engine really bound.
+  const job = "`launchctl print gui/$(id -u)/" + LAUNCHD_JOB_LABEL + "`";
+
+  if (euid === null) {
+    return refusal(
+      `this runtime answers no geteuid(), so it cannot say whether the engine socket at ${target} belongs to `
+      + "the account running it",
+      "run this shell under node on macOS (the platform this product ships on); the check is "
+      + "`node -e \"console.log(process.geteuid())\"` — it must print a number",
+    );
+  }
+
+  let socket: SocketEvidence;
+  try {
+    socket = read(target);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    return refusal(
+      `the engine socket at ${target} could not be inspected (${(error as NodeJS.ErrnoException).code ?? "unknown error"}), `
+      + "so this process cannot say whether the thing listening there is the engine",
+      `make the path stat-able (\`ls -ld ${where(target)}\`); ${job} reads the running job's own arguments, `
+      + "which is how to find the socket the engine actually bound — nothing is restarted by this answer",
+    );
+  }
+
+  if (!socket.isSocket()) {
+    return refusal(
+      `${target} is not a socket, so nothing can answer as the engine from it`,
+      `see what is really at that path with \`ls -l ${where(target)}\`, then point ${ENGINE_SOCKET_ENV} at the socket `
+      + `the engine binds (default ${where(path.join(os.homedir(), ".glasspane", "engine.sock"))}); ${job} reads the `
+      + "running job's arguments and is the way to check that root without restarting anything",
+    );
+  }
+
+  const directory = path.dirname(target);
+  let dir: SocketEvidence;
+  try {
+    dir = read(directory);
+  } catch (error) {
+    return refusal(
+      `the directory holding the engine socket (${directory}) could not be inspected `
+      + `(${(error as NodeJS.ErrnoException).code ?? "unknown error"}), so this process cannot say who may replace ${target}`,
+      `make it readable with \`ls -ld ${where(directory)}\`; ${job} prints the root the job really runs under, `
+      + "and this answer authorises no restart",
+    );
+  }
+
+  for (const [entry, place, kind] of [
+    [socket, target, "socket"],
+    [dir, directory, "directory"],
+  ] as const) {
+    if (entry.uid === euid) continue;
+    return refusal(
+      `the engine ${kind} ${place} belongs to uid ${entry.uid}, not to this process (uid ${euid}), so whatever listens `
+      + "there was not placed there by this account",
+      `run this shell as the account that owns \`glasspaned\`, or point ${ENGINE_SOCKET_ENV} at the socket that account `
+      + `bound (default ${where(path.join(os.homedir(), ".glasspane", "engine.sock"))}); check the owner with `
+      + `\`ls -ld ${where(place)}\``,
+    );
+  }
+
+  if (socket.mode & 0o022) {
+    return refusal(
+      `the engine socket ${target} carries mode ${(socket.mode & 0o7777).toString(8)}, which lets another account send `
+      + "requests to it — an answer from there is not evidence of what the engine said",
+      `tighten it to owner-only with \`chmod 600 ${where(target)}\` — that is the mode the engine binds with; `
+      + `to confirm the socket belongs to the service rather than to someone else, read \`ls -l ${where(target)}\``,
+    );
+  }
+  if (dir.mode & 0o022) {
+    return refusal(
+      `the directory holding the engine socket (${directory}) carries mode ${(dir.mode & 0o7777).toString(8)}, so another `
+      + `account can create or replace ${target}; this process cannot tell the engine's socket from one planted next to it`,
+      `make it owner-only with \`chmod 700 ${where(directory)}\`; ${job} prints the state root the job really uses, `
+      + "and no restart is authorised by this answer",
+    );
+  }
+  return null;
 }
 
 /** Fallback deadline for a method missing from the table below. */
@@ -1215,6 +1347,14 @@ export class EngineJsonRpcClient {
       } catch (error) {
         // Nothing reached the daemon, so no late reply can ever land for it.
         this.pending.delete(id);
+        // A refusal this transport raised about its *own* judgement (an untrusted socket) already
+        // carries its code and remedy; re-laundering it as `GP_E_ENGINE_UNREACHABLE` would hand
+        // the caller a daemon-restart order that this measurement does not license — the thing
+        // listening there may be running fine, just not as the engine.
+        if (error instanceof EngineCallError) {
+          this.reject(entry, error);
+          return;
+        }
         this.reject(entry, new EngineCallError(
           GP_E_ENGINE_UNREACHABLE,
           `cannot send '${method}' to the engine daemon: ${(error as Error).message}`,
@@ -1937,6 +2077,8 @@ class ReconnectingSocketIo implements LineIo {
   constructor(
     private readonly socketPath: string,
     private readonly open: EngineTransportOpener,
+    /** Identity check run before the first byte leaves this process; see {@link trustSocket}. */
+    private readonly trust: (target: string) => { code: string; message: string; remedy: string } | null = trustSocket,
   ) {}
 
   writeLine(line: string, onHandedOff?: () => void): void {
@@ -1977,6 +2119,14 @@ class ReconnectingSocketIo implements LineIo {
     }
     if (this.inner) {
       return this.inner;
+    }
+    // Trust before traffic: everything below treats a reply as the engine's word, and a socket
+    // another account created — or any account may write to — cannot carry that claim. The check
+    // runs on the path this process is about to connect to, *before* `open`, so a refusal sends
+    // nothing and therefore claims nothing about what the daemon did.
+    const untrusted = this.trust(this.socketPath);
+    if (untrusted) {
+      throw new EngineCallError(untrusted.code, untrusted.message, untrusted.remedy);
     }
     const socket = this.open(this.socketPath);
     const io = new StreamLineIo(socket, socket);
@@ -2034,12 +2184,14 @@ export function unixSocketEngineClient(
     surface?: ShellSurface;
     /** Daemon methods this shell forwards; see {@link EngineJsonRpcClient}'s last parameter. */
     expectedDaemonMethods?: readonly string[];
+    /** Seam for {@link trustSocket}; production callers never pass it — the real stat is the default. */
+    trust?: (target: string) => { code: string; message: string; remedy: string } | null;
   } = {},
 ): EngineJsonRpcClient {
   const open: EngineTransportOpener = options.open
     ?? ((target) => net.createConnection(target));
   return new EngineJsonRpcClient(
-    new ReconnectingSocketIo(socketPath, open),
+    new ReconnectingSocketIo(socketPath, open, options.trust ?? trustSocket),
     undefined,
     options.identity ?? null,
     options.callerCeilingMs ?? CALLER_VISIBLE_CEILING_MS,

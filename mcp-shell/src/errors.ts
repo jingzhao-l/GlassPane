@@ -110,6 +110,25 @@ export const GP_E_NO_USER_RECORD = "GP_E_NO_USER_RECORD";
 export const GP_E_STATE_ROOT_REFUSED = "GP_E_STATE_ROOT_REFUSED";
 
 /**
+ * Shell-only: the socket this shell is about to write into is not one it can call the
+ * engine's. The engine socket is `chmod 0600` with **no peer authentication** (SECURITY.md:
+ * same uid = full authority), so the path is a trust root, not just a location: a leaf another
+ * account created, a leaf any other account may write to, or a directory any other account may
+ * replace the entry in all mean the bytes this shell reads back are not evidence of what the
+ * engine said — and every verdict this product publishes is built from those bytes.
+ *
+ * The judgement is made before the first byte leaves this process, so a refusal carries no
+ * claim that anything was executed. It deliberately does NOT reuse `GP_E_ENGINE_UNREACHABLE`:
+ * that code's remedy names a daemon restart, and restarting a service that is mid-`act` on the
+ * user's screen is an action this measurement does not license — the thing listening there may
+ * be running perfectly well, just not as the engine.
+ *
+ * It is also not in `SHELL_REQUEST_REFUSAL_CODES` below: this is not the caller's argument, so
+ * the HTTP surface answers it as 503 like the other infrastructure codes.
+ */
+export const GP_E_SOCKET_TRUST = "GP_E_SOCKET_TRUST";
+
+/**
  * Shell-only: a declared review dimension is malformed. The daemon has no dimension
  * vocabulary at all — a dimension is the harness's annotation on a call, never an engine
  * parameter — so this code can only ever come from the two surfaces that accept the argument,
