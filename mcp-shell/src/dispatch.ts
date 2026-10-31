@@ -1,4 +1,5 @@
 import { EngineJsonRpcClient } from "./engine-client.js";
+import { escapeTerminalControl } from "./evidence-report.js";
 import { attachIdentityOf, executeTool, shellFaultRemedy, TOOL_SPECS, ToolSpec } from "./tools.js";
 import {
   ARRIVAL_ORDER_MECHANISM,
@@ -239,7 +240,7 @@ export class McpServer {
       case "tools/call":
         return this.callTool(id, request.params);
       default:
-        return this.error(METHOD_NOT_FOUND, `Method not found: ${request.method}`, id);
+        return this.error(METHOD_NOT_FOUND, `Method not found: ${this.echoForeign(String(request.method))}`, id);
     }
   }
 
@@ -272,7 +273,7 @@ export class McpServer {
     }
     const spec = this.specs.find((candidate) => candidate.name === name);
     if (!spec) {
-      return this.error(INVALID_PARAMS, `Unknown tool: ${name}`
+      return this.error(INVALID_PARAMS, `Unknown tool: ${this.echoForeign(name)}`
         + ` | remedy: ${this.publishedNamesNear(name)}`, id);
     }
 
@@ -360,6 +361,23 @@ export class McpServer {
    * call is worse than no suggestion, and the point of the sentence is to end the guessing
    * loop a bare `Unknown tool: gp_acti` left the caller in.
    */
+  /**
+   * Caller-authored text that rides a protocol error frame: bounded in length, neutralised
+   * for terminal control. The same product escapes a daemon-authored id with
+   * `renderForeign` and a report body with `escapeTerminalControl`, because an ESC can move
+   * the cursor and overwrite what the frame just said. Protocol-level text arrives from
+   * whoever wrote the frame — an MCP client, or anything that can reach the HTTP body — so
+   * the same rule applies before it is echoed back inside `Unknown tool: …`. Without a
+   * length bound, a 4 MB `params.name` is copied verbatim into the stdout frame, and one
+   * frame on a shared stdout is not a place to park whatever the caller typed.
+   */
+  private echoForeign(value: string, maxChars = 200): string {
+    const escaped = escapeTerminalControl(value);
+    if (escaped.length <= maxChars) return escaped;
+    return `${escaped.slice(0, maxChars)}… (the name is ${value.length} characters; `
+      + `${value.length - maxChars} are not echoed back)`;
+  }
+
   private publishedNamesNear(guess: string): string {
     const names = this.specs.map((spec) => spec.name);
     const near = names.filter((candidate) => candidate.startsWith(guess.slice(0, 6)));

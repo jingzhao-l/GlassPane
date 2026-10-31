@@ -815,6 +815,32 @@ test("a fault inside the shell is answered wire-safe: type on the frame, detail 
     `出路没有点名任何一条读者做得动的读取：${frame.error.message}`);
 });
 
+test("a protocol refusal echoes caller text bounded and control-neutralised", async () => {
+  const { server } = makeServer();
+  // 一段真能作恶的外来文本：以 ESC（0x1b）开头——光标能移走、能覆盖掉这一帧刚说过的话——
+  // 再垫到 4000 字符。产品对 daemon 来的 id 走 `renderForeign`、对报告走
+  // `escapeTerminalControl`，而协议层这两支句子从前把调用方的原文一律原样复述。
+  const esc = String.fromCharCode(0x1b);
+  const hostile = `${esc}[2Jgp_act${"x".repeat(4000)}`;
+  const unknown = await server.handleLine(enq({
+    jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: hostile, arguments: {} },
+  }));
+  assert.ok(!unknown.error.message.includes(esc),
+    `ESC 被原样送回 stdout 帧：${JSON.stringify(unknown.error.message.slice(0, 80))}`);
+  assert.ok(unknown.error.message.length < 900,
+    `一帧错误里复述了 ${unknown.error.message.length} 个字符的调用方原文：${unknown.error.message.slice(0, 80)}…`);
+  assert.match(unknown.error.message, /are not echoed back/, "截断必须说实话：它没复述多少");
+  // 出路仍然点名"这一面上真存在的工具"，截断不许把那一半也吃掉。
+  const listed = [...unknown.error.message.matchAll(/gp_[a-z_]+/g)].map((m) => m[0]);
+  assert.ok(listed.length >= 1, `出路不再点名任何已发布工具：${unknown.error.message.slice(0, 120)}`);
+
+  const badMethod = await server.handleLine(enq({
+    jsonrpc: "2.0", id: 6, method: `${esc}[1;1H${"z".repeat(3000)}`,
+  }));
+  assert.ok(!badMethod.error.message.includes(esc), "method 那一支同样不许把 ESC 送回线上");
+  assert.ok(badMethod.error.message.length < 900, `method 那一支同样没有长度界：${badMethod.error.message.length}`);
+});
+
 test("a session-less McpServer is refused at runtime, not just in types", () => {
   const { engine } = makeEngine();
   // The types make `session` required; these tests are JavaScript, and so is
