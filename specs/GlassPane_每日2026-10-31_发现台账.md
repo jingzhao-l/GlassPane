@@ -23,7 +23,8 @@
   壳 `node --test mcp-shell/test/*.test.mjs` 704 tests / 699 pass / **5 fail**；
   安装器 306 / 301 / **5 fail**；updater 735 / 735 / 0。
 
-## 本轮发现 → 修复 → 具名测试（发现 24 条，修复 24 条，未修项 0）
+## 本轮发现 → 修复 → 具名测试（发现 28 条，修复 28 条，未修项 0；其中 #25-#26 由 CI 的
+## ubuntu / macOS 两条 lane 现形、本机跑不到，#27-#28 是本机套件抓到但归在别的族里）
 
 | # | 发现（触发输入 → 错误行为） | 修在哪 | 具名测试 | 反向破坏 |
 |---|---|---|---|---|
@@ -51,6 +52,11 @@
 | 22 | `agent-entry.js` 被 launchd 指向独立拷贝，加 import 会让在册作业 ERR_MODULE_NOT_FOUND | 该支不印照抄命令（指针坏掉时无真路径可点名） | `agent-entry.test.mjs` 的 dirlink 两格（本项就是被它抓出来的） | 恢复 import ⇒ 该格红 |
 | 23 | 文档里"工具契约三处镜像（kernel schema / daemon / mcp-shell）"与 PR 模板同句：`kernel/schemas` 实测不发布工具清单，且它是被钉语料（手改必被同步闸判红） | `CONTRIBUTING` 双语 / `ITERATE.md` / PR 模板 / `iterate.config.yaml` 改成两张真表 + 数据契约半边 | `check-doc-links`（可复算主张与真源一致） | 主张与实测不符时由该闸红 |
 | 24 | `engine/smoke.md` 说 `--check-input-permission` 三态，探针实发两态（真机实测 granted）；lane-d 在表格单元里写裸 `\|` 把 3 格切成 4 格 | 两态改述 + 历史读数标注所属版本 + 竖线转义 | `DaemonPermissionVocabularyTests`（usage 取值表 ↔ 探针可发射值双向）+ `check-doc-links` 的表格格数判据 | 未转义 ⇒ 文档闸红（本仓真红过一次，见 `be4ab124`） |
+
+| 25 | `StateRoot.tightenPermissions` 对**证据目录**只判 `chmod()!=0`，在忽略权限位的卷上 rc 0 而模式没粘 → 收尾打印"permissions tightened to owner-only"（一句本运行没做到的收紧，而这一行是给面板与 agent 当证据读的） | `tightenDirectory`：chmod 后回读 `st_mode`，不符就落进既有 notes 通道；两个目录站点共用它 | `DailyRound20261031LaneDPermissionTighteningTests`（6 条，含"控制那一档能红"的正对照） | 去掉回读 ⇒ "chmod 被接受但模式没粘"那一格红 |
+| 26 | `test/support/fake-daemon.mjs` 常驻 `server.on("error", () => { throw })` 与 `listen` 上的 `once("error", reject)` 并存：路径不可用时抛进 uncaught，端到端崩成进程退出而不是一个具名判决 | 具名拒绝 + 运行中错误由 `stop()` 报出 | `the stand-in fails the way a daemon fails: a named rejection, not an uncaught throw` | 退回 `throw` ⇒ 该条拿不到 reject |
+| 27 | **CI 现形（ubuntu lane）**：`--no-such-flag` 在 Linux 上 install.sh 回 1（平台句）、cli.js 回 2（参数句）；`--repo <非仓库目录>` 反向分叉。本机（darwin）永远走不到那一档 | 入口次序抽成 `entryDecision`：`--repo` 用法错 → 显式位判据（与主机无关）→ `--help` → 平台 → 未知参数 | `入口次序整表：非 darwin 那一档在两种主机上都是同一个答案`（7 串 × 2 平台） | 把平台判据挪到判据之前并去掉守卫 ⇒ 该行点名 `在 linux 上判成 platform`（实测红→恢复绿） |
+| 28 | **CI 现形（macOS lane）**：`install.sh` 的 `sh_quote` 用 `case` 字符类判惰性，runner 的 en_US.UTF-8 下把 `é` 读成字母 → 印裸 `é`，而 `quoteShellArg` 印 `'é'`；两入口对同一值两种引号形状（Linux 上反倒一致） | 分类改按字节（`LC_ALL=C` 的 grep 判据），与 JS 表逐值同判 | `install.sh 的 sh_quote 与 installer/cli.js 的 quoteShellArg 逐值同判`（13 值 + `eval set --` 回读必须是 `$#=1` 逐字节等值） | 还原 `case` 那一支 ⇒ 在 UTF-8 locale 下 `é` 那一格红（本轮实测在 macOS runner 上就是它先红的） |
 
 覆盖面不足的领域（本轮补了其中 6 项，其余留给后续）：remedy 的"命令名是否真在 PATH 上"（本轮成闸）、
 双入口 argv 全矩阵（本轮 9 格）、跨连接状态生命周期（本轮 1 格）、可选/inbox-gated 键的增删即红

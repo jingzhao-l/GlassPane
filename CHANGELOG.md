@@ -190,6 +190,12 @@ Swift 侧 `DailyRound20261030Swift1PathShapeTests`、`…Swift1PermissionHonesty
   只发 `granted | unverifiable`（真机实测两把读数），历史读数标注所属版本而不改写；
   `CONTRIBUTING` 双语 / `ITERATE.md` / PR 模板 / `iterate.config.yaml` 的"工具契约三处镜像"改成
   实测形状（`kernel/schemas` 不发布工具清单，它是被钉的数据契约语料，追平靠换 pin）。
+- **CI 抓到、本机跑不到的两条**（合入本号的最后一批，`fix(installer)` @ 8085b155）：
+  `--no-such-flag` 与 `--repo <非仓库目录>` 在 Linux runner 上两入口一个回 1 一个回 2（入口把
+  "未知参数"排在平台判据之前，而 install.sh 判不出未知参数），次序现在定死并由新纯函数
+  `entryDecision` 整表验证（7 串 argv × 2 种平台，本机跑满）；`install.sh` 的 `sh_quote` 用受
+  locale 影响的 `case` 字符类判惰性，macOS runner 的 en_US.UTF-8 下把 `é` 读成字母，于是同一
+  值在两入口印出两种引号形状（Linux 上反倒一致，只在交付平台现形）——分类改按字节判。
 
 ## [1.26.0] — 2026-10-29
 
