@@ -488,14 +488,58 @@ def completeness_report(threads):
     return {"frames": dropped_frames, "locals": dropped_locals}
 
 
+def split_command_words(command):
+    """`shlex.split` 的诚实版（纯函数）：回 `(argv, refusal)`。
+
+    裸 `shlex.split` 对没闭合的引号抛 `ValueError`——在 lldb 里面这等于
+    "桥的脚本崩在解释你这句话的路上"：没有 sentinel、没有载荷，外层只能从
+    stderr 的 traceback 里猜。一条没写完的引号是**输入**，不是异常，所以在这里
+    折成具名拒绝，调用方把 refusal 原样递回命令行。
+    """
+    try:
+        return shlex.split(command or ""), None
+    except ValueError as error:
+        return [], ("could not read the command %r as words (%s); nothing was run "
+                    "— close the quotation and re-issue" % (command, error))
+
+
 def parse_trace_request(command, default=TRACE_SAMPLES):
     """`gp-trace --samples N` (pure). Returns (requested | None, refusal | None):
     an unreadable or out-of-range count is refused with a reason, never quietly
     replaced by the default."""
-    argv = shlex.split(command or "")
+    argv, refusal = split_command_words(command)
+    if refusal:
+        return None, refusal
+    # lldb 把**命令名之后**的那段交给脚本函数；两种写法（带不带 `gp-trace` 前缀）
+    # 都曾经被照单全收，所以这里把可选的命令名剥掉，剩下的词才受"只认识
+    # --samples"的约束——剥前缀是容忍既有形状，不是给陌生词放行。
+    if argv and argv[0] == "gp-trace":
+        argv = argv[1:]
+    if argv.count("--samples") > 1:
+        # 与 daemon 的"同一枚取值旗标出现两次即用法错"同一条纪律：一趟只resolve
+        # 一个值，"哪一个赢了"不是这次运行说得出的事——从前第一条悄悄生效，第二条
+        # 连回声都没有，越界的第二条（`--samples 5 --samples 99999999`）就这样被
+        # 吞掉，账本按 5 采，读命令的人以为自己给了数。
+        return None, ("gp-trace --samples was named %d times (%r): one trace request "
+                      "carries exactly one sample count, and which one would win is not "
+                      "something this run can measure — re-issue with a single "
+                      "--samples <count>" % (argv.count("--samples"), command))
     if "--samples" not in argv:
+        if argv:
+            # `gp-trace` 只建模 `--samples <count>` 这一种话。其余 token 从前静默
+            # 存在：`gp-trace --smaples 5`（拼错旗标）照采默认 3 帧，调用方以为
+            # 自己给了数——同一个"桩对任何参数都答话"的形状。不认识的词就拒。
+            return None, ("gp-trace understands only `--samples <count>`, and %r names "
+                          "no such word: nothing was sampled with an unread argument — "
+                          "re-issue with only `--samples <count>` (or nothing)"
+                          % command)
         return default, None
     index = argv.index("--samples") + 1
+    rest = [tok for i, tok in enumerate(argv) if i not in (index - 1, index)]
+    if rest:
+        return None, ("gp-trace accepts nothing besides `--samples <count>`, and these "
+                      "words have no reader: %s — nothing was run until the command "
+                      "carries only that flag" % ", ".join(repr(tok) for tok in rest))
     if index >= len(argv):
         return None, "usage: gp-trace --samples <count> — the flag has no value"
     try:
@@ -1662,18 +1706,41 @@ def no_payload_cause(stderr_text, stdout_text=None, bridge_path=None):
     拿一条从没测量过的通道去下一个自信的判决——目标只要 print 一句
     `cat: config: No such file or directory`，就会命中 "no such file or directory"，
     把"桥没被导入"连同一个指向 checkout 路径的补救报出来，而真正该看的通道是空的。
-    于是现在：stderr 明说导入失败 → bridge-not-imported；stderr 明说 attach 的对象
+    于是现在：stderr 明说 xcrun 找不到工具/开发目录失效 → toolchain-missing；stderr
+    明说导入失败 → bridge-not-imported；stderr 明说 attach 的对象
     不存在 → target-gone；stderr 明说两侧属户 → peer-user-or-sip（后两条是 S9-2 补的，
     真机原文从前落进 catch-all，收到的补救是一张永远治不了它们的 Developer Tools
     席位）；stderr 有内容但没点名任何成因 → debug-gated，且文案明写这是缺省猜测不是
     测量；stderr 一片空白 → 可信通道回答不了，如实说 not-determinable，
     不再从猜测里挑一个病因。`stdout_text` 仍留在签名里供调用方传，但不参与分类。
 
-    返回 `(cause, remedy)`：cause ∈ {"bridge-not-imported", "target-gone",
-    "peer-user-or-sip", "debug-gated", "not-determinable"}。
+    返回 `(cause, remedy)`：cause ∈ {"toolchain-missing", "bridge-not-imported",
+    "target-gone", "peer-user-or-sip", "debug-gated", "not-determinable"}。
     """
     trusted = (stderr_text or "").lower()
     named_us = bridge_path if bridge_path else "glasspane_bridge.py"
+    if ("xcrun: error" in trusted or "unable to find utility" in trusted
+            or "active developer path" in trusted
+            or "active developer directory" in trusted):
+        # S10：`build_lldb_argv` 起的 argv[0] 是 `xcrun`，所以"lldb 缺席"这一族
+        # （Command Line Tools 没装、`xcode-select` 指错、开发者目录失效）全部以
+        # **xcrun 自己的 stderr** 离场。那句话的签名是 `xcrun: error:` 与
+        # "unable to find utility"，而 lldb 自己从不这样起句——放行者仍是测量。
+        # 从前它落进 catch-all `debug-gated`，收到的补救是"去勾 Developer Tools"
+        # 席位；一张 TCC 席位永远变不出一个不存在的二进制，照着勾的人只会把
+        # "量不到"坐实成"再量一次"。这条臂把缺席如实说成缺席，并给出能做的两步。
+        return ("toolchain-missing",
+                "the debugger toolchain itself is absent or unselected: the stderr is "
+                "xcrun's own refusal (an `xcrun: error:` line naming what it could not "
+                "find or which developer path is invalid), not an attach the system "
+                "declined. No TCC seat — Developer Tools included — materializes a "
+                "missing binary; granting anything here changes nothing. Steps that "
+                "can change the outcome: (1) measure what xcrun resolves right now, "
+                "`xcrun --find lldb` — same refusal means the toolchain really is "
+                "absent; (2) read what macOS was told, `xcode-select -p`; (3) install "
+                "the Command Line Tools (`xcode-select --install`) or point the "
+                "selection at a real Xcode/CLT (`sudo xcode-select -s <path>`), then "
+                "re-run this bridge unchanged.")
     if ("importing failed" in trusted or "invalid pathname" in trusted
             or "no such file or directory" in trusted
             or "module not found" in trusted):
@@ -1757,7 +1824,8 @@ def no_payload_cause(stderr_text, stdout_text=None, bridge_path=None):
     return ("debug-gated",
             "the bridge imported and lldb wrote *something* to its stderr, but nothing "
             "on the trusted channel names a cause, so this line is NOT a measurement — "
-            "it is the default guess left after the named causes (import split, gone "
+            "it is the default guess left after the named causes (absent toolchain, "
+            "import split, gone "
             "pid, cross-user attach) were each ruled out by reading the line itself. "
             "If a debugger seat really is missing here (P6 §0 F1/F2, §7.1), granting "
             "System Settings > Privacy & Security > Developer Tools to the calling "
@@ -2549,9 +2617,20 @@ def cmd_trace(debugger, command, result, internal_dict):
 
 def cmd_watch(debugger, command, result, internal_dict):
     """Z4: gp-watch add <addr> [size] [rw] — hardware slots only (§6.5)."""
-    argv = shlex.split(command or "")
+    argv, refusal = split_command_words(command)
+    if refusal:
+        result.AppendMessage(refusal)
+        return
     if not argv or argv[0] != "add":
         result.AppendMessage("usage: gp-watch add <hex-addr> [size=8] [r|w|rw]")
+        return
+    if len(argv) > 4:
+        # 形式是 `<addr> [size] [mode]`，第五个 token 没有读者。从前它静静地躺在
+        # argv 尾巴上，命令照武装、账本报告已就绪——"多打出来的那一段去哪了"这一
+        # 问没有答案。要么按形写全，要么当场拒，口径与 parse_watch_size_token 一致。
+        result.AppendMessage("gp-watch add takes <hex-addr> [size] [r|w|rw] and got %d "
+                             "words (%r): the extra words have no reader, so nothing "
+                             "was armed" % (len(argv), command))
         return
     if len(argv) < 2:
         result.AppendMessage("usage: gp-watch add <hex-addr> [size=8] [r|w|rw] "
@@ -2612,7 +2691,10 @@ def cmd_watch(debugger, command, result, internal_dict):
 def cmd_queue(debugger, command, result, internal_dict):
     """Z4 ledger surface (§6.5). A bare `gp-queue` means `list` — interactive
     mode invokes the command with no argument (see build_lldb_argv)."""
-    argv = shlex.split(command or "")
+    argv, refusal = split_command_words(command)
+    if refusal:
+        result.AppendMessage(refusal)
+        return
     sub = argv[0].lower() if argv else "list"
     if sub in ("list", "status", "snapshot"):
         reconcile_watchpoint_stops(debugger)
@@ -2715,13 +2797,37 @@ def main(argv=None):
                         "never launches)")
     parser.add_argument("--exe-args", nargs=argparse.REMAINDER, default=None,
                         help="arguments forwarded to --exe")
-    parser.add_argument("--samples", type=int, default=TRACE_SAMPLES, help="trace sample count (T2)")
+    parser.add_argument("--samples", type=int, default=None,
+                        help="trace sample count (T2); the mode that reads no count "
+                             "refuses the flag rather than ignoring it")
     parser.add_argument("--setup", help="extra lldb command run after script import")
     parser.add_argument("--timeout", type=float, default=600.0,
                         help="budget incl. first debugserver cold start on a machine (F5: >5 min, one-time)")
     parser.add_argument("--out", help="also write the payload JSON to this file")
     parser.add_argument("--send-sock", help="also send one NDJSON frame to this unix socket (R30回传)")
     args = parser.parse_args(argv)
+    if args.pid is not None and args.pid < 1:
+        # 与 `--samples` 越界同一口径：能在 parse 处量出来的边界，不许转发给 lldb
+        # 再替它编成因。实测（2026-10-31）：`capture --pid -5` 会真的起一趟
+        # `xcrun lldb … -p -5`，lldb 回 "attach failed: no such process"，桥据此报
+        # `target-gone`，补救是"去找活着的 pid 再来一次"——一次畸形参数穿过了整条
+        # 管线，还领走了一份与病因无关的判决。pid 的域是正整数，这里当场拒。
+        parser.error("--pid wants a positive integer (a real pid), got %d: no "
+                     "process on macOS carries that number, and forwarding it only "
+                     "buys an lldb 'no such process' that reads like a gone target — "
+                     "read the pid you mean with `pgrep -l <name>` or "
+                     "`ps -axo pid=,comm= | grep <name>` and re-run" % args.pid)
+    if args.samples is not None and args.mode != "trace":
+        # 镜像 daemon 的一等纪律（`glasspaned --help` 的 64 段）："a modifier flag
+        # that the named subcommand does not read" 是用法错，不是静默 no-op。
+        # capture/interactive 的 argv 里根本没有 samples 的读者，从前它照收照走。
+        parser.error("--samples belongs to trace mode only: capture emits one "
+                     "snapshot and interactive arms nothing from a count. %s reads "
+                     "no sample count, so naming one asks for a pass nothing will "
+                     "run — drop --samples, or run `trace --pid <pid> --samples N`"
+                     % args.mode)
+    if args.mode == "trace" and args.samples is None:
+        args.samples = TRACE_SAMPLES
     if not args.pid and not args.exe and args.mode != "interactive":
         parser.error("capture/trace need --pid or --exe")
     if args.mode == "trace" and args.exe and args.pid is None:

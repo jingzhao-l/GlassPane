@@ -3496,5 +3496,168 @@ class NonceForgedPairIsAmbiguousNotTrusted(unittest.TestCase):
         self.assertIn("stdoutAmbiguous", source)
 
 
+class LaneF20261031CommandHonesty(unittest.TestCase):
+    """泳道 F 2026-10-31 审出的五条，一次修齐：
+
+    1. `shlex.split` 对没闭合引号抛 ValueError——在 lldb 里那等于桥崩在解释命令的
+       路上，没有 sentinel、没有载荷。折成具名拒绝（`split_command_words`）。
+    2. `parse_trace_request` 从前对认不出的词照答（拼错旗标、重复 `--samples`、
+       多余 token 全部静默通过）——"桩对任何参数都答话"在真命令上的形状。
+    3. `cmd_watch add` 第五个 token 没有读者却照武装。
+    4. CLI 的 `--pid` 负数转发给 lldb，换回一份 `target-gone` 判决与"去找活 pid"
+       的补救（2026-10-31 本机实测 rc=1）；`--samples` 被 capture/interactive
+       照收照走，而这两条 argv 里根本没有它的读者。
+    5. `no_payload_cause` 没有工具链缺席那一档：`xcrun: error: unable to find
+       utility "lldb"` 落进 catch-all `debug-gated`，补救指向一张永远变不出二进制
+       的 TCC 席位。
+    每条都走正常/异常/边界三路。"""
+
+    # --- 1. split_command_words ------------------------------------------
+    def test_wellformed_words_split_unchanged(self):
+        argv, refusal = gb.split_command_words("add 0x1000 8 r")
+        self.assertEqual(["add", "0x1000", "8", "r"], argv)
+        self.assertIsNone(refusal)
+
+    def test_unterminated_quote_refuses_instead_of_raising(self):
+        argv, refusal = gb.split_command_words("--samples 5 \"unclosed")
+        self.assertEqual([], argv)
+        self.assertIsNotNone(refusal)
+        self.assertIn("could not read", refusal)
+        self.assertIn("nothing was run", refusal)
+
+    def test_empty_command_is_words_none(self):
+        argv, refusal = gb.split_command_words("")
+        self.assertEqual([], argv)
+        self.assertIsNone(refusal)
+
+    def test_cmd_queue_with_broken_quote_answers_a_refusal_not_a_traceback(self):
+        messages = []
+        result = types.SimpleNamespace(AppendMessage=messages.append)
+        gb.cmd_queue(None, "clear \"dangling", result, {})
+        self.assertEqual(1, len(messages), messages)
+        self.assertIn("could not read", messages[0])
+
+    # --- 2. gp-trace 的词形闸 --------------------------------------------
+    def test_trace_accepts_default_and_single_flag_both_spellings(self):
+        self.assertEqual((gb.TRACE_SAMPLES, None), gb.parse_trace_request(""))
+        self.assertEqual((5, None), gb.parse_trace_request("--samples 5"))
+        self.assertEqual((5, None), gb.parse_trace_request("gp-trace --samples 5"),
+                         "带命令名的旧写法不许被新闸误伤")
+
+    def test_trace_refuses_unknown_and_duplicated_words(self):
+        for command in ("--smaples 5", "--samples 5 extra",
+                        "--samples 5 --samples 9"):
+            requested, refusal = gb.parse_trace_request(command)
+            self.assertIsNone(requested, command)
+            self.assertIsNotNone(refusal, command)
+        _req, dup = gb.parse_trace_request("--samples 5 --samples 99999999")
+        self.assertIn("named 2 times", dup, "越界的第二条不许静默蒸发")
+
+    def test_trace_boundary_flag_without_value_still_names_the_usage(self):
+        requested, refusal = gb.parse_trace_request("--samples")
+        self.assertIsNone(requested)
+        self.assertIn("the flag has no value", refusal)
+
+    # --- 3. cmd_watch 的尾词闸 -------------------------------------------
+    def _run_watch(self, command):
+        queue = gb.WatchQueue()
+        armed = []
+        messages = []
+
+        def fake_arm(debugger, entry):
+            armed.append(dict(entry))
+            return (True, "1")
+
+        result = types.SimpleNamespace(AppendMessage=messages.append)
+        with mock.patch.object(gb, "_WATCH_QUEUE", queue), \
+                mock.patch.object(gb, "_arm_watchpoint", side_effect=fake_arm):
+            gb.cmd_watch(None, command, result, {})
+        return messages, queue, armed
+
+    def test_watch_four_word_form_still_arms(self):
+        messages, queue, armed = self._run_watch("add 0x1000 8 r")
+        self.assertEqual(1, len(armed))
+        self.assertEqual("0x1000", armed[0]["addr"])
+
+    def test_watch_trailing_word_is_refused_and_arms_nothing(self):
+        messages, queue, armed = self._run_watch("add 0x1000 8 r nonsense")
+        self.assertEqual([], armed, "没读者的 token 不能换走一次武装")
+        self.assertEqual([], queue.armed + queue.queued)
+        self.assertIn("no reader", " ".join(messages))
+
+    def test_watch_bare_addr_two_words_unchanged(self):
+        messages, queue, armed = self._run_watch("add 0x2000")
+        self.assertEqual(1, len(armed), "两词形（只给地址）是合法默认，不该被尾词闸拦下")
+
+    # --- 4. CLI 的 --pid / --samples 闸 -----------------------------------
+    def _main_exit_code_and_text(self, argv):
+        err = io.StringIO()
+        def fake_child(args_, timeout, env=None):
+            return gb._Completed(0, "", ""), False
+        with mock.patch.object(gb, "run_child_captured", side_effect=fake_child), \
+                contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as ctx:
+                gb.main(argv)
+        return ctx.exception.code, err.getvalue()
+
+    def test_negative_and_zero_pid_refused_at_parse(self):
+        code, text = self._main_exit_code_and_text(["capture", "--pid", "-5"])
+        self.assertEqual(2, code)
+        self.assertIn("positive integer", text)
+        code, text = self._main_exit_code_and_text(["capture", "--pid", "0"])
+        self.assertEqual(2, code)
+        self.assertIn("positive integer", text,
+                      "--pid 0 要答成域错误，而不是『没给目标』")
+
+    def test_samples_for_a_mode_that_reads_none_is_refused(self):
+        code, text = self._main_exit_code_and_text(
+            ["capture", "--exe", "/bin/false", "--samples", "5"])
+        self.assertEqual(2, code)
+        self.assertIn("trace mode only", text)
+        code, text = self._main_exit_code_and_text(["interactive", "--samples", "5"])
+        self.assertEqual(2, code)
+
+    def test_trace_without_samples_still_runs_with_the_default(self):
+        seen = {}
+        def fake_child(argv, timeout, env=None):
+            seen["argv"] = argv
+            return gb._Completed(0, "", ""), False
+        with mock.patch.object(gb, "run_child_captured", side_effect=fake_child), \
+                contextlib.redirect_stdout(io.StringIO()):
+            gb.main(["trace", "--pid", "4242"])
+        self.assertTrue(any(str(a).startswith("gp-trace --samples %d" % gb.TRACE_SAMPLES)
+                            for a in seen["argv"]), seen["argv"])
+
+    # --- 5. toolchain-missing 成因 ----------------------------------------
+    XCRUN_NO_UTILITY = ('xcrun: error: unable to find utility "lldb", '
+                        'not sure why; try "xcode-select -p"\n')
+    XCRUN_BAD_PATH = ("xcrun: error: invalid active developer path "
+                      "(/Library/Developer/CommandLineTools), missing xcrun: "
+                      "this is an error caused by an recent update to mac operating system\n")
+
+    def test_xcrun_refusal_is_named_as_missing_toolchain(self):
+        cause, remedy = gb.no_payload_cause(self.XCRUN_NO_UTILITY, "", "/tmp/b.py")
+        self.assertEqual("toolchain-missing", cause)
+        self.assertIn("xcode-select", remedy)
+        self.assertIn("No TCC seat", remedy, "补救要先说清席位治不了这个")
+
+    def test_invalid_developer_path_lands_in_the_same_arm(self):
+        cause, _remedy = gb.no_payload_cause(self.XCRUN_BAD_PATH, "", "/tmp/b.py")
+        self.assertEqual("toolchain-missing", cause)
+
+    def test_named_cause_and_empty_stderr_keep_their_own_arms(self):
+        cause, _r = gb.no_payload_cause(
+            "error: importing 'glasspane_bridge' failed: invalid pathname\n",
+            "", "/tmp/b.py")
+        self.assertEqual("bridge-not-imported", cause,
+                         "新臂抢走了 lldb 自己的导入失败就红了")
+        cause, _r = gb.no_payload_cause("", "", "/tmp/b.py")
+        self.assertEqual("not-determinable", cause)
+        cause, _r = gb.no_payload_cause("", 'xcrun: error: unable to find utility "lldb"',
+                                        "/tmp/b.py")
+        self.assertEqual("not-determinable", cause,
+                         "xcrun 的话出现在共享 stdout 上不算测量——成因只读 stderr")
+
+
 if __name__ == "__main__":
     unittest.main()
