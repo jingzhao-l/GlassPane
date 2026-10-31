@@ -55,7 +55,11 @@ export const UninstallCommand = {
     UI.empty()
     UI.println(UI.logo("  "))
     UI.empty()
-    prompts.intro("Uninstall OpenCode")
+    // The product's own name. This said "Uninstall OpenCode" — a user-facing string naming the
+    // upstream project on a path this product ships — while `brand-surface`'s
+    // `upstream-in-user-text` rule reported zero hits, because that rule enumerated
+    // `describe:`/`console.log`/`prompts.log.*` and never `prompts.intro(`.
+    prompts.intro("Uninstall glasspane-harness")
 
     const method = await Installation.method()
     prompts.log.info(`Installation method: ${method}`)
@@ -140,7 +144,10 @@ async function showRemovalSummary(targets: RemovalTargets, method: Installation.
   }
 }
 
-async function executeUninstall(method: Installation.Method, targets: RemovalTargets) {
+// Exported so the exit-code contract has a fixed-point test: `--dry-run` returns before this
+// function runs, so the handler alone cannot reach it, and a test that only reads this file's text
+// would pin nothing. Callers in production still go through `UninstallCommand.handler`.
+export async function executeUninstall(method: Installation.Method, targets: RemovalTargets) {
   const spinner = prompts.spinner()
   const errors: string[] = []
 
@@ -194,6 +201,10 @@ async function executeUninstall(method: Installation.Method, targets: RemovalTar
       if (result.code !== 0) {
         spinner.stop(`Package manager uninstall failed: exit code ${result.code}`, 1)
         prompts.log.warn(`You may need to run manually: ${cmd.join(" ")}`)
+        // Collected, not just printed: the summary below is what decides the exit code, and a
+        // package manager that refused to remove the package used to leave `errors` empty — so
+        // the command ended with a farewell line and exit 0 on a half-done uninstall.
+        errors.push(`Package manager uninstall: exit code ${result.code} — run manually: ${cmd.join(" ")}`)
       } else {
         spinner.stop("Package removed")
       }
@@ -220,6 +231,10 @@ async function executeUninstall(method: Installation.Method, targets: RemovalTar
     for (const err of errors) {
       prompts.log.error(`  ${err}`)
     }
+    // The list is printed AND answered with a non-zero code. An unattended agent reads `$?`
+    // first and this text second, and this used to exit 0 after naming failures — the face
+    // claiming the uninstall worked while the lines above said it did not.
+    process.exitCode = 1
   }
 
   UI.empty()

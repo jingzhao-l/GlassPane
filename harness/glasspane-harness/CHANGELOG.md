@@ -12,6 +12,77 @@ contract does not).
 
 （空。本轮收口后没有未归号的条目。）
 
+## [0.13.0] — 2026-10-30
+
+**版本判断：minor。** pre-1.0 的口径是"产品面/CLI 形状变动 = minor，纯修复 = patch"。本版有三处是**形状**：
+`upgrade` 与 `uninstall` 的退出码（拒绝与失败此前退 0）、`gp_act` 的 `always` 形状（此前是空数组）、
+以及注册给内核的 provider 方法表（从五个收缩到引擎真能答的三个）。证据契约一字未动：
+`{code, message, remedy}` 三键、台账哈希链、`iterate-kernel@0.1.10` 的 pin 与 26 个契约文件字节。
+
+修掉的（每条都配固定点测试，测试驱动的是生产路径而不是它自己的副本）：
+
+- **注册了两个引擎根本不存在的判定生产者。** `src/tool/glasspane/providers.ts` 的 AE provider 声明
+  `diagnose`、`diagnose-pixel`、`diagnose-probed`，evidence provider 声明 `capture`、`last-evidence`。
+  引擎侧 `engine/Sources/GlassPaneEngine/FrameCodec.swift:73-82` 的 `EngineMethod` 是 daemon 的请求白名单，
+  里面**没有** `diagnose-pixel` 与 `diagnose-probed`——实测的运行中 daemon 的 `hello.capabilities`
+  回 11 条（attach/act/observe/assert_element/diagnose/last_evidence/snapshot/restore/audit_ui/
+  capture_view/probe_status），也没有这两个名字。那两个是内核 fixture 语料里的示例条目被手抄进了
+  生产注册表；而注册表按这个文件自己的说法是"另一个 harness 可以依赖的声明"，于是它给不存在的能力作了背书。
+  修法：AE 只注册 `diagnose`；`capture`（引擎的 `capture_view`）与 `last-evidence`（`last_evidence`）保留。
+  **同时把那条自回显测试换掉**：`test/tool/glasspane-provider-registration.test.ts` 原先拿我们的注册表
+  跟 `iterate-kernel/fixtures/provider-registration.ok-01.json` 比——比的就是抄过来的那份字节，
+  结构上看不见发明出来的名字。现在方法表锚在 `contracts/engine-methods.json`（13 个名字，
+  由父仓 `harness/tools/product-surface.mjs` 规则 `engine-methods` 从 Swift blob 重新派生）上，
+  另加两条：注册表里每个名字都必须映射到一个引擎名字，fixture 里那两个多出来的名字必须被拒。
+  反向控制：把 `diagnose-pixel` 加回去 → 4 条具名用例红（含"the registered method table is the
+  engine's, not the fixture's"），按 sha256 核回后 23/23 绿。
+- **`gp_act` 的 "Always allow" 存不下任何东西。** `ask({... patterns: [act:<role>:<action>], always: []})`
+  而 TUI 的确认框（`packages/tui/src/routes/session/permission.tsx:145-158`）就是把 `always` 这份列表
+  渲染成"这将允许以下模式…"并按它落规则，于是选了 Always 的用户下一次同样的点击还会被问，
+  而界面上已经出现过一次"已允许"。这与 `src/tool/glasspane/index.ts` 文件头第 3 条纪律相反
+  （"每个 `always` 就是这次调用自己的模式"）。修法：`always` 传 `act:${role}:${action}`。
+  这条规则不可能比这次调用更宽，因为 `action` 是闭合的 `Schema.Literals`（press/increment/decrement/
+  showMenu/confirm/cancel/pick）、`role` 由 `validateSelector` 拒绝 `*`、`?`、`[`、`\`、`:`——
+  那两条都是被测试钉着的。原先有一条测试把这个缺陷**锁死**（`expect(surface).toContain("always: [],")`），
+  现在它锁形状并要求那句缺陷文本缺席。
+- **`upgrade` 对拒绝和失败都退 0。** `src/cli/cmd/upgrade.ts` 的两条拒绝分支（"这个产品不向该渠道发包"
+  与 `latest()` 的 `NoUpdateChannelError`）与失败分支都只 `prompts.outro("Done")` 后 `return`，
+  `spinner.stop("Upgrade failed", 1)` 的 `1` 只是给这一行上色、不设进程码。无人值守的操作者先读 `$?`
+  再读文案，于是拒绝长得和成功一样。修法：三条分支各设 `process.exitCode = 1`，
+  而"已经是这个版本"仍然退 0（那是诚实的空操作，把它也判红就是另一种谎）。
+  固定点：`test/cli/cmd/glasspane-upgrade-channel.test.ts` 新增两条、改写两条，驱动的是真 handler +
+  PATH 上的桩包管理器（不碰这台机器的全局安装），断言的是退出码不只是文案。
+- **`uninstall` 打印失败再退 0。** 包管理器拒绝移除时只 `spinner.stop(..., 1)` + 一句"你可能要手动跑"，
+  **没有**进 `errors`；而决定退出码的正是那份 `errors` 汇总——所以一半没做完的卸载以
+  "Thank you for using glasspane-harness!" 和 0 退出收场。修法：把这条失败收进 `errors`，
+  并在 `errors` 非空时设 `process.exitCode = 1`。`--dry-run` 走不到这段，所以
+  `executeUninstall` 改成导出，让固定点能用**空的删除目标**端到端驱动它（这个测试不删这台机器上任何文件）。
+- **CLI 的开场白说的是上游产品名。** `src/cli/cmd/uninstall.ts` 的 `prompts.intro("Uninstall OpenCode")`
+  改成产品名。这条同时也暴露尺子自己的缺口：`harness/tools/brand-surface.mjs` 的
+  `upstream-in-user-text` 枚举的是 `describe:` / `console.log(` / `prompts.log.*(` 这些前缀，
+  而 `prompts.intro(` 不在其中——它记的正是"这条规则历史上漏过的三种形"，这是第四形；
+  见下面"本轮没做完的"。
+- **TUI 注意力通道的 5 条断言写着上游名。** `test/cli/cmd/tui/attention.test.ts` 断言通知标题是
+  `opencode`，生产代码回的是 `glasspane-harness`。这些用例住在 `test/cli/` 下，而 fork 自己的 CI
+  名单里从来没有这一档，所以四条红了没有任何一道闸知道。修法：5 条标题期望改成产品名
+  （4 红 → 1 红，剩的那条见"没做完的"），并把 `test/cli/cmd/glasspane-*.test.ts` 加进 CI 名单、
+  把下限从 18 抬到实测的 **21**（量法：在 `packages/opencode` 里展开那段 `files=(...)` 数组数条数）。
+- **文档里一条没人发的错误码。** `docs/troubleshooting.md` 教操作者去认 `GP_E_NO_SOCKET`，
+  而两棵树（fork + 父仓）里没有任何代码发这个码；`daemon.ts` 真发的是 `GP_E_SOCKET_PATH` 与
+  `GP_E_STATE_ROOT`（相对 socket / 相对 state root 的拒绝）。改成真码，并保留"这条曾经写错过"的说明。
+- **`SECURITY.md` 说 Trusted Publisher 还没配。** 这条被 registry 本身推翻，而 `product.json` 的
+  `npm.trustedPublisher.status` 早就记着反证（v0.7.8 带 `slsa.dev/provenance/v1` 证书）。
+  改成按实测说话，并留下"这句话曾经怎么写、被哪条读法推翻"。
+- **两处文档给的校验命令是死路。** `SECURITY.md` 与 `docs/install.md` 都让操作者跑
+  `npm audit signatures --prefix "$(npm prefix -g)"`。本机实测（npm 11.20，`/usr/local` 里装着 0.12.x）：
+  `npm error found no installed dependencies to audit`——全局前缀没有 lockfile 可审。
+  改成实测可用的两条：`npm view glasspane-harness@<version> dist.integrity`（回了 sha512）与
+  registry 的 attestation 读法；并说明 `npm audit signatures` 只有在**装过这个包的项目里**才成立。
+- **发布程序真源里的尺子路径是错的。** `docs/release.md` 的"from the fork root"块写
+  `node ../../tools/product-surface.mjs` 等 4 条——从 `harness/glasspane-harness/` 看，`../../tools`
+  是父仓的 `tools/`，那里只有 `gpg-signing.sh`、`release-signing-gate.sh`、`sync-kernel.sh` 与 `prompts/`，
+  一把尺子都没有。改成 `../tools/`。这条本轮真会执行到，写错就会静默跳过一道闸——正是本仓反复记的那种形状。
+
 ## [0.12.5] — 2026-10-29
 
 **版本判断：patch。** 本版不含任何行为变化：它装的是 0.12.4 那两条修复**缺的固定点测试**，

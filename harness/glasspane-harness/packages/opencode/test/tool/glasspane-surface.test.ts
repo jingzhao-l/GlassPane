@@ -991,8 +991,13 @@ describe("what the permission plane is handed", () => {
         `patterns: ["${method}"], always: ["${method}"]`,
       )
     }
-    // gp_act keeps `always: []`: no answer to its prompt may authorize every later action.
-    expect(surface).toContain("always: [],")
+    // gp_act scopes `always` to its own pattern too. It used to be `always: []` with a comment
+    // claiming that was the cautious choice, but the emptiness was the defect: the TUI builds the
+    // "This will allow the following patterns…" list from this array and appends rules from it, so
+    // an accepted Always answer stored no rule and re-asked the identical action forever.
+    expect(surface).toContain("patterns: [`act:${params.selector.role}:${params.action}`],")
+    expect(surface).toContain("always: [`act:${params.selector.role}:${params.action}`],")
+    expect(surface).not.toContain("always: [],")
   })
 
   test("the model cannot pick which rule gp_act is evaluated against", () => {

@@ -341,7 +341,13 @@ export const ActTool = Tool.define(
           yield* ctx.ask({
             permission: "glasspane",
             patterns: [`act:${params.selector.role}:${params.action}`],
-            always: [],
+            // The call's own pattern, per rule 3 at the top of this file. An empty list here was
+            // not caution — the TUI renders "This will allow the following patterns…" from this
+            // array, so accepting *Always* stored nothing and the same click asked again forever,
+            // with an accepted dialog promising otherwise. The rule cannot be broader than this
+            // call: `action` is a closed `Schema.Literals` set and `validateSelector` refuses any
+            // role carrying `*`, `?`, `[`, `\` or `:` (pinned by the test that names this pair).
+            always: [`act:${params.selector.role}:${params.action}`],
             metadata: fields(params),
           })
           const reply = yield* Daemon.call("act", engineBody(params))

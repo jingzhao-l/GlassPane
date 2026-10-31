@@ -7,7 +7,7 @@ All channels are macOS-only (see [Platform support](index.md#platform-support)).
 ```bash
 npm install -g glasspane-harness     # recommended; installs the wrapper + your Mac's package
 bun add -g glasspane-harness
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.5/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.13.0/scripts/install.sh | bash
 ```
 
 Both commands are available afterwards: `glasspane-harness` and `gp-harness`. The npm and bun
@@ -74,7 +74,12 @@ you want that answer, ask for it:
 
 ```bash
 # npm channel — does the registry vouch for these bytes, and is there an attestation?
-npm audit signatures --prefix "$(npm prefix -g)"
+# Measured on npm 11.20: `npm audit signatures --prefix "$(npm prefix -g)"` answers
+# `npm error found no installed dependencies to audit`, because a global prefix has no lockfile to
+# audit. The registry-side reads below are what actually answer the question; if you want
+# `npm audit signatures`, run it from a project that installed the package itself.
+npm view glasspane-harness@<version> dist.integrity
+curl -fsSL "https://registry.npmjs.org/-/npm/v1/attestations/glasspane-harness@<version>"
 
 # release-asset channel — checksum, then signature, then *which key* made it
 shasum -a 256 -c SHA256SUMS.txt
@@ -105,7 +110,7 @@ does with a nonzero success is add `|| true`, which is how an honest signal beco
 Only you can decide to install anyway, and saying so is an explicit act:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.12.5/scripts/install.sh | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.13.0/scripts/install.sh | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash
 ```
 
 The override has to be set for the shell that reads the script, not for `curl`: a leading

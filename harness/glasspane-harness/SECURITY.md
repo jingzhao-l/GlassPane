@@ -72,10 +72,24 @@ held back; nothing about it is silent.
   invalidate the recorded divergence surface.
 - npm releases are published from this repo's Release workflow with `--provenance`, so the
   registry records a signed provenance statement tying the published tarball to the commit
-  and workflow run that built it. What is **not** in place is npm's repository-side Trusted
-  Publisher setting: publishing currently authenticates with the workflow's OIDC identity
-  per-run, and a run that reports "staged, not published" has published nothing. `npm view
-  glasspane-harness@<version>` and `npm audit signatures` are the checks, not a green job.
+  and workflow run that built it. npm's repository-side Trusted Publisher setting is
+  **configured and measured working** — `product.json`'s `npm.trustedPublisher.status` records
+  the read (v0.7.8 carried both the publish and a `slsa.dev/provenance/v1` attestation, read from
+  `https://registry.npmjs.org/-/npm/v1/attestations/glasspane-harness@0.7.8`). This sentence used
+  to say the setting was "not in place" while provenance shipped: that is a claim the registry can
+  falsify, and it did. What the setting does not do is promise a human approval gate: publishing
+  still authenticates with the workflow's OIDC identity per-run, and a run that reports
+  "staged, not published" has published nothing (the staged release waits for `npm stage approve`,
+  which needs the owner's 2FA).
+- The checks an operator can actually run: `npm view glasspane-harness@<version> dist.integrity`
+  (measured working on npm 11.20 — it answers the sha512 the tarball was published with) and the
+  attestation read `curl -fsSL https://registry.npmjs.org/-/npm/v1/attestations/glasspane-harness@<version>`.
+  `npm audit signatures` is **not** one of them as this page used to write it: run against a global
+  prefix (`--prefix "$(npm prefix -g)"` / `--prefix "$(npm root -g)/.."`) it answers
+  `npm error found no installed dependencies to audit` — measured 2026-10-30 with 0.12.x installed at
+  `/usr/local` — because a global prefix has no lockfile for npm to audit. It only works from a
+  project that installed the package itself (`npm i glasspane-harness@<version> && npm audit signatures`).
+  These are checks a person runs, not a green job.
 - Release assets (`glasspane-harness-darwin-<arch>.zip`) carry a `SHA256SUMS.txt` manifest
   and a detached GPG signature per asset (`.asc`). The signing key's full fingerprint is
   asserted, not just mentioned: `scripts/install.sh` carries both the armored public key and
@@ -97,7 +111,8 @@ Both channels have a check, and neither check is performed on your behalf unless
 
 ```bash
 # npm channel: does the registry vouch for these bytes, and does the attestation resolve?
-npm audit signatures --prefix "$(npm root -g)/.."   # provenance + registry signatures
+npm view glasspane-harness@<version> dist.integrity      # the bytes the registry served
+curl -fsSL "https://registry.npmjs.org/-/npm/v1/attestations/glasspane-harness@<version>"
 
 # release-asset channel: checksum, then signature, then the identity of the signer
 shasum -a 256 -c SHA256SUMS.txt                     # integrity of the downloaded bytes
