@@ -136,6 +136,61 @@ Swift 侧 `DailyRound20261030Swift1PathShapeTests`、`…Swift1PermissionHonesty
 `swift test --package-path engine` 的总数从 1.26.0 的 1530 涨到本版实测值；
 每一条修复都做过反向变异（把那一处逐字改回坏写法，要求具名用例变红，`cp` 恢复后 `shasum` 核回）。
 
+### 同日第二轮并入本号（同一棵树上 07:30 那条线的另一半）
+
+同一晚另一条会话把版本线推到 1.27.0 并提交 `release: 1.27.0`，但 **tag 与 npm 两格都没发生**
+（实测：`git tag --sort=-v:refname` 顶部是 `v1.26.0`；`npm view glasspane-mcp version` 与
+`glasspane-install` 都是 `1.26.0`）。既然 1.27.0 还没发出去，本轮的修复**并进这一号**，不另取
+一个号把同一晚的两批工作拆成两份发布物。上面那四条 minor 判据对本轮同样成立，且本轮又动了
+一次对外报文（见下 `GP_E_SOCKET_TRUST` 的 HTTP 状态与 `requiresDaemonRestart` 的取值域）。
+
+本轮审出并修完的缺陷（每条都有具名用例，逐条台账见
+`specs/GlassPane_每日2026-10-31_发现台账.md`）：
+
+- **main 上遗留的 10 条红清零**（上一轮 19:40/19:57 两批落码未收口）：壳侧 5 条（socket 默认
+  路径三处出口、参数位引号别名对闸隐身、夹具缺 `probeListener`、`GP_E_SOCKET_TRUST` 被答成
+  422、协议层例子选路缺 `validate`）+ 安装器 5 条（生产面已改单引号而测试钉着双引号字面量）。
+  基线读数是干净 main 的 704/699/5（壳）与 306/301/5（安装器）。
+- **P0 出路点名一个不存在的可执行文件**：`updater/**` 与壳里 70 处字符串字面量写着裸
+  `updater check|apply|rollback|status|enable|disable`，而 `updater/package.json` 没有 `bin`
+  字段、npm 只发布两个裸名包、`install.sh` 也不链这个名字——照抄得 127，且这些句子会被
+  `update-state.ts` 原样转发给 agent。Swift 面板早认了这件事（`UpdatePanelLogic.swift:401`），
+  JS 半边是 A 面改了 B 面没改的半修。新增 `updater/lib/invocation.js` 作为唯一说"跑哪一份
+  程序"的地方（`import.meta.url` 自定位 + `realpathSync`，每个参数位过 `quoteShellArg`）。
+  `agent-entry.js` 是 launchd 指向的独立拷贝，那条 dirlink 用例当场把加 import 的写法判红，
+  所以它的失败分支改为不印照抄命令（那正是"指针读不到"的一支，任何绝对路径都是发明的）。
+- **P0 双入口对同一串 argv 两个答案**：`installer/cli.js` 的显式定位位（`--repo` /
+  `GLASSPANE_REPO`）从前只测 `fs.existsSync`，真的把一棵非仓库树当 cwd 跑 `npm ci` 之后才回 1；
+  `install.sh` 同一串输入回 1 且零写入。现在两入口都在 `looksLikeRepoHere` 之前拒并点名两条判据；
+  `--repo` 取值是旗标形状（含单横线 `-x`）两入口同回 2 同说话；dry-run 打印的两行计划带引号，
+  新用例把它们**逐行执行**给 argv 桩看。
+- **上线泄漏一族**：`dispatch.ts` 的协议兜底 catch 与 `tools.ts` 四支 `GP_E_INTERNAL` 手臂都把
+  `String(error)` 放上线（HTTP 半边 `wireCause` 早就剥掉）；协议层两支句子还把调用方原文无界
+  复述。现在细节只进本进程 stderr，帧上留失败类型 + remedy，外来文本有界并中和控制字符。
+- **P1 恒真字段冒充判别器**：`gp_project_set` 的 `requiresDaemonRestart` 从前无条件 `true`，
+  而 `tools.ts:2433` 把它读成"重启是否还欠着"的判据；daemon 那一侧同一枚字段是算出来的
+  （`ProjectRegistry.swift:707`）。改成三态实测：没改动⇒false、写的正是那个根会载的⇒true、
+  daemon 没自报根⇒null（说"不知道"，不许沿用友好值）。
+- **P1 状态文件判与读不是同一个 inode**：`existsSync`→`lstatSync`→`readFileSync` 三步改成一次
+  `open(O_RDONLY|O_NOFOLLOW)` + `fstat` + 同一 fd 读；外来正文（`current`/`latest`/
+  `lastError.message`/`runtime.detail`/`staged.*`）加长度界并走 `escapeTerminalControl`，
+  另设 1 MiB 上限，不再按外来文件声称的大小去分配。
+- **P1 重连沿用上一个 daemon 的自报值**：`ReconnectingSocketIo` 之后 `stateRoot`/`version`
+  永不清零，`project-registry` 会按"服务自报根"决定往哪儿写盘。改成 open 时复位、读不到答不知道。
+- **P2 一批"闸看不见东西"**：`remedy-surface` 的 `SHELL_ONLY` 改成必须等于派生集合（新码漏抄
+  即红）；两处指向不存在测试文件的假清白补上真文件（`npm-partial-success`、
+  `daily-20261030-gate-handoff`）；`fixture-daemon-shape` 的缺键判据从硬点名三把改成从 Swift
+  派生全部条件键（2026-10-22 加的 `ringEvictedEventsTotal`/`durationOverflowFramesTotal` 就此
+  补进夹具）；`--help` 第三档与 `homeDefaultSocketPath()` 钉成同一段路径；
+  `check-workflows` 的行内 `env:` 盲区由另一条会话与本笔共同收口。
+- **P2 宣布了一件没做到的收紧**：`StateRoot.tightenPermissions` 对证据目录只判 `chmod` 返回值，
+  在忽略权限位的卷上会把"没粘住的 0700"报成"已收紧"。改成与根目录/文件同一口径（回读模式），
+  不符就落进既有 notes 通道。
+- **文档主张与代码打脸**：`engine/smoke.md` 那两行写 `--check-input-permission` 有三态，探针今天
+  只发 `granted | unverifiable`（真机实测两把读数），历史读数标注所属版本而不改写；
+  `CONTRIBUTING` 双语 / `ITERATE.md` / PR 模板 / `iterate.config.yaml` 的"工具契约三处镜像"改成
+  实测形状（`kernel/schemas` 不发布工具清单，它是被钉的数据契约语料，追平靠换 pin）。
+
 ## [1.26.0] — 2026-10-29
 
 **版本判断：minor。** 判据仍是 1.6.2 写下、1.22.0/1.23.0/1.24.0/1.25.0 各自复述过的那一条：patch 要求
