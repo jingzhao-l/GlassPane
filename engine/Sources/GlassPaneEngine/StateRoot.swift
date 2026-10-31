@@ -215,6 +215,53 @@ public struct StateRoot: Equatable {
         return .usable
     }
 
+    /// Bring one **existing** directory to an owner-only mode and verify it by
+    /// reading the mode back, returning nil only when the mode is what was asked
+    /// for. `isolateFile` already judges a file this way; this is the same
+    /// judgment for a directory, and the two directory call sites below share it
+    /// so they cannot drift apart.
+    ///
+    /// Why the re-read is the judgment and `chmod`'s own return value is not:
+    /// `chmod` returning 0 says the syscall was accepted, not that the bits were
+    /// kept. A read-only mount, an NFS or SMB export without permission support,
+    /// an `uchg`-style flag the driver ignores, or an ACL that swallows the write
+    /// all answer 0 and leave `st_mode` exactly as it was — on those volumes the
+    /// mode is decided by the mount, and this account never held it. Measured on
+    /// this machine: MS-DOS and exFAT volumes (`hdiutil create -fs MS-DOS`,
+    /// attached `noowners`) accept `chmod` with rc 0 while `stat` keeps reporting
+    /// the fabricated mode, so a file staged there reads `0700` after
+    /// `chmod(0600)`. Announcing "tightened" on that answer is the defect: the
+    /// line is read by the panel and by agents as evidence of what this run did.
+    ///
+    /// The failure keeps the existing note shape (`<label>: chmod(0700) failed: …`
+    /// for a refusal, `<label>: mode is <measured>, not <target>` for a mode that
+    /// did not stick) because that channel already has readers — `tightenPermissions`
+    /// logs every line it returns, and a non-empty list is what suppresses the
+    /// "owner-only" announcement.
+    ///
+    /// `apply` is the one chmod this sweep performs through: it exists so the
+    /// "rc 0, mode unchanged" volume is executable in a test. No local filesystem
+    /// produces that shape for a **directory** (measured: APFS keeps the mode,
+    /// `chflags uchg` and read-only mounts make `chmod` answer non-zero, and the
+    /// FAT/exFAT images attachable without root fabricate directory modes at
+    /// exactly `0700`, so the re-read passes there for the wrong reason), and the
+    /// seam is the same kind of injection `isolationCheck` is for the writers.
+    static func tightenDirectory(
+        _ path: String, to mode: mode_t, label: String,
+        apply: (String, mode_t) -> Int32
+    ) -> String? {
+        if apply(path, mode) != 0 {
+            let code = errno
+            return "\(label): chmod(\(String(format: "%04o", Int(mode)))) failed: "
+                + String(cString: strerror(code))
+        }
+        var after = stat()
+        let measured = stat(path, &after) == 0 ? Int(after.st_mode & 0o777) : -1
+        guard measured != Int(mode) else { return nil }
+        return "\(label): mode is \(String(format: "%04o", measured)), "
+            + "not \(String(format: "%04o", Int(mode)))"
+    }
+
     /// Bring the root, its archive directory and the state files inside them to
     /// owner-only, reporting every step. Called once at daemon start, so the
     /// long-lived process that writes the archive is also the one that closes
@@ -227,8 +274,17 @@ public struct StateRoot: Equatable {
     /// is not a reason to refuse to *start*, and the writers keep refusing
     /// individually (`EvidenceStore.ensureIsolatedDirectory` refuses the write),
     /// so this sweep hardens what it can and says exactly what it could not.
+    ///
+    /// Every path here is judged the same way: the mode is read back after the
+    /// chmod, so the closing "permissions tightened to owner-only" line states
+    /// what this run measured rather than what it asked for. `chmod` returning 0
+    /// is not that evidence (`tightenDirectory` names the volumes that answer 0
+    /// while keeping the mode).
     @discardableResult
-    public func tightenPermissions(log: EngineLog) -> [String] {
+    public func tightenPermissions(
+        log: EngineLog,
+        chmodDirectory: (String, mode_t) -> Int32 = { chmod($0, $1) }
+    ) -> [String] {
         var notes: [String] = []
         // `stat`/`chmod` both follow the leaf symlink, so a `--state-dir` naming
         // `~/.glasspane -> /somewhere/else` would tighten the *target* tree and then
@@ -242,14 +298,10 @@ public struct StateRoot: Equatable {
         }
         var info = stat()
         if stat(path, &info) == 0 {
-            if chmod(path, mode_t(0o700)) != 0 {
-                notes.append("state root \(path): chmod(0700) failed: \(String(cString: strerror(errno)))")
-            } else {
-                var after = stat()
-                let mode = stat(path, &after) == 0 ? Int(after.st_mode & 0o777) : -1
-                if mode != 0o700 {
-                    notes.append("state root \(path): mode is \(String(format: "%04o", mode)), not 0700")
-                }
+            if let defect = Self.tightenDirectory(
+                path, to: mode_t(0o700), label: "state root \(path)", apply: chmodDirectory
+            ) {
+                notes.append(defect)
             }
         } else {
             // The root does not exist yet: every writer creates it with 0700
@@ -268,11 +320,20 @@ public struct StateRoot: Equatable {
                 notes.append(defect)
             }
         }
-        // The archive directory itself (0700), separate from the root.
+        // The archive directory itself (0700), separate from the root. It is judged
+        // by the same predicate as the root above — a chmod that nothing reads back
+        // could only ever *add* a false "tightened" line here, because the note list
+        // stayed empty while the mode stayed group-readable on a volume that ignores
+        // permission bits (2026-10-31 P2-a).
         if let defect = archiveDefect {
             notes.append(defect)
-        } else if stat(evidenceDirectory, &info) == 0, chmod(evidenceDirectory, mode_t(0o700)) != 0 {
-            notes.append("evidence directory \(evidenceDirectory): chmod(0700) failed: \(String(cString: strerror(errno)))")
+        } else if stat(evidenceDirectory, &info) == 0 {
+            if let defect = Self.tightenDirectory(
+                evidenceDirectory, to: mode_t(0o700),
+                label: "evidence directory \(evidenceDirectory)", apply: chmodDirectory
+            ) {
+                notes.append(defect)
+            }
         }
         for note in notes {
             log.error("state permission not isolatable — \(note)")

@@ -135,7 +135,7 @@ rm -rf "$WORK"
 
 | 环节 | 脚本 | 结果 |
 |---|---|---|
-| C33（P2 v2.0 §16.2）输入监控真机冒烟 | `engine/.c33_smoke.py` | C33 SMOKE OK：`glasspaned --check-input-permission`=granted（新增 CLI flag，granted/denied/notDetermined 三态如实输出）→ 自动发现 settings GUI → attach → observe（220 节点）→ act（role-only AXButton，operationId 落盘）→ `last_evidence` 归因面如实呈现（attribution.level=soft、contaminated=false、circuitBreaker.level=1）。按 spec v2.0 §17.2 降级口径：输入流污染判定待 daemon 注入 AttributionGuard 后验证（当前为纯操作权互斥形态），本冒烟覆盖授权环境下完整操作回路与归因面观测 |
+| C33（P2 v2.0 §16.2）输入监控真机冒烟 | `engine/.c33_smoke.py` | C33 SMOKE OK：`glasspaned --check-input-permission`=granted（新增 CLI flag；该命令当下的取值表如实输出两态 `granted | unverifiable`——一枚 `CGPreflightListenEventAccess` 预检布尔说不出更早那种区分，2026-10-30 那轮把词表收到这两态，本行 2026-09-19 抄的是当时旧二进制的三态表，那一次的实际读数在下方「权限主体修正真机记录」里已标注所属版本）→ 自动发现 settings GUI → attach → observe（220 节点）→ act（role-only AXButton，operationId 落盘）→ `last_evidence` 归因面如实呈现（attribution.level=soft、contaminated=false、circuitBreaker.level=1）。按 spec v2.0 §17.2 降级口径：输入流污染判定待 daemon 注入 AttributionGuard 后验证（当前为纯操作权互斥形态），本冒烟覆盖授权环境下完整操作回路与归因面观测 |
 | T9（P2 v2.1 §19.2）渐进退化泄漏注入冒烟 | `engine/.t9_smoke.py` | T9 SMOKE OK：脚本自编译泄漏金丝雀（AppKit，每次点击保留 8MB 内存 + 1 个 fd），daemon 驱动 act 至第 16/24 轮 → evidence 熔断升级 degraded、reason 携带 `degradation\|memory+handles; longSession=false; screen-recording-denied`（当日实测原样；X-6 起末段为 `screen-recording-denied: <捕获原文>`） → `diagnose.class=T9` |
 
 真机观察补充：
@@ -180,7 +180,7 @@ rm -rf "$WORK"
 
 | # | 观测 | 手段 |
 |---|---|---|
-| 1 | 裸二进制席位按**路径**记账：原路径 `glasspaned --check-input-permission`=granted，同内容拷到 `/tmp` 后=notDetermined | 双路径对照 |
+| 1 | 裸二进制席位按**路径**记账：原路径 `glasspaned --check-input-permission`=granted，同内容拷到 `/tmp` 后=notDetermined〔**旧二进制的历史记录**：这个 `notDetermined` 是 2026-09-19 那一次的读数，属 2026-10-30 词表收紧之前的探针；同一个席位今天的读数打印 `unverifiable`，命令那两面是 `granted | unverifiable`。「按路径记账」这条结论与词表版本无关，故不改写、只标注它属于哪一版〕 | 双路径对照 |
 | 2 | 无 bundle 身份时**继承父 app 判定**：同一 `/tmp` 副本，终端子进程=granted，`launchctl submit`（父=launchd）=notDetermined；重签改 cdhash 不改变这一结果 | 双上下文对照 |
 | 3 | 旧 `make-app.sh` 的 `GlassPane.app` 是坏签名：`codesign --verify` → `code has no resources but signature indicates they must be present`；`Identifier=glasspane-settings` 与 `CFBundleIdentifier=com.glasspane.settings` 不一致、`Info.plist=not bound`；且 installer 打包完仍直接起裸二进制（bundle 从未成为运行主体） | `codesign -dvvv` / `--verify --strict` / `ps` |
 | 4 | 面板旧版把**面板进程**的 `AXIsProcessTrusted()` 当作 daemon 状态显示（配合观测 2 即"假绿灯"）；`SettingsModel.refreshEntriesOnly()` 为证据 | 代码 + 上下文对照 |
