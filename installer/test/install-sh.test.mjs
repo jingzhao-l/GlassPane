@@ -223,7 +223,7 @@ test('install.sh: dry-run 的两行计划整行照抄跑得动，带空格的落
     }
     const cloned = runCopied(cloneLine)
     assert.equal(cloned.cmd, 'git', `那一行的命令位该是 git，实得 ${cloned.cmd}`)
-    assert.deepEqual(cloned.argv, ['clone', '--branch', 'v1.26.0', '--depth', '1', '--',
+    assert.deepEqual(cloned.argv, ['clone', '--branch', `v${RELEASE_VERSION}`, '--depth', '1', '--',
       'https://github.com/jingzhao-l/GlassPane.git', cloneDir],
       `照抄 clone 那一行得到的 argv 与将要执行的不是一回事（落点被重排就是这一条红）：${JSON.stringify(cloned.argv)}`)
     const delegated = runCopied(delegateLine)

@@ -73,16 +73,16 @@ Things worth knowing, because they are the usual way this is set up wrong:
    ```bash
    # from the fork root
    $EDITOR product.json CHANGELOG.md
-   node ../../tools/product-surface.mjs      # manifest, build, publish, installers, pipelines agree
+   node ../tools/product-surface.mjs      # manifest, build, publish, installers, pipelines agree
    node ../../scripts/check-doc-links.mjs
    ```
 
 2. **Commit** with the golden records in the same commit as the tree changes:
 
    ```bash
-   node ../../tools/fork-diff.mjs --record
-   node ../../tools/tool-surface.mjs --record
-   node ../../tools/brand-surface.mjs --record
+   node ../tools/fork-diff.mjs --record
+   node ../tools/tool-surface.mjs --record
+   node ../tools/brand-surface.mjs --record
    # Stage by name, never `git add -A`: this monorepo is routinely held dirty by a
    # parallel lane (the engine/MCP-shell daily run works in the same checkout), and an
    # `-A` here commits their half-finished work under my message. `git status --porcelain`

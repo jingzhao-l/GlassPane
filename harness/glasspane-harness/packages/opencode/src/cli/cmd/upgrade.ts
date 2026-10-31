@@ -54,6 +54,9 @@ export const UpgradeCommand = {
     if (!Installation.isUpdateChannel(method)) {
       prompts.log.warn(Installation.noUpdateChannel(method).message)
       prompts.outro("Done")
+      // A refusal is not a success. An unattended agent reads the exit code first and this
+      // sentence second; `return` alone left it at 0, which is the face claiming the upgrade ran.
+      process.exitCode = 1
       return
     }
     prompts.log.info("Using method: " + method)
@@ -69,6 +72,7 @@ export const UpgradeCommand = {
       if (latest instanceof Installation.NoUpdateChannelError) {
         prompts.log.warn(latest.message)
         prompts.outro("Done")
+        process.exitCode = 1
         return
       }
       if (latest instanceof Error) throw latest
@@ -96,6 +100,9 @@ export const UpgradeCommand = {
         }
       } else if (err instanceof Error) prompts.log.error(err.message)
       prompts.outro("Done")
+      // Same reason as the refusal branches: the package manager said no, and exit 0 read as
+      // "upgraded". `spinner.stop(…, 1)` only styles the line — nothing set a process code.
+      process.exitCode = 1
       return
     }
     spinner.stop("Upgrade complete")

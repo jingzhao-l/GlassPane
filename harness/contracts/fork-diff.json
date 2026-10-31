@@ -2,11 +2,11 @@
   "baseTag": "v1.18.32",
   "forkPath": "harness/glasspane-harness",
   "referenceClone": ".external/opencode",
-  "observedAt": "2026-10-30",
+  "observedAt": "2026-10-31",
   "counts": {
-    "identical": 4638,
-    "edited": 287,
-    "added": 113,
+    "identical": 4637,
+    "edited": 288,
+    "added": 114,
     "deleted": 1707
   },
   "edited": [
@@ -216,6 +216,7 @@
     "packages/opencode/src/util/repository.ts",
     "packages/opencode/test/AGENTS.md",
     "packages/opencode/test/agent/plugin-agent-regression.test.ts",
+    "packages/opencode/test/cli/cmd/tui/attention.test.ts",
     "packages/opencode/test/cli/error.test.ts",
     "packages/opencode/test/cli/help/__snapshots__/help-snapshots.test.ts.snap",
     "packages/opencode/test/cli/import.test.ts",
@@ -378,6 +379,7 @@
     "packages/opencode/src/tool/glasspane/index.ts",
     "packages/opencode/src/tool/glasspane/kernel.ts",
     "packages/opencode/src/tool/glasspane/providers.ts",
+    "packages/opencode/test/cli/cmd/glasspane-uninstall-exit.test.ts",
     "packages/opencode/test/cli/cmd/glasspane-upgrade-channel.test.ts",
     "packages/opencode/test/config/glasspane-plugin-dependency.test.ts",
     "packages/opencode/test/config/glasspane-project-plugin-trust.test.ts",
@@ -2771,7 +2773,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "818cb2a1138aa84fab1cb7a8ff14589cd9f5dcff"
+      "forkHash": "bc697290b0fbca8b2342826204493009fe23e16e"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -2901,12 +2903,12 @@
     {
       "file": "packages/opencode/src/cli/cmd/uninstall.ts",
       "upstreamHash": "0afdc518545d1084b0cca7ba945353fd54d38e07",
-      "forkHash": "8f812c20555b054f176e6328b6b47fbb6e15aaed"
+      "forkHash": "75a9dcdc632e97f2257e034736ce54e5b4e09b4f"
     },
     {
       "file": "packages/opencode/src/cli/cmd/upgrade.ts",
       "upstreamHash": "3c1604a0b8354c49fa06a93e825e4b11041cc5dd",
-      "forkHash": "f8c891504fe61a656ab31c1466288082a5e46a07"
+      "forkHash": "49000ef4eb27f8abbc52059560108d92c042bc4f"
     },
     {
       "file": "packages/opencode/src/cli/cmd/web.ts",
@@ -3142,6 +3144,11 @@
       "file": "packages/opencode/test/AGENTS.md",
       "upstreamHash": "464b75cd82f050585ebe64974337fbcc1c891601",
       "forkHash": "21c6f14698980c49edd9e3259eedd65637b2ea88"
+    },
+    {
+      "file": "packages/opencode/test/cli/cmd/tui/attention.test.ts",
+      "upstreamHash": "c8644385abc4ae06f8474683015df39db7255dc0",
+      "forkHash": "412f6ed76d5c6a96e93f2b4baf6a7a9898d15a07"
     },
     {
       "file": "packages/opencode/test/cli/error.test.ts",
@@ -3536,7 +3543,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "c2a99ebc0663d93b73425f11277818aad80bc9ef"
+      "forkHash": "e549983dc031133d1cb78fcf7efe9d5afbdc8fd0"
     },
     {
       "file": "script/publish.ts",
@@ -3556,13 +3563,13 @@
     {
       "file": "SECURITY.md",
       "upstreamHash": "e7e59f4a27ac2bd2ed5005f8851dcb946c08f914",
-      "forkHash": "834b63da6bd1e4842522721d1bc770fb33e24080"
+      "forkHash": "0e26ea743893c652bf1551cb3a537744e80cc73b"
     }
   ],
   "addedDetail": [
     {
       "file": ".github/workflows/ci.yml",
-      "forkHash": "25daf1eee1a787473c5db045ef4429f13f4346ba"
+      "forkHash": "a7d449f80cd02f2a1d68254a02ac10115112d53a"
     },
     {
       "file": ".github/workflows/release.yml",
@@ -3734,7 +3741,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "4acbed485cd831edf66184e54a1bc3436d71eb2c"
+      "forkHash": "c9407a511699dc6cb1ad53022446ed79bc47ae19"
     },
     {
       "file": "contracts/engine-methods.json",
@@ -3762,7 +3769,7 @@
     },
     {
       "file": "docs/install.md",
-      "forkHash": "4b927cb781fded9530cc715a86bd4036e6f5893a"
+      "forkHash": "5c96a893c92103fd37dc11c6ea29ee3d82a37ef3"
     },
     {
       "file": "docs/kernel-integration.md",
@@ -3778,7 +3785,7 @@
     },
     {
       "file": "docs/release.md",
-      "forkHash": "dd78873c959a7b031eb8ac34d878675cee890741"
+      "forkHash": "fc9d9a7f8d370503a6015821063e2a8a18dfec40"
     },
     {
       "file": "docs/tools.md",
@@ -3786,7 +3793,7 @@
     },
     {
       "file": "docs/troubleshooting.md",
-      "forkHash": "9d2c806f2a734330752170fb765b0ec565bd5ceb"
+      "forkHash": "f39f34ec5183988e7a5cf08be3c26d4e65ecbdee"
     },
     {
       "file": "FORK.md",
@@ -3858,7 +3865,7 @@
     },
     {
       "file": "packages/opencode/src/tool/glasspane/index.ts",
-      "forkHash": "14bb0e202cfb6e2cfe5254f7a8bde7b2d577fce5"
+      "forkHash": "1d26f49a3221acef39e958f0f15051882613b3ec"
     },
     {
       "file": "packages/opencode/src/tool/glasspane/kernel.ts",
@@ -3866,11 +3873,15 @@
     },
     {
       "file": "packages/opencode/src/tool/glasspane/providers.ts",
-      "forkHash": "df79123d02826db7185d7d2a530f4d58f56fdc12"
+      "forkHash": "1c94ef40ad80b70edf49843f35829ef30d24b14a"
+    },
+    {
+      "file": "packages/opencode/test/cli/cmd/glasspane-uninstall-exit.test.ts",
+      "forkHash": "2c3d6008f9953a86fe7437f04d3cc63c807a8c65"
     },
     {
       "file": "packages/opencode/test/cli/cmd/glasspane-upgrade-channel.test.ts",
-      "forkHash": "f17d2fdc5f819915bcbad2dcaec4275264ee15b9"
+      "forkHash": "fbc5699e0091cbb5b0c48825228c104c9aa87da2"
     },
     {
       "file": "packages/opencode/test/config/glasspane-plugin-dependency.test.ts",
@@ -3954,11 +3965,11 @@
     },
     {
       "file": "packages/opencode/test/tool/glasspane-provider-registration.test.ts",
-      "forkHash": "9085cfc376282089b35b4f9e812017935882938d"
+      "forkHash": "013f233202bb0872d8e13569892e0baf0cbcbd57"
     },
     {
       "file": "packages/opencode/test/tool/glasspane-surface.test.ts",
-      "forkHash": "f2db3dfd04da225542526723848af2c69699fe16"
+      "forkHash": "75fc32a5f307f0967b2e2206b3601a36611b2813"
     },
     {
       "file": "packages/opencode/test/tool/glasspane-websearch-boundary.test.ts",
@@ -3974,11 +3985,11 @@
     },
     {
       "file": "product.json",
-      "forkHash": "3a3b93e45113dadd5ff8240d825fa1503a7b8baf"
+      "forkHash": "1406639db1b8b6aaf6b7085a184da9dc4db1aa06"
     },
     {
       "file": "README.zh-CN.md",
-      "forkHash": "156cba905c487c49a9d343204b9f1dd00f4a994d"
+      "forkHash": "6870168b31005882fb8ea00eb0948efdc3b1154b"
     },
     {
       "file": "script/assert-ci-green.mjs",
@@ -4006,11 +4017,11 @@
     },
     {
       "file": "scripts/install.sh",
-      "forkHash": "68d99d67f67939717d2bf31031ab9b96efc545db"
+      "forkHash": "4f92d8ba1d806e238a628d9df5740e8e2621ae34"
     },
     {
       "file": "SYNCLOG.md",
-      "forkHash": "f14da95a6dba8024422ce89092bfa22a73d42545"
+      "forkHash": "dd0da6defc70e61147ead8c3fc62ab8fa99cf96d"
     }
   ]
 }

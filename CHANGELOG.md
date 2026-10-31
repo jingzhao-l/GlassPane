@@ -4,7 +4,137 @@
 
 ## [Unreleased]
 
-（空。1.26.0 收口后没有未归号的条目。)
+（空。1.27.0 收口后没有未归号的条目。)
+
+## [1.27.0] — 2026-11-01
+
+**版本判断：minor。** 判据仍是 1.6.2 写下、1.22.0/1.23.0/1.24.0/1.25.0/1.26.0 各自复述过的那一条：
+patch 要求「状态文件的字段没动、退出码集合没动、CLI 参数没动、npm 包的 `bin` 声明没动」。本版动了四项：
+
+1. **退出码集合**——`install.sh --repo <--旗标>` 这一族从前退 1（按坏目录拒），现在与
+   `installer/cli.js` 一样退 2 并说同一句话；实测同一串 argv 在两条一键入口上从前是两个码两句话
+   （`--repo --help`：1 vs 2；`--repo --no-prompt --help`：0 vs 2）。
+2. **对外报文与词表**——`probe_status` 新增 `probeListener`（`live` / `absent (…)`，缺席原因由起
+   daemon 的那一段申报）；`--permissions` 两席的取值不再由一个布尔产出 `notDetermined`；
+   壳侧新增错误码 `GP_E_SOCKET_TRUST`。
+3. **CLI 参数面文档**——`--check-screen-permission` / `--check-input-permission` /
+   `--check-accessibility` 的 `--help` 段落各自写明"退 0 只代表这一趟量过了，判决在打印的那个词里"
+   （码本身一个都没改）。
+4. **npm 包依赖面**——`glasspane-mcp` 的 `dependencies` 新增 `iterate-kernel@0.1.10`：发布出去的
+   `.d.ts` 一直 `import` 它，而它只列在 devDependencies，消费者装不到，于是 README 教的
+   "嵌进自己进程"那条路在类型面上撞 TS2307。捆好的 JS 一个字节没变。
+
+本版**合并了两个未发布运行的全部改动**：`v1.26.0` 之后的 2026-10-30 一轮（本文件下面第 1-24 条）与
+2026-10-31 07:30 那一轮（协议层错误帧不再无界复述调用方原文、故障出路按引擎方法分支等）。
+两轮的产物都没进过任何 tag，registry 与 GitHub Release 此前都停在 1.26.0。
+
+### 证据诚实性（本产品的立身之本）
+
+- **两席权限把"量不到"说成"没问过"**（P1，Swift 探针层）。`CGPreflightListenEventAccess` /
+  `CGPreflightScreenCaptureAccess` 的一个 false 分不清"从没在名单里 / 被关掉 / 早前那次被拒 /
+  条目被删"，而 `hasRequestedThisRun` 是**每进程**的、TCC 是**跨运行持久**的：上次被拒的席位这一趟
+  被报成 `notDetermined`，面板据此写「未请求」——一句关于历史的断言，证据是零。AX 那席早已按同一条
+  理由收口成 `unverifiable`，这两席没跟上。现在四席同一口径，`notDetermined` 不再由任何探针产出
+  （枚举值与 rawValue 表保留：那是发出去的 CLI 词表，删它等于改契约）。
+- **归档的清单被静默截断，报告还把截断后的长度当全体**（P1，daemon）。`HandlerProbeSignal` 取
+  前 32、`StateDiffSignal` 取前 64，而 `ProbeInbox.endWindow` 是从 512 事件的环里数出全量的：
+  40 个 handler 的窗口归档 32 个，`EvidenceReportGenerator` 的 `+N more` 又是从**已截断**的数组算的，
+  于是打印的是一个假数。现在截断在生产端按名字进 `circuitBreaker.reason`（与既有
+  `probe-events-evicted` 同一形状），报告的文字说不出比档案更多的东西。
+- **`probe_status` 用一张空表冒充"这个 app 没接探针"**（P1，daemon）。没有 inbox（`--no-probe`、
+  A-18 拒名、`server.start()` 抛）时回的是 `{"probes":[],"attachedHasProbe":false}`，与"有监听者、
+  app 没接探针"逐字节相同；代理据此去给 app 接探针，而接上也没有 socket 会接受它。四个兄弟键早就按
+  "`--no-probe` 是这一面不存在"省略了，这两个键被漏在外面。现在 `probeListener` 说出在与不在，
+  并且 `GP_E_PROBE_UNAVAILABLE` 第一次有了产地（`restore(mode: rollback_full)` 对 `gpz1-json-v1`
+  检查点的那一支）。
+- **面板的一次性 CLI 调用超时不收尸**（P2，面板）。`process.terminate(); return nil` 不 reap：
+  孩子挂在面板自己的进程表里，每点一次「清理」多一个僵尸，而 `--project-prune` 被打断时注册表
+  可能只修了一半，下一次点击照旧在残局上再走。terminate → reap → join → 关读端，预算一个字没动。
+
+### 信任边界与传输
+
+- **壳对 socket 路径毫无身份判据**（P1，mcp-shell）。`~/.glasspane/engine.sock` 是 0600 且
+  **无 peer 鉴权**（SECURITY.md：同 uid＝全权），而壳在 `GLASSPANE_ENGINE_SOCK` 指的任何路径上都
+  直接连、把回包当引擎的话交付给模型——包括一份 schema 合法的证据包。同产品的 fork 侧自 0.12.0 起
+  有 `trustSocket()`，这一侧一直没有。现在写下第一字节前判四件事：运行时答不出 euid ⇒ 拒；
+  叶子不是 socket ⇒ 点名它是普通文件；叶子或所在目录的 owner 不是本 uid ⇒ 拒；取消资格的是
+  group/other 的**写位**（node 自己 bind 的 socket 是 0755，本机实测——用"除 owner 外无位"会拒掉
+  产品自己的 socket）。`ENOENT` 不判成信任拒：那是"没东西在听"，`GP_E_ENGINE_UNREACHABLE` 已带
+  重启命令。这条拒绝也不得被洗成 unreachable：它的出路若命令重启，就可能掀掉一个正握着用户屏幕的
+  service。
+- **`--state-dir`/`--socket-path` 的"这个根永不 chmod"闸只比字符串**（P1，daemon）。POSIX 把 `..`
+  当目录项解析：`--state-dir "$HOME/Desktop/.."`、`"$HOME/."` 都能绕过比较，然后 `chmod(…,0700)`
+  落在家目录上——正是那条注释说这道闸存在的理由。`.`/`..` 现在在参数层就被拒（判据排在位置比较之前，
+  与 `EngineCore.storedPathShapeDefect` 同一对形状），两个 chmod 入口共用一份判据。
+- **注册表与更新状态文件的两个跟随点**（P2，mcp-shell）。`project-registry.ts` 用 `"w"` 打开它的
+  临时文件（= O_CREAT|O_WRONLY|O_TRUNC，**跟随**那个名字上的任何东西），而 daemon 侧的三个写者
+  都是 O_EXCL（`DurableFileWrite.swift:88`）/O_NOFOLLOW（`EvidenceReportGenerator.swift:189`）；
+  `update-state.ts` 用 `statSync` 判"是不是普通文件""是不是 owner-only 模式"，跟随 `<root>/
+  update-state.json` 上的符号链接后，`gp_diagnose` 念出来的是链接目标的事实。各自改成独占+不跟随 /
+  `lstatSync` 并在拒绝句里点名符号链接。
+
+### 出路的可执行性
+
+- `tools/call` 的**形状**拒绝把代理支使到一个它自己必然拒掉的调用上（P1）：例子的选取读的是广告
+  schema 顶层的 `required`，而 `gp_attach` 写的是 `oneOf`、顶层没有 `required`，`AttachArgs.refine`
+  对空参数回 `GP_E_BAD_PARAMS`。在发布物上实测复现。现在例子按调用路径真跑的 `spec.validate({})` 选。
+- `GP_E_STATE_ROOT_REFUSED` 的出路让代理"`glasspaned --permissions` 印的是它自己的读数"去问根；
+  实测那一支 JSON 是 `{subject,permissions,verdict,verdictSeats,verdictExcludes,seatsNotGranted,next}`，
+  没有任何一格是 state root。改成两条真能跑的：被拒的根本来就在 message 里；
+  `launchctl print gui/$(id -u)/com.glasspane.daemon` 读在册作业的 argv（只读，不命令重启）；
+  `glasspaned --state-dir <path> --evidence-stats` 回显该次运行解析到的根下的 `dir`。
+- `installer/cli.js` 有 12 处把别人给的路径用**双引号**包着印成"照这一行跑"（`tree.cli` /
+  `update.updaterCli` / `repoDir` / `target` / `cliPath`，来自 `--repo` / `GLASSPANE_REPO` /
+  `GLASSPANE_INSTALL_DIR`）。双引号里 `$(` 与反引号照常展开。 installer 独立成包（`files` 只有
+  cli.js 与 glasspane.js），import 不到 `mcp-shell/dist`，所以这里是第四份可执行体，共享的是**闸**：
+  `remedy-shell-quoting` 的扫描集加上 `installer/*.js`，并加一条"扩集不是装饰"的 vacuity 断言。
+- `--help` 的退出码表只解释了 1 的三分之一（两条"什么都没构建就停下"的支路——平台拒绝、环境预检——
+  同样退 1）。表补齐，码不动。
+
+### 文档面与闸
+
+- 两张 README 的环境变量表从前各列 6 条，实测产品源码真从环境里读的有 15 条 —— 包括
+  `gp_project_*` 的 remedy 原话里点名让代理去设的 `GLASSPANE_PROJECTS_FILE` /
+  `GLASSPANE_PROJECTS_FORCE_OVERWRITE`，和面板/更新器/探针 SDK 都认的 `GLASSPANE_STATE_DIR`
+  （daemon 自己不认它，那条诚实边界也写进表）。新闸 `updater/test/daily-20261030-env-docs.test.mjs`
+  是双向的：正向"源码在读的必须在表里"，反向"表里不许有源码从不读的"。反向那一半当场逮到我自己的
+  错——第一版把 `GLASSPANE_SIGNING_PUBLIC_KEY`（`installer/cli.js` 的一个 module export，不是环境
+  变量）写成了旋钮。
+- `check-doc-links.mjs --self-test` 有电池（8 例，5 条变异必须被抓、3 条合法形状必须继续沉默）
+  但 CI 只跑裸判据——那六类判据里任何一类被降级成恒绿，CI 照样打 OK。CI 现在先跑电池再跑裸判据，
+  `daily-20261030-gate-wiring.test.mjs` 钉两步：ci.yml 里那一步的正文形状，以及对数打印的判决行数。
+- `check-workflows.mjs` 的两条 `△` 从前写"交给那棵树自己的闸，这里不拦"。实测
+  `harness/glasspane-harness/script/check-workflows.mjs` 声明四条规则（action pin、
+  `timeout-minutes`、shell gates、npm pin）加链式单行，**既没有** producer→first-match-consumer
+  （141）那条，**也没有**发布 job 必须 `concurrency` 那条：这两条是被打印过、没人拦、也没有收件人
+  的无闸形状。句子改成说实话（`NO_RECEIVER` 一处共用），有真收件人的那条（shell gates）保留原名。
+- 同一条闸从前只审单行 `run:` 里的 `|`，不审 `&&` / `||` / `;`——`node build || echo skipped` 用
+  一次构建失败回 0。判据从 harness 那棵树的 linter（它一直在判这一形状）搬过来；顺带修自己的
+  `piped` 判据：`/\|/` 把 `||` 也算成管道，于是链式单行被冠以"pipelines 且没声明 pipefail"。
+  实测本仓三个 root workflow 今天没有链式单行，所以这条不是为洗红加的。
+- `mcp-shell/.d6_smoke.mjs` 从前 import `dist/engine-client.js` 与 `dist/dispatch.js`，而
+  `npm run bundle` 只留四个入口——`npm run bundle` 之后这份真机冒烟一律
+  `ERR_MODULE_NOT_FOUND`，而 `engine/smoke.md` 与 PR 模板都还把它当一格验收。改成 spawn
+  发布物入口 `node dist/index.js --socket-path <sock>`，并加一条对照：文档引用的步骤必须指得到
+  发布形状里存在的字节（`daily-20261030-documented-smoke.test.mjs`）。
+
+### 本轮我替 owner 做的决定
+
+见 `specs/GlassPane_每日20261030_发现台账.md` 的「替 owner 做的决定」一节（取号、面 A 棘轮重记、
+`notDetermined` 保留为词表而不删、`assert-tag-ready` 由发布线实跑而不是装 git hook、
+四条判为"查过不是缺陷"的语料/契约项）。每条都带依据与回滚命令。
+
+### 测试
+
+本版新增/改动的具名用例：mcp-shell 侧 `daily-20261030-socket-trust`（11）、
+`daily-20261030-remedy-shape`（5）、`daily-20261030-write-and-read-shapes`（5）、
+`daily-20261030-documented-smoke`（2）；installer 侧 `daily-20261030-entry-parity`（4）；
+updater 侧 `daily-20261030-gate-wiring`（4）、`daily-20261030-env-docs`（2）；
+Swift 侧 `DailyRound20261030Swift1PathShapeTests`、`…Swift1PermissionHonestyTests`、
+`…Swift1ShutdownWaiterRaceTests`、`…Swift1CheckFlagExitHonestyTests`、
+`DailyRound20261030SW2TruncationHonestyTests`、`…SW2ProbeListenerTests`、`…SW2CLIReapTests`。
+`swift test --package-path engine` 的总数从 1.26.0 的 1530 涨到本版实测值；
+每一条修复都做过反向变异（把那一处逐字改回坏写法，要求具名用例变红，`cp` 恢复后 `shasum` 核回）。
 
 ## [1.26.0] — 2026-10-29
 

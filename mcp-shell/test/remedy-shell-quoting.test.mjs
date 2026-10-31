@@ -441,10 +441,16 @@ const ALREADY_QUOTED_PRODUCERS = new Set([
  * text that precedes each hole.
  */
 const COMMAND_PREFIX = new RegExp(
-  "(?:^|[\\s`;(\"'])(?:/?(?:usr/)?(?:bin|s?bin)/)?"
+  // The boundary is "any non-identifier character", and the operand may sit behind an opening
+  // quote. Both halves matter: the scan used to accept only whitespace/backtick/semicolon/paren/
+  // quote before the command word and only whitespace after it, so
+  // `…补救（不需要手敲 launchctl）：node "${cliPath}" --restore-launchd` — a command operand behind
+  // a full-width colon, wrapped in the very double quotes this rule exists to refuse — was
+  // invisible to it. Measured: reverting that site to the double-quoted shape left the gate green.
+  "(?:^|[^A-Za-z0-9_$])(?:/?(?:usr/)?(?:bin|s?bin)/)?"
   + "(?:chmod|chown|chgrp|mv|cp|cat|ls|df|plutil|python3|node|npx|launchctl|diskutil|"
   + "kill|rm|mkdir|touch|open|curl|security|defaults|export|gzip|tar|sqlite3|grep|stat|find|sh|"
-  + "glasspaned|updater|installer)(?:\\s+(?:-[A-Za-z0-9_-]+|\\d{3,4}))*\\s+$"
+  + "glasspaned|updater|installer)(?:\\s+(?:-[A-Za-z0-9_-]+|\\d{3,4}))*[\"'\\s]+$"
 );
 const ANY_HOLE = /\$\{([^{}]*)\}/g;
 /** An interpolation whose name says it carries a filesystem location. */

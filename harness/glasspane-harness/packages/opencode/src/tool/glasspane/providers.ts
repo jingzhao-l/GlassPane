@@ -115,6 +115,21 @@ export type ProviderDraft = { readonly [key: string]: unknown }
  * is what the fixture says they are. `last-evidence`'s empty list is a claim — "this
  * method needs no prerequisite signal" — and it is written as `[]` rather than
  * omitted, because the contract treats the two as different statements.
+ *
+ * THE METHOD NAMES COME FROM THE ENGINE, NOT FROM THE CORPUS. `EngineMethod`
+ * (`engine/Sources/GlassPaneEngine/FrameCodec.swift:73-82`, mirrored by
+ * `contracts/engine-methods.json`) is the daemon's whole request whitelist, and the
+ * entry above the corpus's `input.methods` list is not the same set as the registry
+ * half below it: the fixture's `input` carries `diagnose-pixel` and `diagnose-probed`,
+ * which appear nowhere in the Swift enum, so a draft that copied them would register
+ * two judgement producers the daemon answers with unknown-method for. A registration
+ * is a claim another harness relies on, so the table below is the engine's:
+ * `diagnose`, and the evidence source's `capture` + `last-evidence`. `capture` is
+ * legitimate even though the wire name differs — it is the daemon's `capture_view`,
+ * and the sibling surface states the same correspondence
+ * (`mcp-shell/src/providers.ts`: "`glasspane-evidence` also declares `capture`
+ * (the daemon's `capture_view`)"). `test/tool/glasspane-provider-registration.test.ts`
+ * pins the table against the engine's list rather than against this file.
  */
 export function glasspaneProviderDrafts(version: string): readonly ProviderDraft[] {
   return [
@@ -124,11 +139,7 @@ export function glasspaneProviderDrafts(version: string): readonly ProviderDraft
       kind: "ae-diagnosis",
       version,
       origin: "glasspane",
-      methods: [
-        { name: "diagnose", requires: ["ax-event", "attribution", "circuit-breaker"] },
-        { name: "diagnose-pixel", requires: ["ax-event", "pixel-diff", "attribution", "circuit-breaker"] },
-        { name: "diagnose-probed", requires: ["ax-event", "handler-probe", "state-diff", "attribution"] },
-      ],
+      methods: [{ name: "diagnose", requires: ["ax-event", "attribution", "circuit-breaker"] }],
     },
     {
       schemaVersion: PROVIDER_SCHEMA_VERSION,

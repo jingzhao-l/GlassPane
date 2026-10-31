@@ -82,6 +82,11 @@ jobs:
             test/script/*.test.ts
             test/config/glasspane-*.test.ts
             test/server/auth.test.ts
+            # The CLI commands whose exit codes are part of the product's face. These files lived
+            # under `test/cli/` and nothing in any lane ran them, which is how four assertions
+            # naming the upstream project stayed red unseen; the two `glasspane-*` files here are
+            # the fixed points for `upgrade`'s and `uninstall`'s exit codes.
+            test/cli/cmd/glasspane-*.test.ts
           )
           missing=0
           for f in "${files[@]}"; do
@@ -89,8 +94,8 @@ jobs:
           done
           [ "$missing" -eq 0 ] || exit 1
           echo "fixed-point files: ${#files[@]}"
-          if [ "${#files[@]}" -lt 18 ]; then
-            echo "::error::the derived list resolved to ${#files[@]} file(s); this package carries 18 fixed-point files, so a pattern went dead rather than the count dropping honestly"
+          if [ "${#files[@]}" -lt 21 ]; then
+            echo "::error::the derived list resolved to ${#files[@]} file(s); this package carries 21 fixed-point files (measured by expanding the array above in a clean checkout), so a pattern went dead rather than the count dropping honestly"
             exit 1
           fi
           bun test --timeout 30000 "${files[@]}"

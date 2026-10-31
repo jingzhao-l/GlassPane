@@ -128,8 +128,8 @@ mustGoRed(
 mustGoRed(
   "asymmetry-ledger",
   GOLDEN,
-  '"harness:glasspane-engine-ae/diagnose-pixel"',
-  '"harness:glasspane-engine-ae/diagnose-pixel", "shell:glasspane-evidence/selftest-ghost"',
+  '  "oneSided": [],',
+  '  "oneSided": ["harness:glasspane-engine-ae/diagnose-pixel"],',
   1,
   ["asymmetry-ledger"],
 )
@@ -153,7 +153,7 @@ mustGoRed(
 mustGoRed(
   "counts-missing-is-red",
   GOLDEN,
-  '  "counts": {\n    "harnessMethods": 5,\n    "shellMethods": 3,\n    "overlap": 3\n  },',
+  '  "counts": {\n    "harnessMethods": 3,\n    "shellMethods": 3,\n    "overlap": 3\n  },',
   "  \"counts\": {},",
   1,
   ["counts.harnessMethods: the golden does not carry a number"],

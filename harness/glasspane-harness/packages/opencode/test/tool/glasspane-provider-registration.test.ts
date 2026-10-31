@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import path from "node:path"
 
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -13,14 +13,23 @@ import { kernelFixture } from "../lib/kernel-contract"
  * the ruler cannot see — that THIS PRODUCT registers the two producers the corpus
  * names, and refuses in the ways the corpus says a consumer must refuse.
  *
- * The expectations below are read from the fixture shipped inside the pinned
- * package (`node_modules/iterate-kernel/fixtures/provider-registration.ok-01.json`,
- * sha256-pinned by `contracts/kernel-pin.json`) rather than copied, because the
- * claim being tested is "the registration GlassPane writes agrees with the
- * contract" — a hand-copied literal could only ever agree with itself. Note the
- * fixture's `1.11.0` version strings are NOT used as an expectation here: they are
- * the corpus's own engine version at authoring time, and asserting against them
- * would certify a version this product never shipped.
+ * Two different anchors are used below, on purpose, and the shape of each claim
+ * decides which one it gets:
+ *  - the `requires` lists, the refusal semantics and the registry rules come from
+ *    the fixture shipped inside the pinned package
+ *    (`node_modules/iterate-kernel/fixtures/provider-registration.ok-01.json`,
+ *    sha256-pinned by `contracts/kernel-pin.json`), because that contract is the
+ *    kernel's and is read rather than copied;
+ *  - WHICH METHODS MAY BE REGISTERED is an engine claim, and the fixture cannot
+ *    anchor it: the corpus's top-level `input.methods` lists `diagnose-pixel` and
+ *    `diagnose-probed`, names the daemon has no case for. Comparing this product's
+ *    registration against the bytes it was copied from is a self-echo — it grades
+ *    the copy, not the claim. The method table below is therefore anchored to
+ *    `EngineMethod`, the enum that decides what the daemon can answer at all.
+ *
+ * Note the fixture's `1.11.0` version strings are NOT used as an expectation here:
+ * they are the corpus's own engine version at authoring time, and asserting against
+ * them would certify a version this product never shipped.
  */
 import {
   GLASSPANE_AE_PROVIDER_ID,
@@ -85,6 +94,123 @@ function registryFrom(list: readonly FixtureRegistration[]): ProviderRegistry {
 
 const SHIPPED = glasspaneProviderRegistry(InstallationVersion)
 
+/**
+ * THE ENGINE'S METHOD TABLE, AS MEASURED. `EngineMethod` is declared at
+ * `engine/Sources/GlassPaneEngine/FrameCodec.swift:73-82` in the parent tree, and
+ * `RequestParser.parse` in the same file maps the frame's `method` string through
+ * `EngineMethod(rawValue:)` and refuses anything outside the enum
+ * (`:150-152`, "is not in the whitelist"). Nothing named here can be called, so
+ * nothing named here may be registered.
+ *
+ * It is written into this file rather than read from the Swift because the engine
+ * lives in the parent repository and never enters the subtree-split product tree —
+ * a test that walked up to it passed on a maintainer machine and died in the split
+ * repo's CI on the missing file (measured 2026-10-15, the same lesson
+ * `test/tool/glasspane-surface.test.ts` records). The copy is kept honest by the
+ * test below that compares it against `contracts/engine-methods.json`, the artifact
+ * `harness/tools/product-surface.mjs` rule `engine-methods` re-derives from the enum.
+ */
+const ENGINE_METHODS = [
+  "hello",
+  "attach",
+  "act",
+  "observe",
+  "assert_element",
+  "diagnose",
+  "last_evidence",
+  "snapshot",
+  "restore",
+  "audit_ui",
+  "capture_view",
+  "probe_status",
+  "shutdown",
+] as const
+
+/**
+ * What this surface's two producers claim, and the engine method each claim is the
+ * daemon's answer for. The registration speaks kebab-case provider names (the
+ * contract's own vocabulary); the values are the engine's wire names, and every one
+ * of them must be in `ENGINE_METHODS` — that assertion is what makes this table, and
+ * not this file's opinion, the anchor.
+ */
+const REGISTRATION_TO_ENGINE: Record<string, string> = {
+  diagnose: "diagnose",
+  capture: "capture_view",
+  "last-evidence": "last_evidence",
+}
+
+/** The provider each side of the registration belongs to. */
+const AE_METHODS = ["diagnose"]
+const EVIDENCE_METHODS = ["capture", "last-evidence"]
+
+function registeredMethodNames(registry: ProviderRegistry, id: string): string[] {
+  return resolveProvider(registry, id).methods.map((method) => method.name)
+}
+
+/**
+ * The engine-anchored check, as a pure function so the negative control can run the
+ * same code the production claim runs. Returns the problems; empty means the table
+ * equals the engine's.
+ */
+function registrationDrift(ae: readonly string[], evidence: readonly string[]): string[] {
+  const problems: string[] = []
+  for (const [side, names] of [
+    ["glasspane-engine-ae", ae],
+    ["glasspane-evidence", evidence],
+  ] as const) {
+    for (const name of names) {
+      if (REGISTRATION_TO_ENGINE[name] === undefined) {
+        problems.push(`${side}: '${name}' is not a method this surface claims an engine answer for`)
+        continue
+      }
+      if (!ENGINE_METHODS.includes(REGISTRATION_TO_ENGINE[name] as (typeof ENGINE_METHODS)[number])) {
+        problems.push(`${side}: '${name}' maps to '${REGISTRATION_TO_ENGINE[name]}', which the engine's table does not carry`)
+      }
+    }
+    if (names.length !== new Set(names).size) problems.push(`${side}: a method registered twice is two claims, not one`)
+  }
+  const declared = [...ae, ...evidence].sort()
+  const expected = Object.keys(REGISTRATION_TO_ENGINE).sort()
+  if (JSON.stringify(declared) !== JSON.stringify(expected)) {
+    problems.push(`the registration declares ${JSON.stringify(declared)} but the engine-anchored table is ${JSON.stringify(expected)}`)
+  }
+  return problems
+}
+
+describe("the registration is anchored to the engine's method table", () => {
+  test("the list written here is the contract's list, so the copy cannot go stale in silence", () => {
+    const contract = path.join(import.meta.dir, "..", "..", "..", "..", "contracts", "engine-methods.json")
+    expect(existsSync(contract), `${contract} is missing — the engine table has no anchor without it`).toBe(true)
+    const parsed = JSON.parse(readFileSync(contract, "utf8")) as { methods?: unknown }
+    expect(Array.isArray(parsed.methods), "contracts/engine-methods.json carries no method list").toBe(true)
+    expect([...(parsed.methods as string[])].sort()).toEqual([...ENGINE_METHODS].sort())
+  })
+
+  test("every wire name the registration maps to is one the engine answers", () => {
+    for (const [name, wire] of Object.entries(REGISTRATION_TO_ENGINE)) {
+      // `toContain` on the literal tuple would pin the checker to its union type; the claim
+      // being tested is membership, so ask membership and name the pair when it fails.
+      expect((ENGINE_METHODS as readonly string[]).includes(wire), `'${name}' claims the engine answers '${wire}'`).toBe(true)
+    }
+  })
+
+  test("a draft adding a method the engine does not answer is caught, not echoed", () => {
+    // THE NEGATIVE CONTROL, run through the same function as the production claim above. These two
+    // names are the corpus's own invented pair: they are legal kebab-case, so `parseProviderRegistration`
+    // accepts them and a fixture-to-registration comparison accepts them too — only the engine refuses
+    // them, by having no such case. Re-adding either to `providers.ts` turns the test above red.
+    for (const invented of ["diagnose-pixel", "diagnose-probed"]) {
+      expect(ENGINE_METHODS).not.toContain(invented)
+      expect(ENGINE_METHODS.map((wire) => wire.replaceAll("_", "-"))).not.toContain(invented)
+      expect(registrationDrift([...AE_METHODS, invented], EVIDENCE_METHODS).length).toBeGreaterThan(0)
+    }
+    // A name the engine does answer for (`assert_element`), but which no provider this surface ships
+    // declares, is refused by the same check: the table is the engine's methods this surface claims,
+    // not "anything the daemon could reply to".
+    expect(registrationDrift(AE_METHODS, [...EVIDENCE_METHODS, "assert-element"]).length).toBeGreaterThan(0)
+  })
+})
+
 describe("GlassPane registers its two producers", () => {
   test("the shipped registry holds exactly the two ids the corpus names for glasspane", () => {
     expect(Object.keys(SHIPPED).sort()).toEqual(
@@ -99,15 +225,19 @@ describe("GlassPane registers its two producers", () => {
     expect(resolveProvider(SHIPPED, GLASSPANE_EVIDENCE_PROVIDER_ID).id).toBe(GLASSPANE_EVIDENCE_PROVIDER_ID)
   })
 
-  test("the registered method table is the fixture's, in order", () => {
-    expect(resolveProvider(SHIPPED, GLASSPANE_AE_PROVIDER_ID).methods.map((method) => method.name)).toEqual(
-      FIXTURE.input.methods.map((method) => method.name),
-    )
-    // The AE entry at the top of the fixture is the same shape as `registry.glasspane[0]`
-    // only for `diagnose`; the requires lists are what the other harness reads to know
-    // what a call is allowed to assume, so they are pinned, not the names alone.
+  test("the registered method table is the engine's, not the fixture's", () => {
+    // The claim a partner harness relies on is "asking this provider for this method gets an
+    // answer", and only the engine's enum can anchor that. The old version of this assertion
+    // compared the registration with `FIXTURE.input.methods` — the very bytes it was copied
+    // from — so it stayed green while the file certified two judgement producers the daemon
+    // answers with unknown-method.
+    expect(registrationDrift(registeredMethodNames(SHIPPED, GLASSPANE_AE_PROVIDER_ID), registeredMethodNames(SHIPPED, GLASSPANE_EVIDENCE_PROVIDER_ID))).toEqual([])
+    expect(registeredMethodNames(SHIPPED, GLASSPANE_AE_PROVIDER_ID)).toEqual(AE_METHODS)
+    expect(registeredMethodNames(SHIPPED, GLASSPANE_EVIDENCE_PROVIDER_ID)).toEqual(EVIDENCE_METHODS)
+    // The `requires` lists are the other harness's reading material, so they stay pinned — to the
+    // fixture, which is the contract that owns them.
     expect(requireMethod(SHIPPED, GLASSPANE_AE_PROVIDER_ID, "diagnose").requires).toEqual(
-      FIXTURE.input.methods[0]!.requires,
+      FIXTURE.registry.glasspane[0]!.methods[0]!.requires,
     )
     expect(requireMethod(SHIPPED, GLASSPANE_EVIDENCE_PROVIDER_ID, "capture").requires).toEqual(["ax-tree"])
     expect(requireMethod(SHIPPED, GLASSPANE_EVIDENCE_PROVIDER_ID, "last-evidence").requires).toEqual([])
@@ -151,10 +281,16 @@ describe("resolution refuses instead of guessing", () => {
     const refusal = thrown as KernelProviderError
     expect(refusal.code).toBe(PROVIDER_CODES.missingMethod)
     expect(refusal.providerId).toBe(GLASSPANE_AE_PROVIDER_ID)
-    // Asserted on the named list, not on "it threw": the remedy is the half that tells the
-    // caller what exists, and an empty or generic one would leave it guessing.
-    for (const name of FIXTURE.input.methods.map((method) => method.name)) {
+    // Asserted on the registered list, not on "it threw": the remedy is the half that tells the
+    // caller what exists, and an empty or generic one would leave it guessing. The list it has to
+    // name is the AE provider's own — every entry of which the engine's table carries — and it must
+    // not name a method the daemon would answer with unknown-method.
+    for (const name of AE_METHODS) {
       expect(refusal.remedy, `remedy should name ${name}`).toContain(name)
+    }
+    for (const name of FIXTURE.input.methods.map((method) => method.name)) {
+      if (REGISTRATION_TO_ENGINE[name] !== undefined) continue
+      expect(refusal.remedy, `remedy must not offer '${name}' — no EngineMethod case answers for it`).not.toContain(name)
     }
     expect(refusal.message).toContain("diagnose-without-looking")
   })
@@ -186,12 +322,28 @@ describe("resolution refuses instead of guessing", () => {
     expect(refused.ok).toBe(false)
     if (refused.ok) return
     expect(refused.error.code).toBe(PROVIDER_CODES.missingMethod)
-    expect(refused.error.remedy).toContain("diagnose-probed")
+    // The remedy lists what the provider really registered. It used to be asserted against
+    // `diagnose-probed` — a name this surface copied out of the kernel's fixture and the daemon
+    // has no case for, so pinning it here was pinning the defect.
+    expect(refused.error.remedy).toContain("diagnose")
+    expect(refused.error.remedy).not.toContain("diagnose-pixel")
+    expect(refused.error.remedy).not.toContain("diagnose-probed")
   })
 
-  test("every declared AE method attributes cleanly, so the refusal above is about the name", () => {
+  test("a name the engine cannot answer for is refused, not registered", () => {
+    // The corpus's `input.methods` is a fixture of the kernel's *shape*, not a claim about
+    // GlassPane's engine: `diagnose-pixel` and `diagnose-probed` appear in no `EngineMethod`
+    // case (`contracts/engine-methods.json`, which `harness/tools/product-surface.mjs` rule
+    // `engine-methods` re-derives from `FrameCodec.swift`). Registering them would advertise
+    // judgement producers the daemon answers with unknown-method, so the fixture's extras have
+    // to be the refused half of this loop.
     for (const name of FIXTURE.input.methods.map((method) => method.name)) {
-      expect(diagnoseAttribution(name).ok, `${name} is registered and must attribute`).toBe(true)
+      const claim = REGISTRATION_TO_ENGINE[name]
+      const engineCarries = claim !== undefined && (ENGINE_METHODS as readonly string[]).includes(claim)
+      expect(
+        diagnoseAttribution(name).ok,
+        engineCarries ? `${name} is an engine method and must attribute` : `${name} is not an engine method and must not attribute`,
+      ).toBe(engineCarries)
     }
   })
 })
