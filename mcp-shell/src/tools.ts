@@ -1481,6 +1481,51 @@ async function readTrail(
  * third copy of the names, which is what keeps this answer from drifting back into
  * "just retry the click".
  */
+/**
+ * The wire-safe account of a throw **inside this shell**, and the local half of it.
+ *
+ * Same rule the HTTP gateway already states for itself (`wireCause` in
+ * `src/http-gateway.ts`): the description of an internal failure names files, symbols and
+ * sometimes the very path that made it fail, and none of that is evidence the reader asked
+ * for — so it goes to this process's stderr, and the frame keeps the failure *type*. Four
+ * `GP_E_INTERNAL` arms in this file used to interpolate `String(error)` straight into the
+ * tool result the agent reads, which is the same byte the gateway withholds: face A
+ * hardened, face B publishing. One body now, both surfaces, so a fifth arm cannot be
+ * written in the old shape without the scan in
+ * `test/daily-20261031-internal-fault-wire-safe.test.mjs` naming it.
+ *
+ * @param where   what was being attempted, e.g. `an engine call inside gp_last_evidence`
+ * @param surface which connection the frame is going out on (words the reader may quote)
+ */
+export function internalFaultAccount(
+  where: string,
+  error: unknown,
+  surface: string = "tool",
+): { wire: string; detail: string } {
+  const type = error instanceof Error ? (error.constructor?.name ?? "Error") : typeof error;
+  return {
+    wire: `internal shell error (failure type ${type}; the message is on this process's stderr, not on this frame)`,
+    detail: `[glasspane-mcp] ${where}: internal ${type} — ${String(error)} `
+      + `(withheld from the ${surface} frame: a description of an internal failure names files and `
+      + "symbols this frame does not publish; the line above is the one to hand over)",
+  };
+}
+
+/** Write {@link internalFaultAccount}'s detail half to stderr; a stderr that cannot take a
+ *  log line leaves nowhere to report, and the answer must still go out (same allowance
+ *  `stdio-session.ts`'s logger makes). */
+export function reportInternalFault(where: string, error: unknown, surface: string = "tool"): {
+  wire: string;
+} {
+  const account = internalFaultAccount(where, error, surface);
+  try {
+    process.stderr.write(`${account.detail}\n`);
+  } catch {
+    // Swallowed on purpose: the frame is the product here, not the log.
+  }
+  return { wire: account.wire };
+}
+
 export function shellFaultRemedy(engineMethod: string): string {
   const readRoute = "read what happened instead of performing it again: gp_recent_reports lists the operations "
     + "this session recorded, gp_last_evidence {operationId} returns one in full, and gp_probe_status reads the "
@@ -1776,7 +1821,7 @@ async function runValidatedTool(
     return {
       content: [{ type: "text", text: formatToolError(
         GP_E_INTERNAL,
-        `internal shell error: ${String(error)}`,
+        reportInternalFault(`an engine call for ${spec.engineMethod}`, error).wire,
         shellFaultRemedy(spec.engineMethod),
       ) }],
       isError: true,
@@ -2256,7 +2301,7 @@ async function captureView(
     return {
       content: [{ type: "text", text: formatToolError(
         GP_E_INTERNAL,
-        `internal shell error: ${String(error)}`,
+        reportInternalFault("the capture_view route", error).wire,
         shellFaultRemedy("capture_view"),
       ) }],
       isError: true,
@@ -2380,7 +2425,7 @@ function mapProjectError(error: unknown): ToolResult {
   return {
     content: [{ type: "text", text: formatToolError(
       GP_E_INTERNAL,
-      `internal shell error in project registry: ${String(error)}`,
+      reportInternalFault("a project-registry write", error).wire,
       projectErrorRemedy(GP_E_INTERNAL),
     ) }],
     isError: true,
@@ -3042,7 +3087,7 @@ function mapAuditError(error: unknown, engineMethod = "last_evidence"): ToolResu
   return {
     content: [{ type: "text", text: formatToolError(
       GP_E_INTERNAL,
-      `internal shell error: ${String(error)}`,
+      reportInternalFault(`an engine call for ${engineMethod}`, error).wire,
       shellFaultRemedy(engineMethod),
     ) }],
     isError: true,
