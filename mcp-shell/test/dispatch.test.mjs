@@ -739,7 +739,10 @@ test("a protocol-level tools/call refusal carries a remedy naming published tool
   const subset = new McpServer({
     engine: makeEngine().engine,
     session: new EvidenceAuditSession(),
-    specs: [{ name: "gp_probe_status", description: "d", inputSchema: { type: "object", properties: {} } }],
+    specs: [{ name: "gp_probe_status", description: "d",
+      inputSchema: { type: "object", properties: {} },
+      // ToolSpec 的必填面：出路现在按 `spec.validate({})` 选例子，夹具就得是一个真 spec。
+      validate: () => ({ ok: true, value: {} }) }],
   });
   for (const [id, params] of [[11, "gp_observe"], [12, { name: 7 }]]) {
     const shape = await subset.handleLine(enq({ jsonrpc: "2.0", id, method: "tools/call", params }));
@@ -749,6 +752,67 @@ test("a protocol-level tools/call refusal carries a remedy naming published tool
         `一个只发布 gp_probe_status 的面上，出路点名了 ${name}：${shape.error.message}`);
     }
   }
+});
+
+test("a spec without a callable validate is refused at construction, not mid-request", () => {
+  const { engine } = makeEngine();
+  // `callShapeRemedy()` runs the same `validate` the call path runs (that is the 2026-10-29
+  // fix: picking the example off the JSON Schema's `required` advertised a call the daemon
+  // would refuse). A spec missing it therefore used to surface as
+  // `Internal error: TypeError: spec.validate is not a function` **on the wire, inside a
+  // caller's error frame** — a contract mistake by the embedding code, answered as a mystery.
+  assert.throws(
+    () => new McpServer({
+      engine,
+      session: new EvidenceAuditSession(),
+      specs: [{ name: "gp_probe_status", description: "d", inputSchema: { type: "object", properties: {} } }],
+    }),
+    /gp_probe_status" has no callable validate/,
+  );
+  // …and the refusal names the seam to fix, not just the symptom.
+  assert.throws(
+    () => new McpServer({ engine, session: new EvidenceAuditSession(), specs: [{ name: "gp_x", description: "d" }] }),
+    /TOOL_SPECS/,
+  );
+});
+
+test("a fault inside the shell is answered wire-safe: type on the frame, detail on stderr, remedy on both", async () => {
+  const { engine } = makeEngine();
+  const LEAKED = "EPHEMERAL /Users/someone/.glasspane/engine.sock could not be opened";
+  const server = new McpServer({
+    engine,
+    session: new EvidenceAuditSession(),
+    specs: [{
+      name: "gp_probe_status",
+      description: "d",
+      inputSchema: { type: "object", properties: {} },
+      validate: () => { throw new Error(LEAKED); },
+    }],
+  });
+  const written = [];
+  const realWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk, ...rest) => {
+    written.push(String(chunk));
+    return true;
+  };
+  let frame;
+  try {
+    frame = await server.handleLine(enq({ jsonrpc: "2.0", id: 99, method: "tools/call", params: "gp_probe_status" }));
+  } finally {
+    process.stderr.write = realWrite;
+  }
+  const log = written.join("");
+  assert.ok(log.includes(LEAKED), `内部的失败描述没进本进程的 stderr——它现在无处可去了：${log}`);
+  assert.match(log, /withheld from the stdio frame/, "stderr 那一行必须说清为什么不上线");
+  assert.equal(frame.error.code, -32603);
+  assert.ok(!frame.error.message.includes(LEAKED),
+    `内部描述被印到线上（这是 HTTP 半边早已禁止的形状）：${frame.error.message}`);
+  assert.match(frame.error.message, /\| remedy: /, frame.error.message);
+  assert.match(frame.error.message, /this shell faulted/);
+  // 出路必须点名"这条面上的读者真能做的动作"，而不是"再发一次"：gp_probe_status 是只读的，
+  // `shellFaultRemedy` 对可重发与不可重发两类分别说话，这里钉的是它被真的调用过。
+  assert.match(frame.error.message, /gp_last_evidence|gp_recent_reports|stderr/,
+    `出路没有点名任何一条读者做得动的读取：${frame.error.message}`);
 });
 
 test("a session-less McpServer is refused at runtime, not just in types", () => {

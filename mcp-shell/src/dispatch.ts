@@ -1,5 +1,5 @@
 import { EngineJsonRpcClient } from "./engine-client.js";
-import { attachIdentityOf, executeTool, TOOL_SPECS, ToolSpec } from "./tools.js";
+import { attachIdentityOf, executeTool, shellFaultRemedy, TOOL_SPECS, ToolSpec } from "./tools.js";
 import {
   ARRIVAL_ORDER_MECHANISM,
   type LateArrivalAttribution,
@@ -116,6 +116,21 @@ export class McpServer {
       );
     }
     this.specs = deps.specs ?? TOOL_SPECS;
+    // Same reason the `session` check above exists: the specs list reaches this
+    // constructor from JavaScript callers (the HTTP gateway's route subset, the smoke
+    // scripts, the tests), where a tool spec without a callable `validate` type-checks
+    // forever and then throws *mid-request* — `callShapeRemedy()` runs `validate` to pick
+    // an example, and a spec missing it turned a caller's shape error into
+    // `Internal error: TypeError: spec.validate is not a function` on the wire. Refusing
+    // at construction names the defect once, at the place that can fix it.
+    for (const spec of this.specs) {
+      if (typeof spec.validate !== "function") {
+        throw new Error(
+          `ToolSpec "${String(spec.name)}" has no callable validate: every spec handed to `
+          + 'McpServer must carry the same validate the call path runs (see TOOL_SPECS in src/tools.ts)',
+        );
+      }
+    }
     this.session = deps.session;
   }
 
@@ -150,7 +165,27 @@ export class McpServer {
     try {
       return await this.dispatch(request, request.id);
     } catch (error) {
-      return this.error(INTERNAL_ERROR, `Internal error: ${String(error)}`, request.id);
+      // `String(error)` may not ride this frame. The HTTP side already refuses that
+      // shape (`wireCause` in src/http-gateway.ts: the detail goes to the process's own
+      // stderr, the wire gets a sentence that names no file), and an un-converted stdio
+      // arm made this shell leak exactly what the other half withholds: internal type and
+      // message text, with no remedy for the reader to act on.
+      const method = this.callTargetName(request);
+      const type = error instanceof Error ? (error.constructor?.name ?? "Error") : typeof error;
+      try {
+        process.stderr.write(
+          `[glasspane-mcp] an internal failure while handling ${String(request.method)}: `
+          + `${type} — ${String(error)} (withheld from the stdio frame: a description of an internal `
+          + "failure names files and symbols this frame does not publish; the line above is the one to hand over)\n",
+        );
+      } catch {
+        // A stderr that cannot take a log line leaves nowhere to report — the same
+        // allowance `stdio-session.ts`'s logger makes. The answer must still go out.
+      }
+      return this.error(INTERNAL_ERROR,
+        `this shell faulted while handling ${String(request.method)} and answered nothing `
+        + `(failure type ${type}) | remedy: ${shellFaultRemedy(method)}`,
+        request.id);
     }
   }
 
@@ -256,6 +291,19 @@ export class McpServer {
       this.deps.stdoutDroppedFrames,
     );
     return this.result(id, { content: outcome.content, isError: outcome.isError });
+  }
+
+  /**
+   * The tool a `tools/call` names, when the frame names one. `shellFaultRemedy` branches on
+   * whether the engine method is safe to re-issue, so a fault inside `gp_act` must not be
+   * answered with the generic "read what happened" sentence — and the name is only usable
+   * when the frame actually carries a string, which the shape refusals above handle.
+   */
+  private callTargetName(request: IncomingRequest): string {
+    const params = this.asParams(request.params);
+    return typeof params?.name === "string" && params.name.length > 0
+      ? params.name
+      : String(request.method);
   }
 
   private asParams(rawParams: unknown): { name: unknown; arguments?: unknown } | null {
