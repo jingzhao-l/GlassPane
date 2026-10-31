@@ -18,6 +18,7 @@ import path from 'node:path'
 
 import { CODES } from './codes.js'
 import { UpdaterError, resolveWithin, tightenMode } from './fsutil.js'
+import { updaterCommand } from './invocation.js'
 
 const BLOCK = 512
 
@@ -157,7 +158,7 @@ function parsePaxMode(value, name) {
   if (!/^[0-7]{1,7}$/.test(text)) {
     throw new UpdaterError(
       CODES.archiveUnreadable,
-      `pax extended header for ${JSON.stringify(name)} declares mode=${JSON.stringify(value)}, which is not an octal mode: nothing was extracted, because a release archive whose own metadata is unparseable is a release to re-publish, not a tree to guess at. Run "updater check" again against a corrected release.`,
+      `pax extended header for ${JSON.stringify(name)} declares mode=${JSON.stringify(value)}, which is not an octal mode: nothing was extracted, because a release archive whose own metadata is unparseable is a release to re-publish, not a tree to guess at. Run \`${updaterCommand('check')}\` again against a corrected release.`,
     )
   }
   return Number.parseInt(text, 8)
@@ -345,7 +346,7 @@ export function extractTarGz(buffer, destDir, { allowedRoot, maxOutputLength = M
       throw new UpdaterError(
         CODES.archiveEntryUnsafe,
         `archive carries two entries named ${JSON.stringify(entry.name)} (a ${firstAt.get(target)} and a ${entry.type}): the second would silently replace the first, `
-        + 'so nothing was written anywhere in the staging tree. Re-run "updater check" against a release whose archive holds each path once.',
+        + `so nothing was written anywhere in the staging tree. Re-run \`${updaterCommand('check')}\` against a release whose archive holds each path once.`,
       )
     }
     byTarget.set(target, entry)

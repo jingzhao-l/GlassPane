@@ -23,6 +23,7 @@ import { CA_ENV_VAR } from './ca-bundle.js'
 import { COMMON_BIN_DIRS, LAUNCHD_PATH, npmGlobalBinDirs, recordHome } from './binaries.js'
 import { UpdaterError, STATE_FILE_MODE, sameRuntimePath, writePrivateFile } from './fsutil.js'
 import { stateDirReadings } from './policy.js'
+import { updaterCommand } from './invocation.js'
 
 export const AGENT_LABEL = 'com.glasspane.update'
 export const DAEMON_JOB_LABEL = 'com.glasspane.daemon'
@@ -416,7 +417,7 @@ export function readRunningJob({
         + `${why ? ` (${why})` : errText ? ` (${errText.slice(0, 160)})` : ' (no exit code, no output)'}: `
         + 'this run observed nothing about the daemon job either way, so it is **not** a reading of "unloaded". '
         + 'Nothing was swapped or restarted. Next: read it yourself with `launchctl print gui/$(id -u)/' + label + '` '
-        + '— if that answers too, this process just could not ask launchctl, and "updater status --json" shows what the last '
+        + `— if that answers too, this process just could not ask launchctl, and \`${updaterCommand('status', '--json')}\` shows what the last `
         + 'recorded run saw.',
     }
   }
@@ -439,7 +440,7 @@ export function readRunningJob({
           + 'or run the GlassPane installer.'
         : `launchctl print gui/${resolved}/${label} answered ${res.status}${errText ? `: ${errText.slice(0, 200)}` : ''} — `
           + 'that is not an answer this tool can read as "loaded" or "unloaded", so the job was **not observed**, and nothing was swapped or restarted on the strength of it. '
-          + `Next: run \`launchctl print gui/$(id -u)/${label}\` and read what it says; if it names a domain or permission problem, "updater status --json" shows what the last recorded run saw.`,
+          + `Next: run \`launchctl print gui/$(id -u)/${label}\` and read what it says; if it names a domain or permission problem, \`${updaterCommand('status', '--json')}\` shows what the last recorded run saw.`,
     }
   }
   const block = parseArgumentsBlock(res.stdout)
@@ -469,7 +470,7 @@ export function readRunningJob({
       program: parseLaunchctlProgram(res.stdout),
       code: CODES.busyOrUnreachable,
       read: JOB_READS.available,
-      reason: `the running job names the state-root flag more than once (${named.join(', ')}), so which state root it writes is not decidable and no version was swapped. Next: put that job's argument list down to one state root (\`launchctl print gui/$(id -u)/${label}\` shows the list), then re-run \`updater apply\` against that root`,
+      reason: `the running job names the state-root flag more than once (${named.join(', ')}), so which state root it writes is not decidable and no version was swapped. Next: put that job's argument list down to one state root (\`launchctl print gui/$(id -u)/${label}\` shows the list), then re-run \`${updaterCommand('apply')}\` against that root`,
     }
   }
   // A flag that is *there* with a value that cannot be decoded is not a flag that is absent:
@@ -483,7 +484,7 @@ export function readRunningJob({
       program: parseLaunchctlProgram(res.stdout),
       code: CODES.busyOrUnreachable,
       read: JOB_READS.available,
-      reason: `the running job names the state-root flag with a value that cannot be read (${JSON.stringify(named[0])}: the flag is last in the argument list, its value begins with "-", or nothing follows the "="), so which state root it writes is not decidable and no version was swapped. Next: read \`launchctl print gui/$(id -u)/${label}\` and give that job exactly one readable state-root flag, then re-run \`updater apply\``,
+      reason: `the running job names the state-root flag with a value that cannot be read (${JSON.stringify(named[0])}: the flag is last in the argument list, its value begins with "-", or nothing follows the "="), so which state root it writes is not decidable and no version was swapped. Next: read \`launchctl print gui/$(id -u)/${label}\` and give that job exactly one readable state-root flag, then re-run \`${updaterCommand('apply')}\``,
     }
   }
   return {
@@ -997,7 +998,7 @@ export function registerAgent({
           + `and its answer to bootstrap was only "${String(boot.stderr ?? '').trim().slice(0, 80) || `exit ${boot.status}`}" — the loaded job names the same `
           + `stable entry it always named (${cliPath ?? 'the CLI path this run rendered'}), which proves nothing about the schedule or environment it carries. `
           + 'Nothing was recorded as enabled: run "launchctl bootout '
-          + `gui/${resolvedUid}/${label}" (or "launchctl remove ${label}") until it answers Could not find service, then run "updater enable" again`,
+          + `gui/${resolvedUid}/${label}" (or "launchctl remove ${label}") until it answers Could not find service, then run \`${updaterCommand('enable')}\` again`,
       }
     }
     // What the book *does* answer about the loaded definition is compared next: the daily interval
@@ -1016,7 +1017,7 @@ export function registerAgent({
         message: `the update agent was not replaced: the job launchd is holding runs at ${heldSchedule.hour}:${String(heldSchedule.minute).padStart(2, '0')}, `
           + `not the ${wantSchedule.hour}:${String(wantSchedule.minute).padStart(2, '0')} this run rendered, and its arguments name the stable entry `
           + `${cliPath ?? '<none>'} so the argv alone could not notice. Run "launchctl bootout gui/${resolvedUid}/${label}" until it answers `
-          + 'Could not find service, then run "updater enable" again',
+          + `Could not find service, then run \`${updaterCommand('enable')}\` again`,
       }
     }
     const wantEnv = parseAgentEnvironment(plistText)
@@ -1032,7 +1033,7 @@ export function registerAgent({
         code: CODES.busyOrUnreachable,
         message: `the update agent was not replaced: the loaded job's environment still differs from the definition this run rendered in `
           + `${differed.join(', ')}, which the stable argv cannot show. Run "launchctl bootout gui/${resolvedUid}/${label}" until it answers `
-          + 'Could not find service, then run "updater enable" again',
+          + `Could not find service, then run \`${updaterCommand('enable')}\` again`,
       }
     }
     return {
@@ -1063,7 +1064,7 @@ export function registerAgent({
       restored,
       message: `the update agent could not be loaded ${why}; ` + (restored
         ? `the definition this machine had before is back on disk and loaded again, so automatic update keeps running that previous job — the change this run asked for did not take`
-        : `putting the previous definition back also failed (launchctl bootstrap exit ${back.status}: ${(back.stderr || 'no stderr').trim().slice(0, 160)}), so this machine has NO update agent registered and "updater enable" has to be run again`),
+        : `putting the previous definition back also failed (launchctl bootstrap exit ${back.status}: ${(back.stderr || 'no stderr').trim().slice(0, 160)}), so this machine has NO update agent registered and \`${updaterCommand('enable')}\` has to be run again`),
     }
   }
   removeFile(plistPath)

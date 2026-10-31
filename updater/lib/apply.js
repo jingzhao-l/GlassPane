@@ -46,6 +46,7 @@ import { decideSwapPermission, foreignStateDir } from './policy.js'
 import { authorshipNote } from './signature.js'
 import { loadState, nextState, readPointer, saveState } from './state.js'
 import { ARCHIVE_FILE_NAME, extractInto, releaseTreeRoot, retireStaleGenerations, stagedTreePresent } from './staging.js'
+import { updaterCommand } from './invocation.js'
 
 /** §3.3: the daemon gets this long to answer before the swap is undone. */
 export const HANDSHAKE_BUDGET_MS = 15_000
@@ -1447,7 +1448,7 @@ export function npmLayerBlockedNote(npmReady) {
     ? 'The fix is to put node back where this run can reach it, not to change any permission: npm is a '
       + 'script whose first line asks for `node`, and that request could not be answered from this '
       + 'environment. Install or restore node (brew install node, or the official installer), then run '
-      + '"updater enable" from that shell — enable renders the daily job\'s PATH from the node that is '
+      + `\`${updaterCommand('enable')}\` from that shell — enable renders the daily job's PATH from the node that is `
       + 'running it, which is what the job needs to start the same script tomorrow. Nothing about the '
       + 'install itself has to change, and no password is asked for.'
     : notFound
@@ -1459,7 +1460,7 @@ export function npmLayerBlockedNote(npmReady) {
       ? 'The fix is a PATH that reaches npm, not a permission: run the `npm install -g` line above from a '
         + 'shell whose PATH includes the directory npm is installed in (the search in this sentence is the '
         + 'list of directories the updater was allowed to look in), then re-register the daily job with '
-        + '"updater enable" from that same shell — enable writes the job\'s PATH from the node and npm '
+        + `\`${updaterCommand('enable')}\` from that same shell — enable writes the job's PATH from the node and npm `
         + 'prefix bins it finds at that moment, so editing the plist by hand would only be overwritten. '
         + 'Nothing about the install itself has to change, and no password is asked for.'
       : npmReady.dir
@@ -1759,7 +1760,7 @@ export async function applyUpdate({
   // Gate: something must be staged, and the tree must still be there.
   const staged = stagedTreePresent({ stateRoot, staged: state.staged })
   if (!staged.ok) {
-    return fail('deferred', CODES.notStaged, `nothing is staged for update (${staged.reason}): run "updater check" first, and press Install update when it reports a version.`)
+    return fail('deferred', CODES.notStaged, `nothing is staged for update (${staged.reason}): run \`${updaterCommand('check')}\` first, and press Install update when it reports a version.`)
   }
   const wantVersion = state.staged.version
   const appliedDigest = state.staged.digest
@@ -1779,7 +1780,7 @@ export async function applyUpdate({
     // against the one recorded at check time. Reverse mutation: drop this
     // branch — `an equal or older staged tree is refused instead of swapped in`
     // goes red on a swapped-in 1.3.9.
-    return fail('deferred', CODES.stagedNotNewer, `${describeKind(kind, wantVersion, baseline)}. Nothing was swapped, and the staged tree was dropped from the state: run "updater check" again against the version this machine actually runs.`, {
+    return fail('deferred', CODES.stagedNotNewer, `${describeKind(kind, wantVersion, baseline)}. Nothing was swapped, and the staged tree was dropped from the state: run \`${updaterCommand('check')}\` again against the version this machine actually runs.`, {
       details: { kind, wantVersion, baseline },
       clearStaged: true,
     })
@@ -1797,7 +1798,7 @@ export async function applyUpdate({
     // refusal of the three (`policy.js:112-113`'s rule: a refusal carries a next step).
     // Both routes are said: the panel for a person, `--consent major` for an agent — and
     // the scheduled run is told plainly that neither was used on its behalf.
-    return fail('needs-consent', CODES.consentRequired, `version ${wantVersion} is a major upgrade from ${baseline}. Press "Install update" in the GlassPane panel to confirm you want it, or run "updater apply --consent major" from a terminal (the consent is per run; nothing here grants it to the schedule).`
+    return fail('needs-consent', CODES.consentRequired, `version ${wantVersion} is a major upgrade from ${baseline}. Press "Install update" in the GlassPane panel to confirm you want it, or run \`${updaterCommand('apply', '--consent', 'major')}\` from a terminal (the consent is per run; nothing here grants it to the schedule).`
       + (trigger === 'auto' && consents.length > 0
         ? ' This run came in as the scheduled run (--auto), so the consent on its command line was not used: a schedule cannot confirm on a person\'s behalf.'
         : ''))
@@ -1829,7 +1830,7 @@ export async function applyUpdate({
   if (!proven.ok) {
     return fail('deferred', CODES.digestMismatch,
       `the staged release is no longer the bytes "check" verified: ${proven.reason}. Nothing was built, packed, swapped or restarted, and the daemon was left running the version it had. `
-      + 'Run "updater check" to re-download and re-verify the release against its checksum, then press "Install update" again — and if something else on this machine writes into '
+      + `Run \`${updaterCommand('check')}\` to re-download and re-verify the release against its checksum, then press "Install update" again — and if something else on this machine writes into `
       + `${staged.dir}, that is the thing to fix first.`,
       { details: proven.details ?? null })
   }
@@ -2280,7 +2281,7 @@ export async function applyUpdate({
           // `updater apply`'s answer is the only one who can do the step, and a clean "applied" with no
           // mention of it is how a pending thing stays pending forever. The wording says one time,
           // because with the stable entry that is literally true — this is the last version that asks.
-          ? 'the updater code, the pointer, and the stable entry all moved, but the registered job still names its own path, so this machine owes one migration: flip "automatic update" off and on once (or run "updater enable"); after that single step, no future version needs it'
+          ? `the updater code, the pointer, and the stable entry all moved, but the registered job still names its own path, so this machine owes one migration: flip "automatic update" off and on once (or run \`${updaterCommand('enable')}\`); after that single step, no future version needs it`
           : null
     // The npm layer's share of the verdict, said in the same sentence the panel prints verbatim: the
     // machine did update, the global packages did not, and the one command that finishes the job is
@@ -2417,7 +2418,7 @@ export async function applyUpdate({
         historyEntry: { action: 'rollback', result: status, digest: appliedDigest, code: CODES.postSwapFailed },
       })
     } catch (writeError) {
-      writeFailure = `update-state.json could not be written after the rollback (${writeError?.message ?? String(writeError)}): read "updater status" again once the disk is writable, and treat ${baseline} as the version on disk`
+      writeFailure = `update-state.json could not be written after the rollback (${writeError?.message ?? String(writeError)}): read \`${updaterCommand('status')}\` again once the disk is writable, and treat ${baseline} as the version on disk`
     }
     return {
       ok: false,
@@ -2481,10 +2482,10 @@ export function backupOwnership(marker, { appsDir, stateRoot }) {
 
 /** The sentence for a backup that belongs to a different installation, with the command that reaches it. */
 function ownershipRefusal(dir, ownership, { appsDir, stateRoot }) {
-  const command = ['updater rollback']
-  if (ownership.wantAppsDir && !sameRuntimePath(ownership.wantAppsDir, appsDir)) command.push(`--apps-dir "${canonicalPath(ownership.wantAppsDir)}"`)
-  if (ownership.wantStateRoot && !sameRuntimePath(ownership.wantStateRoot, stateRoot)) command.push(`--state-dir "${canonicalPath(ownership.wantStateRoot)}"`)
-  return `${dir} is not a backup of the installation this command is pointed at: ${ownership.problems.join('; ')}. Nothing was restored and the daemon was not restarted. To roll back the install this backup belongs to, run it against that install: ${command.join(' ')}`
+  const command = ['rollback']
+  if (ownership.wantAppsDir && !sameRuntimePath(ownership.wantAppsDir, appsDir)) command.push('--apps-dir', canonicalPath(ownership.wantAppsDir))
+  if (ownership.wantStateRoot && !sameRuntimePath(ownership.wantStateRoot, stateRoot)) command.push('--state-dir', canonicalPath(ownership.wantStateRoot))
+  return `${dir} is not a backup of the installation this command is pointed at: ${ownership.problems.join('; ')}. Nothing was restored and the daemon was not restarted. To roll back the install this backup belongs to, run it against that install: \`${updaterCommand(...command)}\``
 }
 
 /**
@@ -2612,7 +2613,7 @@ export async function rollbackToBackup({
     code: handshake.ok ? null : CODES.handshakeFailed,
     message: (handshake.ok
       ? `restored ${wantVersion} from ${dir} and the daemon reports it`
-      : `restored ${wantVersion} from ${dir} on disk and verified the files, but the running daemon did not confirm it: ${handshake.message}. Restart it when GlassPane is idle ("updater rollback" again), and if it still does not report ${wantVersion} re-run the GlassPane installer`) + leftover,
+      : `restored ${wantVersion} from ${dir} on disk and verified the files, but the running daemon did not confirm it: ${handshake.message}. Restart it when GlassPane is idle (\`${updaterCommand('rollback')}\` again), and if it still does not report ${wantVersion} re-run the GlassPane installer`) + leftover,
     state: saved,
     rollback: { ok: true, performed: true },
     restart,

@@ -39,6 +39,7 @@ import {
 } from './fsutil.js'
 import { agentEntryPath, ensureAgentEntry } from './agent-entry.js'
 import { AGENT_LABEL, agentPlistPath } from './launchd.js'
+import { commandFrom } from './invocation.js'
 import { readPointer, writePointer } from './state.js'
 import { compareVersions } from './version.js'
 
@@ -719,7 +720,12 @@ export async function refreshRuntime({
         agentVerified: false,
         at,
         code: CODES.runtimeRegistrationPending,
-        detail: `the updater code, the pointer, and the stable entry are all in place, but the registered job still names its own path instead of ${entry.path}, and this run was the scheduled one — re-registering from inside it would tear the job down mid-run. Flip "automatic update" off and on once (or run "updater enable") to move the definition onto the entry; after that single step, no future version needs it${pruneNote(pruned)}.`,
+        // The command names the copy that just landed (`copied.cliPath`) rather than the one running
+        // this line, because the pointer already names it and `tools.ts`'s own enable remedy prints
+        // `runtime.cliPath` — one reader, one path. The bare `updater enable` this replaced was a dead
+        // end on every machine (no such executable exists; the panel said so at
+        // `UpdatePanelLogic.swift:401`).
+        detail: `the updater code, the pointer, and the stable entry are all in place, but the registered job still names its own path instead of ${entry.path}, and this run was the scheduled one — re-registering from inside it would tear the job down mid-run. Flip "automatic update" off and on once (or run \`${commandFrom(copied.cliPath, ['enable'])}\`) to move the definition onto the entry; after that single step, no future version needs it${pruneNote(pruned)}.`,
       },
       restored: { attempted: false, ok: true },
       pruned,

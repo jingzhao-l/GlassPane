@@ -46,6 +46,8 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
+import { updaterCommand } from './invocation.js'
+
 /**
  * The PATH a launchd job is handed on macOS, measured in this repo (`lib/signature.js`,
  * `test/signature.test.mjs`). Exported so a test can drive the search with *this* value rather than with a
@@ -247,7 +249,9 @@ export function interpreterMissingDetail({ name = 'the command', bin = null, std
   return `${bin ?? name} was found and started, but it could not run: ${asked} is not on the PATH this process handed to the child `
     + `(searched ${searched ?? 'the inherited PATH'}), which is what the \`${asked}\` line at the top of that script asks for. `
     + `This is the *runtime* being unreachable, not a permission of any directory: install ${asked} where the updater can reach it, `
-    + 'or re-run "updater enable" from a session that has it — enable renders the daily job\'s PATH from the directory node is '
+    + 'or re-run '
+    + `\`${updaterCommand('enable')}\``
+    + ' from a session that has it — enable renders the daily job\'s PATH from the directory node is '
     + 'running this program from, so the job gets the same reach this run just had.'
 }
 
@@ -335,7 +339,7 @@ export function binaryNotFoundDetail({
     : ''
   return `${name} could not be found on the searched paths — it was looked for at ${tried.join(', ')} and none of those is an executable file. `
     + `This process runs with ${where}, which does not include the directory the command is installed in (a launchd job and a Finder-launched .app are handed ${LAUNCHD_PATH} even when your shell has the right one)${tail}. `
-    + `Re-run the same command from a shell whose PATH includes that directory; for the daily job run "updater enable" from that `
+    + `Re-run the same command from a shell whose PATH includes that directory; for the daily job run \`${updaterCommand('enable')}\` from that `
     + `shell, because enable renders the job's own PATH (the directory this node lives in plus the npm prefix bins) into the `
     + `plist it registers — a hand-edit of that block is overwritten by the next enable. The updater will not invent a path it did not see.`
 }

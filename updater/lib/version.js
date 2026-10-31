@@ -20,6 +20,7 @@ import { spawnSync } from 'node:child_process'
 
 import { CODES } from './codes.js'
 import { UpdaterError } from './fsutil.js'
+import { updaterCommand } from './invocation.js'
 
 export const TAG_RE = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
 export const PLAIN_SEMVER_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
@@ -198,7 +199,7 @@ export function localVersion({ appsDir, daemonExecutable, settingsAppName, daemo
       message: `the installed bundles are present but unreadable as versions — ${unreadable.join(', ')}; `
         + 'a version this tool can only guess at cannot be compared with a release tag, so nothing was fetched, staged or swapped. '
         + 'Next: re-run the GlassPane installer (it rewrites those Info.plist files from the release it installs), '
-        + 'then "updater check --json" — and "updater status --json" shows this refusal recorded in the state the panel reads.',
+        + `then \`${updaterCommand('check', '--json')}\` — and \`${updaterCommand('status', '--json')}\` shows this refusal recorded in the state the panel reads.`,
     }
   }
   if (readings.length === 0) {

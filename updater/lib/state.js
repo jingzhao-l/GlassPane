@@ -14,6 +14,7 @@ import path from 'node:path'
 
 import { CODES, SCHEMA_VERSION, STATUSES } from './codes.js'
 import { UpdaterError, ensurePrivateDir, modeOf, writePrivateFile, STATE_FILE_NAME, POINTER_FILE_NAME, canonicalPath, writableRoots } from './fsutil.js'
+import { updaterCommand } from './invocation.js'
 import { assertValidState, loadSchema } from './schema.js'
 
 /** Spec §4: a check older than this is shown as overdue ("the fixed time hit while the machine was off"). */
@@ -243,7 +244,10 @@ const STATE_FIELDS = new Set(Object.keys(loadSchema().properties ?? {}))
 /** §4: a refusal always has a sentence a person can act on, even from a code. */
 function refusalSentence(status, code) {
   const stopped = typeof status === 'string' ? `the update stopped as "${status}"` : 'the update was refused'
-  return `${stopped} (${code ?? 'no code'}): run "updater status" to read the reason, and press "Install update" in the GlassPane panel to try again`
+  // The command is this package's CLI by absolute path (`lib/invocation.js`), not the bare name
+  // `updater`: no machine this product installs has such an executable, so the old sentence was a
+  // next step that answered 127 — and this one line is what the panel and `gp_diagnose` print.
+  return `${stopped} (${code ?? 'no code'}): run \`${updaterCommand('status')}\` to read the reason, and press "Install update" in the GlassPane panel to try again`
 }
 
 /** `lastError.details` is `string | null` in the schema; structure is flattened. */

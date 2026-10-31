@@ -25,6 +25,7 @@ import path from 'node:path'
 import process from 'node:process'
 
 import { CODES } from './codes.js'
+import { updaterCommand } from './invocation.js'
 import { stateDirFromArgs } from './policy.js'
 
 export const PROBE_METHOD = 'probe_status'
@@ -123,10 +124,10 @@ export function probeIdle({
           + `What this run measured is only "no reply on ${socketPath} in ${timeoutMs}ms"; it cannot tell apart an act queued in front of the reply, `
           + 'a daemon that stopped taking connections, and something else owning that socket name. '
           + 'What distinguishes them, in order: `launchctl print gui/$(id -u)/com.glasspane.daemon` shows whether launchd holds the job and with which '
-          + '--socket-path; "updater status --json" shows what the last recorded run saw without touching the network; '
+          + `--socket-path; \`${updaterCommand('status', '--json')}\` shows what the last recorded run saw without touching the network; `
           + 'and a daemon that answers nothing is repaired by the installer\'s `node installer/cli.js --restore-launchd` '
           + '(it asks before unloading a job that is loaded, so an act in flight is not cancelled by it). '
-          + 'Re-run "updater apply" once the probe is answered — until then the swap stays refused, which is the safe side.',
+          + `Re-run \`${updaterCommand('apply')}\` once the probe is answered — until then the swap stays refused, which is the safe side.`,
       })
     }, timeoutMs)
     const settleOnce = (verdict) => {

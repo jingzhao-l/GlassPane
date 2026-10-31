@@ -23,7 +23,8 @@
  * (its `lib/` is bundled into the state root beside `agent-entry.js`, and the package cannot
  * import `mcp-shell/dist`), so a cross-package import is impossible. What this file therefore
  * is: THE single updater-side implementation — every updater site that quotes (lib/check.js,
- * lib/source.js, lib/policy.js) imports it rather than writing its own rule, and
+ * lib/source.js, and lib/invocation.js, which is where lib/policy.js's remedy operands get quoted
+ * now) imports it rather than writing its own rule, and
  * `mcp-shell/test/remedy-shell-quoting.test.mjs` scans `updater/lib/*.js` and `updater/*.js`
  * with the same argument-position judgement it applies to `mcp-shell/src`, so a bare
  * interpolation at a command operand fails the gate on both sides in one test run.

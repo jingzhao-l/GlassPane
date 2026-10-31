@@ -37,6 +37,7 @@ import { makeBytesFetcher, makeFetcher, resolveBase } from './lib/source.js'
 import { RELATIVE_RELEASE_PATH } from './lib/check.js'
 import { CA_ENV_VAR, caBundlePath, describeCa, exportCaBundle, usableBundle } from './lib/ca-bundle.js'
 import { agentEntryPath, ensureAgentEntry } from './lib/agent-entry.js'
+import { updaterCommand } from './lib/invocation.js'
 
 export const SUBCOMMANDS = ['check', 'apply', 'status', 'rollback', 'enable', 'disable']
 // 防循环标记：重跑的那一次带着它，于是它自己的 TLS 失败只会如实报出原因，不再往上叠一层子进程。
@@ -239,9 +240,9 @@ export function parseArgs(argv) {
       .filter(Boolean).join(' and ')
     return {
       ok: false,
-      reason: `${named} only mean something to "updater enable" (they are written into the daily `
+      reason: `${named} only mean something to the update agent's \`enable\` step (they are written into the daily `
         + `launchd schedule); the command here is ${JSON.stringify(command ?? 'none')}, which reads neither. `
-        + 'Nothing was changed: run `updater enable --hour <0-23> --minute <0-59>` to set the schedule, '
+        + `Nothing was changed: run \`${updaterCommand('enable', '--hour', '<0-23>', '--minute', '<0-59>')}\` to set the schedule, `
         + 'and drop these options from this invocation.',
     }
   }
@@ -399,7 +400,7 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
           ok: false,
           code: CODES.versionMismatchLocal,
           version: null,
-          message: 'the installed version came back as nothing at all, so this run has no starting point: nothing was fetched, staged or swapped. Re-run the GlassPane installer, then "updater check --json".',
+          message: `the installed version came back as nothing at all, so this run has no starting point: nothing was fetched, staged or swapped. Re-run the GlassPane installer, then \`${updaterCommand('check', '--json')}\`.`,
         }
       }
       return reading
@@ -409,8 +410,8 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         code: error instanceof UpdaterError ? error.code : CODES.versionMismatchLocal,
         version: null,
         message: `reading the installed version threw (${String(error?.message ?? error)}) — that is a refusal, not a crash, and nothing was fetched, staged or swapped. `
-          + 'Next: re-run the GlassPane installer (it rewrites the bundles this reading depends on), then "updater check --json"; '
-          + '"updater status --json" shows this refusal recorded in the state the panel reads.',
+          + `Next: re-run the GlassPane installer (it rewrites the bundles this reading depends on), then \`${updaterCommand('check', '--json')}\`; `
+          + `\`${updaterCommand('status', '--json')}\` shows this refusal recorded in the state the panel reads.`,
       }
     }
   }
@@ -567,7 +568,7 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         agent = {
           ok: false,
           code: CODES.autoDisabled,
-          message: `GLASSPANE_UPDATE_DISABLE=1 is set, so the update agent was not registered. Unset it (or run "updater enable" from a shell without it) to switch automatic update back on.`,
+          message: `GLASSPANE_UPDATE_DISABLE=1 is set, so the update agent was not registered. Unset it (or run \`${updaterCommand('enable')}\` from a shell without it) to switch automatic update back on.`,
         }
       } else {
         // §9: the agent is the thing that must carry the bundle, so this is where
@@ -686,7 +687,7 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         // 那句是"每日 12:00"。判据要能答"不知道"，常量不能冒充实测。
         agentSchedule: disable ? null : (agent.schedule ?? null),
         message: disable
-          ? `automatic update is off${agent.message ? ` (${agent.message})` : ''}: "updater check" and "updater apply" still work by hand`
+          ? `automatic update is off${agent.message ? ` (${agent.message})` : ''}: \`${updaterCommand('check')}\` and \`${updaterCommand('apply')}\` still work by hand`
           : `automatic update is on${agent.message ? ` (${agent.message})` : ''}${ca ? `; ${ca.summary} — ${ca.remedy}` : ''}`,
         state: saved.state,
         command,
@@ -868,7 +869,7 @@ export function recoverFromTlsFailure({ outcome, argv, env, refresh, spawnChild,
     // 重跑照做（那才是用户要的恢复），但"这次没能在状态里留下证据"必须说出来 ——
     // 只写 stderr，`--json` 那一行仍然恰好一行、且只由子进程写。
     stderrFor(stderr).write(`updater: 证书恢复已重跑，但导出结果没能写进状态文件（${record.recordWriteError ?? '原因未知'}）；`
-      + `下一次 \`updater enable\` 之前，面板与 gp_diagnose 看到的 caRoots 仍是上一次的记录。\n`)
+      + `在下一次注册自动更新作业（enable 那一步）之前，面板与 gp_diagnose 看到的 caRoots 仍是上一次的记录。\n`)
   }
   const status = child && typeof child.status === 'number' ? child.status : null
   if (status === null) {

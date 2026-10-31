@@ -62,6 +62,7 @@ import { spawnSync } from 'node:child_process'
 import { CODES } from './codes.js'
 import { SIGNATURE_NAME } from './assets.js'
 import { UpdaterError, removeTreeWithin, resolveWithin, uniqueToken, writableRoots } from './fsutil.js'
+import { updaterCommand } from './invocation.js'
 
 /**
  * The closed vocabulary. The installer's `classifyTagVerify` supplies the words
@@ -148,9 +149,9 @@ function verdict(outcome, { version = null, sumsName = null, detail = null, sign
   const gap = signedAsset ? `publishes a ${name} that carries no signature at all (${detail ?? 'gpg: no signature found'})` : `publishes no ${name}`
   const messages = {
     verified: `${who}'s ${name} verifies against the key this program ships (fingerprint ${keyFingerprint ?? 'unread'}, the primary fingerprint pinned in this file rather than one this release chose for itself), so the checksum file that gates 4 and 5 take their digest from is the publisher's own statement — authorship established to that key, which is all "verified" claims here and nothing more.`,
-    invalid: `${who} publishes ${name}, and that signature does not check against the key this program ships. ${detail ?? 'Nothing more can be said about why.'} Nothing was staged, and no consent can override a bad signature: "updater check --consent unsigned-release" is the answer to "nobody signed this release", never to "the signature contradicts itself". This release is refused outright.`,
-    'unsigned-release': `${who} ${gap}, so nothing proves who wrote its checksum file: the digest, version-line and CI gates buy integrity and build traceability, not authorship (the release-signing job was added after 1.3.1, so every release tagged before it reads like this one). An automatic run stops here. A person who has compared the sha256 "updater status" reports against the release page may run "updater check --consent unsigned-release" to stage it with the missing proof recorded in the state file.`,
-    'signature-tool-missing': `${who}'s ${name} could not be checked on this machine: ${detail ?? 'no verification tool is available'}, so its authorship is unknown rather than proven. An automatic run stops here; "updater check --consent unsigned-release" proceeds with the gap recorded in the state file.`,
+    invalid: `${who} publishes ${name}, and that signature does not check against the key this program ships. ${detail ?? 'Nothing more can be said about why.'} Nothing was staged, and no consent can override a bad signature: running \`${updaterCommand('check', '--consent', UNSIGNED_CONSENT_KIND)}\` is the answer to "nobody signed this release", never to "the signature contradicts itself". This release is refused outright.`,
+    'unsigned-release': `${who} ${gap}, so nothing proves who wrote its checksum file: the digest, version-line and CI gates buy integrity and build traceability, not authorship (the release-signing job was added after 1.3.1, so every release tagged before it reads like this one). An automatic run stops here. A person who has compared the sha256 that \`${updaterCommand('status')}\` reports against the release page may run \`${updaterCommand('check', '--consent', UNSIGNED_CONSENT_KIND)}\` to stage it with the missing proof recorded in the state file.`,
+    'signature-tool-missing': `${who}'s ${name} could not be checked on this machine: ${detail ?? 'no verification tool is available'}, so its authorship is unknown rather than proven. An automatic run stops here; running \`${updaterCommand('check', '--consent', UNSIGNED_CONSENT_KIND)}\` proceeds with the gap recorded in the state file.`,
   }
   const sentence = messages[outcome]
   if (sentence === undefined) {
@@ -192,8 +193,8 @@ export function authorshipNote(authorship, done = 'accepted') {
     code: OUTCOME_CODES[word] ?? CODES.releaseUnsigned,
     message: `release ${authorship.version ?? 'unknown'} was ${done} without authorship proof (${word || 'no verdict'}${asset}): `
       + 'no signature made by the key this program ships was verified, and a person accepted that with '
-      + `"updater check --consent ${UNSIGNED_CONSENT_KIND}". The scheduled run will not do this on its own. `
-      + 'Compare the sha256 "updater status" reports against the release page before you rely on what is installed.',
+      + `run \`${updaterCommand('check', '--consent', UNSIGNED_CONSENT_KIND)}\` for that; the scheduled run will not do this on its own. `
+      + `Compare the sha256 that \`${updaterCommand('status')}\` reports against the release page before you rely on what is installed.`,
   }
 }
 
@@ -295,7 +296,7 @@ export function classifySignature({
       signedAsset: signatureAsset.name,
       detail: `gpg 被叫起来了，但这一趟没有给出判定（退出码 ${run.status === undefined ? '缺失' : 'null'}`
         + `${tail ? `：${tail}` : '，且没有任何输出'}）——它没答话不等于它答了"不对"，这台机器上的验证没走完。`
-        + `重跑一次即可；确认那只是负载之后，人可以按 "updater check --consent ${UNSIGNED_CONSENT_KIND}" 带着这一格记录继续。`,
+        + `重跑一次即可；确认那只是负载之后，人可以跑 \`${updaterCommand('check', '--consent', UNSIGNED_CONSENT_KIND)}\` 带着这一格记录继续。`,
     })
   }
   // The pin is asked about *before* anything gpg answered: a caller that hands in a

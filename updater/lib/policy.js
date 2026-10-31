@@ -12,7 +12,10 @@
  */
 import { bumpKind, compareVersions, parseTag } from './version.js'
 import { CODES } from './codes.js'
-import { quoteShellArg } from './shell-quote.js'
+// `invocation.js` is the only thing here that touches shell text: every operand of a remedy command
+// it prints goes through `quoteShellArg` (`lib/shell-quote.js`) inside the helper, so a remedy cannot
+// quote some operands and leave the state root bare.
+import { updaterCommand } from './invocation.js'
 
 /**
  * Consent gates a human can name with `--consent <kind>`.
@@ -67,8 +70,13 @@ export function decideUpdate({ currentVersion, tag, autoApply = true, consents =
       // 拒绝必须给出一条能跑的口令（本文件 :112-113 立的规矩）：面板那条路保留，但只说面板的
       // 拒绝对一个在终端前头的 agent 没有下一步，而另外两道门（`state-dir` 见下、
       // `unsigned-release` 见 lib/signature.js）都已经带着 `--consent <kind>`。
+      // 那两条口令从前写的是裸的 `updater check` / `updater apply`：这台机器上没有一个叫
+      // `updater` 的可执行文件（`updater/package.json` 没有 bin 字段，npm 只发布
+      // glasspane-mcp 与 glasspane-install），照抄得到 127。口令现在由 `invocation.js` 的
+      // `updaterCommand(...)` 生成，带着这一包 cli.js 的真路径。
       reason: `version ${candidate.version} is a major upgrade from ${currentVersion}: contract changes need a person, so press "Install update" when you want it. `
-        + `A person who has decided they want this major may run "updater check --consent major" to stage it and "updater apply --consent major" to swap it in; `
+        + `A person who has decided they want this major may run \`${updaterCommand('check', '--consent', 'major')}\` to stage it and `
+        + `\`${updaterCommand('apply', '--consent', 'major')}\` to swap it in; `
         + 'an automatic run never carries that flag.',
     }
   }
@@ -107,8 +115,8 @@ export function decideSwapPermission({ probe, jobArgs, ourStateRoot, consented =
       reason: probe?.reason
         ?? 'the daemon did not answer the idle probe, so this run has no evidence it is safe to restart it: nothing was swapped, built, packed or restarted. '
           + 'This measures only "no reply before the deadline" — a queued act, a wedged daemon and a different service owning the socket all look identical from here. '
-          + 'Next: `launchctl print gui/$(id -u)/com.glasspane.daemon` to see whether launchd holds the job at all, "updater status --json" for what the last recorded run saw '
-          + '(no network), and `node installer/cli.js --restore-launchd` if the daemon answers nothing — then re-run "updater apply".',
+          + `Next: \`launchctl print gui/$(id -u)/com.glasspane.daemon\` to see whether launchd holds the job at all, \`${updaterCommand('status', '--json')}\` for what the last recorded run saw `
+          + `(no network), and \`node installer/cli.js --restore-launchd\` if the daemon answers nothing — then re-run \`${updaterCommand('apply')}\`.`,
       swapped: false,
     }
   }
@@ -129,8 +137,8 @@ export function decideSwapPermission({ probe, jobArgs, ourStateRoot, consented =
       status: 'unknown',
       code: CODES.busyOrUnreachable,
       reason: ambiguous
-        ? `the running job names the state-root flag more than once (${readings.map((value) => String(value)).join(', ')}), so which state root its daemon writes to is not decidable and this tool will not swap on a guess. Nothing was replaced: read the job back with \`launchctl print gui/$(id -u)/com.glasspane.daemon\`, put its arguments list down to one state root — then re-run "updater apply" against that root.`
-        : `the running job names the state-root flag, but its value cannot be read (${readings.map((value) => String(value)).join(', ')} — a flag at the end of the argument list, a value beginning with "-", or nothing after the "="), so which state root its daemon writes to is not decidable and this tool will not swap on a guess. Nothing was replaced: read the job back with \`launchctl print gui/$(id -u)/com.glasspane.daemon\`, put its arguments list down to one readable state root — then re-run "updater apply" against that root.`,
+        ? `the running job names the state-root flag more than once (${readings.map((value) => String(value)).join(', ')}), so which state root its daemon writes to is not decidable and this tool will not swap on a guess. Nothing was replaced: read the job back with \`launchctl print gui/$(id -u)/com.glasspane.daemon\`, put its arguments list down to one state root — then re-run \`${updaterCommand('apply')}\` against that root.`
+        : `the running job names the state-root flag, but its value cannot be read (${readings.map((value) => String(value)).join(', ')} — a flag at the end of the argument list, a value beginning with "-", or nothing after the "="), so which state root its daemon writes to is not decidable and this tool will not swap on a guess. Nothing was replaced: read the job back with \`launchctl print gui/$(id -u)/com.glasspane.daemon\`, put its arguments list down to one readable state root — then re-run \`${updaterCommand('apply')}\` against that root.`,
       swapped: false,
     }
   }
@@ -144,10 +152,13 @@ export function decideSwapPermission({ probe, jobArgs, ourStateRoot, consented =
       // 这句从前还补了一句"面板上「安装更新」按钮干的是同一件事"——那是假的：`non-default-state-dir`
       // 不在 UpdatePanelLogic 的 consentGate 表里，落到 `.none` 那一档，而那一档写死
       // `applyEnabled: false`（UpdatePanelTests 钉着）。把人说往一个按不动的按钮，比不说更糟。
-      // `ourStateRoot` 走 `quoteShellArg`：这句是被面板/agent 原样转发的 remedy，而状态根是从
+      // `ourStateRoot` 走 `quoteShellArg`（经 `invocation.js` 的 `updaterCommand`，它对每一个参数位
+      // 都套这条规则）：这句是被面板/agent 原样转发的 remedy，而状态根是从
       // `--state-dir` / `GLASSPANE_STATE_DIR` / 面板透传（UpdateModel.swift 直接传 daemon 报的根）
       // 来的**不受信字节**；从前写的是双引号形态，而 `$()` 与反引号在双引号里照样展开。
-      reason: `the running daemon writes to ${foreign}, which is not the state root this tool was asked to update (${ourStateRoot}). A swap here would replace bundles that somebody else's daemon is using. A person who has checked which install they mean may run "updater apply --state-dir ${quoteShellArg(ourStateRoot)} --consent state-dir" — single-quoted by this tool's own rule (see lib/shell-quote.js: double quotes would not do, a command substitution still runs inside them), because a home or state root may contain a space, a non-ASCII name, or a shell metacharacter, and an unquoted copy of it would act on a truncated path; an automatic run never carries that flag.`,
+      // 命令名从前写的是裸的 `updater`——这台机器上没有那个可执行文件，照抄得 127；面板那一侧
+      // 早就换成 `node <绝对路径>`（UpdatePanelLogic.swift:482、:510），这一半跟着改。
+      reason: `the running daemon writes to ${foreign}, which is not the state root this tool was asked to update (${ourStateRoot}). A swap here would replace bundles that somebody else's daemon is using. A person who has checked which install they mean may run \`${updaterCommand('apply', '--state-dir', ourStateRoot, '--consent', 'state-dir')}\` — every operand single-quoted by this tool's own rule (see lib/shell-quote.js, applied by lib/invocation.js: double quotes would not do, a command substitution still runs inside them), because a home or state root may contain a space, a non-ASCII name, or a shell metacharacter, and an unquoted copy of it would act on a truncated path; an automatic run never carries that flag.`,
       swapped: false,
     }
   }

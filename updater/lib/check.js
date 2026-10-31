@@ -39,6 +39,7 @@ import { selfCheckStagedTree } from './selfcheck.js'
 import { verifyCiGreen } from './ci.js'
 import { loadState, nextState, saveState } from './state.js'
 import { readPointer } from './state.js'
+import { updaterCommand } from './invocation.js'
 
 export const RELATIVE_RELEASE_PATH = '/releases/latest'
 
@@ -364,7 +365,7 @@ export async function runCheck({
       // machine that just staged an update printed `check: ` and nothing else — which reads like the command
       // produced no answer, when the honest answer is "there is one, and here is what to press" (found by
       // running the real thing on 2026-10-01, right after the first successful 1.6.0 update).
-      || `staged ${candidate.version} (sha256 ${verified.digest.slice(0, 12)}); press "Install update" or run "updater apply"`
+      || `staged ${candidate.version} (sha256 ${verified.digest.slice(0, 12)}); press "Install update" or run \`${updaterCommand('apply')}\``
     return finish(
       {
         status: needsConsent ? 'needs-consent' : 'staged',
@@ -392,7 +393,7 @@ export async function runCheck({
     const discardNote = discarded.ok === true
       ? null
       : `. This run could not throw its own staged bytes away: ${discarded.reason}. Nothing was installed, `
-        + 'but the disk it left behind is real — re-run "updater check" (which re-stages into the same place), '
+        + `but the disk it left behind is real — re-run \`${updaterCommand('check')}\` (which re-stages into the same place), `
         + `and if ${discarded.dir} is still there after that, that directory is the thing to fix`
     // A filesystem error *inside this run's own staging directory* is a second run's doing, and the raw
     // errno is not the cause a person can act on. See `stagingRaceCause`.
@@ -486,7 +487,7 @@ export function stagingRaceCause(error, { dir, staging, version }) {
         + `before retrying — "ls -lO ${quoteShellArg(deniedPath)}" shows the flags (look for \`uchg\`/\`schg\`; "chflags -R nouchg" is what clears one), and `
         + `"stat -f 'owner %Su group %Sg mode %Sp flags %Sf' ${quoteShellArg(deniedPath)}" shows who owns it and what mode it has. `
         + `If neither points at the directory, whatever else on this machine holds ${deniedPath} open is the thing to fix. `
-        + `Nothing was kept and no version was offered: nothing was installed, and re-run "updater check" once the flags or the owner `
+        + `Nothing was kept and no version was offered: nothing was installed, and re-run \`${updaterCommand('check')}\` once the flags or the owner `
         + 'are the ones this account can write.',
     )
     : new UpdaterError(
@@ -494,7 +495,7 @@ export function stagingRaceCause(error, { dir, staging, version }) {
       `the bytes this run was staging under ${dir} moved while it worked (${code}: ${text}) — `
         + `the usual author of that is a second update run for ${version} in the same directory: the GlassPane panel's "Install update" and the daily job fetch the same release, `
         + 'and whichever one refuses first throws the shared tree away (the other cause is a hand-cleaned update-staging/). '
-        + 'Nothing was kept and no version was offered: run "updater check" again on its own, and leave the other run\'s directory alone while it works.',
+        + `Nothing was kept and no version was offered: run \`${updaterCommand('check')}\` again on its own, and leave the other run's directory alone while it works.`,
     )
   refused.tlsVerification = error?.tlsVerification === true
   return refused

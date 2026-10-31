@@ -22,6 +22,7 @@ import { spawnSync } from 'node:child_process'
 
 import { CODES } from './codes.js'
 import { UpdaterError, writePrivateFile } from './fsutil.js'
+import { updaterCommand } from './invocation.js'
 
 export const CA_BUNDLE_NAME = 'ca-roots.pem'
 export const CA_ENV_VAR = 'NODE_EXTRA_CA_CERTS'
@@ -172,8 +173,8 @@ export function describeCa(record, { bundlePath = null } = {}) {
     return {
       summary: 'this install has never exported a root bundle for node',
       remedy: bundlePath
-        ? `run the installer again, or "updater enable": either one re-exports ${bundlePath} and re-registers the agent with it.`
-        : 'run the installer again, or "updater enable": either one exports the machine\'s root bundle as ca-roots.pem inside your update state root (the stateRoot field of "updater status --json" names that directory) and re-registers the agent with it.',
+        ? `run the installer again, or \`${updaterCommand('enable')}\`: either one re-exports ${bundlePath} and re-registers the agent with it.`
+        : `run the installer again, or \`${updaterCommand('enable')}\`: either one exports the machine's root bundle as ca-roots.pem inside your update state root (the stateRoot field of \`${updaterCommand('status', '--json')}\` names that directory) and re-registers the agent with it.`,
     }
   }
   const where = record.path ? ` ${record.path}` : ''
@@ -188,7 +189,7 @@ export function describeCa(record, { bundlePath = null } = {}) {
         summary: record.path
           ? `"security find-certificate" ran but produced no certificate, so nothing was exported; the bundle already at ${record.path} is kept and still handed to the agent`
           : '"security find-certificate" ran but produced no certificate, and this machine has no exported bundle at all',
-        remedy: 'check the two keychains are readable ("security dump-keychain" lists them), then re-run "updater enable". Until then a machine that intercepts TLS keeps failing the first update gate.',
+        remedy: `check the two keychains are readable ("security dump-keychain" lists them), then re-run \`${updaterCommand('enable')}\`. Until then a machine that intercepts TLS keeps failing the first update gate.`,
       }
     case 'unavailable':
       return {
@@ -198,7 +199,7 @@ export function describeCa(record, { bundlePath = null } = {}) {
     case 'write-unverified':
       return {
         summary: `the bundle that was read back is not what was written${where} (${record.detail ?? 'no further detail'})`,
-        remedy: 'fix permissions or free space on the state root, then re-run "updater enable"; a bundle nobody can read back is not a bundle.',
+        remedy: `fix permissions or free space on the state root, then re-run \`${updaterCommand('enable')}\`; a bundle nobody can read back is not a bundle.`,
       }
     case 'probe-failed':
       return {
@@ -220,7 +221,7 @@ export function describeCa(record, { bundlePath = null } = {}) {
       // 枚举外的一切都是"这份记录读不懂"。当成 ok 就是规格 §9.7 明令禁止的那种静默放行。
       return {
         summary: `the recorded CA status ${JSON.stringify(record.status)} is not one this program knows`,
-        remedy: 're-run "updater enable" to produce a status this build understands.',
+        remedy: `re-run \`${updaterCommand('enable')}\` to produce a status this build understands.`,
       }
   }
 }

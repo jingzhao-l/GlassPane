@@ -116,7 +116,13 @@ export function refusalLine({ code, stateRoot, cli, json }) {
   const message = `the GlassPane update agent could not start: the installer pointer ${path.join(stateRoot, POINTER_FILE_NAME)}`
     + (cli ? ` names ${cli}, which is not on disk` : ' is missing or unreadable')
     + ` (state root ${stateRoot}). Nothing was checked or installed. Remedy: re-run the GlassPane installer`
-    + ' (it rewrites the pointer and re-registers this job), or run "updater enable" from a working copy.'
+    + ` (it rewrites the pointer and re-registers this job), or run the updater's \`enable\` step from a working`
+    // 这里**不**印一条 `node <路径> enable`：走到这一支恰恰是因为指针读不到、`cli` 不在盘上
+    // （`resolveUpdaterCli` 的两种失败），此时任何"照抄这条命令"都是发明一个不存在的路径。
+    // 而 `agent-entry.js` 是被 launchd 指向的一份**独立拷贝**（见 test/agent-entry.test.mjs 的
+    // dirlink 那一组：把这一个文件搬进沙箱它必须还能跑），所以它也不许 import `lib/`——
+    // 一条 import 就能让在册作业在真机上 ERR_MODULE_NOT_FOUND 而死。
+    + ' copy of the repository.'
   if (!json) return `updater/agent-entry: ${message}\n`
   return `${JSON.stringify({
     command: null,

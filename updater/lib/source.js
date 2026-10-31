@@ -13,6 +13,7 @@ import process from 'node:process'
 import { CODES } from './codes.js'
 import { UpdaterError } from './fsutil.js'
 import { quoteShellArg } from './shell-quote.js'
+import { updaterCommand } from './invocation.js'
 
 /** Pinned repository. Not overridable by argument, env, or release payload. */
 export const REPO_SLUG = 'jingzhao-l/GlassPane'
@@ -267,8 +268,8 @@ export function describeTransportFailure(url, error, { caBundlePath = null } = {
   const head = `GET ${url} failed: ${own}${code ? ` (${code}${causeText ? `: ${causeText}` : ''})` : ''}`
   if (!isTlsVerificationFailure(code)) return { message: head, details: null, tlsVerification: false }
   const remedy = caBundlePath
-    ? `node trusts only the CA bundle compiled into it and does not read the macOS keychain, so a machine whose HTTPS is intercepted by a locally trusted root needs that root handed to it: export NODE_EXTRA_CA_CERTS=${quoteShellArg(caBundlePath)} (one shell word — the value is single-quoted whenever it carries anything a shell could act on, and a double-quoted copy would **not** be safe, because a command substitution expands inside double quotes too; if that file does not exist yet, re-run the installer or "updater enable" — either exports the machine's own root bundle; nothing verifies less by doing this, it adds the roots this machine's administrator already trusts).`
-    : `node trusts only the CA bundle compiled into it and does not read the macOS keychain, so a machine whose HTTPS is intercepted needs its own root bundle exported: run the installer or "updater enable", then point NODE_EXTRA_CA_CERTS at the ca-roots.pem inside your update state root ("updater status --json" names that directory in its stateRoot field).`
+    ? `node trusts only the CA bundle compiled into it and does not read the macOS keychain, so a machine whose HTTPS is intercepted by a locally trusted root needs that root handed to it: export NODE_EXTRA_CA_CERTS=${quoteShellArg(caBundlePath)} (one shell word — the value is single-quoted whenever it carries anything a shell could act on, and a double-quoted copy would **not** be safe, because a command substitution expands inside double quotes too; if that file does not exist yet, re-run the installer or \`${updaterCommand('enable')}\` — either exports the machine's own root bundle; nothing verifies less by doing this, it adds the roots this machine's administrator already trusts).`
+    : `node trusts only the CA bundle compiled into it and does not read the macOS keychain, so a machine whose HTTPS is intercepted needs its own root bundle exported: run the installer or \`${updaterCommand('enable')}\`, then point NODE_EXTRA_CA_CERTS at the ca-roots.pem inside your update state root (\`${updaterCommand('status', '--json')}\` names that directory in its stateRoot field).`
   // 结构化地说"这是证书类失败"：下游的自愈分支必须读这个布尔，而不是去匹配我写的句子
   // （文案会改，判据不能跟着改）。
   return { message: head, details: remedy, tlsVerification: true }
@@ -294,8 +295,8 @@ function answered(url, response) {
   const status = Number.isInteger(response && response.status) ? String(response.status) : 'with no status'
   const text = response && typeof response.statusText === 'string' && response.statusText.trim() !== '' ? ` ${response.statusText.trim()}` : ''
   return `GET ${url} answered ${status}${text}. The release is refused and nothing partial is staged, so the next run starts from a clean slate. `
-    + 'Re-run "updater check" a little later — a 403 from GitHub is rate-limiting, which lifts on its own, while a 404 means the pinned source has '
-    + 'no release to offer yet; "updater status" prints what this install last recorded.'
+    + `Re-run \`${updaterCommand('check')}\` a little later — a 403 from GitHub is rate-limiting, which lifts on its own, while a 404 means the pinned source has `
+    + `no release to offer yet; \`${updaterCommand('status')}\` prints what this install last recorded.`
 }
 
 export function makeFetcher(fetchImpl = globalThis.fetch, { timeoutMs = 20_000, caBundlePath = null } = {}) {
@@ -533,7 +534,7 @@ export function makeBytesFetcher(fetchImpl = globalThis.fetch, {
         if (declared !== null && declared > maxBytes) {
           throw new UpdaterError(
             CODES.releaseBadPayload,
-            `GET ${url} declares ${humanBytes(declared)}, more than the ${humanBytes(maxBytes)} this tool will ever hold in memory for one release file, and its answer carries no stream to read a bound out of. Nothing was buffered and nothing is staged: re-run "updater check"; if a published release really is that large, the number to raise is DOWNLOAD_MAX_BYTES in lib/source.js, not the 45-minute timer.`,
+            `GET ${url} declares ${humanBytes(declared)}, more than the ${humanBytes(maxBytes)} this tool will ever hold in memory for one release file, and its answer carries no stream to read a bound out of. Nothing was buffered and nothing is staged: re-run \`${updaterCommand('check')}\`; if a published release really is that large, the number to raise is DOWNLOAD_MAX_BYTES in lib/source.js, not the 45-minute timer.`,
           )
         }
         const once = new Uint8Array(await response.arrayBuffer())
@@ -621,7 +622,7 @@ function stoppedForLength(url, { received, declared, capBytes }) {
   const bound = declared
     ? `the ${humanBytes(declared)} this response declared for itself`
     : `the ${humanBytes(capBytes)} ceiling this tool puts on a body that declares no length at all`
-  return `GET ${url} was stopped mid-stream: ${humanBytes(received)} had already arrived, which is more than ${bound}. A body that overruns its own length is not a slow download, so no timer would have helped: nothing partial is staged and the next run starts from a clean slate. Re-run "updater check"; if it stops the same way, whatever sits between this machine and GitHub is re-encoding or inventing that body (a proxy, or a host that is not the pinned release CDN), and that is the thing to fix`
+  return `GET ${url} was stopped mid-stream: ${humanBytes(received)} had already arrived, which is more than ${bound}. A body that overruns its own length is not a slow download, so no timer would have helped: nothing partial is staged and the next run starts from a clean slate. Re-run \`${updaterCommand('check')}\`; if it stops the same way, whatever sits between this machine and GitHub is re-encoding or inventing that body (a proxy, or a host that is not the pinned release CDN), and that is the thing to fix`
 }
 
 /** The sentence for the rate floor: what it measured, what it needs, where that number comes from, what arrived. */
