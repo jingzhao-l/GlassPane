@@ -2043,7 +2043,7 @@ function runtimeSelfDiagnosis(runtime: RuntimeReading, stateFile: string): strin
         + "inside the daily job would unregister the job that is running it"
         + (runtime.cliPath === null ? "" : `; the copy that would run next is ${location}`)
         + ". So treat the updater as whatever the loaded job actually runs, rather than as current. Remedy (one time): "
-        + "switch automatic update off and on again in the settings panel, or run `updater enable` from a terminal — "
+        + `switch automatic update off and on again in the settings panel, or run ${updaterEnableCommand(runtime)} from a terminal — `
         + "after that a version move is a single file write and no future release will ask for this step; if a machine "
         + `has only ever shown skipped, re-run the GlassPane installer, ${installerCmd}, once to put a self-updating copy down.`;
       break;
