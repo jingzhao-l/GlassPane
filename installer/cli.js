@@ -793,33 +793,38 @@ export function bundlesToReplace({ plan, exists = fs.existsSync } = {}) {
  *  finding C9（2026-10-24）：从前这里只把 `cpSync` 的 errno 原样抛出去——读的人既不知道
  *  旧 bundle 是否还在（旧实现是先 `rm -rf` 再拷，中途失败就是"旧的没了、新的是半棵"），
  *  也没有一句下一步。现在每一种失败各自点名"原件在不在"，并给一条真能跑的命令。 */
-function bundlePlacementFailureText({ source, target, staged, retired, error, step, stagedRemoved = true }) {
+export function bundlePlacementFailureText({ source, target, staged, retired, error, step, stagedRemoved = true }) {
   const raw = String(error?.message ?? error)
   const errno = error?.code && !raw.startsWith(String(error.code)) ? `${error.code}: ${raw}` : raw
   const head = `安置 ${target} 失败（来源 ${source}）：${errno}`
-  const dir = JSON.stringify(path.dirname(target))
-  const q = (p) => JSON.stringify(p)
+  // 命令位上的每一份路径都**就地**走本包自己的 `quoteShellArg`（2026-10-31：这里原来是一个
+  // `const dir = JSON.stringify(...)` 与一个 `q = (p) => JSON.stringify(p)`——那是双引号，
+  // `$(` 与反引号在双引号里照常展开，"照着这条命令修磁盘"就变成"照着目录名执行"。判据在
+  // `installer/test/shell-quoting.test.mjs` 的行为半边与
+  // `mcp-shell/test/remedy-shell-quoting.test.mjs` 的参数位扫描里；扫描按**名字**放行，所以
+  // 这里不保留 `dir`/`q` 这类别名：一个别名就是一次让闸看不见这处调用的改写。）
   if (step === 'copy' || step === 'retire') {
     return `${head}\n`
       + `新的一份只走到暂存位置就断了，原件还在原位——${target} 仍是上一轮那份**完整**的 bundle，`
-      + `本轮没有任何一步动过它的内容。下一步：空间不够看 \`df -h ${dir}\`，权限/旗标看 `
-      + `\`ls -ld ${dir}\` 与 \`ls -lO ${q(target)}\`（macOS 的 immutable 旗标 uchg 会让改名与覆盖都失败），`
+      + `本轮没有任何一步动过它的内容。下一步：空间不够看 \`df -h ${quoteShellArg(path.dirname(target))}\`，权限/旗标看 `
+      + `\`ls -ld ${quoteShellArg(path.dirname(target))}\` 与 \`ls -lO ${quoteShellArg(target)}\`（macOS 的 immutable 旗标 uchg 会让改名与覆盖都失败），`
       + `腾出来或修好之后重跑 install.sh。`
       + (stagedRemoved
         ? `本轮的暂存副本 ${staged} 已删，不需要手工清理。`
-        : `本轮的暂存副本 ${staged} 没能删掉（同一个错误也挡住了它），重跑前手工 \`rm -rf ${q(staged)}\` 即可。`)
+        : `本轮的暂存副本 ${staged} 没能删掉（同一个错误也挡住了它），重跑前手工 \`rm -rf ${quoteShellArg(staged)}\` 即可。`)
   }
   if (step === 'restore') {
     return `${head}\n`
       + `这一步之后本机已经没有 ${target} 了：新的一份在 ${staged}，上一轮那份完整的备份在 ${retired}，`
       + `而把它们放回原位的改名也被同一个错误挡住。这一步归人（安装器不发放提权命令）：`
-      + `先 \`mv ${q(retired)} ${q(target)}\` 把旧的一份放回原位，或 \`mv ${q(staged)} ${q(target)}\` 用本轮新的一份；`
-      + `两个都跑不通就是 ${path.dirname(target)} 的权限问题，看 \`ls -ld ${dir}\`，修好后重跑 install.sh。`
+      + `先 \`mv ${quoteShellArg(retired)} ${quoteShellArg(target)}\` 把旧的一份放回原位，`
+      + `或 \`mv ${quoteShellArg(staged)} ${quoteShellArg(target)}\` 用本轮新的一份；`
+      + `两个都跑不通就是 ${path.dirname(target)} 的权限问题，看 \`ls -ld ${quoteShellArg(path.dirname(target))}\`，修好后重跑 install.sh。`
   }
   // step === 'place'：新的一份没能落位，旧的一份已经被挪回原位——机器上此刻仍是完整的一版。
   return `${head}\n`
     + `${target} 已经放回上一轮那一份（先把备份 ${retired} 挪回原位再报错），本轮新的一份留在 ${staged}——`
-    + `本机现在不是"半棵"，是旧的那版在位。下一步：\`ls -ld ${dir}\` 看这个目录当前账号能不能写`
+    + `本机现在不是"半棵"，是旧的那版在位。下一步：\`ls -ld ${quoteShellArg(path.dirname(target))}\` 看这个目录当前账号能不能写`
     + `（EACCES 通常是目录属主不是您，或这卷不保存权限位），修好后重跑 install.sh；`
     + `两处残留 ${staged} 与 ${retired} 想清就 \`rm -rf\`，留着也不影响下一轮。`
 }
