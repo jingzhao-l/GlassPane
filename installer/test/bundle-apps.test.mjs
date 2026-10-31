@@ -28,6 +28,7 @@ import {
   installOutcome,
   verificationFailureText,
   parseArgs,
+  quoteShellArg,
   launchdPlistString,
   LAUNCHD_LABEL,
   LAUNCH_SETTLE_MS,
@@ -190,6 +191,23 @@ test('launchd plist 指向 bundle 内可执行时路径原样写入（授权主�
 })
 
 /** 从说明文本里抠出所有被双引号包住的绝对路径（finding 8 的闸：印出来的必须真存在）。 */
+/**
+ * 读者照抄的那一条 `open …` 命令的目标，按引号助手**会怎么印**来读（2026-10-31）。
+ *
+ * 生产者现在写的是 `open ${quoteShellArg(target)}`：惰性路径原样裸写，含空格的单引号包好。这一族
+ * 断言从前只认 `open "…"`（双引号那一形），所以 2026-10-30 把参数位修对之后，测试反而把"印出了
+ * 一条 open"判成"没印"。只认一种写法的断言和没有断言同样危险，因此这里三种形态都认，认回来是
+ * **一枚**参数。本文件的夹具路径来自 mkdtemp，不含单引号，所以不做 `'\''` 拼接的还原——真要测
+ * 那一形，归 remedy-shell-quoting 的行为半边（它拿恶意路径过真分词器）。
+ */
+function openTargets(text) {
+  const out = []
+  for (const m of String(text).matchAll(/\bopen\s+(?:'([^'\n]*)'|"([^"\n]*)"|(\/[\w@%+=:,./-]*))/g)) {
+    out.push(m[1] ?? m[2] ?? m[3])
+  }
+  return out
+}
+
 function quotedPaths(text) {
   return [...String(text).matchAll(/"(\/[^"]*)"/g)].map((m) => m[1])
 }
@@ -217,8 +235,8 @@ test('nextStepsText: bundle 形态与裸二进制形态的条目名各自如实�
   assert.ok(bundled.includes('授权勾选必须人工'), '诚实边界：TCC 不程序化')
   assert.ok(bundled.includes(plan.daemonExecutable), '给出 --permissions 验证命令的完整路径')
   assert.ok(bundled.includes('--permissions'))
-  assert.ok(bundled.includes(`open "${realApp}"`), 'bundle 形态的再起一次命令要指向那个 .app')
-  for (const p of quotedPaths(bundled).filter((x) => x.endsWith('.app'))) {
+  assert.ok(bundled.includes(`open ${quoteShellArg(realApp)}`), 'bundle 形态的再起一次命令要指向那个 .app')
+  for (const p of openTargets(bundled).filter((x) => x.endsWith('.app'))) {
     assert.ok(fs.existsSync(p), `说明里印给读者的 open 目标必须存在：${p}`)
   }
 
@@ -243,7 +261,7 @@ test('nextStepsText: bundle 形态与裸二进制形态的条目名各自如实�
     daemon: { path: '/repo/engine/.build/release/glasspaned', viaBundle: false },
     panel: { viaBundle: false, executable: path.join(emptyDir, PANEL_EXE_NAME), app: path.join(emptyDir, SETTINGS_APP_NAME), exists: false },
   })
-  assert.ok(!/open "/.test(nothing), `没有可执行面板产物时不许印 open "…"：${nothing}`)
+  assert.deepEqual(openTargets(nothing), [], `没有可执行面板产物时不许印一条 open：${nothing}`)
   assert.ok(nothing.includes('没有可执行的面板产物'), '必须明说这一步没有可执行的指引')
   assert.ok(nothing.includes(path.join(emptyDir, PANEL_EXE_NAME)), '要把查过的那个路径点出来')
   fs.rmSync(root, { recursive: true, force: true })
@@ -421,7 +439,7 @@ test('nextStepsText: daemon 未通过 hello 校验时先给失败告警与补救
   assert.ok(unverified.includes('未通过 hello 校验'), '未校验通过必须显式告警')
   assert.ok(unverified.includes('--restore-launchd'), '告警必须带可执行的补救命令')
   assert.ok(
-    unverified.includes('node "/repo/installer/cli.js" --restore-launchd'),
+    unverified.includes(`node ${quoteShellArg('/repo/installer/cli.js')} --restore-launchd`),
     '补救命令必须是拼好的真实路径，印 "<仓库目录>" 占位符等于没给可执行的东西',
   )
 
@@ -448,9 +466,9 @@ test('nextStepsText: 面板没打开时给的是**真能跑**的打开命令（�
     panel: { viaBundle: true, executable: path.join(app, 'Contents', 'MacOS', PANEL_EXE_NAME), app, exists: true },
   })
   assert.ok(!text.includes('面板已打开'))
-  const command = /open "([^"]+)"/.exec(text)
-  assert.ok(command, `应给出一条 open 命令：${text}`)
-  assert.ok(fs.existsSync(command[1]), `open 的目标必须真的存在，实为 ${command[1]}`)
+  const command = openTargets(text)
+  assert.ok(command.length >= 1, `应给出一条 open 命令：${text}`)
+  assert.ok(fs.existsSync(command[0]), `open 的目标必须真的存在，实为 ${command[0]}`)
 
   // 产物不存在时换成裸二进制说明，而不是把不存在的路径塞进 open。
   const missing = nextStepsText({
@@ -460,7 +478,7 @@ test('nextStepsText: 面板没打开时给的是**真能跑**的打开命令（�
     daemon: { path: '/repo/glasspaned', viaBundle: true },
     panel: { viaBundle: true, executable: null, app: path.join(root, '缺失.app'), exists: false },
   })
-  assert.ok(!/open "/.test(missing), '没有产物时不许印 open')
+  assert.deepEqual(openTargets(missing), [], '没有产物时不许印 open')
   assert.ok(missing.includes('没有可执行的面板产物'), missing)
   fs.rmSync(root, { recursive: true, force: true })
 })
@@ -475,7 +493,7 @@ test('panelOpenHint: bundle/裸二进制两形态与"什么都没有"那一档�
   assert.ok(!bare.text.startsWith('open '), '裸二进制不经 open')
   const gone = panelOpenHint({ panel: { viaBundle: false, executable: path.join(root, 'nope'), app: null, exists: false } })
   assert.equal(gone.runnable, false)
-  assert.ok(!gone.text.includes('open "'), '没东西可开时不许印 open')
+  assert.deepEqual(openTargets(gone.text), [], '没东西可开时不许印 open')
   fs.rmSync(root, { recursive: true, force: true })
 })
 
@@ -534,7 +552,7 @@ test('verificationFailureText: 失败提示带退出码 + 真实路径的补救�
   })
   assert.ok(noSocket.includes('安装未完成'), '先说结论')
   assert.ok(noSocket.includes('退出码 1'), '必须点明退出码：脚本调用方只读得到这个')
-  assert.ok(noSocket.includes('node "/repo/installer/cli.js" --restore-launchd'),
+  assert.ok(noSocket.includes(`node ${quoteShellArg('/repo/installer/cli.js')} --restore-launchd`),
     '补救命令必须是拼好的真实路径，用户/agent 直接可执行')
   assert.ok(noSocket.includes('/Users/dev/.glasspane/installer-daemon.log'), '必须指向日志')
   assert.ok(noSocket.includes('engine.sock'), '必须指向没等到应答的 socket')

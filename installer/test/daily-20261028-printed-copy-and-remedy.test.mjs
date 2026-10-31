@@ -27,7 +27,7 @@ import assert from 'node:assert/strict'
 import path from 'node:path'
 import test from 'node:test'
 
-import { installGuard, nextStepsText, updateGuidanceText, usageText } from '../cli.js'
+import { installGuard, nextStepsText, quoteShellArg, updateGuidanceText, usageText } from '../cli.js'
 
 const UPDATER_CLI = path.join('/install', 'root', 'updater', 'cli.js')
 
@@ -87,13 +87,15 @@ test('缺陷1：改写只动散文——flag 名、命令串与"八道校验"这
   }
   const guide = everyUpdateGuide().join('\n')
   assert.match(guide, /八道校验/, '校验是八道这一条事实必须在（auto-update.test.mjs 也按它断言）')
-  assert.match(guide, new RegExp(`node "${UPDATER_CLI}" enable`), '重开的那一条命令要能照抄')
-  assert.match(guide, new RegExp(`node "${UPDATER_CLI}" disable`), '一键关的那一条命令要能照抄')
+  // 断言按引号助手**会怎么印**来写（2026-10-31）：惰性路径裸写、含空格的单引号包好。
+  // 原来这两条钉的是 `node "<路径>"`——那是被修掉的那个形状（双引号里 `$()` 照常展开）。
+  assert.ok(guide.includes(`node ${quoteShellArg(UPDATER_CLI)} enable`), '重开的那一条命令要能照抄')
+  assert.ok(guide.includes(`node ${quoteShellArg(UPDATER_CLI)} disable`), '一键关的那一条命令要能照抄')
   assert.match(guide, /bootout com\.glasspane\.update/, '卸载口径仍然要点名同一个作业')
   const steps = nextStepsText({ rootDir: '/install/root', socketPath: '/s.sock', guiOpened: false, daemon: { path: '/x/glasspaned', viaBundle: false } })
   assert.match(steps, /授权勾选必须人工/, 'TCC 那条诚实边界不能被改写没了')
   assert.match(steps, /npm i -g glasspane-mcp/, '发布口径仍然在')
-  assert.match(steps, new RegExp(`node "${path.join('/install/root', 'installer', 'cli.js')}" --restore-launchd`), '恢复命令仍然是真路径')
+  assert.ok(steps.includes(`node ${quoteShellArg(path.join('/install/root', 'installer', 'cli.js'))} --restore-launchd`), '恢复命令仍然是真路径')
 })
 
 test('缺陷2：installGuard 的两条 HOME 拒绝点名真正生效的开关，不再叫用户挪 $HOME', () => {
