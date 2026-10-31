@@ -1475,3 +1475,34 @@ gp-restart-after-prune | AXButton | enabled=1 | 重启后台服务
 - 补充复跑（吃了改动 API 的那批文件：`Qoder20261027PruneBannerTests|Qoder20261019PanelDefectsTests|QoderPanel20261019Tests|Qoder20261024PanelHonestyTests|Qoder20261024CliAndPanelTests|ConsoleCliChannel|Prune|Daemon`）→ XCTest **176 执行 / 0 失败**。
 - 反向变异 9 点（`/var/tmp/glasspane-main-check/2026-10-29-main/lane5/reverse_mutations.py`，日志 `mutations-final.log`）：
   M1a/M1b/M2a/M2b/M2c/M3a/M3b/M3c/M3d **全部具名用例变红**，每次 `cp` 回备份后 `shasum -a 1` 与备份逐字一致。
+
+## 每日真机核对 2026-10-30 / 11-01（v1.27.0 收口，本机 GUI 会话，发布前同一棵树的 debug 产物）
+
+量的东西全部跑在 `/Volumes/Eng-Dev/gp-close-20261030`（收口树，代码 == 要 tag 的那一笔），
+helper 是自写的 `/var/tmp/glasspane-main-check-20261030/gp-ax-walk.swift`（本机没有 pyobjc，
+办法沿用 2026-10-22 / 10-29 两节：按 `AXIdentifier` 读、按 `kAXPressAction` 点，`cliclick` 点不动裸可执行文件）。
+
+1. **daemon 在隔离根上的自报**（`glasspaned --state-dir <临时根> --permissions`，rc 0）：
+   `{"accessibility":"granted","developer-tools":"unverifiable","input-monitoring":"granted","screen-recording":"granted"}`，
+   `verdict: granted`、`seatsNotGranted: []`，而 `verdictExcludes` 里 developer-tools 那一项
+   自己说清"这一席本命令不量，报 granted/denied 都是没读到的判决"，next 指 `--check-developer-tools`。
+   **本轮 F1 之后屏幕面上不再出现 `notDetermined` 那个词**——三席测量席给出的只有
+   `granted` 或"这次没量到"（`unverifiable`）。
+2. **面板按标识可读**：权限页一次遍历拿到 31 个 `gp-*` 标识，席位卡片把自己的**实测值**写进
+   标识里：`gp-perm-accessibility-granted`、`gp-perm-input-monitoring-granted`、
+   `gp-perm-screen-recording-granted`、`gp-perm-developer-tools-unverifiable`，另有
+   `gp-perm-explainer-*` 四张说明与 `gp-nav-*` 六个页签、`gp-daemon-state-root` /
+   `gp-daemon-socket-origin` / `gp-daemon-liveness-answering` 与 `gp-guide-*` 三枚引导按钮。
+   读数与 1 里 daemon 自己报的一致，面板不代测。
+3. **控件按得动、且真的换页**：`kAXPressAction` 打 `gp-nav-updates` 回 `err=0`（ok），按压前后
+   两次遍历的标识集合从 31 变到 30——权限页上的 `gp-copy-binary` 在更新页不再出现。
+   这一条只证到"按下去换了可见面"；我没写成"证到状态变化"，因为差集比对（comm）在两棵都
+   全量物化的 AX 树上是不可判定的，这一格如实记为**部分观测**。
+4. **进程归属两次 `pgrep` 判决**：本 run 起的 daemon 与面板在 `SIGTERM` 后
+   `pgrep -f "state-dir <临时根>"` 命中 0 行，`clean`；隔离根 `rm -rf` 回收。
+   在册的真 daemon（`~/Applications/GlassPane Daemon.app`，launchd 管的那枚）本 run **没碰**：
+   所有 daemon 运行都带 `--state-dir <临时根>`，`--prune-evidence` 一类破坏性旗标一次都没执行过。
+
+未观测的一格（物理边界，不是"没做"）：`gp-refresh-daemon-stats` 这一枚标识在这次构建的面板上
+不存在（10-29 那节记录的名字），所以我按的是当次真的列出来的 `gp-nav-updates`；补它不需要人工动作，
+下一轮按实际列出的标识点名即可。
