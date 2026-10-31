@@ -67,7 +67,7 @@ engine Swift（证据语义/socket/信号/CLI/面板）、探针与面板+脚本
 | C1 | 闸 | `check-doc-links --self-test` 有电池但 CI 从不跑它 | `daily-20261030-gate-wiring` 前两条 |
 | C2 | 闸 | `△` 句声称"交给那棵树自己的闸"，实测那棵树没有这两条判据 | `daily-20261030-gate-wiring` 第三条 |
 | C3 | 发布链 | `scripts/assert-tag-ready.mjs` 没有任何调用点（其判据在 CI 里由 `assert-ci-green` 承担） | 处置见「替 owner 做的决定」第 4 条；本轮由发布线实跑并记读数 |
-| C4 | 闸 | 单行 `run:` 只审 `|`，不审 `&&`/`||`/`;` | `check-workflows --self-test` 新增两例（37 例） |
+| C4 | 闸 | 单行 `run:` 只审管道符（`\|`），不审 `&&`/`\|\|`/`;` | `check-workflows --self-test` 新增两例（37 例） |
 | E1 | mcp-shell | 壳对 socket 路径无身份判据（同 uid 植一个监听者即可让代理把假回包当引擎的话） | `daily-20261030-socket-trust` 11 条（含端到端 `heardFromWire==0`） |
 | E2 | daemon | `.`/`..` 拼写绕过"这个根永不 chmod"的字符串比较 ⇒ 家目录被 0700 | `DailyRound20261030Swift1PathShapeTests` |
 | E3 | mcp-shell | 注册表临时文件用 `"w"` 打开（跟随符号链接），而 daemon 三个写者都 O_EXCL/NOFOLLOW | `daily-20261030-write-and-read-shapes` 前两条 |
@@ -180,3 +180,17 @@ engine Swift（证据语义/socket/信号/CLI/面板）、探针与面板+脚本
   `python3 -m pytest -q bridge` = 185 passed, 1 skipped；信号闸 OK；`sh -n install.sh` rc 0；
   `check-workflows --self-test` = 37 例（22 变异 + 15 沉默）；`check-doc-links --self-test` = 8 例（5+3）；
   `check-kernel-corpus` = 26 份 == `iterate-kernel@0.1.10`；`tool-surface --check` = 面 A 12627/21.88%、面 B 12040/20.86%，"no growth past the recorded baseline"。
+
+## 收口时的两处更正（不改上面的历史结论，只补事实）
+
+1. **表格格数**：上面「本轮审出并已修完的缺陷」那张表的 C4 一行把管道符写进了格子里，
+   `check-doc-links` 的表格判据当场把它判成"7 格对 4 格表头"，连带三条 updater 用例
+   （`scripts-check-doc-links`、`scripts-daily-20261020` 的两条）一起红。这不是文档小事：
+   那三条正是"文档闸在 main 上必须绿、且它认得到那些句子"的读者。修法是格内的竖线写成 `\|`。
+2. **「替 owner 做的决定」第 2 条要按实际发生改写**：我确实做过一次面 A `--record`
+   （`chore(harness): 面 A 基线补记 …`），但 rebase 到 10:30 那条线的新批次时金样冲突，
+   按"以 main 的为准"取他们那份后，我那笔成了空提交被丢弃。当下实测：
+   `tool-surface --check` 里 **面 A 12627/21.87%、面 B 12080/20.92% 都已等于金样**，
+   rc 0——即那 302 行最终是他们用 `c9a3a748`/`615e6f00` 两笔一并记走的。
+   所以"本线自己重记棘轮"这一格的实际状态是**不需要记**，而不是我记了。留这一句免得下一轮
+   在 `harness/contracts/tool-surface.json` 上再记一次同一批行。
