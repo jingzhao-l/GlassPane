@@ -36,7 +36,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { install, locatedRootRefusal, parseArgs } from "../cli.js";
+import { entryDecision, install, locatedRootRefusal, parseArgs } from "../cli.js";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const IS_DARWIN = process.platform === "darwin";
@@ -349,3 +349,51 @@ test("非 macOS 上两入口的**码**仍然同答（句子在不同主机上不
 function escapeRe(text) {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+/* ------------------------------------------------------------------ *
+ * 入口次序的整表（2026-10-31）。
+ *
+ * 这一格必须能在**任一台**主机上跑完：CI 的两条 lane 各是一种平台，而上一轮就是把
+ * "未知参数在非 darwin 上该由谁答"写在 `if (isMain)` 的链里——本机（darwin）永远走不到
+ * 那一档，于是 Linux runner 现形：同一串 `--no-such-flag`，install.sh 回 1、cli.js 回 2。
+ * `entryDecision` 把那条次序抽成纯函数之后，整张矩阵在本机就能跑满，包括那台跑不到的。
+ * ------------------------------------------------------------------ */
+
+const baseOptions = { repoDir: null, help: false, restoreLaunchd: false, prompt: false };
+
+test("入口次序整表：非 darwin 那一档在两种主机上都是同一个答案", () => {
+  const notRepoDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "gp-entry-order-"));
+  const env = { PATH: process.env.PATH };
+  try {
+    const cases = [
+      // argv, 期望的 kind 与码（darwin / 非 darwin 两列）
+      [["--help"], ["help", 0], ["help", 0]],
+      [["--no-such-flag"], ["usage-error", 2], ["platform", 1]],
+      [["--repo"], ["usage-error", 2], ["usage-error", 2]],
+      [["--repo", "--help"], ["usage-error", 2], ["usage-error", 2]],
+      // 显式定位位交的目录不合判据：**与主机无关**，两列必须同码同 kind
+      [["--repo", notRepoDir], ["located-root", 1], ["located-root", 1]],
+      [[], ["install", 0], ["platform", 1]],
+      [["--restore-launchd"], ["restore-launchd", 0], ["restore-launchd", 0]],
+    ];
+    for (const [argv, darwin, other] of cases) {
+      const { options, error, errorKind } = parseArgs(argv);
+      for (const [platform, expected] of [["darwin", darwin], ["linux", other]]) {
+        const d = entryDecision({ options, error, errorKind, platform, env });
+        assert.equal(d.kind, expected[0],
+          `argv=${JSON.stringify(argv)} 在 ${platform} 上判成 ${d.kind}，期望 ${expected[0]}`);
+        assert.equal(d.exitCode, expected[1],
+          `argv=${JSON.stringify(argv)} 在 ${platform} 上的退出码是 ${d.exitCode}，期望 ${expected[1]}`);
+      }
+    }
+    // 判据自己也得会咬人：--repo 的判据若被排到平台判据**之后**，Linux 那一列就会分叉。
+    const flipped = entryDecision({
+      options: { ...baseOptions, repoDir: notRepoDir }, error: null, errorKind: null,
+      platform: "linux", env,
+    });
+    assert.equal(flipped.kind, "located-root",
+      "显式定位位的判据不再是平台判据的前身——两条入口在 Linux 上会重新分叉");
+  } finally {
+    fs.rmSync(notRepoDir, { recursive: true, force: true });
+  }
+});

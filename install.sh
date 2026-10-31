@@ -254,10 +254,19 @@ sh_quote() { # $1=任意值；stdout 上是一个可照抄的 shell 词
   _sq_in=$1
   _sq_q="'"
   _sq_bare=1
+  # 分类必须**按字节**判（2026-10-31，CI 的 macOS lane 抓到）：`case` 里的 `[!A-Za-z…]` 受
+  # locale 影响，macOS runner 的 en_US.UTF-8 下 `é`（UTF-8 两字节）被当成落在字母类里，于是
+  # 这里印裸的 `é`，而 `installer/cli.js` 的 quoteShellArg 印 `'é'`——同一串 argv 在两条一键
+  # 入口上有两种引号形状（Linux 上反倒一致，所以这一族只在交付平台上现形）。LC_ALL=C 让字符类
+  # 按字节走，与 JS 那张表逐值同判；`installer/test/install-sh.test.mjs` 的表对照钉这件事。
+  if ! printf '%s' "$_sq_in" | LC_ALL=C command grep -q "[^A-Za-z0-9@%+=:,./_-]"; then
+    _sq_bare=1
+  else
+    _sq_bare=0
+  fi
   case $_sq_in in
     '') _sq_bare=0 ;;
     -*) _sq_bare=0 ;;
-    *[!A-Za-z0-9@%+=:,./_-]*) _sq_bare=0 ;;
   esac
   if [ "$_sq_bare" = "1" ]; then
     printf '%s' "$_sq_in"

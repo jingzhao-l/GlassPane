@@ -184,7 +184,7 @@ test('C3 --restore-launchd：作业已加载且定义一致时一个字都不动
 })
 
 test('C3 入口把 --no-prompt 交给恢复路径的同意门（不传就等于非交互永远拒）', () => {
-  const body = CLI_SOURCE.slice(CLI_SOURCE.indexOf('} else if (options.restoreLaunchd) {'))
+  const body = CLI_SOURCE.slice(CLI_SOURCE.indexOf('} else if (decision.kind === \'restore-launchd\') {'))
   assert.match(body, /restoreLaunchd\(\{[\s\S]{0,200}autoYes: options\.prompt === false/,
     `main() 里那次 restoreLaunchd() 必须把 --no-prompt 传给同意门：${body.slice(0, 400)}`)
 })

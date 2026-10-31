@@ -513,6 +513,40 @@ export function platformRefusal(platform = process.platform) {
     + '要在别的系统上用 GlassPane，等它把引擎搬到那一侧再说——现在这一步没有可绕的旗标。'
 }
 
+/**
+ * 入口那一条 if/else 链的**纯函数形状**（2026-10-31）：次序里有一档只在非 darwin 主机上才走到，
+ * 而 CI 的两条 lane 正好各跑一种（ubuntu 的 root workspace gate、macOS 的 darwin-only 套件）。
+ * 把判据留在 `if (isMain)` 里，本机就永远证不到那一档——上一轮正是这样把"同一串 argv 两入口
+ * 两个码"发到了 main 上（Linux runner 现形：install.sh 回 1，cli.js 回 2）。抽出来之后，
+ * 次序矩阵在任一台机器上都能整表跑，包括那台跑不到的。
+ *
+ * 次序（同一份规则写在 install.sh 的 2c'/2e 与 `if (isMain)` 上面）：
+ *   1. `--repo` 的两类用法错（缺取值 / 取值是旗标形状）——这串 argv 自己就不通，先于 --help；
+ *   2. 显式定位位（`--repo` / `GLASSPANE_REPO`）交的目录不合仓库判据——**与主机无关**，
+ *      所以它排在平台判据之前，两条入口在 Linux 与 macOS 上给同一句、同一个码；
+ *   3. `--help` / `-h`：0（CI 的 install-gate 与两份 README 钉的就是这个 0）；
+ *   4. 平台判据：跑不了这个产品的机器上第一句说的是"这里跑不了"（1）。未知参数只有本文件判得
+ *      出来（install.sh 没有旗标清单，也不许抄一份），所以那一档在平台判据**之后**：否则
+ *      同一串 argv 在 Linux 上就成了 install.sh=1 / cli.js=2；
+ *   5. 未知参数：2 + usage 页；
+ *   6. `--restore-launchd` / 正常安装。
+ */
+export function entryDecision({ options, error = null, errorKind = null,
+  platform = process.platform, env = process.env }) {
+  const repoValueError = errorKind === 'repo-value'
+  const located = (repoValueError || options.help || options.restoreLaunchd)
+    ? null : explicitLocatedRootRefusal(options, env)
+  const platformRefuse = (repoValueError || options.help || located !== null || options.restoreLaunchd)
+    ? null : platformRefusal(platform)
+  if (repoValueError) return { kind: 'usage-error', message: error, exitCode: 2 }
+  if (located !== null) return { kind: 'located-root', message: located, exitCode: 1 }
+  if (options.help) return { kind: 'help', exitCode: 0 }
+  if (platformRefuse) return { kind: 'platform', message: platformRefuse, exitCode: 1 }
+  if (error) return { kind: 'usage-error', message: error, exitCode: 2 }
+  if (options.restoreLaunchd) return { kind: 'restore-launchd', exitCode: 0 }
+  return { kind: 'install', exitCode: 0 }
+}
+
 /** 汇总预检结果：缺项按严重程度排序返回可读描述（空数组 = 全部通过）。 */
 export function preflightIssues(env) {
   const issues = []
@@ -835,6 +869,20 @@ export function bundlesToReplace({ plan, exists = fs.existsSync } = {}) {
   ]
     .filter(([source, target]) => source && target && exists(source) && exists(target))
     .map(([, target]) => target)
+}
+
+export function explicitLocatedRootRefusal(options, env = process.env) {
+  const explicitRoot = options.repoDir ? path.resolve(options.repoDir) : null
+  const envRoot = env.GLASSPANE_REPO ? path.resolve(env.GLASSPANE_REPO) : null
+  const ref = resolvePinRef(env)
+  for (const located of [
+    { label: '--repo', dir: explicitRoot },
+    { label: 'GLASSPANE_REPO', dir: envRoot },
+  ]) {
+    const refusal = locatedRootRefusal({ ...located, ref })
+    if (refusal) return refusal
+  }
+  return null
 }
 
 /** 安置一份 bundle 时那条"没落地"的拒绝：说清动到哪一步、旧的一份还在不在、下一步跑什么。
@@ -3227,11 +3275,11 @@ export async function install({
   // 从前这里只问"在不在"，于是一个存在的非仓库目录会被当成项目根交给 npm（见
   // locatedRootRefusal 的注释），而同一串 argv 在 install.sh 那一头回 1 且一个字节都没写。
   // 两条一键入口对同一串输入必须同判，且"能拒的守卫要在第一字节之前拒"是本仓的规矩。
-  for (const located of [
-    { label: '--repo', dir: explicitRoot },
-    { label: 'GLASSPANE_REPO', dir: envRoot },
-  ]) {
-    const refusal = locatedRootRefusal({ ...located, ref: pinRef })
+  // 判据本体在 explicitLocatedRootRefusal 里——入口也调它一次，这样"这棵 argv 自己就不通"
+  // 这件事不与主机平台有关（CI 的 Linux 那一格实测过：从前 install.sh 按判据拒、cli.js 按
+  // "只支持 macOS"拒，同一串输入两句话）。
+  {
+    const refusal = explicitLocatedRootRefusal(options, env)
     if (refusal) throw new Error(refusal)
   }
 
@@ -3680,24 +3728,32 @@ if (isMain) {
   // 平台判据住在 cli.js 这一侧才是权威的：`uname` 是 PATH 上一个可以被换掉的程序（本轮实测：
   // 桩一个 `uname` 说 Linux，install.sh 那一道只管挡"要 clone 的那一趟"，源码在手边时一路走到
   // `exec node cli.js`，npm ci / tsc / swift build / launchd 注册全部真的发生），而
-  // `process.platform` 是 node 向主机问来的，桩不掉。放在 --help / 参数错误 / --restore-launchd
-  // 之后判：CI 的 install-gate 那一格跑在非 macOS 上，它读的正是 usage 与预检那几句。
-  const refusal = (error || options.help || options.restoreLaunchd) ? null : platformRefusal()
-  if (refusal) {
-    process.stderr.write(paint(`\n${refusal}\n`, 'red'))
-    process.exitCode = 1
-  } else if (errorKind === 'repo-value') {
-    process.stderr.write(`\n${paint(`参数错误：${error}`, 'red')}\n\n`)
+  // `process.platform` 是 node 向主机问来的，桩不掉。
+  // 但它**只压过"未知参数"那一档，不压 --help / --repo 的两类用法错 / 显式定位位的判据**
+  // （2026-10-31，CI 的 Linux 那一格现形）：从前这里把 `error` 也算进"跳过平台判据"的条件，
+  // 于是 `--no-such-flag` 在非 macOS 上这头退 2、install.sh 那头退 1——而 install.sh 在把 argv
+  // 交给本文件之前，只判得了它自己那份旗标（未知参数那一档必须由本文件回答）。同一串 argv
+  // 两个码，按 rc 分叉的调用方就读了个寂寞。留下来的规则是：一台跑不了这个产品的机器上，
+  // 第一句该说的是"这里跑不了"（rc 1），参数打错是它之后的事；`--help` 仍旧先赢（0）。
+  const decision = entryDecision({ options, error, errorKind })
+  // 每一支的退出码在这里**写死成字面量**：次序由 `entryDecision` 决定（那台跑不到的主机上的
+  // 那一档因此可在本机整表验证），而"每条退出都走事件循环、每条分支都还在"由
+  // `test/failure-exit.test.mjs` 扫这几行钉住——它认的是字面量，改成 `= decision.exitCode`
+  // 会让那条闸看不见分支被删。
+  if (decision.kind === 'usage-error') {
+    process.stderr.write(`\n${paint(`参数错误：${decision.message}`, 'red')}\n\n`)
     process.stderr.write(usageText())
     process.exitCode = 2
-  } else if (options.help) {
+  } else if (decision.kind === 'located-root') {
+    process.stderr.write(`\n${paint(decision.message, 'red')}\n`)
+    process.exitCode = 1
+  } else if (decision.kind === 'help') {
     process.stdout.write(usageText())
     process.exitCode = 0
-  } else if (error) {
-    process.stderr.write(`\n${paint(`参数错误：${error}`, 'red')}\n\n`)
-    process.stderr.write(usageText())
-    process.exitCode = 2
-  } else if (options.restoreLaunchd) {
+  } else if (decision.kind === 'platform') {
+    process.stderr.write(paint(`\n${decision.message}\n`, 'red'))
+    process.exitCode = 1
+  } else if (decision.kind === 'restore-launchd') {
     // 审计项④：恢复 + 校验全机器化，退出码即判定（0=daemon 就位且已按实际
     // 自报如实报告；1=作业/服务面失败），agent 可直接执行并按 message 续办。
     // finding C3：这一支也可能 bootout 一个已加载作业，所以它读同一个同意门——

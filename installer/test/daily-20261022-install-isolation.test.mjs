@@ -173,7 +173,10 @@ test('both doors consult the platform verdict before anything can mutate the mac
     '平台闸必须排在源码定位之后、委托之前——它挡的就是"已经找到源码"的那一趟');
 
   const cli = jsCode(fs.readFileSync(path.join(HERE, '..', 'cli.js'), 'utf8'));
-  const refusalCall = cli.indexOf('platformRefusal()');
+  // 2026-10-31：平台判据的调用点从入口那条链挪进了 `entryDecision`（那样 Linux 那一档才能在
+  // 本机被整表验证）。判据没变——**它在环境预检之前**——所以这里认 `platformRefusal(` 的调用，
+  // 不再要求它写在 `()` 那一形上。
+  const refusalCall = cli.indexOf('platformRefusal(');
   assert.ok(refusalCall > 0, 'cli.js 没有调用它自己的平台判据');
   assert.ok(cli.indexOf('checkEnvironment()') > refusalCall,
     '平台判据排在环境预检之后：那一步之前谁都不许动机器');
