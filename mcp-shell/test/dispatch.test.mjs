@@ -739,7 +739,7 @@ test("a protocol-level tools/call refusal carries a remedy naming published tool
   const subset = new McpServer({
     engine: makeEngine().engine,
     session: new EvidenceAuditSession(),
-    specs: [{ name: "gp_probe_status", description: "d",
+    specs: [{ name: "gp_probe_status", description: "d", engineMethod: "probe_status",
       inputSchema: { type: "object", properties: {} },
       // ToolSpec 的必填面：出路现在按 `spec.validate({})` 选例子，夹具就得是一个真 spec。
       validate: () => ({ ok: true, value: {} }) }],
@@ -774,6 +774,53 @@ test("a spec without a callable validate is refused at construction, not mid-req
     () => new McpServer({ engine, session: new EvidenceAuditSession(), specs: [{ name: "gp_x", description: "d" }] }),
     /TOOL_SPECS/,
   );
+  // The other half of the same contract: a spec without an `engineMethod` cannot be answered
+  // about re-issue safety at all, and must not get to find that out mid-request.
+  assert.throws(
+    () => new McpServer({
+      engine,
+      session: new EvidenceAuditSession(),
+      specs: [{
+        name: "gp_y", description: "d", inputSchema: {}, validate: () => ({ ok: true, value: {} }),
+      }],
+    }),
+    /gp_y" has no engineMethod/,
+  );
+});
+
+test("a fault on a gp_act frame is answered about the ENGINE method, not the tool name", async () => {
+  const { engine } = makeEngine();
+  const LEAKED = "EPHEMERAL act state could not be resolved";
+  // `deps.engine` is read while the call arguments are being assembled, i.e. outside
+  // `executeTool` and therefore outside the tool layer's own catch — which is the only way a
+  // fault on a `tools/call` reaches the protocol-level arm under test.
+  const deps = {
+    session: new EvidenceAuditSession(),
+    get engine() { throw new Error(LEAKED); },
+  };
+  const server = new McpServer(deps);
+  const written = [];
+  const realWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk) => { written.push(String(chunk)); return true; };
+  let frame;
+  try {
+    frame = await server.handleLine(enq({
+      jsonrpc: "2.0", id: 7, method: "tools/call",
+      params: { name: "gp_act", arguments: { action: "press", selector: { role: "AXButton", title: "x" } } },
+    }));
+  } finally {
+    process.stderr.write = realWrite;
+  }
+  const message = frame.error.message;
+  // This is the sentence the domain mismatch used to lose: `shellFaultRemedy` keys off the
+  // engine method (`act`), so passing it the tool name `gp_act` fell through to the
+  // replay-safe arm and invited the reader to send the action again — the one thing this
+  // product refuses to print for something that may still land on the user's screen.
+  assert.match(message, /Do NOT re-issue act/, `gp_act 的内部故障没有说"不许重发"：${message}`);
+  assert.ok(!/sending this tool again is a real option/.test(message),
+    `出路把重发当成一条真出路：${message}`);
+  assert.ok(!message.includes(LEAKED), `内部描述上了线：${message}`);
+  assert.ok(written.join("").includes(LEAKED), "细节必须留在本进程 stderr，否则读者无从诊断");
 });
 
 test("a fault inside the shell is answered wire-safe: type on the frame, detail on stderr, remedy on both", async () => {
@@ -785,6 +832,7 @@ test("a fault inside the shell is answered wire-safe: type on the frame, detail 
     specs: [{
       name: "gp_probe_status",
       description: "d",
+      engineMethod: "probe_status",
       inputSchema: { type: "object", properties: {} },
       validate: () => { throw new Error(LEAKED); },
     }],
@@ -807,11 +855,14 @@ test("a fault inside the shell is answered wire-safe: type on the frame, detail 
   assert.equal(frame.error.code, -32603);
   assert.ok(!frame.error.message.includes(LEAKED),
     `内部描述被印到线上（这是 HTTP 半边早已禁止的形状）：${frame.error.message}`);
+  // 分支选择本身要有判别力：`probe_status` 是可安全重发的一支，所以这一帧不许出现
+  // "Do NOT re-issue"；上一版这里写的是 `/gp_last_evidence|gp_recent_reports|stderr/`，
+  // 三个 arm 都含 `readRoute`，那条断言对分支选择恒真（自审 2026-10-31 点名的假判别）。
   assert.match(frame.error.message, /\| remedy: /, frame.error.message);
   assert.match(frame.error.message, /this shell faulted/);
-  // 出路必须点名"这条面上的读者真能做的动作"，而不是"再发一次"：gp_probe_status 是只读的，
-  // `shellFaultRemedy` 对可重发与不可重发两类分别说话，这里钉的是它被真的调用过。
-  assert.match(frame.error.message, /gp_last_evidence|gp_recent_reports|stderr/,
+  assert.ok(!/Do NOT re-issue/.test(frame.error.message),
+    `可安全重发的方法被答成了不许重发：${frame.error.message}`);
+  assert.match(frame.error.message, /gp_recent_reports/,
     `出路没有点名任何一条读者做得动的读取：${frame.error.message}`);
 });
 

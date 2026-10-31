@@ -131,6 +131,15 @@ export class McpServer {
           + 'McpServer must carry the same validate the call path runs (see TOOL_SPECS in src/tools.ts)',
         );
       }
+      // `engineMethod` is not decoration: the fault remedy, the `hello.capabilities`
+      // reconciliation and the replay-safety table all key off it, so a spec missing it makes
+      // the "may this be re-issued?" answer silently wrong rather than absent.
+      if (typeof spec.engineMethod !== "string" || spec.engineMethod.length === 0) {
+        throw new Error(
+          `ToolSpec "${String(spec.name)}" has no engineMethod: the fault remedy and the `
+          + "capabilities reconciliation both key off it (see TOOL_SPECS in src/tools.ts)",
+        );
+      }
     }
     this.session = deps.session;
   }
@@ -175,7 +184,7 @@ export class McpServer {
       const type = error instanceof Error ? (error.constructor?.name ?? "Error") : typeof error;
       try {
         process.stderr.write(
-          `[glasspane-mcp] an internal failure while handling ${String(request.method)}: `
+          `[glasspane-mcp] an internal failure while handling ${this.echoForeign(String(request.method))}: `
           + `${type} — ${String(error)} (withheld from the stdio frame: a description of an internal `
           + "failure names files and symbols this frame does not publish; the line above is the one to hand over)\n",
         );
@@ -184,7 +193,7 @@ export class McpServer {
         // allowance `stdio-session.ts`'s logger makes. The answer must still go out.
       }
       return this.error(INTERNAL_ERROR,
-        `this shell faulted while handling ${String(request.method)} and answered nothing `
+        `this shell faulted while handling ${this.echoForeign(String(request.method))} and answered nothing `
         + `(failure type ${type}) | remedy: ${shellFaultRemedy(method)}`,
         request.id);
     }
@@ -295,16 +304,27 @@ export class McpServer {
   }
 
   /**
-   * The tool a `tools/call` names, when the frame names one. `shellFaultRemedy` branches on
-   * whether the engine method is safe to re-issue, so a fault inside `gp_act` must not be
-   * answered with the generic "read what happened" sentence — and the name is only usable
-   * when the frame actually carries a string, which the shape refusals above handle.
+   * The name the fault remedy should be written about: the **engine method**, when the frame
+   * names a tool this server publishes.
+   *
+   * `shellFaultRemedy` branches on the engine method (`act` / `restore` / `attach` are the
+   * replay-unsafe ones — see `REPLAY_UNSAFE_REASONS` in engine-client.ts), and a tool name is
+   * not an engine method: `gp_act` is not in that table, so handing it over answered a fault
+   * inside `gp_act` with "sending this tool again is a real option — do that once". That is
+   * the one sentence this product refuses to print for an action that may still be performing
+   * a change on the user's screen, so the domain conversion happens here, at the only call
+   * site. An unknown name is not a method either, and the caller's own bytes must not be
+   * echoed unbounded into the remedy, so that arm falls back to the protocol method — bounded
+   * and control-neutralised, the same rule {@link echoForeign} states.
    */
   private callTargetName(request: IncomingRequest): string {
     const params = this.asParams(request.params);
-    return typeof params?.name === "string" && params.name.length > 0
-      ? params.name
-      : String(request.method);
+    const name = typeof params?.name === "string" && params.name.length > 0 ? params.name : null;
+    if (name !== null) {
+      const spec = this.specs.find((candidate) => candidate.name === name);
+      if (spec !== undefined) return spec.engineMethod;
+    }
+    return this.echoForeign(String(request.method));
   }
 
   private asParams(rawParams: unknown): { name: unknown; arguments?: unknown } | null {
