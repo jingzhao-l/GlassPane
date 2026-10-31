@@ -71,7 +71,7 @@ macOS 上的运行时验证引擎：一个 Swift 后台服务，测量应用的�
 ```bash
 # 引擎（macOS 14+）。权限面板弹出时，为 `GlassPane Daemon` 勾选辅助功能、
 # 输入监控与屏幕录制。
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
+GP="$(mktemp "${TMPDIR:-/tmp/}gp-install.XXXXXXXX")" && curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o "$GP" && sh "$GP" && rm -f "$GP"
 ```
 
 安装渠道、权限、证据包格式与更新线都在它的 README：[jingzhao-l/GlassPane](https://github.com/jingzhao-l/GlassPane)。

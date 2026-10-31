@@ -79,7 +79,7 @@ Install the engine first — the harness is a client, not a substitute:
 ```bash
 # Engine (macOS 14+). When the permission panel opens, grant Accessibility,
 # Input Monitoring and Screen Recording to `GlassPane Daemon`.
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
+GP="$(mktemp "${TMPDIR:-/tmp/}gp-install.XXXXXXXX")" && curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o "$GP" && sh "$GP" && rm -f "$GP"
 ```
 
 Its README is the place for install channels, permissions, the evidence-pack format and the
