@@ -3,43 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import {
-  bundlePlan,
-  daemonLaunchPath,
-  settingsLaunchPath,
-  pidsFromPs,
-  daemonPidsFromPs,
-  panelPidsFromPs,
-  listRunningPids,
-  terminatePids,
-  waitForSocket,
-  launchdKickstartArgs,
-  launchdNeedsReregister,
-  loadedLaunchdProgram,
-  bundleLaunchArgs,
-  daemonStartCommand,
-  guiStartCommand,
-  installBundles,
-  bundlesToReplace,
-  panelOpenHint,
-  nextStepsText,
-  startDetached,
-  ensureLogDir,
-  installOutcome,
-  verificationFailureText,
-  parseArgs,
-  launchdPlistString,
-  LAUNCHD_LABEL,
-  LAUNCH_SETTLE_MS,
-  APPS_DIR_NAME,
-  DAEMON_APP_NAME,
-  DAEMON_EXE_NAME,
-  PANEL_EXE_NAME,
-  SETTINGS_APP_NAME,
-  SOCKET_DIR_NAME,
-  SOCKET_FILE_NAME,
-  DAEMON_LOG_NAME,
-} from '../cli.js'
+import { quoteShellArg, bundlePlan, daemonLaunchPath, settingsLaunchPath, pidsFromPs, daemonPidsFromPs, panelPidsFromPs, listRunningPids, terminatePids, waitForSocket, launchdKickstartArgs, launchdNeedsReregister, loadedLaunchdProgram, bundleLaunchArgs, daemonStartCommand, guiStartCommand, installBundles, bundlesToReplace, panelOpenHint, nextStepsText, startDetached, ensureLogDir, installOutcome, verificationFailureText, parseArgs, launchdPlistString, LAUNCHD_LABEL, LAUNCH_SETTLE_MS, APPS_DIR_NAME, DAEMON_APP_NAME, DAEMON_EXE_NAME, PANEL_EXE_NAME, SETTINGS_APP_NAME, SOCKET_DIR_NAME, SOCKET_FILE_NAME, DAEMON_LOG_NAME } from '../cli.js'
 
 // ---------------------------------------------------------------------------
 // P1 v1.2 §11.1 打包/安置层：bundle 计划、启动路径选择、陈旧实例识别、文案。
@@ -191,7 +155,15 @@ test('launchd plist 指向 bundle 内可执行时路径原样写入（授权主�
 
 /** 从说明文本里抠出所有被双引号包住的绝对路径（finding 8 的闸：印出来的必须真存在）。 */
 function quotedPaths(text) {
-  return [...String(text).matchAll(/"(\/[^"]*)"/g)].map((m) => m[1])
+  // 参数位上的路径现在按 `quoteShellArg` 的口径出：惰性字符裸写，其余整段单引号包裹。
+  // 从前这里只摘 `"/abs"`——双引号形态一消失，这个 helper 就返回空集，而"印给读者的 open
+  // 目标必须真的存在"那一句会悄悄变成一条不检查任何东西的循环。三种形态都收：单引号、
+  // 旧的双引号（防回退）、以及裸写的绝对路径。
+  const out = []
+  for (const re of [/'(\/[^']*)'/g, /"(\/[^"]*)"/g, /(?:^|[\s`(>])open (\/[^\s'"]+)/gm]) {
+    for (const m of String(text).matchAll(re)) out.push(m[1])
+  }
+  return [...new Set(out)]
 }
 
 test('nextStepsText: bundle 形态与裸二进制形态的条目名各自如实，且印出的路径真的存在', () => {
@@ -217,7 +189,8 @@ test('nextStepsText: bundle 形态与裸二进制形态的条目名各自如实�
   assert.ok(bundled.includes('授权勾选必须人工'), '诚实边界：TCC 不程序化')
   assert.ok(bundled.includes(plan.daemonExecutable), '给出 --permissions 验证命令的完整路径')
   assert.ok(bundled.includes('--permissions'))
-  assert.ok(bundled.includes(`open "${realApp}"`), 'bundle 形态的再起一次命令要指向那个 .app')
+  assert.ok(bundled.includes(`open ${quoteShellArg(realApp)}`),
+    'bundle 形态的再起一次命令要指向那个 .app（按 quoteShellArg 的口径，含空格的落点整段单引号）')
   for (const p of quotedPaths(bundled).filter((x) => x.endsWith('.app'))) {
     assert.ok(fs.existsSync(p), `说明里印给读者的 open 目标必须存在：${p}`)
   }
@@ -243,7 +216,8 @@ test('nextStepsText: bundle 形态与裸二进制形态的条目名各自如实�
     daemon: { path: '/repo/engine/.build/release/glasspaned', viaBundle: false },
     panel: { viaBundle: false, executable: path.join(emptyDir, PANEL_EXE_NAME), app: path.join(emptyDir, SETTINGS_APP_NAME), exists: false },
   })
-  assert.ok(!/open "/.test(nothing), `没有可执行面板产物时不许印 open "…"：${nothing}`)
+  assert.ok(!/(?:^|[\s`(])open ['"\/]/m.test(nothing),
+    `没有可执行面板产物时不许印任何 open 命令（三种引号形态都算）：${nothing}`)
   assert.ok(nothing.includes('没有可执行的面板产物'), '必须明说这一步没有可执行的指引')
   assert.ok(nothing.includes(path.join(emptyDir, PANEL_EXE_NAME)), '要把查过的那个路径点出来')
   fs.rmSync(root, { recursive: true, force: true })
@@ -421,7 +395,7 @@ test('nextStepsText: daemon 未通过 hello 校验时先给失败告警与补救
   assert.ok(unverified.includes('未通过 hello 校验'), '未校验通过必须显式告警')
   assert.ok(unverified.includes('--restore-launchd'), '告警必须带可执行的补救命令')
   assert.ok(
-    unverified.includes('node "/repo/installer/cli.js" --restore-launchd'),
+    unverified.includes(`node ${quoteShellArg('/repo/installer/cli.js')} --restore-launchd`),
     '补救命令必须是拼好的真实路径，印 "<仓库目录>" 占位符等于没给可执行的东西',
   )
 
@@ -448,9 +422,12 @@ test('nextStepsText: 面板没打开时给的是**真能跑**的打开命令（�
     panel: { viaBundle: true, executable: path.join(app, 'Contents', 'MacOS', PANEL_EXE_NAME), app, exists: true },
   })
   assert.ok(!text.includes('面板已打开'))
-  const command = /open "([^"]+)"/.exec(text)
+  const command = /open (?:(['"])([^'"]+)\1|(\/\S+))/.exec(text)
+  // 裸写形态后面紧跟的是中文正文（`open /x/GlassPane.app（点权限卡…`），所以取到第一个不可能是
+  // 路径边界的字符为止；单引号形态整段已经在 command[2] 里。
+  const opened = command ? (command[2] ?? command[3].split(/[\s（），,;'\"]/)[0]) : null
   assert.ok(command, `应给出一条 open 命令：${text}`)
-  assert.ok(fs.existsSync(command[1]), `open 的目标必须真的存在，实为 ${command[1]}`)
+  assert.ok(fs.existsSync(opened), `open 的目标必须真的存在，实为 ${opened}`)
 
   // 产物不存在时换成裸二进制说明，而不是把不存在的路径塞进 open。
   const missing = nextStepsText({
@@ -460,7 +437,7 @@ test('nextStepsText: 面板没打开时给的是**真能跑**的打开命令（�
     daemon: { path: '/repo/glasspaned', viaBundle: true },
     panel: { viaBundle: true, executable: null, app: path.join(root, '缺失.app'), exists: false },
   })
-  assert.ok(!/open "/.test(missing), '没有产物时不许印 open')
+  assert.ok(!/(?:^|[\s`(])open ['"\/]/m.test(missing), '没有产物时不许印 open')
   assert.ok(missing.includes('没有可执行的面板产物'), missing)
   fs.rmSync(root, { recursive: true, force: true })
 })
@@ -475,7 +452,7 @@ test('panelOpenHint: bundle/裸二进制两形态与"什么都没有"那一档�
   assert.ok(!bare.text.startsWith('open '), '裸二进制不经 open')
   const gone = panelOpenHint({ panel: { viaBundle: false, executable: path.join(root, 'nope'), app: null, exists: false } })
   assert.equal(gone.runnable, false)
-  assert.ok(!gone.text.includes('open "'), '没东西可开时不许印 open')
+  assert.ok(!/(?:^|[\s`(])open ['"\/]/m.test(gone.text), '没东西可开时不许印 open')
   fs.rmSync(root, { recursive: true, force: true })
 })
 
@@ -534,7 +511,7 @@ test('verificationFailureText: 失败提示带退出码 + 真实路径的补救�
   })
   assert.ok(noSocket.includes('安装未完成'), '先说结论')
   assert.ok(noSocket.includes('退出码 1'), '必须点明退出码：脚本调用方只读得到这个')
-  assert.ok(noSocket.includes('node "/repo/installer/cli.js" --restore-launchd'),
+  assert.ok(noSocket.includes(`node ${quoteShellArg('/repo/installer/cli.js')} --restore-launchd`),
     '补救命令必须是拼好的真实路径，用户/agent 直接可执行')
   assert.ok(noSocket.includes('/Users/dev/.glasspane/installer-daemon.log'), '必须指向日志')
   assert.ok(noSocket.includes('engine.sock'), '必须指向没等到应答的 socket')
