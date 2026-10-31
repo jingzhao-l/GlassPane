@@ -206,6 +206,18 @@ Swift 侧 `DailyRound20261030Swift1PathShapeTests`、`…Swift1PermissionHonesty
    此前写进 marker 而**全仓零读者**），`--evidence-stats` 的载荷新增 `ageRetention`，
    `probe_status` 新增 `durationOverflowFrames`/`durationOverflowCount`/`durationOverflowFramesTotal`。
 
+同一晚还有另一条并发实例在同一棵主仓工作树上跑同一份每日任务（
+是它的记录）。它的批次已经并进 main，因此**也在本版的发布物里**： 32 files changed, 698 insertions(+), 107 deletions(-)
+Usage: installer [-help] [-dominfo] [-volinfo] [-pkginfo] [-allowUntrusted] [-dumplog]
+                 [-verbose | -verboseR] [-vers] [-config] [-plist]
+                 [-file <pathToFile>] [-lang <ISOLanguageCode>] [-listiso]
+                 [-showChoicesXML] [-applyChoiceChangesXML <pathToFile>]
+                 [-showChoicesAfterApplyingChangesXML <pathtoFile>]
+                 -pkg <pathToPackage>
+                 -target <[DomainKey|MountPoint]> 量出 58 文件 / +2985 / -306，具名的一格里有 
+（"印给代理照抄的那一行必须真的跑得动"这一族）。本条目上面那四项判据不受它影响，条目内容也不由本线替它重写——
+要读它修了什么，去它自己那份台账。
+
 本版没有合并任何未发布的旧号；`v1.25.0`/`v1.25.1` 那两格空号（上一轮留下的、各有解释）不移动、不删除。
 
 本轮审出 **42 条已核实缺陷，全部随本版发出**：mcp-shell 传输与归因 4、引擎存储与 socket 归属 3、
