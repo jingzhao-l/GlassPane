@@ -132,15 +132,27 @@ test("the fixture's probe_status reply is the daemon's probe_status key set", ()
     [],
     `probe_status must answer the unconditional keys, not only the interesting one: ${JSON.stringify(PROBE_STATUS_KEYS.unconditional)}`,
   );
-  // The three that exist only when a probe inbox is wired: this fixture runs with one,
-  // so answering `probes` alone would let a session "pass" against a daemon shape that
-  // cannot tell a live registration from a dropped one (A-10).
+  // The inbox-conditional keys: this fixture runs **with** one wired (it answers
+  // `probes`/`disconnections`/`recentDisconnections`), so answering only the interesting
+  // key would let a session "pass" against a daemon shape that cannot tell a live
+  // registration from a dropped one (A-10), and — the half that bit on 2026-10-31 — would
+  // let a key the daemon added in 2026-10-22 (`ringEvictedEventsTotal`,
+  // `durationOverflowFramesTotal`) stay invisible here forever. So the requirement is now
+  // **derived**: every conditional key the responder publishes must be answered, unless it
+  // sits on the exemption list below, which is itself checked against the Swift.
+  const exemptions = ["degradation"]; // 这份夹具没接 watch tier，那一句确实发不出
+  const stale = exemptions.filter((key) => !PROBE_STATUS_KEYS.optional.includes(key));
+  assert.deepEqual(stale, [],
+    `夹具的豁免名单里有一项 Swift 已经不再发布：${JSON.stringify(stale)} — 重读这条判据，别把它留在名单上`);
+  for (const key of PROBE_STATUS_KEYS.optional.filter((key) => !exemptions.includes(key))) {
+    assert.ok(Object.prototype.hasOwnProperty.call(status, key),
+      `the fixture drops the inbox-conditional key ${key}, which probeStatus() publishes (${JSON.stringify(PROBE_STATUS_KEYS.optional)})`);
+  }
   for (const key of ["disconnections", "recentDisconnections", "unmapableStateFrames"]) {
     assert.ok(
       PROBE_STATUS_KEYS.optional.includes(key) || PROBE_STATUS_KEYS.unconditional.includes(key),
       `the daemon no longer publishes ${key} from probeStatus() — re-read this fixture against the new responder`,
     );
-    assert.ok(Object.prototype.hasOwnProperty.call(status, key), `the fixture drops the inbox-conditional key ${key}`);
   }
 });
 

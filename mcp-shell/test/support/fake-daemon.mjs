@@ -120,6 +120,9 @@ export function fakeProbeStatusResult() {
       connected: true,
       bundleId: FAKE_PROBE_BUNDLE_ID,
     }],
+    // 与 `EngineCore.probeStatus()` 同键集（`fixture-daemon-shape` 从 Swift 里派生那份表）：
+    // "没有监听者"与"有监听者、这个 app 没接探针"必须是两种回话，夹具不能只回其中一半。
+    probeListener: "live",
     attachedHasProbe: true,
     disconnections: 1,
     recentDisconnections: [{
@@ -135,6 +138,11 @@ export function fakeProbeStatusResult() {
       drops: 1,
     }],
     unmapableStateFrames: 0,
+    // 同一个 `if let inbox` 块里的另两把总数（`EngineCore.probeStatus()` 2026-10-22 加的
+    // defect3 读数）。这份夹具是**接了 inbox** 的那一档（上面三把键都在），所以这两把也必须在：
+    // 少发一键，e2e 就永远测不到 daemon 会发它，而读侧的缺省分支会替它编一个 0。
+    ringEvictedEventsTotal: 0,
+    durationOverflowFramesTotal: 0,
   };
 }
 
