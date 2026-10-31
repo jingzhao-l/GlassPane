@@ -704,7 +704,26 @@ function livenessProbeGuide(): string {
  */
 export type ShellSurface = "mcp" | "http";
 
-/** Where the answer to a timed-out request can be found, per surface. */
+/**
+ * Where the answer to a timed-out request can be found, per surface.
+ *
+ * The HTTP arm is written against the line the gateway actually prints, because
+ * an exit a caller cannot walk is not an exit: it used to promise the reply "is
+ * written to this gateway's stderr **with its body**, so the operationId it
+ * carries can be read off that line". The real sink refuses exactly that — the
+ * body of a late reply is on-screen accessibility content, and `http-gateway.ts`
+ * hands it to `lateReplyBodyNote`, which writes a byte count plus a SHA-256
+ * digest and says in words that the text is not written (review 2026-10-09
+ * finding 3, F3 on 2026-10-27). So the sentence pointed a caller at bytes the
+ * product has decided do not exist on that path, and the id it told the caller
+ * to read is printed only when the reply's `operationId` matches the archive
+ * grammar. The wording below transcribes what the line really says; flipping the
+ * other way — making the note write the body — would break the trust boundary
+ * that keeps screen content out of a log file whose mode this product never
+ * sets, so it is not the fix. `test/daily-20261031-late-reply-route-shape.test.mjs`
+ * compares this sentence with a line the real gateway wrote, rather than testing
+ * each of them alone.
+ */
 export function lateReplyRoute(surface: ShellSurface): string {
   return surface === "mcp"
     ? "the original reply, when it lands, is written to this server's log (stderr) *and* its operationId is recorded "
@@ -713,11 +732,17 @@ export function lateReplyRoute(surface: ShellSurface): string {
       + LATE_REPLY_RETENTION + " timed-out requests, and an eviction is logged), a re-attach in between supersedes it "
       + "(also logged, with the operationIds it dropped), a transport that ends first is logged the same way with the "
       + "requests it stopped tracking, and if this process has exited nothing will be recorded at all"
-    : "the original reply, when it lands, is written to this gateway's stderr with its body, so the operationId it "
-      + "carries can be read off that line and fetched with GET /v1/evidence/<operationId> — the tracking window is "
-      + "bounded (" + LATE_REPLY_RETENTION + " timed-out requests, and an eviction is logged, as is a transport that "
-      + "ends before the reply lands), and this gateway keeps "
-      + "no operation trail of its own";
+    : "the original reply, when it lands, is written to this gateway's stderr as a fact about the frame and never as "
+      + "its text: the line reads `late engine reply to '<method>': the engine did answer, with a <N>-byte body "
+      + "(sha256 <12 hex>)` and then states that the body is on-screen accessibility content whose text is not "
+      + "written to this log. The operationId is on that line only when the reply carries one this shell's archive "
+      + "grammar accepts, printed as `, for <operationId>` right after the digest — read it there and fetch that "
+      + "pack with GET /v1/evidence/<operationId> or POST /v1/tools/last_evidence {operationId}; a reply that names "
+      + "no archive-shaped id leaves nothing on the line to read off, and the digest is then the only correlation "
+      + "this surface can offer. The bytes themselves stay in the daemon's evidence archive under the state root, "
+      + "which this gateway does not copy — the tracking window is bounded ("
+      + LATE_REPLY_RETENTION + " timed-out requests, and an eviction is logged, as is a transport that ends before "
+      + "the reply lands), and this gateway keeps no operation trail of its own";
 }
 
 /**
