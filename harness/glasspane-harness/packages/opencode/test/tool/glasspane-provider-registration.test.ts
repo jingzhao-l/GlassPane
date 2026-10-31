@@ -188,7 +188,9 @@ describe("the registration is anchored to the engine's method table", () => {
 
   test("every wire name the registration maps to is one the engine answers", () => {
     for (const [name, wire] of Object.entries(REGISTRATION_TO_ENGINE)) {
-      expect(ENGINE_METHODS, `'${name}' claims the engine answers '${wire}'`).toContain(wire)
+      // `toContain` on the literal tuple would pin the checker to its union type; the claim
+      // being tested is membership, so ask membership and name the pair when it fails.
+      expect((ENGINE_METHODS as readonly string[]).includes(wire), `'${name}' claims the engine answers '${wire}'`).toBe(true)
     }
   })
 
