@@ -216,6 +216,41 @@ function jobsOfWorkflow(text) {
   return walkWorkflow(text).jobs
 }
 
+/**
+ * Split the inside of a YAML flow mapping into its `key: value` pairs, on the commas that sit at
+ * depth 0 outside quotes. `${{ github.token }}` nests braces and a matrix value carries commas, so a
+ * bare `split(",")` would cut pairs in half — and a half-pair is a false positive, which is the
+ * failure mode this rule has to stay out of.
+ */
+function splitFlowPairs(text) {
+  const out = []
+  let depth = 0
+  let quote = null
+  let current = ""
+  for (const ch of text) {
+    if (quote) {
+      current += ch
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      current += ch
+      continue
+    }
+    if (ch === "{" || ch === "[") depth++
+    if (ch === "}" || ch === "]") depth--
+    if (ch === "," && depth <= 0) {
+      out.push(current)
+      current = ""
+      continue
+    }
+    current += ch
+  }
+  out.push(current)
+  return out
+}
+
 function inspect(target) {
   const { dir, file } = target
   const base = path.join(dir, file)
@@ -298,6 +333,35 @@ function inspect(target) {
     if (quoted) continue
     // A block scalar or an explicit anchor/tag introduces its own structure.
     if (/^[>|&*]/.test(value)) continue
+    // A flow mapping (`env: { GH_TOKEN: "…" }`, one line, braces) is NOT "a value with a colon in
+    // it": the `key: value` pairs inside the braces are structure. Reading them as a plain scalar is
+    // the same blindness rule 3d had, one rule over — it reddened the exact shape `ghTokenProblems`'
+    // remedy tells an operator to type, and that remedy had better be copy-pastable or the gate is
+    // pointing at a door that is not there. So the braces are opened and each pair's scalar is asked
+    // the flow-context question instead: a plain scalar between `{}` may not carry `{`, `}`, `[`,
+    // `]` or `,`, which is precisely why `{ GH_TOKEN: ${{ github.token }} }` does not parse and
+    // `{ GH_TOKEN: "${{ github.token }}" }` does.
+    const flow = value.trim().match(/^\{(.*)\}$/)
+    if (flow) {
+      for (const pairText of splitFlowPairs(flow[1])) {
+        const pair = pairText.trim()
+        if (pair === "") continue
+        const kv = /^([^:]+):(.*)$/.exec(pair)
+        if (!kv) continue // a scalar with no key at all is judged by the rules above, not here
+        const scalar = kv[2].trim()
+        if (scalar === "" || ["'", '"'].includes(scalar[0]) || /^[>|&*]/.test(scalar)) continue
+        if (/[{}[\],]/.test(scalar) || /:\s/.test(scalar) || /[?:]\s*$/.test(scalar)) {
+          problems.push(
+            `line ${i + 1}: the flow mapping \`{ ${pair} }\` carries the unquoted scalar \`${scalar}\`, ` +
+              `and a plain scalar inside a YAML flow mapping cannot contain \`{\`, \`}\`, \`[\`, \`]\` or \`,\` ` +
+              `(nor hold a second \`: \`) — the file does not parse, the workflow dispatches as zero jobs and ` +
+              `the run reports a workflow-file problem with no log. Quote it: \`${kv[1].trim()}: "${scalar}"\`, ` +
+              `or write the block form with the key on its own line.`,
+          )
+        }
+      }
+      continue
+    }
     const hasColonSpace = /:\s/.test(value)
     const danglingQuestion = /[?:]\s*$/.test(value) || /\?(\s|$)/.test(value)
     if (hasColonSpace || danglingQuestion) {
@@ -802,8 +866,10 @@ function timeoutAdvisories(jobs) {
  * executes, and reddening it would get the prose deleted instead of the step fixed (the same reason
  * `ghJsonFieldProblems` below skips comment lines). So a line counts only when it is a gh call in
  * command position — not a comment, and not a continuation of a line that began with `echo`/`printf`
- * — and a step is satisfied by `GH_TOKEN`/`GITHUB_TOKEN` anywhere in its own block, its job's block,
- * or the workflow's top-level `env:`.
+ * — and a step is satisfied by a `GH_TOKEN`/`GITHUB_TOKEN` key *inside one of its own `env:`
+ * declarations*, in its job's own keys or at the workflow level. Both YAML shapes of an `env:`
+ * declaration are read (block and flow mapping); a token name that only appears in the step's `run:`
+ * body is a string, not a credential, and satisfies nothing.
  */
 const GH_CALL = /(^|[^\w-])gh[ \t]+([a-z][a-z-]*)/g
 const GH_VERBS = new Set(["api", "release", "run", "secret", "workflow", "issue", "pr", "repo",
@@ -876,6 +942,68 @@ function enclosingRanges(lines, jobKeys, at) {
 }
 
 /**
+ * An `env:` declaration, in the two shapes YAML allows it and this repository writes it.
+ *
+ * WHY this is a per-declaration question and not a whole-block one: the first version of
+ * `ghTokenProblems` asked the step block two unrelated things at once — "does a line that looks like
+ * an `env:` header exist anywhere" (`/^\s{2,}(?:-\s+)?env:\s*$/`) and "does `GH_TOKEN` appear
+ * anywhere" — and then joined them with `&&`. Measured consequence: the flow mapping
+ * `env: { GH_TOKEN: ${{ github.token }} }`, which is the *exact string this rule's own remedy
+ * prints*, answered the first test false, so an operator who copied the advice kept a red gate.
+ * That is a remedy pointing at a shape that does not exist, and this repository's rule is that a
+ * branch an agent cannot execute is an unfixed defect. Reading declarations instead of scanning the
+ * block fixes both halves at once: each shape is read for what it declares, and a `GH_TOKEN:` that
+ * only sits in a `run:` body stops counting.
+ */
+const ENV_HEADER = /^(\s*)(?:-\s+)?env:\s*(.*)$/
+// A flow mapping: `{ … }` on the header's own line. The capture is greedy and anchored to the LAST
+// `}` because a `${{ github.token }}` value nests braces of its own — the outer pair is the map.
+const ENV_FLOW_MAP = /^\{(.*)\}(?:\s+#.*)?$/
+// Block form: the token must be a key of the map, at the indentation under its own `env:` header.
+const ENV_BLOCK_TOKEN_KEY = /^(?:GH_TOKEN|GITHUB_TOKEN)\s*:/
+// Same test inside one pair of braces. Keys may be quoted, and `MY_GITHUB_TOKEN:` must not count —
+// hence the boundary instead of a bare `/(GH_TOKEN|GITHUB_TOKEN):/`.
+const ENV_FLOW_TOKEN_KEY = /(?:^|[,{\s])["']?(?:GH_TOKEN|GITHUB_TOKEN)["']?\s*:/
+
+/**
+ * Do these lines carry an `env:` declaration that names a token — in its own braces or in its own
+ * indented keys? A header whose residue is neither `{…}` nor empty (`env: ${{ … }}`, a scalar) is
+ * not a map this walker can read, so it declares nothing and the verdict stays red.
+ */
+function envDeclaresToken(lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const header = ENV_HEADER.exec(lines[i])
+    if (!header) continue
+    const residue = header[2].trim()
+    const flow = ENV_FLOW_MAP.exec(residue)
+    if (flow) {
+      if (ENV_FLOW_TOKEN_KEY.test(flow[1])) return true
+      continue
+    }
+    if (residue !== "") continue
+    for (let j = i + 1; j < lines.length; j++) {
+      if (lines[j].trim() === "") continue
+      if (lines[j].search(/\S/) <= header[1].length) break
+      if (ENV_BLOCK_TOKEN_KEY.test(lines[j].trim())) return true
+    }
+  }
+  return false
+}
+
+/**
+ * The workflow's top-level `env:` lines in either shape, or [] when the file declares none. Read at
+ * column 0 like the rest of this walker. The header finder used to be `/^env:\s*$/`, which — same
+ * defect as the block test above — made a top-level `env: { GH_TOKEN: … }` invisible.
+ */
+function topLevelEnvLines(lines) {
+  const start = lines.findIndex((l) => /^env:(?:\s|$)/.test(l))
+  if (start < 0) return []
+  let end = start + 1
+  while (end < lines.length && (/^\s*$/.test(lines[end]) || /^ {2}\S/.test(lines[end]))) end++
+  return lines.slice(start, end)
+}
+
+/**
  * Line ranges the `run:` line at `at` belongs to: its own step, and the part of its job that is
  * NOT another step (a sibling step's `env:` must not vouch for this one, or the rule could never
  * see the defect it names). Built from the same indentation markers the walker uses, because "did
@@ -883,31 +1011,27 @@ function enclosingRanges(lines, jobKeys, at) {
  */
 function ghTokenProblems(lines, jobKeys) {
   const out = []
-  const hasToken = (block) => /(^\s{2,}(?:-\s+)?env:\s*$)/m.test(block) && /(GH_TOKEN|GITHUB_TOKEN):/.test(block)
   for (const hit of ghCallLines(lines)) {
     const { step, job } = enclosingRanges(lines, jobKeys, hit.line)
-    const stepBlock = lines.slice(step[0], step[1]).join("\n")
-    // The job's own keys, up to (not through) its `steps:` — its job-level `env:` block.
+    const stepBlock = lines.slice(step[0], step[1])
+    // The job's own keys, up to (not through) its `steps:` — its job-level `env:` declaration.
     const jobHeaderEnd = (() => {
       for (let i = job[0]; i < job[1]; i++) if (/^ {4}steps:\s*$/.test(lines[i])) return i
       return job[1]
     })()
-    const jobBlock = lines.slice(job[0], jobHeaderEnd).join("\n")
-    // The workflow's own top-level `env:` block (a 2-space key under a top-level `env:`).
-    const topEnv = (() => {
-      const start = lines.findIndex((l) => /^env:\s*$/.test(l))
-      if (start < 0) return ""
-      let end = start + 1
-      while (end < lines.length && (/^\s*$/.test(lines[end]) || /^ {2}\S/.test(lines[end]))) end++
-      return lines.slice(start, end).join("\n")
-    })()
-    if ([stepBlock, jobBlock, topEnv].some(hasToken)) continue
+    const jobBlock = lines.slice(job[0], jobHeaderEnd)
+    if ([stepBlock, jobBlock, topLevelEnvLines(lines)].some(envDeclaresToken)) continue
     out.push(
       `line ${hit.line} runs \`gh ${hit.verb}\` and no \`env:\` in its step, in its job's own keys or at the ` +
         `workflow level names GH_TOKEN — gh reads GH_TOKEN, while the runner hands steps GITHUB_TOKEN, and ` +
         `the gap is what killed the v1.16.2 release lane (run 38855034310: ` +
-        `"gh api 回了 4: … please set the GH_TOKEN environment variable"). Add ` +
-        `env: { GH_TOKEN: \${{ github.token }} } to that step, with the scopes the call needs.`,
+        `"gh api 回了 4: … please set the GH_TOKEN environment variable"). Put the token in that step's own ` +
+        `\`env:\`, with the scopes the call needs, in either shape this gate reads and this file's YAML rules ` +
+        `accept: the block form every gh step here already uses (` +
+        `\`env:\` on its line, then \`GH_TOKEN: \${{ github.token }}\` indented under it) or the flow mapping ` +
+        `with the value QUOTED (\`env: { GH_TOKEN: "\${{ github.token }}" }\` — unquoted, the braces of the ` +
+        `expression are illegal inside a flow mapping and the workflow never compiles). A \`GH_TOKEN\` that ` +
+        `only appears in the step's \`run:\` body is a string, not a credential, and satisfies nothing.`,
     )
   }
   return out
@@ -1434,6 +1558,17 @@ jobs:
     "      - name: gated on a secret",
     "      - name: ask GitHub\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: gh release view v1 --json tagName\n      - name: gated on a secret",
   )
+  // The same step with its token declared as a flow mapping instead of a block — the shape rule 3d's
+  // OWN remedy text prints. Held as a fixture of its own because the defect this table guards is
+  // exactly "the remedy names a shape the judge cannot see": with the block-only predicate back in
+  // place, `the same gh call with its token as a step-level flow mapping` below is the case that goes
+  // red. The value is QUOTED because that is the only flow mapping that parses — unquoted, the `{` of
+  // `${{ … }}` is illegal inside a flow mapping (measured with a real YAML parser), which is the
+  // second half of the same blindness and lives in rule 1c's cases.
+  const WITH_FLOW_TOKEN = BASE.replace(
+    "      - name: gated on a secret",
+    "      - name: ask GitHub\n        env: { GH_TOKEN: \"${{ github.token }}\" }\n        run: gh release view v1 --json tagName\n      - name: gated on a secret",
+  )
 
   const cases = [
     {
@@ -1870,6 +2005,128 @@ jobs:
             "      - name: gated on a secret",
         ),
       absent: /names GH_TOKEN/,
+    },
+    // ---- rule 3d, the flow-mapping half. The four cases above cover the block shape only, which is
+    // how the judge came to be blind to the shape its own remedy printed. Every case below has a
+    // branch that can go red: the four `absent` cases die when the flow mapping stops being read
+    // (they were the fix's whole point), the four `expect` cases die the moment the judge degrades
+    // into "any GH_TOKEN anywhere passes". Reverting `envDeclaresToken` to the old block-only
+    // conjunction reddens exactly the first group; loosening it back to a whole-block `&&` reddens
+    // exactly the second.
+    //
+    // The line numbers the `expect` cases pin are BASE's layout, read once: BASE is 18 lines, the
+    // step anchor `      - name: gated on a secret` is line 16, and each fixture says how many lines
+    // it inserts before that anchor. Pinning the number is the point — "the gate names the line that
+    // is missing its token" is the whole delivery of this rule, and a case that accepted any line
+    // would also pass when the range logic reports a neighbour instead.
+    {
+      id: "the same gh call with its token as a step-level flow mapping (D6-c, the shape the remedy prints)",
+      apply: () => WITH_FLOW_TOKEN,
+      absent: /names GH_TOKEN/,
+    },
+    {
+      id: "a gh call whose step-level flow mapping names no token (D6-c negative)",
+      // `{ NODE_ENV: "production" }` is a perfectly legal `env:` that declares nothing gh can use.
+      // Accepting the flow SHAPE must not mean accepting anything in it — the token still has to be
+      // inside the braces, and the report still has to point at the gh line (18 here: three lines
+      // inserted ahead of the anchor on 16).
+      apply: (t) =>
+        t.replace(
+          "      - name: gated on a secret",
+          "      - name: ask GitHub\n        env: { NODE_ENV: \"production\" }\n        run: gh release view v1 --json tagName\n      - name: gated on a secret",
+        ),
+      expect: /^line 18 runs `gh release`[\s\S]*names GH_TOKEN/,
+    },
+    {
+      id: "a gh call whose job declares its token as a flow mapping (D6-c, the middle level)",
+      apply: (t) =>
+        t
+          .replace("    steps:\n", "    env: { GH_TOKEN: \"${{ github.token }}\" }\n    steps:\n")
+          .replace(
+            "      - name: gated on a secret",
+            "      - name: ask GitHub\n        run: gh release view v1 --json tagName\n      - name: gated on a secret",
+          ),
+      absent: /names GH_TOKEN/,
+    },
+    {
+      id: "a gh call covered by a top-level flow-mapping env (D6-c, the third level)",
+      // The finder used to be `/^env:\s*$/`, so a top-level flow mapping was invisible too — the same
+      // class of blindness one level up. This case is what keeps `topLevelEnvLines` honest.
+      apply: (t) =>
+        t
+          .replace("  contents: read\n", "  contents: read\nenv: { GH_TOKEN: \"${{ github.token }}\" }\n")
+          .replace(
+            "      - name: gated on a secret",
+            "      - name: ask GitHub\n        run: gh release view v1 --json tagName\n      - name: gated on a secret",
+          ),
+      absent: /names GH_TOKEN/,
+    },
+    {
+      id: "a top-level flow-mapping env that names no token leaves the gh call red (D6-c negative)",
+      // One line at the top plus two for the step: the gh line is 18.
+      apply: (t) =>
+        t
+          .replace("  contents: read\n", "  contents: read\nenv: { CI: \"true\" }\n")
+          .replace(
+            "      - name: gated on a secret",
+            "      - name: ask GitHub\n        run: gh release view v1 --json tagName\n      - name: gated on a secret",
+          ),
+      expect: /^line 18 runs `gh release`[\s\S]*names GH_TOKEN/,
+    },
+    {
+      id: "a sibling step's flow-mapping token does not vouch for the gh step (D6-c range discipline)",
+      // Reading the flow shape widened what a step block can contain, so the range boundary is now
+      // load-bearing: if the whole job vouched, this defect — one step borrowing another step's
+      // credential — would read green forever. The gh call is line 17; the neighbour that carries the
+      // token is 18-20, and pinning 17 is what proves the report did not drift onto its sibling.
+      apply: (t) =>
+        t.replace(
+          "      - name: gated on a secret",
+          "      - name: ask GitHub\n        run: gh release view v1 --json tagName\n" +
+            "      - name: the neighbour that carries the token\n        env: { GH_TOKEN: \"${{ github.token }}\" }\n        run: node scripts/check-version.mjs\n" +
+            "      - name: gated on a secret",
+        ),
+      expect: /^line 17 runs `gh release`[\s\S]*names GH_TOKEN/,
+    },
+    {
+      id: "a GH_TOKEN that exists only as a string in the run body (D6-c: reading shapes is not passing anything)",
+      // The old judge asked "is there an `env:` header" and "is there a `GH_TOKEN:`" and joined them
+      // with &&, so this step passed on the strength of a string inside a `node -e`. That is the
+      // "什么都放行" failure mode this rule's fix could have traded into, and this case is the branch
+      // that dies if anyone re-loosens the predicate: under the old conjunction the gate goes silent
+      // and the case reports NOT caught. The gh call is line 22 (seven lines before the anchor).
+      apply: (t) =>
+        t.replace(
+          "      - name: gated on a secret",
+          "      - name: ask GitHub\n" +
+            "        env:\n" +
+            "          WANT_BUN: ${{ github.event.inputs.mode }}\n" +
+            "        run: |\n" +
+            "          set -euo pipefail\n" +
+            "          node -e 'console.log(\"GH_TOKEN: not a credential\")'\n" +
+            "          gh release view v1 --json tagName\n" +
+            "      - name: gated on a secret",
+        ),
+      expect: /^line 22 runs `gh release`[\s\S]*names GH_TOKEN/,
+    },
+    // ---- rule 1c against the same flow mapping. A quoted one is valid YAML and must not be
+    // reddened (this is the case that used to fire on the shape rule 3d's remedy printed); an
+    // unquoted one is genuinely invalid — measured: PyYAML refuses
+    // `env: { GH_TOKEN: ${{ github.token }} }` with "while parsing a flow mapping" — and must stay
+    // red. Without the second of these, teaching 1c about braces would be the "什么都放行" trade.
+    {
+      id: "a quoted flow-mapping env parses and stays silent (1c's counter-case for the remedy's shape)",
+      apply: (t) => WITH_FLOW_TOKEN,
+      absent: /unquoted value containing|carries the unquoted scalar/,
+    },
+    {
+      id: "an unquoted flow-mapping env is still caught (1c: the shape that does not compile)",
+      apply: (t) =>
+        t.replace(
+          "      - name: gated on a secret",
+          "      - name: ask GitHub\n        env: { GH_TOKEN: ${{ github.token }} }\n        run: gh release view v1 --json tagName\n      - name: gated on a secret",
+        ),
+      expect: /the flow mapping .* carries the unquoted scalar/,
     },
   ]
 
