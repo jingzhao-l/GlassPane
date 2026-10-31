@@ -234,6 +234,55 @@
   移除它们等于替第三方决定它的 zod major，而 `gitlab-ai-provider` 那条测试路径在 CI 与本机都是网络红；
   本轮不改判据，只把这份读数重新量一遍并记在这里。
 
+
+### 收尾读数（同一会话）· 发布三格只齐一格半，卡在 macOS runner 上
+
+**发布链的实际状态（每条都是当场问出来的，不是推断）。**
+
+| 格 | 读数 |
+| --- | --- |
+| 主仓 main | `a3d03d02`（本会话推上去的），随后 `git status --porcelain` 为 0 行 |
+| 搬运仓 main | `bb3c2f22`，tree `8bb208c1e4696227bd149c55de5585f45e6bd067` == 主干 `harness/glasspane-harness` 子树（`git rev-parse` 两侧逐字相等才推的）；快进推送 `d480c058..bb3c2f22`，**没用 force**，远端有而我缺的提交 = 0 |
+| tag | `v0.13.0` 已打已推，签名 key `0929EA31DF4F7429F63FC53189D88B1298`（`git verify-tag` 报"完好的签名"），peel == `bb3c2f22` == split head |
+| GitHub Release | **没有**：`gh release view v0.13.0` 取不到 |
+| registry | `glasspane-harness` / `-darwin-arm64` / `-darwin-x64` 三个 `0.13.0` 都查不到，`latest` 仍是 **0.12.5**（`--prefer-online` 逐个点名，npm 11.20） |
+| `verify-published 0.13.0` | **未跑成**：它装的就是 npm 上那份发布物，而 0.13.0 没上架 |
+| 端到端安装 | **未观测**（同上）；本机 `/usr/local/bin` 仍是 0.12.0，本会话没改这台机器的安装 |
+
+**为什么断在这里。** `release.yml` 的 `tag, manifests and CI all agree on this commit` 那一步
+（`script/assert-ci-green.mjs --sha bb3c2f22 --workflow ci.yml --budget 1800000 --poll 30000`）
+的原文是：`ci.yml is cancelled on commit bb3c2f22: #125 cancelled … Fix the red run before
+shipping; loosening this step is how an unverified tree gets a signed release.` 被它引用的 CI run
+里，ubuntu 那一格 `install, typecheck, fixed points` 是 **success**，被取消的是
+`install.sh fallback channel (offline, stubbed)`——`runs-on: macos-14`，本仓 ci.yml 自己在注释里
+就叫它"the scarcest label here"。我一共触发了三次 CI（push `41218725050`、dispatch on tag
+`41219350206`、dispatch on main `41219766425`），**三次都在同一个 macOS job 上被 cancelled**，
+不是 failed、不是超时、没有日志步——这台账号此刻拿不到 macos-14 的执行位。
+两次 `workflow_dispatch` 的 Release run（`41218935112` 被我主动取消、`41219619435` 自己走完）
+都因同一道闸没有产出发布物；npm 那两条 job 全程 skipped，**没有任何一个字节上架**。
+
+**这一格怎么补（确切命令，两条，顺序不能反）。**
+
+```bash
+# 1) macOS runner 回来之后，先让那一格 CI 真绿——不要绕过 assert-ci-green
+gh workflow run ci.yml --repo jingzhao-l/glasspane-harness --ref main
+gh run watch <那个 run-id>            # 期望 install.sh fallback channel = success
+# 2) CI 绿了再重跑那一条失败的 Release（--failed 只重跑红的那格，tag 不动）
+gh run rerun 41218731606 --repo jingzhao-l/glasspane-harness --failed
+# 3) 发布物出来之后才是 npm 与发布专有闸
+gh workflow run release.yml --repo jingzhao-l/glasspane-harness --ref v0.13.0 -f publish_npm=true -f confirm=true
+cd harness/glasspane-harness/packages/opencode && bun run script/verify-published.ts 0.13.0
+```
+
+**我为什么选"留着 tag、不回滚版本号"而不是把版本线退回 0.12.5。** `v0.13.0` 已经是一个签名 tag
+并指向正确的树，而"已发布的 tag 绝不移动"是本仓的规矩；`create-release` 那一步写成"不存在才建、
+可重跑"，所以补发布不需要新号、也不需要动 tag。把 `product.json` 退回 0.12.5 反而会让主干与
+已有的 `v0.13.0` 说两套话，并且把下一轮的取号搞成 0.13.1 这种没人要的号。代价说清楚：
+在这段窗口里 npm 服务的是 0.12.5、主干声明 0.13.0，而 `release-artifact` 看的是树与 ref，
+它对"tag 存在且 == 主干"给的是**通过**——所以这条闸不会替我喊出"发布物还没出来"这件事，
+这一格靠的是上面那张表和本段读数，不是靠闸。下一轮应当先跑 `gh release view v0.13.0`，
+取不到就按上面三条补。
+
 ## 2026-10-29（第二十五次会话）· 取号 0.12.4：26 条修复、八条新守卫，以及 fork 自己的 CI 从未跑过的那 9 个测试文件
 
 本轮是四条只读审查泳道（工具面正确性 / 发布与供应链 / 六把尺子 / 用户面文案与功能缺口）交回
