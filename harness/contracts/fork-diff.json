@@ -3543,7 +3543,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "47bd2b40af83b6a4727576187f74b72e2b79020a"
+      "forkHash": "e549983dc031133d1cb78fcf7efe9d5afbdc8fd0"
     },
     {
       "file": "script/publish.ts",
@@ -3989,7 +3989,7 @@
     },
     {
       "file": "README.zh-CN.md",
-      "forkHash": "d99e30a6183fb3dc9094c85a17725e99b6ebeedf"
+      "forkHash": "6870168b31005882fb8ea00eb0948efdc3b1154b"
     },
     {
       "file": "script/assert-ci-green.mjs",
