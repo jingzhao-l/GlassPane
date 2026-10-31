@@ -202,14 +202,18 @@ export function lineOf(version) {
 
 /**
  * 位点应当等于的字符串。普通位点等于完整 semver；带 `line: true` 的位点等于它的 `major.minor`
- * （那一格对外声称的是一条**线**，不是一个补丁号）。取不出段就返回 null，让两侧都把它当漂移报，
+ * （那一格对外声称的是**一条线**，不是一个补丁号）。取不出段就返回 null，让两侧都把它当漂移报，
  * 而不是拿原串去比一个永远不会相等的值。
  *
- * **显示位也必须走这个函数。**`scripts/check-version.mjs` 现在打的是
- * `value === target ? '✓' : '≠'`，所以那两行会显示 `≠`（文件里写的是 `1.19`，真源是 `1.19.0`）
- * 而退出码仍然是 0——那是给人看的假红，读的人学会忽略它之后，真的那条也就没人看了。改成
- * `value === expectedFor(site, target)` 是一行的事，归 `check-version.mjs` 的所有者；本文件先把
- * 判定与期望值放在**一处**，就是为了那一行改起来不需要再抄一套段号规则。
+ * **显示位也走这个函数，而且三个调用点都已落地（2026-10-31 逐行复核；此处旧注释写的"check-version
+ * 现在打的是 `value === target`"是假缺陷陈述，照着它去修会白改一遍已改好的东西）：**
+ *   判定侧 = 本文件 `drift()` 里 `const expect = expectedFor(site, target)`（现 :300）；
+ *   打印侧 = `check-version.mjs:27` 的 `const expected = expectedFor(site, target)`，
+ *            它的 `:28` 打 `✓/≠`、`:29` 打 `shown`，两处比的都是这个折算值而不是整条 semver；
+ *   改写侧 = 本文件 `applySite()` 里 `const want = expectedFor(site, version)`（现 :251），
+ *            `set-version.mjs` 经它写 `line: true` 的位点。
+ * 段号规则（`lineOf`）只有本函数这一个调用点，三个方向都没有再抄第二遍——把判定、显示、改写
+ * 三处的期望值收在同一处，就是为了段号改动不需要在两侧各改一次。
  */
 export function expectedFor(site, target) {
   if (!site.line) return target
