@@ -34,7 +34,7 @@ set -eu
 # 勿手改）：一键安装 clone 的是这个 **tag**，不是移动的 main——同一天两个人跑
 # 同一条命令必须拿到同一份源码。入口脚本本身仍从 main 取，因为它是唯一需要
 # "最新"的东西：钉的是哪个 tag 就写在这行里。
-GLASSPANE_RELEASE="v1.26.0"
+GLASSPANE_RELEASE="v1.27.0"
 
 # 输出函数先定义：下面第 (0) 条 HOME 闸要用 fail 说话，而它必须排在任何 $HOME 展开之前。
 say() { printf '%s\n' "$*"; }

@@ -227,7 +227,7 @@ GP_INSTALL_SH="$(mktemp "${TMPDIR:-/tmp/}gp-install.XXXXXXXX")" && curl -fsSL ht
 #    mean to install an unreleased tree. The tag below is not verified by eye: it is a derived site
 #    owned by `scripts/version-sites.mjs`, and `scripts/check-doc-links.mjs` reddens when it stops
 #    matching install.sh.
-git clone --branch v1.26.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
+git clone --branch v1.27.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
 ```
 
 What npm does **not** deliver: the Swift engine. Every channel above ends in the same `swift build`
