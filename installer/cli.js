@@ -198,7 +198,14 @@ export function paint(text, color, enabled = process.stdout.isTTY) {
 // 纯逻辑层（可单测）
 // ---------------------------------------------------------------------------
 
-/** 解析 CLI 参数；未知/带值参数缺参时返回 { error }。 */
+/** 解析 CLI 参数；未知/带值参数缺参时返回 `{ error, errorKind }`。
+ *
+ * 返回的 `options` 是**已经读到的那一部分**（不是 defaults）——入口要在"--help 与用法错同时
+ * 出现时谁赢"这条规则上看得见 help 有没有被真的给出来（2026-10-31 P1）。
+ * `errorKind` 也只有两个取值：`'repo-value'`＝这一层自己就说不通的用法错（`--repo` 没接到取值、
+ * 或取值是旗标形状），`'unknown'`＝只有本文件认得的旗标清单才能判定的错。两个 kind 与
+ * `--help` 的先后关系不同，规则写在入口的 `if (isMain)` 那一块上面。
+ */
 export function parseArgs(argv) {
   const defaults = {
     repoDir: null,
@@ -224,13 +231,21 @@ export function parseArgs(argv) {
       case '-h':
         opts.help = true
         break
-      case '--repo':
-        index += 1
-        if (index >= rest.length || rest[index].startsWith('--')) {
-          return { options: defaults, error: '--repo 需要一个目录参数' }
+      case '--repo': {
+        // 取值的两条判据与 install.sh 的 2c' 同一句，且**不以 `--` 为界**：单横线的 `-x` 同样是
+        // 一面旗标的形状。从前这里只否 `--` 前缀，于是 `--repo -x` 被当成一个目录收下继续跑，
+        // 而同一个文件的 unsafeArgvValue 对 clone 目标却否 `-` 前缀——一处两套口径（2026-10-31 P1）。
+        const value = rest[index + 1]
+        if (value === undefined) {
+          return { options: opts, error: '--repo 需要一个目录参数（后面没有取值）', errorKind: 'repo-value' }
         }
-        opts.repoDir = rest[index]
+        if (value.startsWith('-')) {
+          return { options: opts, error: `--repo 需要一个目录参数（收到的是旗标：${value}）`, errorKind: 'repo-value' }
+        }
+        index += 1
+        opts.repoDir = value
         break
+      }
       case '--no-prompt':
         opts.prompt = false
         break
@@ -270,10 +285,10 @@ export function parseArgs(argv) {
         opts.acceptUnverifiedSignature = true
         break
       default:
-        return { options: defaults, error: `未知参数：${arg}（--help 查看用法）` }
+        return { options: opts, error: `未知参数：${arg}（--help 查看用法）`, errorKind: 'unknown' }
     }
   }
-  return { options: opts, error: null }
+  return { options: opts, error: null, errorKind: null }
 }
 
 /** "这一棵是不是 GlassPane 仓库"的**唯一一份**判据（两个 marker 的相对路径）。
@@ -289,6 +304,39 @@ export const REPO_MARKERS = Object.freeze(['engine/Package.swift', 'mcp-shell/pa
 export function looksLikeRepoHere(dir) {
   if (typeof dir !== 'string' || dir === '') return false
   return REPO_MARKERS.every((rel) => fs.existsSync(path.join(dir, rel)))
+}
+
+/** 显式定位位（`--repo` / `GLASSPANE_REPO`）交进来的那一条路径的**第一字节之前的闸**（纯函数）。
+ *
+ * 存在的理由（2026-10-31 P0，实测）：`install()` 从前对这两个值只测 `fs.existsSync`，于是
+ * `npx glasspane-install --repo <一个存在的非仓库目录>` 真的把那个目录当项目根——`npm install`
+ * 以它为 cwd 跑起来（往里写 `node_modules`），一路撞到 `swift build` 才回 1。同一串输入
+ * `install.sh` 在 2e 那一支回 1 且"没有 clone、没有写入任何东西"。两条一键入口对同一串 argv
+ * 必须同判，而"先写再拒"本身就违背本仓的规矩：能拒绝的守卫要在第一字节之前拒
+ * （同一族的先例：`GP_E_SOCKET_TRUST` 写在写位之前、`install.sh` 的 `looks_like_repo`）。
+ *
+ * 判据两条，拒时都要点名（缺了哪一条也要点名，否则读者不知道该补什么）：
+ *  1. 目录存在；
+ *  2. 目录里同时有 {@link REPO_MARKERS} 那两个文件（与 `install.sh` 的 `looks_like_repo` 同一份）。
+ * 文案与 `install.sh` 的 2e/2f 两支逐句对齐，由 `installer/test/daily-20261030-entry-parity.test.mjs`
+ * 按同一串输入逐值对照——那句"两条入口同答"从前只写在注释里。
+ *
+ * @returns {string|null} 拒绝正文（调用方抛错即可，一条字节都不必已经写出）；放行时是 null。
+ */
+export function locatedRootRefusal({ label, dir, ref = '' }) {
+  if (typeof dir !== 'string' || dir === '') return null
+  const exists = fs.existsSync(dir)
+  if (exists && looksLikeRepoHere(dir)) return null
+  const missing = REPO_MARKERS.filter((rel) => !fs.existsSync(path.join(dir, rel)))
+  return [
+    `${label} 给了这个目录，而它不合判据：${dir}`,
+    `  判据（两条都要在，与 looks_like_repo 同一份）：目录要存在；目录里要同时有 ${REPO_MARKERS.join(' 与 ')}。`,
+    `  现在缺的是：${exists ? `${missing.join('、')} 不在` : '目录不存在'}`,
+    // 这一句是这条闸的**承诺**，不是装饰：它排在 ensureLogDir 与 npm 之前，所以拒绝之后
+    // 家目录里不会多出 .glasspane，指定目录里不会多出 node_modules。
+    '本轮没有 clone、没有写入任何东西。',
+    `下一步：${label} 指一棵真的仓库（上面两条判据都在），或去掉 ${label} 让它 clone 一份${ref ? `（ref: ${ref}）` : ''}。`,
+  ].join('\n')
 }
 
 /** 从起始目录向上逐级寻找含 engine/Package.swift 与 mcp-shell/package.json 的根目录。 */
@@ -2248,7 +2296,10 @@ export function usageText() {
     '用法: node installer/cli.js [选项]',
     '',
     '选项:',
-    '  --repo <目录>      指定项目根目录（默认自动向上查找）',
+    '  --repo <目录>      指定项目根目录（默认自动向上查找）。这一枚与 GLASSPANE_REPO 都要先过',
+    '                     判据（目录存在 + 目录里同时有 engine/Package.swift 与 mcp-shell/package.json）：',
+    '                     不合就当场拒绝，且拒在任何写入之前——从前它只测"目录在不在"，于是',
+    '                     一个存在的非仓库目录会被当成项目根去跑 npm install（2026-10-31 修）',
     '  --no-prompt        跳过破坏性步骤的确认（脚本/自动化场景）。被它拦住的是三件：',
     '                     ① bootout 已加载的 launchd daemon 作业（会打断正在跑的 act；',
     '                     install 与 --restore-launchd 走的是同一道门）；',
@@ -2293,6 +2344,10 @@ export function usageText() {
     '     ② 环境预检未通过（缺 node/swift/npm 那一族，`checkEnvironment` 报的每条都列在输出里）。',
     '     这两条的正文各自点名了下一步，读正文才知道该装什么。',
     '  2  命令行参数错误',
+    '     用法错与 --help 同时出现时谁赢（install.sh 的 2c\' 那一节写的是同一份规则）：',
+    '     `--repo` 没接到取值、或接到的是旗标（`-` 开头，单双横线都算）——这一类**先赢**，仍旧退 2；',
+    '     "未知参数"这一类**让位**：给了 --help 就打这一页并退 0，因为入口脚本没有本文件的旗标',
+    '     清单、判不出"未知"，抄一份就是下一处没人对照的孪生抄本。',
     '  跨二进制的用法错对照（**这是在记录一处已知分歧，不是修它**——那些码都是发出去的契约，',
     '     本轮一个都没改）：同样是"命令行参数错误"，`node updater/cli.js` 回 2（与本文件一致），',
     '     后台服务 `glasspaned` 回 64（并把整块用法打出去）。按 rc 分支的脚本要把 2 与 64 都当用法错。',
@@ -3168,6 +3223,18 @@ export async function install({
   const homeDir = guard.home
   const pinRef = resolvePinRef(env)
 
+  // 2026-10-31 P0：两个**显式**定位位排在 `fs.existsSync` 之前先过 looksLikeRepoHere。
+  // 从前这里只问"在不在"，于是一个存在的非仓库目录会被当成项目根交给 npm（见
+  // locatedRootRefusal 的注释），而同一串 argv 在 install.sh 那一头回 1 且一个字节都没写。
+  // 两条一键入口对同一串输入必须同判，且"能拒的守卫要在第一字节之前拒"是本仓的规矩。
+  for (const located of [
+    { label: '--repo', dir: explicitRoot },
+    { label: 'GLASSPANE_REPO', dir: envRoot },
+  ]) {
+    const refusal = locatedRootRefusal({ ...located, ref: pinRef })
+    if (refusal) throw new Error(refusal)
+  }
+
   let rootDir = explicitRoot ?? envRoot ?? resolveProjectRoot()
 
   if (!rootDir || !fs.existsSync(rootDir)) {
@@ -3598,7 +3665,18 @@ if (isMain) {
   // --restore-launchd／环境预检这四条还留着 `process.exit()`；Linux runner 上就是
   // 从这里现形的（那台机器没有 swift，预检拒绝必然走到，而测试原本指望走到 install
   // 的拒绝分支——一条依赖机器状态的断言）。
-  const { options, error } = parseArgs(process.argv.slice(2))
+  const { options, error, errorKind } = parseArgs(process.argv.slice(2))
+  // **两入口对同一串 argv 的用法错规则**（2026-10-31 P1；同一份规则写在 install.sh 的 2c' 上面）：
+  //   1. `--repo` 没接到取值、或接到的是一面旗标（`-` 开头，单双横线都算）——这是"这一层自己就
+  //      说不通"的用法错，**先于 --help**：两条入口都退 2、都说那一句、都随后打 usage 页。
+  //      带 --help 也一样退 2，因为 argv 在 --repo 那一枚上根本没写完。
+  //   2. "未知参数"只有读了本文件的旗标清单才判得出来，而 install.sh 没有那份清单（也不许抄一份，
+  //      那正是本仓反复修的"两份抄本没人对照"）。所以这一档在 --help 面前**让位**：给了 --help
+  //      就是要这一页，两条入口都退 0 并打出各自那一页；没给 --help 时由这里退 2。
+  //   3. 单独的 --help / -h 仍旧退 0（CI 的 install-gate 与两份 README 钉的就是那个 0）。
+  // 从前这里是 `else if (error)` 排在 `else if (options.help)` 前面，两个 kind 一起压过 help，
+  // 于是 `--help --no-such-flag` 在这一头退 2、在 install.sh 那一头退 0（实测）——同一串 argv
+  // 两个码，而按 rc 分叉的调用方读到的"2 = 命令行写错了"在两条入口之间漂移。
   // 平台判据住在 cli.js 这一侧才是权威的：`uname` 是 PATH 上一个可以被换掉的程序（本轮实测：
   // 桩一个 `uname` 说 Linux，install.sh 那一道只管挡"要 clone 的那一趟"，源码在手边时一路走到
   // `exec node cli.js`，npm ci / tsc / swift build / launchd 注册全部真的发生），而
@@ -3608,13 +3686,17 @@ if (isMain) {
   if (refusal) {
     process.stderr.write(paint(`\n${refusal}\n`, 'red'))
     process.exitCode = 1
-  } else if (error) {
+  } else if (errorKind === 'repo-value') {
     process.stderr.write(`\n${paint(`参数错误：${error}`, 'red')}\n\n`)
     process.stderr.write(usageText())
     process.exitCode = 2
   } else if (options.help) {
     process.stdout.write(usageText())
     process.exitCode = 0
+  } else if (error) {
+    process.stderr.write(`\n${paint(`参数错误：${error}`, 'red')}\n\n`)
+    process.stderr.write(usageText())
+    process.exitCode = 2
   } else if (options.restoreLaunchd) {
     // 审计项④：恢复 + 校验全机器化，退出码即判定（0=daemon 就位且已按实际
     // 自报如实报告；1=作业/服务面失败），agent 可直接执行并按 message 续办。

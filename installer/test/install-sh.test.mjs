@@ -17,6 +17,7 @@ import {
   cloneFailureText,
   existingCloneDecision,
   safeGitCloneArgs,
+  quoteShellArg,
   REPO_URL,
   INSTALL_SH_URL,
   RELEASE_VERSION,
@@ -156,7 +157,115 @@ test('install.sh: 参数透传（--no-gui 出现在委托行）', () => {
     env: { ...process.env, GLASSPANE_INSTALL_DRY_RUN: '1' },
   })
   assert.equal(passthrough.status, 0, passthrough.stderr)
-  assert.match(passthrough.stdout, /cli\.js .*--no-gui --skip-build/)
+  // 2026-10-31 P2 之后这一行的每一枚参数都是一个**可照抄的 shell 词**：以 - 开头的值按
+  // installer/cli.js 的 quoteShellArg 那张表要单引号包住（裸的 `-x` 会被下一个命令读成选项），
+  // 所以这里比对的是加引号后的形状，而不是从前那句裸插值 `$*`。
+  // 整行照抄真跑一遍由下面的「dry-run 印出去的两行计划能整行照抄执行」那两条钉，这里只闸顺序。
+  assert.match(passthrough.stdout, /cli\.js '--no-gui' '--skip-build'/)
+})
+
+/* ---------------------------------------------------------------------------
+ * 2026-10-31 P2：dry-run 印出去的那两行是"给人照抄的命令行"，不是散文。
+ * 从前它们是裸插值（`git clone … $CLONE_DIR`、`node $REPO/installer/cli.js $*`），
+ * 于是 GLASSPANE_INSTALL_DIR="/Users/John Smith/glasspane" 这一趟打印出来的那一行照抄去跑，
+ * 落点被空格重排成两枚参数；同文件真跑那一支用的是引号包住的 "$CLONE_DIR"（argv 一枚一枚传）。
+ * 这两条用例不比对字符串形状，它把印出去的那一行**整行交给 /bin/sh 跑一遍**，用桩记录 argv：
+ * 任何一处重排、任何一次命令替换都会落在这把尺子上。
+ * ------------------------------------------------------------------------- */
+
+test('install.sh: dry-run 的两行计划整行照抄跑得动，带空格的落点仍是一枚参数', () => {
+  const fx = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-dryrun-copy-'))
+  try {
+    const cloneDir = path.join(fx, 'John Smith', 'glasspane')
+    const stub = path.join(fx, 'bin')
+    const log = path.join(fx, 'argv.log')
+    fs.mkdirSync(stub, { recursive: true })
+    fs.mkdirSync(path.join(fx, 'home'), { recursive: true })
+    fs.mkdirSync(path.join(fx, 'bare-cwd'), { recursive: true })
+    // 桩：预检问的是 `node -p 'Number(process.versions.node.split(".")[0])'`（install.sh:429），
+    // 不是 `--version`——桩只答 `--version` 的话，主版本读成 0，整条 dry-run 在 clone 之前就停，
+    // 这一条测的就不再是"照抄的那两行跑得动"而是桩自己没答话。两种问法都答，其余调用把每一枚
+    // argv 单独记成一行（ARG<…> 包起来，空串也看得见）后立刻返回。
+    for (const name of ['git', 'node']) {
+      fs.writeFileSync(path.join(stub, name), [
+        '#!/bin/sh',
+        name === 'node' ? 'case "${1:-}" in -p) printf \'22\\n\'; exit 0 ;; --version|-v) printf \'v22.11.1\\n\'; exit 0 ;; esac' : null,
+        `printf 'CMD=%s\\n' ${JSON.stringify(name)} >> ${JSON.stringify(log)}`,
+        'for gp_a in "$@"; do printf "ARG<%s>\\n" "$gp_a" >> ' + JSON.stringify(log) + '; done',
+        'exit 0',
+        '',
+      ].filter((line) => line !== null).join('\n'), { mode: 0o755 })
+    }
+    const copiedPath = `${stub}:${path.dirname(process.execPath)}:/usr/bin:/bin`
+    const res = spawnSync('/bin/sh', [INSTALL_SH, '--no-gui', '--note=a b'], {
+      cwd: path.join(fx, 'bare-cwd'),
+      encoding: 'utf8',
+      env: {
+        ...process.env, PATH: copiedPath, HOME: path.join(fx, 'home'),
+        GLASSPANE_REPO: '', GLASSPANE_INSTALL_DRY_RUN: '1', GLASSPANE_INSTALL_DIR: cloneDir,
+      },
+    })
+    assert.equal(res.status, 0, `${res.stdout}\n${res.stderr}`)
+    const grab = (needle) => {
+      const line = res.stdout.split('\n').find((l) => l.includes(needle))
+      assert.ok(line, `dry-run 没打出含「${needle}」的那一行：${res.stdout}`)
+      return line.slice(line.indexOf('将执行: ') + '将执行: '.length)
+    }
+    const cloneLine = grab('将执行: git clone')
+    const delegateLine = grab('将执行: node')
+    const runCopied = (line) => {
+      fs.rmSync(log, { force: true })
+      const r = spawnSync('/bin/sh', ['-c', line], { encoding: 'utf8', env: { ...process.env, PATH: copiedPath } })
+      assert.equal(r.status, 0, `照抄这一行跑不动：[${line}]｜${r.stdout}\n${r.stderr}`)
+      const slots = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean)
+      const cmd = slots.shift().replace(/^CMD=/, '')
+      return { cmd, argv: slots.map((s) => s.replace(/^ARG<(.*)>$/s, '$1')) }
+    }
+    const cloned = runCopied(cloneLine)
+    assert.equal(cloned.cmd, 'git', `那一行的命令位该是 git，实得 ${cloned.cmd}`)
+    assert.deepEqual(cloned.argv, ['clone', '--branch', 'v1.26.0', '--depth', '1', '--',
+      'https://github.com/jingzhao-l/GlassPane.git', cloneDir],
+      `照抄 clone 那一行得到的 argv 与将要执行的不是一回事（落点被重排就是这一条红）：${JSON.stringify(cloned.argv)}`)
+    const delegated = runCopied(delegateLine)
+    assert.equal(delegated.cmd, 'node', delegated.cmd)
+    assert.deepEqual(delegated.argv, [path.join(cloneDir, 'installer', 'cli.js'), '--no-gui', '--note=a b'],
+      `委托行的每一枚透传参数都得是一枚 argv；$* 那种写法把 "--note=a b" 拆成两枚（这一条就是重排的证据）：${JSON.stringify(delegated.argv)}`)
+  } finally {
+    fs.rmSync(fx, { recursive: true, force: true })
+  }
+})
+
+test('install.sh 的 sh_quote 与 installer/cli.js 的 quoteShellArg 逐值同判，且照抄回读是同一枚参数', () => {
+  const source = fs.readFileSync(INSTALL_SH, 'utf8')
+  const fn = source.match(/^sh_quote\(\) \{[\s\S]*?^\}/m)
+  assert.ok(fn, 'install.sh 里没读到 sh_quote 的函数体——这条闸的取材点要跟着一头改')
+  const fx = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-shquote-'))
+  try {
+    const driver = path.join(fx, 'driver.sh')
+    fs.writeFileSync(driver, [
+      '#!/bin/sh',
+      fn[0],
+      'q=$(sh_quote "$1")',
+      'printf \'%s\\n\' "$q"',
+      // 照抄回读：eval 那一行就是操作者粘贴那一行时会发生的事。$# 必须是 1，$1 必须逐字节等于原值。
+      'eval "set -- $q"',
+      'printf \'%s\\001%s\\n\' "$#" "$1"',
+      '',
+    ].join('\n'))
+    const values = ['v1.26.0', 'https://github.com/jingzhao-l/GlassPane.git', '/Users/John Smith/glasspane',
+      '-x', '--no-prompt', '', "a'b", '$(printf X)', '`printf X`', 'a;b', 'a*b', '~/x', 'é', '@:%=,./_+']
+    for (const value of values) {
+      const out = execFileSync('/bin/sh', [driver, value], { encoding: 'utf8' }).split('\n')
+      const quoted = out[0]
+      const [, count, roundTrip] = /^([0-9]+)\u0001([\s\S]*)$/.exec(out[1]) ?? [, '0', '']
+      assert.equal(quoted, quoteShellArg(value),
+        `值「${value}」上两入口的引号表不同判：install.sh 印 ${quoted}，cli.js 印 ${quoteShellArg(value)}`)
+      assert.equal(count, '1', `值「${value}」印成 ${quoted} 后被照抄回读成了 ${count} 枚参数`)
+      assert.equal(roundTrip, value, `值「${value}」印成 ${quoted} 后回读为「${roundTrip}」——不是同一枚参数`)
+    }
+  } finally {
+    fs.rmSync(fx, { recursive: true, force: true })
+  }
 })
 
 // ---------------------------------------------------------------------------

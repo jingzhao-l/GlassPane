@@ -52,8 +52,9 @@ usage() {
   say '  sh install.sh [选项]                     # 一键命令里要带旗标就写：| sh -s -- <选项>'
   say ''
   say '这一层认的三个旗标（其余原样透传给 installer/cli.js，它的 --help 里有完整清单）：'
-  say '  --repo <目录>    用这棵树当源码（目录里必须同时有 engine/Package.swift 与'
-  say '                   mcp-shell/package.json）；给了而不合这条判据就当场停下，不 clone、也不委托。'
+  say '  --repo <目录>    用这棵树当源码（两条判据：目录要存在，且目录里要同时有'
+  say '                   engine/Package.swift 与 mcp-shell/package.json）；给了而不合判据就当场停下，'
+  say '                   不 clone、也不委托——GLASSPANE_REPO 指同一件事，也走同一道闸。'
   say '  --no-bootstrap   定位不到源码时不 clone，直接停下并打印四个定位位。'
   say '  -h, --help       这一页。退出码 0，且不 clone、不委托——任何平台都一样（与 installer/cli.js'
   say '                   对 --help 的豁免同一句话：CI 读的就是这一页，不是这台机器装不装得了）。'
@@ -62,7 +63,8 @@ usage() {
   say '  GLASSPANE_REPO_URL      clone 的地址，只认 https:// / ssh:// / file://（默认 GitHub 上的本仓）'
   say '  GLASSPANE_REF           钉的版本（默认 '"${GLASSPANE_RELEASE}"'；要追主干必须显式写 main）'
   say '  GLASSPANE_INSTALL_DIR   clone 的落点（默认 '"${HOME:-当前登录家目录}"'/glasspane）'
-  say '  GLASSPANE_REPO          指一棵已经在手的仓库树（与 --repo 同一件事）'
+  say '  GLASSPANE_REPO          指一棵已经在手的仓库树（与 --repo 同一件事，也过同一道判据闸：'
+  say '                          给了而不合判据就当场停下，不再悄悄落到下一个定位位）'
   say '  GLASSPANE_INSTALL_DRY_RUN=1  只报告决策：不 clone、不委托'
   say ''
   say '这一层做的五件事（Node 预检 / 平台闸 / 源码定位 / 覆盖位的形状闸与透传 / 委托 installer）'
@@ -70,8 +72,12 @@ usage() {
   say '  node <仓库>/installer/cli.js --help'
   say ''
   say '退出码：0 = 这一页已打印（--help），或委托之后 installer 自己回的那个 0；'
-  say '        1 = 这一层就停下（HOME/形状闸/源码定位/平台闸），或 installer 回 1；'
-  say '        2 = installer 判定的命令行参数错误（由 exec 原样透传）。'
+  say '        1 = 这一层就停下（HOME/形状闸/源码定位/两个定位位的判据闸/平台闸），或 installer 回 1；'
+  say '        2 = 命令行参数错误——这一层自己就能判的那两类（--repo 没接到取值、接到的是一面旗标，'
+  say '            以 - 开头时单双横线都算）由这一层直接回 2，其余（未知参数）由 installer 判了透传回来。'
+  say '        用法错与 --help 同时出现时：上面那两类**先赢**（仍旧 2，argv 在 --repo 那一枚上没'
+  say '        写完），未知参数那一类**让位**给 --help（两条入口都打帮助页并退 0）——同一份规则'
+  say "        写在 installer/cli.js 的入口与 2c' 那一节的注释里，两条一键入口对同一串 argv 同答。"
 }
 
 # --- 0a) HOME 闸（必须在 CLONE_DIR 展开之前）---------------------------------
@@ -208,6 +214,68 @@ clone_failure_text() { # $1=ref $2=退出码 $3=目标目录 $4=git 的 stderr
 
 looks_like_repo() {
   [ -f "$1/engine/Package.swift" ] && [ -f "$1/mcp-shell/package.json" ]
+}
+
+# 显式定位位（--repo / GLASSPANE_REPO）交进来的目录不合判据时，这一层怎么说。
+# **两句判据都要点名**（目录存在 + 两个 marker 都在），且拒在任何动作之前：本函数不 clone、
+# 不委托、不写一个字节，说完就 exit 1。行式与 installer/cli.js 的 `locatedRootRefusal` 逐句同源
+# （2026-10-31 P0；同一串输入两条一键入口必须给同一个码、同一句话，由
+# installer/test/daily-20261030-entry-parity.test.mjs 按值对照——在那之前"两条入口同答"只是
+# 两句注释互相指认）。改这里那一行也要去改那一头。
+refuse_located_root() { # $1=旗标/变量名 $2=目录
+  _rr_label=$1
+  _rr_dir=$2
+  say "${_rr_label} 给了这个目录，而它不合判据：${_rr_dir}"
+  say '  判据（两条都要在，与 looks_like_repo 同一份）：目录要存在；目录里要同时有 engine/Package.swift 与 mcp-shell/package.json。'
+  if [ ! -d "$_rr_dir" ]; then
+    say '  现在缺的是：目录不存在'
+  else
+    _rr_missing=''
+    for _rr_marker in engine/Package.swift mcp-shell/package.json; do
+      [ -f "${_rr_dir}/${_rr_marker}" ] || _rr_missing="${_rr_missing:+${_rr_missing}、}${_rr_marker}"
+    done
+    say "  现在缺的是：${_rr_missing} 不在"
+  fi
+  say '  这一枚原样透传给 installer/cli.js 时它优先级最高：刚 clone 的那一棵会被无视，'
+  say '  npm install 会以这个被拒的目录为 cwd 真的跑起来——所以这里停下，不 clone、不委托。'
+  say '本轮没有 clone、没有写入任何东西。'
+  say "下一步：${_rr_label} 指一棵真的仓库（上面两条判据都在），或去掉 ${_rr_label} 让它 clone 一份（ref: ${REF}）。"
+  exit 1
+}
+
+# 印出去的那一行要能**整行照抄执行**（2026-10-31 P2）：dry-run 的两行计划从前是裸插值
+# （`git clone … $CLONE_DIR`、`node $REPO/installer/cli.js $*`），于是
+# `GLASSPANE_INSTALL_DIR="/Users/John Smith/glasspane"` 打印出来的那条命令照抄去跑会变成
+# 两个参数——落点被路径里的空格重排，而真跑那一支用的是引号包住的 "$CLONE_DIR"。
+# 表与 installer/cli.js 的 `quoteShellArg`（= `updater/lib/shell-quote.js` =
+# `mcp-shell/src/errors.ts`，产品里的同一份表）逐字符对齐：只由 shell 动不了手脚的字符组成的
+# 词原样印，其余（空格、引号、glob、`$`、空串、以 `-` 开头）单引号包住，内部的单引号换成 '\''。
+sh_quote() { # $1=任意值；stdout 上是一个可照抄的 shell 词
+  _sq_in=$1
+  _sq_q="'"
+  _sq_bare=1
+  case $_sq_in in
+    '') _sq_bare=0 ;;
+    -*) _sq_bare=0 ;;
+    *[!A-Za-z0-9@%+=:,./_-]*) _sq_bare=0 ;;
+  esac
+  if [ "$_sq_bare" = "1" ]; then
+    printf '%s' "$_sq_in"
+    return 0
+  fi
+  _sq_out=''
+  _sq_rest=$_sq_in
+  while :; do
+    case $_sq_rest in
+      *"$_sq_q"*) ;;
+      *) _sq_out="${_sq_out}${_sq_rest}"
+         break ;;
+    esac
+    # 关引号 → 一个反斜杠引起来的单引号 → 再开引号（POSIX 里唯一稳的写法）。
+    _sq_out="${_sq_out}${_sq_rest%%"$_sq_q"*}${_sq_q}\\${_sq_q}${_sq_q}"
+    _sq_rest=${_sq_rest#*"$_sq_q"}
+  done
+  printf "'%s'" "$_sq_out"
 }
 
 describe_ref() {
@@ -388,6 +456,7 @@ _explicit_repo=""
 _no_bootstrap=0
 _wants_help=0
 _want_repo_arg=0
+_repo_value_missing=0
 for _arg in "$@"; do
   if [ "$_want_repo_arg" = "1" ]; then
     _explicit_repo="$_arg"
@@ -399,24 +468,43 @@ for _arg in "$@"; do
     --no-bootstrap) _no_bootstrap=1 ;;
     # --help 排在这里而不是另起一轮扫描：`--repo --help` 在 installer/cli.js 里是"值被 --repo 吃掉"
     # （parseArgs 的 case '--repo' 直接吞下一枚），这里跟着同一个形状走。跟着**吞**，不跟着**答**：
-    # cli.js 对吞下去的那一枚还有一条判据——以 `--` 开头就不是目录，退 2 并打 usage
+    # cli.js 对吞下去的那一枚还有一条判据——以 `-` 开头就不是目录，退 2 并打 usage
     # （"--repo 需要一个目录参数"）。这一层从前只把它当坏目录拒回 1，于是同一串 argv 在两条一键
     # 入口上是两个退出码、两句话；下面 2e 把这一支对齐到同一答案。
     --help|-h) _wants_help=1 ;;
   esac
 done
+# `--repo` 是最后一枚 ⇒ 它压根没接到取值。这一条从前在两条入口上是两个答案（实测 install.sh 回
+# 0/继续 clone，cli.js 回 2），所以这里把它记成一个**旗标自己的**用法错，交给 2c' 那一节说话。
+[ "$_want_repo_arg" = "1" ] && _repo_value_missing=1
 
-# --- 2c'）--repo 吞下的那一枚若是一面旗标，那是用法错，不是坏目录 ------------------
-# cli.js 对 `--repo --help` 答的是 rc 2 + "--repo 需要一个目录参数"（parseArgs 里
-# `startsWith("--")` 那一条），这一层从前只把它当坏目录答 rc 1 + 判据说明——同一串 argv 在两条
-# 一键入口上两个退出码、两句话，而按 rc 分叉的调用方会把它读成"这个目录不存在"。
+# --- 2c'）--repo 自己的两类用法错：取值缺 / 取值是旗标形状 ------------------------
+# **两入口对同一串 argv 的规则（2026-10-31 P1，同一份写在 installer/cli.js 入口的 if (isMain) 上面）**：
+#   1. `--repo` 没接到取值，或接到的那一枚以 `-` 开头（**单横线与双横线都算**）：这是"这一层自己
+#      就说不通"的用法错，**先于 --help**——两条入口都退 2、都说同一句"参数错误：--repo 需要一个
+#      目录参数（……）"、随后各自打 usage。带 --help 也照样退 2：argv 在 --repo 那一枚上没写完。
+#   2. "未知参数"不在这一层判：本层只有 --repo / --no-bootstrap / --help 三面旗，抄一份 installer
+#      的旗标清单进来就是下一处"两份抄本没人对照"（本文件 usage 里写明这一点）。所以这一档由
+#      installer 判，而 installer 在 --help 出现时先给帮助页：`--help --no-such-flag` 两条入口
+#      都退 0，`--no-such-flag` 单给时两条都退 2（installer 判的）。
+#   3. 单独的 --help / -h 仍旧退 0（CI 的 install-gate 与两份 README 钉的就是那个 0）。
+# 从前这里的形状闸只否 `--*`，于是 `--repo -x` 被当成一个目录收下、走进 2e 的"不合判据"回 1，
+# 而 cli.js 的 parseArgs 把 `-x` 当目录继续跑（同文件的 unsafeArgvValue 对 clone 目标却否 `-`
+# 前缀——一处两套口径，实测三条 argv 三个码：--help --repo 0/2、--help --no-such-flag 0/2、
+# --repo -x 1/继续跑）。现在两边都按 `-` 判。
 # 位置排在 usage 闸**之前**，这不是随手放的：实测 `--repo --no-prompt --help` 时，把它放在 2d 之后
 # 会让这一层回 0（帮助短路在前、旗标形状判定在后）而 cli.js 回 2——又造出一格新的两入口分叉，
 # 正是这条修复要消灭的形状。它与 HOME 闸、两个覆盖位的形状闸同一族："这一趟根本没法谈"，
-# 带不带 --help 都该听见。判据也排在 looks_like_repo **之前**："--help" 同样"不像一棵仓库"，
+# 带不带 --help 都该听见。判据也排在 looks_like_repo **之前**："-x" 同样"不像一棵仓库"，
 # 两条都跑就会先撞上那一句。
+if [ "$_repo_value_missing" = "1" ]; then
+  say "参数错误：--repo 需要一个目录参数（后面没有取值）"
+  say "本轮没有 clone、没有写入任何东西。"
+  usage
+  exit 2
+fi
 case "$_explicit_repo" in
-  --*)
+  -*)
     say "参数错误：--repo 需要一个目录参数（收到的是旗标：${_explicit_repo}）"
     say "本轮没有 clone、没有写入任何东西。"
     usage
@@ -448,15 +536,24 @@ fi
 # 形状也与 --no-bootstrap 那一支同句（say + exit 1，dry-run 不豁免）。
 # 排在定位级联**之前**也带着另一条理由：`$PWD` 恰好是一棵真仓库时，级联会命中 cwd 那一支而
 # 让 REPO 非空——坏旗标就再也没被问过，照样原样透传。给了就要么合判据、要么当场拒，不给兜底的机会。
-# 旗标形状的取值（`--repo --help`）已经在 2c' 里按用法错退回 2，跑到这里的都是真路径。
+# 旗标形状的取值（`--repo --help`、`--repo -x`）与取值缺（`--repo` 收尾）已经在 2c' 里按用法错退回
+# 2，跑到这里的都是真路径。
 if [ -n "$_explicit_repo" ] && ! looks_like_repo "$_explicit_repo"; then
-  say "--repo 给了这个目录，而它不合判据：${_explicit_repo}"
-  say "  判据（与 looks_like_repo 同一份）：目录里要同时有 engine/Package.swift 与 mcp-shell/package.json。"
-  say "  这一枚旗标原样透传给 installer/cli.js 时它优先级最高：刚 clone 的那一棵会被无视，"
-  say "  npm install 会以这个被拒的目录为 cwd 真的跑起来——所以这里停下，不 clone、不委托。"
-  say "本轮没有 clone、没有写入任何东西。"
-  say "下一步：--repo 指一棵真的仓库（上面那两条判据都在），或去掉 --repo 让它 clone 一份（ref: ${REF}）。"
-  exit 1
+  refuse_located_root '--repo' "$_explicit_repo"
+fi
+
+# --- 2f）GLASSPANE_REPO 给了就要么合判据、要么当场拒（2026-10-31 P0，与 2e 同一族）---
+# 从前这一层对它是另一种姿势：`looks_like_repo` 不中就**悄悄往下一个定位位走**（$PWD → 既有 clone
+# → clone），一句话不说。而 cli.js 那一头把同一个环境变量当 rootDir（envRoot 在 explicitRoot 之后、
+# 自动查找之前），2026-10-31 之前只测 `fs.existsSync`——于是 `GLASSPANE_REPO=<一个存在的非仓库目录>`
+# 在两条一键入口上是两个答案：这一层换个目录继续装，那一头真的把 npm install 的 cwd 设成那个目录。
+# 修法与 --repo 同一条：给了就要么合判据、要么在第一字节之前拒。那句"悄悄落到下一个定位位"
+# 不是兜底，是把读者递过去的定位位当没看见——与 2e 当年拒绝 --repo 的理由一字不差。
+# 排在这里（定位级联之前、usage 闸之后）：它不是"argv 写错了"那一类（那是 2 ），是"这一枚指的地方
+# 不能用"那一类（与 2e 同为 1）。委托给 installer 的那一步会在最后 `export GLASSPANE_REPO="$REPO"`
+# 覆盖成已验过的树，所以这两道闸对**委托的那一趟**是纯前置，不改变它的任何行为。
+if [ -n "${GLASSPANE_REPO:-}" ] && ! looks_like_repo "$GLASSPANE_REPO"; then
+  refuse_located_root 'GLASSPANE_REPO' "$GLASSPANE_REPO"
 fi
 
 # --- 3) 源码定位：--repo → GLASSPANE_REPO → 当前目录 → 既有 clone → 自动 clone --
@@ -524,7 +621,11 @@ if [ -z "$REPO" ]; then
     # dry-run 也要把 REPO 定下来：否则后面委托行打印成 "/installer/cli.js"，
     # CI 的分支测试就读不出真实将要执行的路径。
     REPO="$CLONE_DIR"
-    say "[dry-run] 未定位到仓库，将执行: git clone --branch $REF --depth 1 -- $REPO_URL $CLONE_DIR"
+    # 三个值都过 sh_quote（2026-10-31 P2）：这一行是给 CI 与操作者**照抄**用的，裸插值在
+    # `GLASSPANE_INSTALL_DIR="/Users/John Smith/glasspane"` 这种落点上印出来是一条跑不通的命令
+    # （落点被空格重排成两个参数），而真跑那一支用的是引号包住的 "$CLONE_DIR"。惰性字符组成的
+    # 值仍原样印（表与 installer/cli.js 的 quoteShellArg 同一份），默认那一行的形状不变。
+    say "[dry-run] 未定位到仓库，将执行: git clone --branch $(sh_quote "$REF") --depth 1 -- $(sh_quote "$REPO_URL") $(sh_quote "$CLONE_DIR")"
   else
     command -v git >/dev/null 2>&1 || fail "未找到 git（安装 Xcode Command Line Tools: xcode-select --install）"
     if [ -e "$CLONE_DIR" ]; then
@@ -582,7 +683,14 @@ else
   say '  要放行就在一键命令后面补上这个旗标：sh -s -- --no-prompt；本脚本不替你决定这件事。'
 fi
 if [ "$DRY_RUN" = "1" ]; then
-  say "[dry-run] 将执行: node $REPO/installer/cli.js $*"
+  # 委托行同样逐枚加引号（2026-10-31 P2）：从前这里是 `$REPO/…$*`——`$*` 把透传参数按空格
+  # 重排成一句话，落点或参数里带空格时印出来的那一行照抄就跑不动，而真跑那一支是
+  # `exec node "$REPO/installer/cli.js" "$@"`（argv 一枚一枚传）。现在印的就是那份 argv。
+  _dry_run_argv=''
+  for _dq_arg in "$@"; do
+    _dry_run_argv="${_dry_run_argv} $(sh_quote "$_dq_arg")"
+  done
+  say "[dry-run] 将执行: node $(sh_quote "$REPO/installer/cli.js")${_dry_run_argv}"
   exit 0
 fi
 # 平台闸有两道，两道都在，各有各的职责。（这一段从前写的是"installer/cli.js 里没有任何平台判据

@@ -224,6 +224,13 @@ function makeInstallTarget({ lockfile }) {
   const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-npmci-tree-'))
   fs.writeFileSync(path.join(dir, 'package.json'), '{"name":"gp-fixture-tree","version":"1.14.1"}\n')
   if (lockfile) fs.writeFileSync(path.join(dir, 'package-lock.json'), '{"lockfileVersion":3}\n')
+  // 2026-10-31 P0 之后，`--repo` / `GLASSPANE_REPO` 交进来的目录要先过 looksLikeRepoHere 才轮得到
+  // 依赖那一步（能拒绝的守卫排在第一字节之前）。这棵夹具树本来就不是仓库，于是它连 npm 都没走到，
+  // 这一格的尺子就空了——所以把判据的两枚 marker 补上，让它成为它本来要冒充的那东西。
+  fs.mkdirSync(path.join(dir, 'engine'), { recursive: true })
+  fs.mkdirSync(path.join(dir, 'mcp-shell'), { recursive: true })
+  fs.writeFileSync(path.join(dir, 'engine', 'Package.swift'), '// swift-tools-version:5.9\n')
+  fs.writeFileSync(path.join(dir, 'mcp-shell', 'package.json'), '{}')
   return dir
 }
 
