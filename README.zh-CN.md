@@ -257,7 +257,7 @@ GP_INSTALL_SH="$(mktemp "${TMPDIR:-/tmp/}gp-install.XXXXXXXX")" && curl -fsSL ht
 #    每次发版由 `scripts/set-version.mjs` 改写）——要装未发布的树才去 `main`。下面那个 tag 不靠人眼
 #    核对：它是 `scripts/version-sites.mjs` 登记的派生位点，一旦与 install.sh 不一致，
 #    `scripts/check-doc-links.mjs` 就把这一页判红。
-git clone --branch v1.27.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
+git clone --branch v1.28.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
 ```
 
 npm 不交付的东西也说清：Swift 引擎。上面三条渠道最后都要在你这台机器上跑一次 `swift build`——

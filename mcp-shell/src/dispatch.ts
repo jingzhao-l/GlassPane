@@ -40,7 +40,7 @@ export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = [
   "2025-03-26",
   MCP_PROTOCOL_VERSION,
 ] as const;
-export const SERVER_INFO = { name: "glasspane-mcp", version: "1.27.0" } as const;
+export const SERVER_INFO = { name: "glasspane-mcp", version: "1.28.0" } as const;
 
 export const PARSE_ERROR = -32700;
 export const INVALID_REQUEST = -32600;

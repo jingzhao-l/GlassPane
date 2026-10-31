@@ -278,3 +278,19 @@ engine Swift（证据语义/socket/信号/CLI/面板）、探针与面板+脚本
   （`v1.0<NL>`、`v1.0<TAB>`）是**探针取材错**而非入口分叉——探针直接调 `validateGitRef`，跳过了
   门上那一层 `resolvePinRef` 的裁边。裁边这一档由新增那条用例按"门对门"的方式判，且它在 M-E 下
   会红。
+
+### 取号：本轮的修复走 1.28.0，不并进 1.27.0（决定 → 依据 → 回滚）
+
+- **读数**（11-01 02:56 本机实测）：`git rev-parse v1.27.0^{commit}` = `3ddd6031`；tag 已在远端
+  （`git ls-remote --tags origin refs/tags/v1.27.0` 有值）；`gh release view v1.27.0` 非草稿；
+  `npm view glasspane-mcp version --prefer-online` 与 `npm view glasspane-install version --prefer-online`
+  都回 `1.27.0`。发布链那三趟 `release.yml`（`41229973000` push 触发的归档 + 两趟
+  `workflow_dispatch`：`41231290749`、`41231339141`）全部 completed/success。
+- **依据**：本节的 `edbee85e` 在 tag 之后才进 main（`git merge-base --is-ancestor edbee85e v1.27.0`
+  答 NO），所以它**不在 1.27.0 的发布物里**。台账与 1.27.0 自己写下的规则是"发现晚的修复不许移动
+  已发布 tag，只能让号"（1.20.0→1.20.1、1.22.0→1.23.0 两次都是这么走的），而 minor 的判据来自
+  本版动了两枚覆盖位的**取值域**（`GLASSPANE_REPO_URL` 现在拒非 ASCII；`GLASSPANE_REF` 的裁边集合
+  固定成六个 ASCII 空白字节）与两条拒绝句的文案——CLI 旗标与退出码集合一个都没动。
+- **回滚**：`node scripts/set-version.mjs 1.27.0` 把 15 个声明位点与两份 lockfile 退回原值，
+  `git revert` 取号那一笔即可；**不碰 v1.27.0 那个 tag 与已发布的 npm 版本**（这一条本来就是
+  "让号而不覆盖"的纪律）。
