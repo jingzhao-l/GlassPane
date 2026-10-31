@@ -16,6 +16,7 @@ import { CODES } from '../lib/codes.js'
 import { UpdaterError } from '../lib/fsutil.js'
 import { quoteShellArg } from '../lib/shell-quote.js'
 import { PINNED_PATH, bytesResponse, jsonResponse, startServer } from './helpers.mjs'
+import { inertView } from './helpers.mjs'
 
 test('with no override the source is the pinned GitHub API', () => {
   const resolved = resolveBase({})
@@ -203,7 +204,7 @@ test('a certificate-verification failure reports the cause code, not "fetch fail
   // pinned by name in `test/daily-20261022-updater.test.mjs`.
   assert.match(error.details, new RegExp(`NODE_EXTRA_CA_CERTS=${quoteShellArg(BUNDLE).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'the remedy names the file this machine should be handed, through the quoting rule — a path a shell can act on must arrive as one inert single-quoted word')
   assert.doesNotMatch(error.details, /NODE_EXTRA_CA_CERTS="/, '双引号形态必须消失：`"$(touch /tmp/pwned)"` 里的命令替换照样执行')
-  assert.match(error.details, /updater enable|installer/, 'and the two ways to produce it')
+  assert.match(inertView(error.details), /updater\/cli\.js enable|installer/, 'and the two ways to produce it')
 })
 
 test('a refused connection gets no certificate advice', async () => {
@@ -230,7 +231,7 @@ test('a TLS failure with no bundle path still names how to get one', () => {
   const described = describeTransportFailure(URL_UNDER_TEST, tlsError(), {})
   assert.equal(isTlsVerificationFailure('SELF_SIGNED_CERT_IN_CHAIN'), true)
   assert.equal(isTlsVerificationFailure('EAI_AGAIN'), false, 'a DNS hiccup is not a trust problem and must not borrow this sentence')
-  assert.match(described.details, /updater enable/)
+  assert.match(inertView(described.details), /updater\/cli\.js enable/)
   assert.doesNotMatch(described.details, new RegExp(BUNDLE), 'there is no path on this machine yet; pointing at a file that does not exist would be a lie')
 })
 
@@ -608,7 +609,7 @@ test('a stream that overruns its own declared length is stopped in the read loop
   assert.equal(error.code, CODES.releaseBadPayload, '这是"字节与声明对不上"那一档，不是"网络不行"那一档')
   assert.match(error.message, /more than the 4 KiB this response declared for itself/, error.message)
   assert.match(error.message, /nothing partial is staged/, '拒绝里要交代这台机器现在的样子')
-  assert.match(error.message, /updater check/, '并且给出一条能直接跑的下一步')
+  assert.match(inertView(error.message), /updater\/cli\.js check/, '并且给出一条能直接跑的下一步')
   assert.ok(Date.now() - started < 5_000, `不许等任何计时器（实际 ${Date.now() - started}ms）`)
   // 只多读一段就停下：旧实现会把 `chunks` 一直堆到 `DOWNLOAD_CEILING_MAX_MS` 才交给长度比对。
   assert.ok(runaway.produced <= declared + 1024, `缓冲过的字节必须停在声明值附近（实到 ${runaway.produced}）`)

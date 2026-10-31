@@ -56,6 +56,7 @@ import {
 } from '../lib/signature.js'
 import { CODES } from '../lib/codes.js'
 import { FAKE_SIGNER_FPR, FOREIGN_SIGNER_FPR, TMP_PREFIX, fakeGpg, removeDir, tempDir } from './helpers.mjs'
+import { inertView } from './helpers.mjs'
 
 const VERSION = '1.4.1'
 const SUMS_NAME = `SHA256SUMS-${VERSION}.txt`
@@ -205,7 +206,7 @@ test('gpg 这一趟没跑完（status null）说的是"验证没走完"，不是
   assert.doesNotMatch(v.message, /refused outright/, '不许把一次工具失败说成不可挽回的篡改')
   assert.match(v.message, /没有给出判定/, '要说的是"这一趟没给出判定"')
   assert.match(v.message, /ETIMEDOUT/, '细节里要带上那次真跑出来的话，读者才知道不是空穴来风')
-  assert.match(v.message, /--consent unsigned-release/, '而自动运行仍然停：给得出人的那一步，并且这一格会记进状态文件')
+  assert.match(inertView(v.message), /--consent unsigned-release/, '而自动运行仍然停：给得出人的那一步，并且这一格会记进状态文件')
   assert.equal(v.keyFingerprint, null, '没判定成就没有可记录的键')
 })
 
@@ -225,7 +226,7 @@ test('unsigned-release: no .asc published is a different claim from a wrong one'
   assert.equal(v.code, CODES.releaseUnsigned)
   assert.match(v.message, /publishes no SHA256SUMS-1\.4\.1\.txt\.asc/)
   assert.match(v.message, /not authorship/, 'it has to say plainly that the other gates do not answer this question')
-  assert.match(v.message, /--consent unsigned-release/, 'and name the one action left for a human')
+  assert.match(inertView(v.message), /--consent unsigned-release/, 'and name the one action left for a human')
   assert.equal(v.signedAsset, null, 'there is no verified asset to record')
 })
 
@@ -508,7 +509,7 @@ test('authorshipNote: verified is silent, everything else keeps saying it', () =
     const note = authorshipNote({ version: VERSION, signature: word, signedAsset: null, consented: true }, 'applied')
     assert.equal(note.code, OUTCOME_CODES[word])
     assert.match(note.message, /was applied without authorship proof/)
-    assert.match(note.message, /--consent unsigned-release/)
+    assert.match(inertView(note.message), /--consent unsigned-release/)
   }
   const staged = authorshipNote({ version: VERSION, signature: 'unsigned-release', signedAsset: null, consented: true }, 'staged')
   assert.match(staged.message, /was staged without authorship proof/, 'the tense follows what happened, or the record describes an event that did not')

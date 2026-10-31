@@ -49,6 +49,7 @@ import { loadState, nextState, saveState } from '../lib/state.js'
 import { UpdaterError } from '../lib/fsutil.js'
 import { localVersion } from '../lib/version.js'
 import { packTarGz } from '../lib/tar.js'
+import { inertView } from './helpers.mjs'
 import {
   PINNED_PATH,
   bytesResponse,
@@ -221,7 +222,7 @@ test('all eight gates pass: the release is staged and the state records the dige
     // to answer nothing on the one outcome that has an action attached to it (measured on a real machine
     // with the first successful 1.6.0 update, 2026-10-01).
     assert.match(result.message, /^staged 1\.4\.1 \(sha256 [0-9a-f]{12}\)/, JSON.stringify(result.message))
-    assert.match(result.message, /Install update|updater apply/, '要说清下一步按什么')
+    assert.match(inertView(result.message), /Install update|updater\/cli\.js apply/, '要说清下一步按什么')
     assert.equal(result.staged.digest, src.digest, '§1.5: the digest measured off the downloaded file is the one recorded')
     const state = loadState(machine.dir).state
     assert.equal(state.status, 'staged')
@@ -682,7 +683,7 @@ test('an unsigned release refuses the scheduled run, downloads no archive, and r
     assert.equal(state.status, 'needs-consent')
     assert.equal(state.authorship.signature, 'unsigned-release')
     assert.equal(state.authorship.consented, false, 'nobody accepted anything here: the schedule refused on its own')
-    assert.match(state.lastError.message, /--consent unsigned-release/, '§4: the sentence the panel prints names the one action that is left')
+    assert.match(inertView(state.lastError.message), /--consent unsigned-release/, '§4: the sentence the panel prints names the one action that is left')
     assert.equal(updateSummary(state).authorship, 'unsigned-release')
   } finally {
     await src.server.close()

@@ -52,6 +52,7 @@ import { sha256Bytes } from '../lib/digest.js'
 import { packTarGz } from '../lib/tar.js'
 import { emptyState, loadState, nextState, saveState } from '../lib/state.js'
 import { TMP_PREFIX, makeFakeApp, removeDir, shortSocketPath, startSocketDaemon, tempDir } from './helpers.mjs'
+import { inertView } from './helpers.mjs'
 
 const NOW = new Date('2026-09-27T12:00:00.000Z')
 const BUNDLES = [
@@ -393,7 +394,7 @@ test('node genuinely unavailable still installs the bundles and names the runtim
     assert.doesNotMatch(result.message, /cannot write where npm would put them/, result.message)
     assert.doesNotMatch(result.message, /\bsudo\b/, 'remedy 不许交出可照抄执行的升权命令')
     assert.match(result.message, /put node back where this run can reach it/, `补救要说真正的病因：${result.message}`)
-    assert.match(result.message, /updater enable/, `补救要指向本产品支持的下一步（enable 会重渲染作业的 PATH）：${result.message}`)
+    assert.match(inertView(result.message), /updater\/cli\.js enable/, `补救要指向本产品支持的下一步（enable 会重渲染作业的 PATH）：${result.message}`)
     assert.doesNotMatch(result.message, /add that directory to the update agent's EnvironmentVariables/, '那个手工编辑会被下一次 enable 抹掉，不是补救')
   } finally {
     await daemon.close()

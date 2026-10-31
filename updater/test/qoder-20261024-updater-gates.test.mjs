@@ -43,6 +43,7 @@ import { bundleVersionReading, localVersion, readBundleVersion } from '../lib/ve
 import { SUBCOMMANDS, runCommand } from '../cli.js'
 import { makeDaemonBinary, removeDir, shortSocketPath, startSocketDaemon, tempDir, TMP_PREFIX } from './helpers.mjs'
 import { formatMode as installerFormatMode, parseArgs as parseInstallerArgs } from '../../installer/cli.js'
+import { inertView } from './helpers.mjs'
 
 const BLOCK = 512
 const HAS_PLUTIL = fs.existsSync('/usr/bin/plutil')
@@ -324,7 +325,7 @@ test('C5 第二个读数者抛出来/答成空：runCommand 仍旧只回一条 r
       assert.ok(state?.lastError, `${shape}: 拒绝没落进状态，面板与 gp_diagnose 读不到理由`)
       if (shape === 'throws') assert.match(state.lastError.message, /installer pointer file names 1\.20/, state.lastError.message)
       else assert.match(state.lastError.message, /came back as nothing at all/, state.lastError.message)
-      assert.match(state.lastError.message, /installer|updater check/i, `拒绝要给下一步：${state.lastError.message}`)
+      assert.match(inertView(state.lastError.message), /installer|updater\/cli\.js check/i, `拒绝要给下一步：${state.lastError.message}`)
       assert.ok(sink.lines.join('\n').includes(state.lastError.message.slice(0, 40)), 'stderr 上那句和落盘那句是同一句')
     } finally {
       removeDir(dir)
@@ -617,7 +618,7 @@ test('C7 桩没带 reason 时，policy 那道门的兜底句也必须带命令�
   assert.equal(decision.status, 'deferred')
   assert.doesNotMatch(decision.reason, /so something is queued/, decision.reason)
   assert.match(decision.reason, /look identical|cannot be told apart|all look the same/i, `未量到的归因要写成并列可能：${decision.reason}`)
-  assert.match(decision.reason, /launchctl print|--restore-launchd|updater status/, `这道门从前什么都没给：${decision.reason}`)
+  assert.match(inertView(decision.reason), /launchctl print|--restore-launchd|updater\/cli\.js status/, `这道门从前什么都没给：${decision.reason}`)
   assert.equal(decision.swapped, false)
 })
 
@@ -708,7 +709,7 @@ test('C10 真归档里补一条 pax mode= 记录：它覆盖成员头，setuid �
       assert.ok(error, `非八进制的 pax mode 不许静默回退成成员模式：${JSON.stringify(garbage)}`)
       assert.equal(error.code, CODES.archiveUnreadable, `夹具形状不是真八进制：${error.message}`)
       assert.match(error.message, /mode=/, error.message)
-      assert.match(error.message, /updater check/, '拒了要给下一步')
+      assert.match(inertView(error.message), /updater\/cli\.js check/, '拒了要给下一步')
       assert.equal(fs.existsSync(path.join(dest3, 'tree')), false, '拒收的那一份一个字都不该写')
     }
   } finally {

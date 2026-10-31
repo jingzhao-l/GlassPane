@@ -387,3 +387,14 @@ export function fakeMcpPeer(mode = 'answer') {
 }
 
 const TOOLS_16 = Array.from({ length: 16 }, (_, i) => ({ name: `gp_tool_${i}`, description: 'x', inputSchema: { type: 'object' } }))
+
+/**
+ * 去掉句子里的单引号，再拿它去比"点了哪一步"。
+ *
+ * 2026-10-31 起，updater 的出路印的是 `node <这一包的 cli.js> <verb> --consent major`，而每一个
+ * 参数位都由 `lib/shell-quote.js` 单引号包好（`'--consent' major`）。测试问的是"这句话点名了
+ * 哪一步、哪个 consent kind"——那是内容；"参数位是否惰性"由 `mcp-shell/test/remedy-shell-quoting.test.mjs`
+ * 与本包的 `test/remedy-command-invocable.test.mjs` 判，不在这里重复一遍，也不许因为多了引号就
+ * 说那句出路没点名。
+ */
+export const inertView = (text) => String(text).replaceAll("'", '')

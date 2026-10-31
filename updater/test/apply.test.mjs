@@ -50,6 +50,7 @@ import { packTarGz } from '../lib/tar.js'
 import { emptyState, loadState, nextState, saveState, updateSummary } from '../lib/state.js'
 import { writableRoots } from '../lib/fsutil.js'
 import { fakeMcpPeer, makeDaemonBinary, makeFakeApp, removeDir, shortSocketPath, startSocketDaemon, tempDir, TMP_PREFIX } from './helpers.mjs'
+import { inertView } from './helpers.mjs'
 
 const NOW = new Date('2026-09-27T12:00:00.000Z')
 const BUNDLES = [
@@ -287,7 +288,7 @@ test('a swap whose release had no authorship proof still says so after it is ins
   assert.equal(state.code, CODES.releaseUnsigned)
   assert.equal(state.lastError.code, CODES.releaseUnsigned)
   assert.match(state.lastError.message, /was applied without authorship proof/)
-  assert.match(state.lastError.message, /--consent unsigned-release/)
+  assert.match(inertView(state.lastError.message), /--consent unsigned-release/)
   assert.equal(updateSummary(state).authorship, 'unsigned-release', 'gp_diagnose reads the summary, so it has to be in it')
 })
 
@@ -989,7 +990,7 @@ test('a staged tree that is no longer on disk defers instead of swapping', async
     assert.equal(result.status, 'deferred')
     assert.equal(result.code, CODES.notStaged)
     assert.equal(exitCodeFor(result), EXIT.REFUSED)
-    assert.match(result.message, /run "updater check" first/)
+    assert.match(inertView(result.message), /updater\/cli\.js check.*first/)
   } finally {
     fx.cleanup()
   }
@@ -2562,7 +2563,7 @@ test('a staged file rewritten after check is refused before anything is built, p
     assert.equal(exitCodeFor(result), EXIT.REFUSED, '什么都没换 ⇒ §7 的那一档是 3')
     assert.match(result.message, /does not match the tree inside the archive/, result.message)
     assert.match(result.message, /package\.json/, '拒绝里要指名哪个相对路径不对')
-    assert.match(result.message, /updater check/, '并且给出一条能直接跑的下一步')
+    assert.match(inertView(result.message), /updater\/cli\.js check/, '并且给出一条能直接跑的下一步')
     assert.equal(calls.build, 0, '一次构建都不许发生')
     assert.equal(calls.npm, 0, '一次 npm pack/install 都不许发生')
     assert.equal(kick.calls.length, 0, 'daemon 没有被重启')

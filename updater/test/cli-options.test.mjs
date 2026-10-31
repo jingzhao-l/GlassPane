@@ -26,6 +26,7 @@ import { CONSENT_KINDS } from '../lib/policy.js'
 import { emptyState, nextState, saveState } from '../lib/state.js'
 import { DEFAULT_HOUR, DEFAULT_MINUTE } from '../lib/launchd.js'
 import { TMP_PREFIX, removeDir, tempDir } from './helpers.mjs'
+import { inertView } from './helpers.mjs'
 
 const CLI = path.join(import.meta.dirname, '..', 'cli.js')
 
@@ -72,8 +73,8 @@ test('--hour/--minute are refused on the commands that read neither', () => {
   for (const command of ['check', 'apply', 'status', 'rollback']) {
     const got = parseArgs([command, '--hour', '3'])
     assert.equal(got.ok, false, `${command} 不该收下 --hour：它没有读这个键的分支`)
-    assert.match(got.reason, /only mean something to "updater enable"/, got.reason)
-    assert.match(got.reason, /updater enable --hour/, got.reason)
+    assert.match(got.reason, /only mean something to the update agent.s `enable` step/, got.reason)
+    assert.match(inertView(got.reason), /updater\/cli\.js enable --hour/, got.reason)
   }
   assert.equal(parseArgs(['enable', '--hour', '3', '--minute', '15']).ok, true,
     '对照：enable 仍然收这两个值，否则这条修复只是永远拒绝')

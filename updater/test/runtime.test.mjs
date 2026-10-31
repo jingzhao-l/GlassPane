@@ -45,7 +45,7 @@ import { readPointer, writePointer } from '../lib/state.js'
 import { SCHEMA_PATH } from '../lib/schema.js'
 import { undoHandover } from '../lib/runtime.js'
 import { canonicalPath } from '../lib/fsutil.js'
-import { TMP_PREFIX, removeDir, tempDir } from './helpers.mjs'
+import { TMP_PREFIX, removeDir, tempDir, inertView } from './helpers.mjs'
 
 const NOW = () => new Date('2026-10-01T02:00:00.000Z')
 
@@ -622,7 +622,9 @@ test('a scheduled run moves the code and the pointer but does not re-register th
     assert.equal(record.agentVerified, false, '没有把注册换成稳定入口，就不许在状态里说它被核实过')
     assert.deepEqual(enableCalls, [], 'bootout/bootstrap 不许在这次运行里发生：那就是把自己的作业在半路拆掉')
     assert.equal(readPointer(stateRoot).pointer.updaterCli, record.cliPath, '代码与指针照换——面板跑的就是这份')
-    assert.match(record.detail, /or run "updater enable"/, `要说清下一步是谁做的：${record.detail}`)
+    assert.match(inertView(record.detail), /or run .*updater\/cli\.js enable/, `要说清下一步是谁做的：${record.detail}`)
+    // 迁移那一句只许点 `enable`：把 apply/rollback 也写进同一句话，读的人会以为这一趟还欠别的步。
+    assert.doesNotMatch(inertView(record.detail), /updater\/cli\.js (apply|rollback|check)/, `迁移那句多点了别的子命令：${record.detail}`)
     // The sentence a person reads has to distinguish this from the old per-version cost, or they will
     // keep looking for the next manual step after the one that finished it.
     assert.match(record.detail, /after that single step, no future version needs it/, record.detail)

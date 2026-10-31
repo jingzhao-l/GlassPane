@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url'
 
 import { describeCa } from '../lib/ca-bundle.js'
 import { CONSENT_KINDS, decideSwapPermission, decideUpdate } from '../lib/policy.js'
+import { inertView } from './helpers.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -149,16 +150,30 @@ test('每一条 needs-consent 的拒绝都点一个真的存在的 --consent <ki
       want: 'state-dir',
     },
   ]
+  // `--consent <kind>` 在出路句子里有两种拼形：话术里是 `'--consent' major`（参数位由引号助手
+  // 包好），lib 源码里是 `updaterCommand('check', '--consent', 'major')`。两种都得认，只认一种
+  // 的扫描会把"口令点错了"这一族放回盲区。
+  const consentKinds = (text) => [...String(text).matchAll(/--consent['"]?,?\s+['"]?([A-Za-z0-9-]+)/g)]
+    .map((m) => m[1])
+    // 全大写的那一串是**常量名**（源码里的 `updaterCommand('check', '--consent', UNSIGNED_CONSENT_KIND)`），
+    // 不是口令字面量。它由下面那条"常量必须定义成一种真口令"单独管，不能在这里被当成口令判红。
+    .filter((kind) => !/^[A-Z0-9_]+$/.test(kind))
   for (const { name, decision, want } of outcomes) {
     assert.equal(decision.status, 'needs-consent', `${name} 的判定变了，这条闸要跟着改判据而不是删断言`)
-    const named = [...String(decision.reason).matchAll(/--consent\s+([A-Za-z0-9-]+)/g)].map((m) => m[1])
+    const named = consentKinds(inertView(decision.reason))
     assert.ok(named.length > 0, `${name} 的拒绝里没有一个 --consent 旗标，人读到的是散文不是一句命令：${decision.reason}`)
     for (const kind of named) {
       assert.ok(CONSENT_KINDS.includes(kind), `${name} 点了 --consent ${kind}，而 CONSENT_KINDS 里没有这一种：${decision.reason}`)
     }
     assert.ok(named.includes(want), `${name} 必须点它本次缺的那一种（${want}），实点 ${named.join(', ')}`)
-    assert.match(decision.reason, /updater (check|apply)/, `${name} 的旗标前面要带上真正要跑的子命令`)
+    assert.match(inertView(decision.reason), /updater\/cli\.js (check|apply)/, `${name} 的旗标前面要带上真正要跑的子命令`)
   }
+
+  // 判据自己也要能咬人：两种拼形各喂一句，认不出来就是这条闸瞎了。
+  assert.deepEqual(consentKinds("run `node /x/updater/cli.js apply '--consent' major`"), ['major'],
+    '句子里的带引号拼形没被认出来')
+  assert.deepEqual(consentKinds("updaterCommand('check', '--consent', 'unsigned-release')"), ['unsigned-release'],
+    '源码里的助手调用拼形没被认出来')
 
   // 静态的一半：lib 里交出去的话术**只要提到** `--consent <kind>`，那个 kind 就得是真的——
   // 拼错的口令比没有口令更坏，因为它让人以为自己批过了（`cli.js` 里那条同样的判据的散文版）。
@@ -166,9 +181,18 @@ test('每一条 needs-consent 的拒绝都点一个真的存在的 --consent <ki
   let mentions = 0
   for (const name of fs.readdirSync(libDir).filter((n) => n.endsWith('.js'))) {
     const raw = fs.readFileSync(path.join(libDir, name), 'utf8')
-    for (const m of raw.matchAll(/--consent\s+([A-Za-z0-9-]+)/g)) {
+    for (const kind of consentKinds(raw)) {
       mentions += 1
-      assert.ok(CONSENT_KINDS.includes(m[1]), `${name} 写了 --consent ${m[1]}，CONSENT_KINDS 是 ${CONSENT_KINDS.join('/')}`)
+      assert.ok(CONSENT_KINDS.includes(kind), `${name} 写了 --consent ${kind}，CONSENT_KINDS 是 ${CONSENT_KINDS.join('/')}`)
+    }
+    // 常量形式单独核：`updaterCommand('check', '--consent', UNSIGNED_CONSENT_KIND)` 里点的不是一个
+    // 字面口令，所以这一条把常量名解回它的定义再问"是不是真口令"。少这一步，改坏那行 const 就
+    // 只会让出路里出现一个没人批过的旗标，而这条闸安静地放过去。
+    for (const ident of [...raw.matchAll(/--consent',\s+([A-Z][A-Z0-9_]+)\)/g)].map((m) => m[1])) {
+      mentions += 1
+      const def = new RegExp(`const ${ident}\\s*=\\s*'([A-Za-z0-9-]+)'`).exec(raw)
+      assert.ok(def !== null, `${name}: 把 ${ident} 当 --consent 的取值用，却在这个文件里找不到它的字面定义`)
+      assert.ok(CONSENT_KINDS.includes(def[1]), `${name}: ${ident} = ${def[1]}，不在 CONSENT_KINDS（${CONSENT_KINDS.join('/')}）里`)
     }
   }
   assert.ok(mentions >= 4, `整个 lib 只认出 ${mentions} 处 --consent 提及，这条对照已经看不见东西`)

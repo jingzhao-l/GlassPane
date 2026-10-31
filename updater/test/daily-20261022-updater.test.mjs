@@ -233,19 +233,19 @@ test('the state-dir consent command keeps a hostile state root one inert word at
     ourStateRoot: hostileRoot,
   })
   assert.equal(decision.status, 'needs-consent')
-  const begin = 'updater apply --state-dir '
-  const end = ' --consent state-dir'
-  const s = decision.reason.indexOf(begin)
-  assert.notEqual(s, -1, 'consent 命令不在句子里：' + decision.reason)
-  const e = decision.reason.indexOf(end, s)
-  assert.notEqual(e, -1, 'consent 旗标不在命令里：' + decision.reason)
-  const cmd = decision.reason.slice(s, e + end.length)
+  // 2026-10-31：出路里那条命令是 `node <这一包的 cli.js> apply --state-dir <根> --consent state-dir`。
+  // 从前它写的是裸的 `updater apply …`——这台机器上没有那个可执行文件，照抄得 127，而这道闸当时
+  // 恰好把"能跑"这件事验成了"词数对"。现在先要求它点名 node 与真路径，再按 shell 的分词验每一个参数位。
+  const cmd = (decision.reason.match(/`([^`]+)`/) ?? [])[1] ?? ''
+  assert.ok(cmd.startsWith('node '), `出路没有印一条跑得动的命令，只印了散文：${decision.reason}`)
+  const words = shellWords(cmd)
+  assert.equal(words[1].endsWith('/updater/cli.js'), true, `命令跑的不是这一包的 cli.js：${words[1]}`)
   assert.deepEqual(
-    shellWords(cmd),
-    ['updater', 'apply', '--state-dir', hostileRoot, '--consent', 'state-dir'],
+    words.slice(2),
+    ['apply', '--state-dir', hostileRoot, '--consent', 'state-dir'],
     `--state-dir 的参数位没有把恶意根当成一个词：${cmd}`,
   )
-  assert.ok(decision.reason.includes(`--state-dir '${hostileRoot}'`), '单引号形态缺席：' + decision.reason)
+  assert.ok(decision.reason.includes(`'--state-dir' '${hostileRoot}'`), '单引号形态缺席：' + decision.reason)
   assert.ok(!decision.reason.includes('--state-dir "'), '双引号形态回来了：那正是 `$( )` 仍然展开的位置')
 })
 
@@ -344,7 +344,7 @@ test('a real 404 from a local server answers with the status, the consequence cl
     assert.ok(!error.message.includes('undefined'), error.message)
     // Grep-driven existence: every `updater <word>` the sentence tells the reader to run is a
     // subcommand `cli.js` actually parses (`SUBCOMMANDS`), in the style of the repo's remedy-existence gates.
-    const named = [...error.message.matchAll(/updater ([a-z][a-z-]*)/g)].map((m) => m[1])
+    const named = [...error.message.matchAll(/updater\/cli\.js ([a-z][a-z-]*)/g)].map((m) => m[1])
     assert.ok(named.length >= 1, '拒绝里没有点名任何 updater 子命令，这条闸什么也没看：' + error.message)
     for (const word of named) {
       assert.ok(SUBCOMMANDS.includes(word), `remedy 点了一个不存在的命令 updater ${word}（SUBCOMMANDS=${SUBCOMMANDS.join('/')})：${error.message}`)

@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 
 import { CONSENT_KINDS, decideSwapPermission, decideUpdate, foreignStateDir, stateDirFromArgs, stateDirReadings } from '../lib/policy.js'
 import { CODES } from '../lib/codes.js'
+import { inertView } from './helpers.mjs'
 
 test('a major bump is needs-consent and is never auto-applied', () => {
   const decision = decideUpdate({ currentVersion: '1.4.2', tag: 'v2.0.0' })
@@ -234,8 +235,8 @@ test('a state-root flag whose value cannot be decoded is unknown, never allowed'
 test('the major refusal names the runnable consent, not only the panel', () => {
   const decision = decideUpdate({ currentVersion: '1.4.2', tag: 'v2.0.0' })
   assert.equal(decision.status, 'needs-consent')
-  assert.match(decision.reason, /--consent major/, '拒绝必须给出人说"要这一版"的那条口令，和另外两道门同一个形状')
-  assert.match(decision.reason, /updater (check|apply)/, '口令前面要带上真正要跑的子命令')
+  assert.match(inertView(decision.reason), /--consent major/, '拒绝必须给出人说"要这一版"的那条口令，和另外两道门同一个形状')
+  assert.match(inertView(decision.reason), /updater\/cli\.js (check|apply)/, '口令前面要带上真正要跑的子命令')
   assert.match(decision.reason, /press "Install update"/, '面板那条路保留：它是人实际按下去的地方')
 })
 
@@ -253,8 +254,8 @@ test('the state-dir refusal names the consent action a person can actually run',
     ourStateRoot: '/Users/dev/.glasspane',
   })
   assert.equal(decision.status, 'needs-consent')
-  assert.match(decision.reason, /--consent state-dir/, '和另外两道门一样，点名的就是本次缺的那个旗标')
-  assert.match(decision.reason, /updater apply/, '旗标前面必须带上真正要跑的子命令')
+  assert.match(inertView(decision.reason), /--consent state-dir/, '和另外两道门一样，点名的就是本次缺的那个旗标')
+  assert.match(inertView(decision.reason), /updater\/cli\.js apply/, '旗标前面必须带上真正要跑的子命令')
   assert.ok(!/do it by hand\.$/.test(decision.reason), '不能停在一句"你手工来吧"的散文上')
 })
 
