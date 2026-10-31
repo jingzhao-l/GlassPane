@@ -457,7 +457,7 @@ GlassPane has one configuration surface for the engine and one for each consumer
 | `GLASSPANE_PROBE_SOCK` | the in-app probe SDK (`GlassPaneProbe`) | Socket the linked probe connects to when `GP.start(socketPath:)` was given none; defaults to `~/.glasspane/probe.sock` |
 | `GLASSPANE_PROJECTS_FILE` | `glasspane-mcp` | File `gp_project_*` reads and writes instead of `<state root>/projects.json`. A value naming a directory this process would have to create and re-permission is refused (`GP_E_STATE_ROOT_REFUSED`), not obeyed |
 | `GLASSPANE_PROJECTS_FORCE_OVERWRITE` | `glasspane-mcp`, daemon CLI | Let a registry that cannot be decoded be rebuilt from scratch: the damaged file is moved aside as `<path>.unreadable-<id>`, never deleted, and every entry still inside it is lost |
-| `GLASSPANE_REF` | `install.sh`, installer | Release tag to install; `main` tracks the trunk, which is not a fixed artifact |
+| `GLASSPANE_REF` | `install.sh`, installer | Release tag to install; `main` tracks the trunk, which is not a fixed artifact. Leading/trailing ASCII whitespace (space, tab, newline, carriage return, vertical tab, form feed) is trimmed and an all-whitespace value means "unset"; anything else must be a tag/branch literal — `[A-Za-z0-9._/@+-]`, starting with a letter or digit |
 | `GLASSPANE_UPDATE_DISABLE` | updater | Set to `1` to refuse enabling the scheduled update, including through a later re-install |
 | `GLASSPANE_DECISION_LOG` | GlassPane Harness | Where the decision ledger is written instead of `~/.local/share/glasspane-harness/decisions.jsonl` |
 | `GLASSPANE_RUN_PLAN` | GlassPane Harness | Run plan that decides which dimension history is dropped first when a session is compacted |
@@ -465,7 +465,7 @@ GlassPane has one configuration surface for the engine and one for each consumer
 | `GLASSPANE_HTTP_TOKEN` | `glasspane-http` | Bearer token the HTTP gateway requires; an unset or empty value is a refusal to start an unauthenticated gateway, not a tokenless one |
 | `GLASSPANE_INSTALL_DIR` | installer | Where the tree and `.app` are placed; a value starting with `-` is refused (it would reach git/node as an option, not a path) |
 | `GLASSPANE_REPO` | installer | Repository root to install from, when `$PWD` is not it. Must satisfy the same two-file shape `--repo` checks |
-| `GLASSPANE_REPO_URL` | installer | Clone source, only `git@github.com:`/`https://github.com/` prefixes; used when the local tree is absent |
+| `GLASSPANE_REPO_URL` | `install.sh`, installer | Clone source; only the `https://`, `ssh://` and `file://` prefixes are accepted (scp-style `git@github.com:path` is refused — write `ssh://git@github.com/path`), and the value must be pure ASCII without spaces (write internationalized domains in punycode, `xn--…`) |
 | `GLASSPANE_RELEASE` | `install.sh` | The tag this script pins (set by the script, read back by the installer); `main` is not a fixed artifact |
 | `GLASSPANE_INSTALL_DRY_RUN` | `install.sh` | `1` reports the decisions it made — no clone, no delegation to the installer |
 | `GLASSPANE_APPS_DIR` | updater | Directory holding `GlassPane Daemon.app`; `--apps-dir` on the command line wins over it |

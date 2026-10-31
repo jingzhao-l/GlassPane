@@ -235,33 +235,73 @@ test('install.sh: dry-run 的两行计划整行照抄跑得动，带空格的落
   }
 })
 
+/** 本机可用的 locale 档位：`C` 一定在，另外挑 **UTF-8 档**（CI 的 macOS runner 用的
+ * `en_US.UTF-8` 就在这一档里现形过：`é` 被当成字母、NBSP 被当成空白）。这几张矩阵必须在
+ * 每一档里各跑一遍——位判据跟着主机 LANG 走过一轮，只在一档里对照等于没对照。凑不出两档时
+ * 这条闸点名失败，不许把"只跑了一档"当成跑过了。 */
+function gateLocales(where) {
+  const listed = spawnSync('locale', ['-a'], { encoding: 'utf8' })
+  const available = listed.status === 0 ? listed.stdout.split('\n').map((l) => l.trim()).filter(Boolean) : []
+  const wanted = ['C', 'C.UTF-8', 'en_US.UTF-8', 'en_US.utf8']
+  const picked = ['C', ...wanted.filter((l) => available.includes(l))]
+  if (picked.length < 2) {
+    const utf8 = available.find((l) => /utf-?8/i.test(l))
+    if (utf8) picked.push(utf8)
+  }
+  assert.ok(picked.length >= 2,
+    `${where}：位判据这条闸要求至少两档 locale（分类从前是 locale 相关的：é 只在 en_US.UTF-8 下判错、`
+    + `NBSP 只在 UTF-8 档被当空白）。本机 \`locale -a\` rc=${listed.status}，读到 ${available.length} 档：`
+    + `${JSON.stringify(available.slice(0, 12))}${listed.stderr ? ` stderr=${listed.stderr.slice(0, 200)}` : ''}`
+    + `——只凑出 ${JSON.stringify(picked)}，请在这台机器上装一档 UTF-8 locale`)
+  return picked.map((locale) => ({ locale, env: { LC_ALL: locale, LANG: locale, LC_CTYPE: locale } }))
+}
+
 test('install.sh 的 sh_quote 与 installer/cli.js 的 quoteShellArg 逐值同判，且照抄回读是同一枚参数', () => {
   const source = fs.readFileSync(INSTALL_SH, 'utf8')
   const fn = source.match(/^sh_quote\(\) \{[\s\S]*?^\}/m)
   assert.ok(fn, 'install.sh 里没读到 sh_quote 的函数体——这条闸的取材点要跟着一头改')
+  // 判据的尺子搬进了 `bytes_all_in`（按字节，不看 locale），所以取材点必须连着它一起取：
+  // 只抄 sh_quote 的函数体会让驱动脚本里 `bytes_all_in: not found`，那条命令替换回空值，
+  // 判据于是恒判"不安全"——表面对照通过、实际量的是空气。
+  const helper = source.match(/^GP_BYTE_SENTINEL=[\s\S]*?^\}/m)
+  assert.ok(helper, 'install.sh 里没读到 bytes_all_in（GP_BYTE_SENTINEL 起的那一段）——引号表这条闸看不见它用的尺子了')
   const fx = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-shquote-'))
   try {
     const driver = path.join(fx, 'driver.sh')
     fs.writeFileSync(driver, [
       '#!/bin/sh',
+      helper[0],
       fn[0],
       'q=$(sh_quote "$1")',
-      'printf \'%s\\n\' "$q"',
+      // 字段分隔符用 NUL：shell 变量装不下 NUL，所以它不可能是值里的字节——带换行的值也能
+      // 逐字段读回（从前这里按 \n 分行，于是换行那一档压根读不回来）。
+      'printf \'%s\\000\' "$q"',
       // 照抄回读：eval 那一行就是操作者粘贴那一行时会发生的事。$# 必须是 1，$1 必须逐字节等于原值。
       'eval "set -- $q"',
-      'printf \'%s\\001%s\\n\' "$#" "$1"',
+      'printf \'%s\\000\' "$#"',
+      'printf \'%s\\000\' "$1"',
       '',
     ].join('\n'))
     const values = ['v1.26.0', 'https://github.com/jingzhao-l/GlassPane.git', '/Users/John Smith/glasspane',
-      '-x', '--no-prompt', '', "a'b", '$(printf X)', '`printf X`', 'a;b', 'a*b', '~/x', 'é', '@:%=,./_+']
-    for (const value of values) {
-      const out = execFileSync('/bin/sh', [driver, value], { encoding: 'utf8' }).split('\n')
-      const quoted = out[0]
-      const [, count, roundTrip] = /^([0-9]+)\u0001([\s\S]*)$/.exec(out[1]) ?? [, '0', '']
-      assert.equal(quoted, quoteShellArg(value),
-        `值「${value}」上两入口的引号表不同判：install.sh 印 ${quoted}，cli.js 印 ${quoteShellArg(value)}`)
-      assert.equal(count, '1', `值「${value}」印成 ${quoted} 后被照抄回读成了 ${count} 枚参数`)
-      assert.equal(roundTrip, value, `值「${value}」印成 ${quoted} 后回读为「${roundTrip}」——不是同一枚参数`)
+      '-x', '--no-prompt', '', "a'b", '$(printf X)', '`printf X`', 'a;b', 'a*b', '~/x', 'é', '@:%=,./_+',
+      // 换行与制表（2026-10-31）：带换行的路径在 POSIX 里合法，而印出来的那一行是给 CI 和操作者
+      // 照抄的——裸词里的一个换行就是"粘贴一次、执行两条命令"。上一轮那版按 `LC_ALL=C grep` 判，
+      // 而 grep 逐行读、换行永远不出现在它检查的那一行里，本机读数 `a<NL>b` / `a<NL>` / `<NL>b`
+      // 三枚全判成裸词。这几枚就是那一次的对照。
+      'a\nb', 'a\n', '\nb', 'a\tb', '\n']
+    for (const { locale, env } of gateLocales('引号表（sh_quote vs quoteShellArg）')) {
+      for (const value of values) {
+        const out = execFileSync('/bin/sh', [driver, value], {
+          encoding: 'utf8',
+          env: { ...process.env, ...env },
+        })
+        const [quoted = '', count = '', roundTrip = ''] = out.split('\0')
+        const at = `locale=${locale} 值=${JSON.stringify(value)}`
+        assert.equal(quoted, quoteShellArg(value),
+          `${at} 上两入口的引号表不同判：install.sh 印 ${JSON.stringify(quoted)}，cli.js 印 ${JSON.stringify(quoteShellArg(value))}`)
+        assert.equal(count, '1', `${at} 印成 ${JSON.stringify(quoted)} 后被照抄回读成了 ${count} 枚参数`)
+        assert.equal(roundTrip, value, `${at} 印成 ${JSON.stringify(quoted)} 后回读为 ${JSON.stringify(roundTrip)}——不是同一枚参数`)
+      }
     }
   } finally {
     fs.rmSync(fx, { recursive: true, force: true })
@@ -369,8 +409,51 @@ test('install.sh: GLASSPANE_REF 只有空白 = 与置空同义；含内部空白
     env: { GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: path.join(bare, 'ct2'), GLASSPANE_REF: 'v1 x' },
   })
   assert.notEqual(smuggle.status, 0, '含内部空白的 ref 必须仍被拒')
-  assert.match(`${smuggle.stderr}${smuggle.stdout}`, /含空白\/控制字符/)
+  // 句子是 2026-10-31 换的那一条：位判据从 `[[:space:]]|[[:cntrl:]]`（跟着主机 LANG 走）换成
+  // "值必须完全由可打印 ASCII 且不含空格组成"，两条入口同一句（上面那两条矩阵逐字比过）。
+  assert.match(`${smuggle.stderr}${smuggle.stdout}`, /含空白、控制字符或非 ASCII 字节/)
   assert.ok(!/--branch v1 x/.test(smuggle.stdout), '被拒的值不许进到 clone 行')
+})
+
+test('裁边集合两入口同判：只裁那六个 ASCII 空白字节，NBSP 归位判据拒', () => {
+  // `resolvePinRef` 从前用 `.trim()`——它按码位算 Unicode 空白，会把 NBSP / 全角空格裁掉；
+  // install.sh 用 `[[:space:]]`，裁不裁得到 NBSP 取决于主机 LANG。于是 `GLASSPANE_REF=<NBSP>`
+  // 在一头等于"没设"（安静落回发布 tag），在另一头是非法字符。现在两侧都只裁
+  // 空格/制表/换行/垂直制表/换页/回车这六个字节，剩下的交给同一把按字节的尺子。
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'glasspane-trimpat-'))
+  const PIN = `v${RELEASE_VERSION}`
+  const cases = [
+    ['   ', PIN, '纯 ASCII 空白 = 没设 ⇒ 落回发布 tag'],
+    ['\t\n\r \v\f' + PIN + ' \r\n\t', PIN, '六个 ASCII 空白字节照常裁'],
+    [PIN + '\u00a0', null, 'NBSP（U+00A0）不裁 ⇒ 两入口都拒（从前 .trim() 会把它裁成合法 tag）'],
+    [PIN + '\u3000', null, '全角空格（U+3000）不裁 ⇒ 同上'],
+    ['\u00a0', null, '只有 NBSP：不裁成空，所以不许悄悄落回发布 tag'],
+  ]
+  for (const { locale, env: localeEnv } of gateLocales('裁边集合对照')) {
+    for (const [value, expected, note] of cases) {
+      const resolved = resolvePinRef({ GLASSPANE_REF: value })
+      assert.equal(resolved, expected ?? value, `${note}（locale=${locale}，值=${JSON.stringify(value)}）`)
+      const js = validateGitRef(resolved)
+      const result = runInstallSh({
+        cwd: bare,
+        env: {
+          ...localeEnv,
+          GLASSPANE_REPO: '',
+          GLASSPANE_INSTALL_DIR: path.join(bare, `tp-${locale}-${Buffer.from(value).length}`),
+          GLASSPANE_REF: value,
+        },
+      })
+      assert.equal(result.status, js.ok ? 0 : 1,
+        `${note}：两入口必须同码（installer 判 ${js.ok ? '收' : '拒'}，install.sh 回 ${result.status}）｜${result.stdout}${result.stderr}`)
+      if (js.ok) {
+        assert.ok(result.stdout.includes(`--branch ${resolved}`),
+          `clone 计划里必须是裁完的那一枚（${JSON.stringify(resolved)}）：${result.stdout}`)
+      } else {
+        assert.equal(refusalOf(result), js.error, `${note}：同一个值两条入口必须说同一句话`)
+      }
+    }
+  }
+  fs.rmSync(bare, { recursive: true, force: true })
 })
 
 test('repoMissingText: 三条路径齐全且与 install.sh 地址真源一致', () => {
@@ -415,34 +498,56 @@ test('install.sh: GLASSPANE_REF 四条形状规则与 installer 的 validateGitR
     ['字符集外：printf 占位 "%"（旧实现还会把它当格式串）', '%n'],
     ['字符集外：glob "*"', 'v1*branch'],
     ['字符集外：首字符不是字母/数字', '.hidden'],
+    // 2026-10-31：位判据换成按字节之后，这几枚值在两入口、两档 locale 上都必须同一句。
+    // 从前 `case … *[!A-Za-z0-9._/@+-]*` 跟着主机 LANG 走，`v1.0é` 在 C 档拒、在
+    // en_US.UTF-8 档放行，而 installer 恒拒——同一枚覆盖位的值，答案取决于终端的 locale。
+    ['非 ASCII 字节（é，UTF-8 两字节）', 'v1.0é'],
+    ['非 ASCII 首字符（首字符那一档也一样跟着 locale 走）', 'é1.0'],
+    ['非 ASCII：中日韩字符', 'v1.0中'],
+    ['NBSP（JS 的 .trim() 从前把它当空白裁掉，shell 只在 UTF-8 档裁）', 'v1.0 '],
+    ['制表符（`[[:cntrl:]]` 与 `\s` 对它的口径不同）', 'v1\tx'],
+    ['换行（值里塞第二条命令的形状；照抄回读会多执行一条）', 'v1\nx'],
   ]
-  for (const [index, [rule, value]] of rejected.entries()) {
-    const installer = validateGitRef(value)
-    assert.equal(installer.ok, false, `前提：installer 侧必须拒 ${JSON.stringify(value)}（规则：${rule}）`)
-    const result = runInstallSh({
-      cwd: bare,
-      env: { GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: path.join(bare, `ct-${index}`), GLASSPANE_REF: value },
-    })
-    assert.equal(result.status, 1, `${rule}：install.sh 必须退出 1，实得 ${result.status}｜${result.stdout}${result.stderr}`)
-    assert.equal(
-      refusalOf(result),
-      installer.error,
-      `${rule}：同一个值，两条一键入口必须说同一句话（install.sh 声称与 installer 同源）`,
-    )
-    assert.doesNotMatch(result.stdout, PLANNED_CLONE, `${rule}：被拒的值不许进到 clone 计划里`)
-  }
-  // 四条规则里 "+" 与字符集这两条是本轮新加的：没有它们，上面那批值会一路走进 clone。
-  assert.match(validateGitRef('+bad').error, /以 "\+" 开头/, '前提：installer 侧的 "+" 规则在')
-  assert.match(validateGitRef('v1:2').error, /含不被接受的字符/, '前提：installer 侧的字符集规则在')
-  // 对照：合法 ref 两侧都收，且 clone 计划里就是那个值（判据不能被"全拒"满足）。
-  for (const value of ['main', `v${RELEASE_VERSION}`, 'refs/tags/v1.15.1', 'feature/x_y-1.0+2']) {
-    assert.equal(validateGitRef(value).ok, true, `前提：installer 侧要收 ${value}`)
-    const result = runInstallSh({
-      cwd: bare,
-      env: { GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: path.join(bare, `ok-${value}`), GLASSPANE_REF: value },
-    })
-    assert.equal(result.status, 0, `${value} 是合法 ref，不该被拒：${result.stderr}`)
-    assert.ok(result.stdout.includes(`--branch ${value}`), `clone 计划里必须是那个值：${result.stdout}`)
+  for (const { locale, env: localeEnv } of gateLocales('GLASSPANE_REF 矩阵')) {
+    for (const [index, [rule, value]] of rejected.entries()) {
+      const at = `locale=${locale} ${rule}（${JSON.stringify(value)}）`
+      const installer = validateGitRef(value)
+      assert.equal(installer.ok, false, `前提：installer 侧必须拒 ${JSON.stringify(value)}（规则：${rule}）`)
+      const result = runInstallSh({
+        cwd: bare,
+        env: {
+          ...localeEnv,
+          GLASSPANE_REPO: '',
+          GLASSPANE_INSTALL_DIR: path.join(bare, `ct-${locale}-${index}`),
+          GLASSPANE_REF: value,
+        },
+      })
+      assert.equal(result.status, 1, `${at}：install.sh 必须退出 1，实得 ${result.status}｜${result.stdout}${result.stderr}`)
+      assert.equal(
+        refusalOf(result),
+        installer.error,
+        `${at}：同一个值，两条一键入口必须说同一句话（install.sh 声称与 installer 同源）`,
+      )
+      assert.doesNotMatch(result.stdout, PLANNED_CLONE, `${at}：被拒的值不许进到 clone 计划里`)
+    }
+    // 四条规则里 "+" 与字符集这两条是本轮新加的：没有它们，上面那批值会一路走进 clone。
+    assert.match(validateGitRef('+bad').error, /以 "\+" 开头/, '前提：installer 侧的 "+" 规则在')
+    assert.match(validateGitRef('v1:2').error, /含不被接受的字符/, '前提：installer 侧的字符集规则在')
+    // 对照：合法 ref 两侧都收，且 clone 计划里就是那个值（判据不能被"全拒"满足）。
+    for (const value of ['main', `v${RELEASE_VERSION}`, 'refs/tags/v1.15.1', 'feature/x_y-1.0+2']) {
+      assert.equal(validateGitRef(value).ok, true, `前提：installer 侧要收 ${value}`)
+      const result = runInstallSh({
+        cwd: bare,
+        env: {
+          ...localeEnv,
+          GLASSPANE_REPO: '',
+          GLASSPANE_INSTALL_DIR: path.join(bare, `ok-${locale}-${value}`),
+          GLASSPANE_REF: value,
+        },
+      })
+      assert.equal(result.status, 0, `${value} 是合法 ref（locale=${locale}），不该被拒：${result.stderr}`)
+      assert.ok(result.stdout.includes(`--branch ${value}`), `clone 计划里必须是那个值：${result.stdout}`)
+    }
   }
 })
 
@@ -464,30 +569,50 @@ test('install.sh: GLASSPANE_REPO_URL 的判序与句子同 validateGitRepoUrl（
     'HTTPS',
     'File',
     'http',
+    // 2026-10-31：地址这一档现在要求纯 ASCII（与 install.sh 的 bytes_all_in 同一把尺子）。
+    // 从前 installer 用 `\s` 按码位拒 NBSP，而 shell 用 `[[:space:]]`——同一枚 URL 在 C 档放行、
+    // UTF-8 档拒。现在两入口、两档 locale 都是拒，且句子逐字相同（国际化域名请写 punycode）。
+    'https://x/é',
+    'https://x/y z',
+    'https://x/y　z',
+    'https://x/y\nz',
   ]
-  for (const [index, value] of rejected.entries()) {
-    const installer = validateGitRepoUrl(value)
-    assert.equal(installer.ok, false, `前提：installer 侧必须拒 ${JSON.stringify(value)}`)
-    const result = runInstallSh({
-      cwd: work,
-      env: { GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: path.join(work, `ct-${index}`), GLASSPANE_REPO_URL: value },
-    })
-    assert.equal(result.status, 1, `${JSON.stringify(value)} 必须被拒：${result.stdout}${result.stderr}`)
-    // 判序要紧：`ext::sh -c …` 被挡的理由是"不带 scheme 的 ext 传输会起 shell"，
-    // 先撞上空白那条就把它报成"含空白/控制字符"，读者看不出真正被拒的是什么。
-    assert.equal(refusalOf(result), installer.error, `两侧对同一个 URL 必须说同一句话：${JSON.stringify(value)}`)
-    assert.doesNotMatch(result.stdout, PLANNED_CLONE, '被拒的 URL 不许进到 clone 计划里')
-  }
-  assert.equal(fs.existsSync(sentinel), false, 'sentinel 被创建了：ext:: 传输真的被执行了')
-  // 对照：合法 scheme 两侧都收（file:// 是 specs 里记着的离线/镜像用法）。
-  for (const value of ['ssh://git@example.invalid/x.git', 'file:///Users/dev/mirror/GlassPane.git']) {
-    assert.equal(validateGitRepoUrl(value).ok, true, `前提：installer 侧要收 ${value}`)
-    const result = runInstallSh({
-      cwd: work,
-      env: { GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: path.join(work, 'ok-url'), GLASSPANE_REPO_URL: value },
-    })
-    assert.equal(result.status, 0, `${value} 是合法 scheme，不该被拒：${result.stderr}`)
-    assert.ok(result.stdout.includes(value), `clone 计划里必须是那个地址：${result.stdout}`)
+  for (const { locale, env: localeEnv } of gateLocales('GLASSPANE_REPO_URL 矩阵')) {
+    for (const [index, value] of rejected.entries()) {
+      const installer = validateGitRepoUrl(value)
+      assert.equal(installer.ok, false, `前提：installer 侧必须拒 ${JSON.stringify(value)}`)
+      const result = runInstallSh({
+        cwd: work,
+        env: {
+          ...localeEnv,
+          GLASSPANE_REPO: '',
+          GLASSPANE_INSTALL_DIR: path.join(work, `ct-${locale}-${index}`),
+          GLASSPANE_REPO_URL: value,
+        },
+      })
+      assert.equal(result.status, 1, `${JSON.stringify(value)} 必须被拒（locale=${locale}）：${result.stdout}${result.stderr}`)
+      // 判序要紧：`ext::sh -c …` 被挡的理由是"不带 scheme 的 ext 传输会起 shell"，
+      // 先撞上字节位那条就把它报成"含空白、控制字符或非 ASCII 字节"，读者看不出真正被拒的是什么。
+      assert.equal(refusalOf(result), installer.error,
+        `两侧对同一个 URL 必须说同一句话（locale=${locale}）：${JSON.stringify(value)}`)
+      assert.doesNotMatch(result.stdout, PLANNED_CLONE, '被拒的 URL 不许进到 clone 计划里')
+    }
+    assert.equal(fs.existsSync(sentinel), false, 'sentinel 被创建了：ext:: 传输真的被执行了')
+    // 对照：合法 scheme 两侧都收（file:// 是 specs 里记着的离线/镜像用法）。
+    for (const value of ['ssh://git@example.invalid/x.git', 'file:///Users/dev/mirror/GlassPane.git']) {
+      assert.equal(validateGitRepoUrl(value).ok, true, `前提：installer 侧要收 ${value}`)
+      const result = runInstallSh({
+        cwd: work,
+        env: {
+          ...localeEnv,
+          GLASSPANE_REPO: '',
+          GLASSPANE_INSTALL_DIR: path.join(work, `ok-url-${locale}`),
+          GLASSPANE_REPO_URL: value,
+        },
+      })
+      assert.equal(result.status, 0, `${value} 是合法 scheme，不该被拒（locale=${locale}）：${result.stderr}`)
+      assert.ok(result.stdout.includes(value), `clone 计划里必须是那个地址：${result.stdout}`)
+    }
   }
 })
 

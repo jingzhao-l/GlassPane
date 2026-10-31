@@ -194,3 +194,87 @@ engine Swift（证据语义/socket/信号/CLI/面板）、探针与面板+脚本
    rc 0——即那 302 行最终是他们用 `c9a3a748`/`615e6f00` 两笔一并记走的。
    所以"本线自己重记棘轮"这一格的实际状态是**不需要记**，而不是我记了。留这一句免得下一轮
    在 `harness/contracts/tool-surface.json` 上再记一次同一批行。
+## 第三轮（11-01 01:46 之后）：`8085b155` 那一族位判据剩下的三处洞
+
+`8085b155 fix(installer): 两条入口在非 macOS 上不再分叉；sh_quote 与 quoteShellArg 按字节同判`
+是并发那条线落的。方向对（按字节判），但那一把尺子只量了三处中的不到一半。三条都是**在同一台
+机器上量出来的**，量法是两档 locale × 两入口逐值对表；表本身在下面（原始脚本
+`/var/tmp/glasspane-main-check-20261030/probe_shape_locale.mjs`，它同时是这条发现的证据）。
+
+### 读数（修之前，本机 `C` 与 `en_US.UTF-8` 两档 × install.sh 与 installer/cli.js）
+
+| 值 | installer | install.sh `C` | install.sh `en_US.UTF-8` | 结论 |
+| --- | --- | --- | --- | --- |
+| `GLASSPANE_REF=v1.0é` | 拒 | 拒 | **放行** | 同一枚覆盖位，答案取决于终端 LANG |
+| `GLASSPANE_REF=é1.0` | 拒 | 拒 | **放行** | 首字符那一档同罪 |
+| `GLASSPANE_REF=v1.0<NBSP>` | 拒 | 拒（判成非法字符） | **放行**（`[[:space:]]` 在 UTF-8 档把它当空白裁掉了） | 裁边集合按 locale 走 |
+| `GLASSPANE_REPO_URL=https://x/y<NBSP>z` | 拒 | **放行** | 拒 | 方向相反的那一格 |
+| `GLASSPANE_REPO_URL=https://x/é` | 收 | 收 | 收 | 修后统一为拒（见下面那条决定） |
+| `sh_quote` 的 `a<NL>b` / `a<NL>` / `<NL>b` | — | 判 BARE | 判 BARE | `8085b155` 用的 `grep` 逐行读，换行不在它检查的那一行里 |
+
+`é` 那一格还纠正了本轮台账里我自己写下的一句"本机测不到、只有 CI 那种机器能测"：拿
+`case *[!A-Za-z0-9…]*` 直接跑一遍就红了（`locale=en_US.UTF-8 值="é"`）——测不到的原因是那张
+对照表只跑了一档 locale。闸的盲区写成用例的盲区，比写成硬件限制诚实。
+
+### 改了什么
+
+1. `install.sh`：新增唯一一把尺子 `bytes_all_in`（`LC_ALL=C tr -d` + `\001` 哨兵；哨兵不属于任何
+   一套允许位，又把尾部换行顶到中间，因为命令替换只吃尾部换行；tr 失败时结果为空 ≠ 哨兵 ⇒ 拒，
+   fail-closed）。`sh_quote`、`assert_ref_shape`、`assert_ref`（首字符 + 字符集两档）、
+   `assert_repo_url` 四处共用它；`GP_WS` 把首尾裁固定成六个 ASCII 空白字节。
+2. `installer/cli.js`：`unsafeArgvValue` 加 `byteSet` 档（ref/URL 用，目录不用——路径里带空格合法），
+   `validateGitRepoUrl` 同一把尺子，`resolvePinRef` 的 `.trim()` 换成同一组六个字节；两处拒绝句
+   统一成"含空白、控制字符或非 ASCII 字节"并**原样**打印 `"值"`（不再 `JSON.stringify` 转义：
+   转义形状本身就是两入口对不上的那一格）。
+3. 判据口径决定：地址（`GLASSPANE_REPO_URL`）改为**要求纯 ASCII**。见下面「替 owner 做的决定」。
+4. 文档面：两份 README 的 `GLASSPANE_REF` / `GLASSPANE_REPO_URL` 两行、`install.sh --help` 里
+   那两行跟着改；顺带修掉 README 里 `GLASSPANE_REPO_URL` 那行从前写的"只收 `git@github.com:`
+   前缀"——代码收的是 https:// / ssh:// / file://，scp 式一直是被拒的（`validateGitRepoUrl`
+   那条用例就在拒它）。
+5. 闸：`install-sh.test.mjs` 的引号表用例改成 NUL 分隔 + 两档 locale + 表里补换行/制表；REF 矩阵
+   与 URL 矩阵整体跑在两档 locale 上并补进上表那几枚值；新增一条"裁边集合两入口同判"用例，比对
+   的是 install.sh **真正钉出去的 `--branch`** 与 `resolvePinRef` 的输出（不是两个内部函数）。
+
+### 本轮这四处替 owner 做的决定（依据 → 回滚）
+
+- **地址要求纯 ASCII**（`https://x/é` 从前两入口都收，现在两入口都拒）。依据：这一族的病根是
+  "shell 的字符类跟着主机 LANG 走、JS 的正则不跟"，而 URL 这一侧要写成逐字节同判，只有把非 ASCII
+  一并拒掉才能不牺牲空白判据的强度（另一条路是把 JS 的 `\s` 放宽成 ASCII-only，那是**放松**一道
+  守卫，不可接受）。代价：国际化域名的镜像地址必须写 punycode，拒绝句与两份 README 都写明了。
+  回滚：`git revert 8085b155..HEAD -- installer/cli.js install.sh` 逐文件不可行；准确的回滚是把
+  `bytes_all_in "$1" '!-~'` 两处换回 `case "$1" in *[[:space:]]*|*[[:cntrl:]]*)` 并把 JS 的
+  `/^[\x21-\x7e]+$/` 换回 `/[\s\u0000-\u001f]/`（矩阵用例随之改回只跑一档 locale）。
+- **拒绝句里的值改为原样打印**（不再 `JSON.stringify`）。依据：转义形状不同是"同判不同句"，而
+  这个产品的出路要求两入口对同一枚值说同一句话；被拒的值原样回显时确实可能带控制字符，但那正是
+  `escapeTerminalControl` 之外唯一一处"读者需要看见原始字节"的场合。回滚：换回 `JSON.stringify(text)`
+  并同步矩阵里那两行的期望。
+- **`clone 目标目录` 那一档不进这把尺子**。依据：`/Users/John Smith/glasspane` 是合法路径，把空格
+  拒掉是把闸变成障碍；它也不是两入口对照的那一处（install.sh 没有对目录的字符类判据）。
+- **矩阵要求"至少两档 locale"当成硬失败**而不是跳过。依据：`é` 那一格的教训就是只跑一档等于没跑。
+  代价：某台只装了 C locale 的机器会在这三条用例上红，红message 里给了 `locale -a` 的实读数量与
+  补救方向（装一档 UTF-8 locale）。
+
+### 反向变异（三发，每发都先 grep 证明落地，`cp` 恢复后 `shasum -a 256` 核回）
+
+| 编号 | 打在哪 | 改回什么坏写法 | 具名变红的用例 | 核回 |
+| --- | --- | --- | --- | --- |
+| M-C | `install.sh` 三处位判据 | 退回 `case … *[[:space:]]*\|*[[:cntrl:]]*` 与 `*[!A-Za-z0-9._/@+-]*` | 4 条：REF 矩阵、URL 矩阵、`GLASSPANE_REF 只有空白…`、`裁边集合两入口同判…` | `install.sh` sha 回到 `7d27b2531492…` |
+| M-D1 | `installer/cli.js` 的 REF 字节档 | 退回 `/[\s\u0000-\u001f]/` | `install.sh: GLASSPANE_REF 四条形状规则…`，message 点名 `locale=C 非 ASCII 字节（é，UTF-8 两字节）（"v1.0é"）` | `installer/cli.js` sha 回到 `90f8b135bdb7…` |
+| M-D2 | `installer/cli.js` 的 URL 字节档 | 同上（按函数位置锚定，见下那条注） | `install.sh: GLASSPANE_REPO_URL 的判序与句子同 validateGitRepoUrl…` | 同上 |
+| M-E | `installer/cli.js` 的 `resolvePinRef` | 退回 `.trim()` | `裁边集合两入口同判：只裁那六个 ASCII 空白字节，NBSP 归位判据拒` | 同上 |
+| M-F | `install.sh` 的 `sh_quote` 判据 | 退回 `LC_ALL=C grep` 那一版（即 `8085b155`） | `install.sh 的 sh_quote 与 … 逐值同判`，message 点名 `值="a\nb"` | `install.sh` sha 回到 `74159d9722c4…`（当轮中间态） |
+| M-G | 同 M-F，退回更早的 `case *[!…]*` | 同左 | 同一条用例，message 点名 `locale=en_US.UTF-8 值="é"` | 同上 |
+
+注（M-D2 那次踩的坑，值得留着）：第一版变异脚本用两空格缩进的锚点，而 `String.replace` 拿字符串
+模式匹配时**四空格那一处把它当子串先吃掉**，于是我"改了 URL"却红了 REF 矩阵——是那条红告诉我打错
+了位置。第二版按函数位置（`export function validateGitRepoUrl` 之后第一次出现）锚定，才拿到 URL
+矩阵的具名红。教训：变异的落地证明不能只看脚本说"written"，要看红的是不是**该红的那条**。
+
+### 收口读数（本小节）
+
+- `sh -n install.sh` rc=0；`node --test installer/test/*.test.mjs` 315 / 315 / 0。
+- `npm test --workspace glasspane-update` 746 / 746 / 0。
+- 两入口逐值对表（`probe_shape_locale.mjs`）：17 枚值里 15 枚 same；剩下 2 枚
+  （`v1.0<NL>`、`v1.0<TAB>`）是**探针取材错**而非入口分叉——探针直接调 `validateGitRef`，跳过了
+  门上那一层 `resolvePinRef` 的裁边。裁边这一档由新增那条用例按"门对门"的方式判，且它在 M-E 下
+  会红。

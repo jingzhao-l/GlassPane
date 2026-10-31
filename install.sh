@@ -60,8 +60,10 @@ usage() {
   say '                   对 --help 的豁免同一句话：CI 读的就是这一页，不是这台机器装不装得了）。'
   say ''
   say '环境变量：'
-  say '  GLASSPANE_REPO_URL      clone 的地址，只认 https:// / ssh:// / file://（默认 GitHub 上的本仓）'
-  say '  GLASSPANE_REF           钉的版本（默认 '"${GLASSPANE_RELEASE}"'；要追主干必须显式写 main）'
+  say '  GLASSPANE_REPO_URL      clone 的地址，只认 https:// / ssh:// / file:// 三个前缀，且必须'
+  say '                          是纯 ASCII、不含空白（国际化域名写 punycode，形如 xn--…）'
+  say '  GLASSPANE_REF           钉的版本（默认 '"${GLASSPANE_RELEASE}"'；要追主干必须显式写 main。'
+  say '                          首尾的 ASCII 空白会被裁掉，其余只许 tag/分支名字面量）'
   say '  GLASSPANE_INSTALL_DIR   clone 的落点（默认 '"${HOME:-当前登录家目录}"'/glasspane）'
   say '  GLASSPANE_REPO          指一棵已经在手的仓库树（与 --repo 同一件事，也过同一道判据闸：'
   say '                          给了而不合判据就当场停下，不再悄悄落到下一个定位位）'
@@ -81,6 +83,30 @@ usage() {
   say '        用法错与 --help 同时出现时：上面那两类**先赢**（仍旧 2，argv 在 --repo 那一枚上没'
   say '        写完），未知参数那一类**让位**给 --help（两条入口都打帮助页并退 0）——同一份规则'
   say "        写在 installer/cli.js 的入口与 2c' 那一节的注释里，两条一键入口对同一串 argv 同答。"
+}
+
+# --- 0) 字符类的唯一一把尺子（按字节，不看 locale）----------------------------
+# `case` 里的 `[!A-Za-z…]`、`[[:space:]]`、`[[:cntrl:]]` 都跟着 locale 走。2026-10-31 CI 的
+# macOS lane 抓到第一例（`é` 在 en_US.UTF-8 下被当成字母 ⇒ sh_quote 印裸词），本机同一条值在
+# C 档又判对；拿同一把尺子量其余两处覆盖位闸，实测表（本机两档 locale × 两入口）是：
+#   GLASSPANE_REF=v1.0é  installer 拒 / install.sh 在 C 拒、在 en_US.UTF-8 放行
+#   GLASSPANE_REF=é1.0   同上（首字符那一档也一样）
+#   GLASSPANE_REPO_URL=https://x/y<NBSP>z  installer 拒 / install.sh 在 C 放行、在 UTF-8 拒
+# 也就是"同一枚值的答案取决于这台机器的 LANG"，而 installer/cli.js 的正则不看 locale。下面这一把
+# 尺子用 LC_ALL=C 的 tr 按字节量，两套语言就此同一判据；三处调用（sh_quote、两个覆盖位的形状闸、
+# REF 的首字符）共用它，不留第二份抄本。
+# 哨兵用 \001（八进制 001 那个控制字节：它不属于下面任何一套允许位，而命令替换只吃**尾部换行**
+# ——"尾部带换行的值"从前正是这样被判成安全的）。判不出来就当不安全：tr 失败时结果是空的 ≠ 哨兵
+# ⇒ 拒，不放开。
+GP_BYTE_SENTINEL=$(printf '\001')
+# 首尾裁的空白位：只裁这六个 ASCII 字节（与 cli.js 的 resolvePinRef 同一份），不写 `[[:space:]]`
+# ——那一套位跟着 locale 走，UTF-8 下会把 NBSP 也裁掉，于是同一枚值在这一头裁成合法、在 installer
+# 那一头判成非法。
+GP_WS=$(printf ' \t\n\013\014\r')
+
+bytes_all_in() { # $1=值 $2=允许位（tr 的位集语法，不许含哨兵 \001）
+  _bai_left=$(printf '%s\001' "$1" | LC_ALL=C tr -d "$2")
+  [ "$_bai_left" = "$GP_BYTE_SENTINEL" ]
 }
 
 # --- 0a) HOME 闸（必须在 CLONE_DIR 展开之前）---------------------------------
@@ -119,8 +145,8 @@ DRY_RUN="${GLASSPANE_INSTALL_DRY_RUN:-0}"
 # （installer/test/review-2026-10-09.test.mjs 的 finding10 要求那行赋值与这条例外回退相邻，
 #  注释不许插在两者中间——所以这段话写在上头。那是用例的口径，本行不改它。）
 REF="${GLASSPANE_REF-${GLASSPANE_RELEASE}}"
-REF="${REF#"${REF%%[![:space:]]*}"}"
-REF="${REF%"${REF##*[![:space:]]}"}"
+REF="${REF#"${REF%%[!$GP_WS]*}"}"
+REF="${REF%"${REF##*[!$GP_WS]}"}"
 [ -n "$REF" ] || REF="$GLASSPANE_RELEASE"
 
 # --- 0b) 覆盖位的形状闸（finding 3）-------------------------------------------
@@ -140,17 +166,20 @@ REF="${REF%"${REF##*[![:space:]]}"}"
 # `%n` 在这里一路放行、原样进了 `git clone --branch`，然后由 clone 失败那句"ref 不存在
 # 或网络不可达"替它们背锅——那是误归因（真正的病因是形状），而 installer 自己的入口对
 # 同一批值是拒的。上面那句"与 installer/cli.js 的 resolvePinRef 同源"当时也只对了一半。
-# 唯一没能逐字对齐的一处：cli.js 用 JSON.stringify 打印含空白/控制字符的值（控制字符
-# 会被转义成 \n 这种两字符形态），这里用双引号原样打印——**可打印**的值两侧完全相等
-# （矩阵测的就是这些），带控制字符的值两条入口都拒，只是引号里的形状可能不同。
-assert_ref_shape() { # $1=GLASSPANE_REF 的值。判序照 cli.js：空 → "-" → 空白/控制 → "+"
+# 对齐到"逐字"的那一处（2026-10-31）：从前 cli.js 用 JSON.stringify 打印含空白/控制字符的值
+# （控制字符被转义成 \n 这种两字符形态），这里用双引号原样打印——那一格只能"同判不能同句"。
+# 现在这一族的每一条位判据都走上面那把按字节的尺子，两侧一律原样打印 `"值"`，矩阵里连
+# 换行、制表、NBSP、非 ASCII 都按逐字比对（`installer/test/install-sh.test.mjs` 的两档 locale 矩阵）。
+assert_ref_shape() { # $1=GLASSPANE_REF 的值。判序照 cli.js：空 → "-" → 字节位 → "+"
   case "$1" in
     '') fail_ref_gate "GLASSPANE_REF 为空" ;;
     -*) fail_ref_gate "GLASSPANE_REF 以 \"-\" 开头，会被 git 当成命令行选项而不是值：$1" ;;
   esac
-  case "$1" in
-    *[[:space:]]*|*[[:cntrl:]]*) fail_ref_gate "GLASSPANE_REF 含空白/控制字符：\"$1\"" ;;
-  esac
+  # 这一档从前写 `*[[:space:]]*|*[[:cntrl:]]*`：两套位都跟着 locale 走，且 `[[:cntrl:]]` 在
+  # UTF-8 档下不算 NBSP，于是同一枚值在这一头和 installer 那一头（`\s` 按码位算）说得不是
+  # 同一句话。现在只问一件事：值是不是完全由"可打印 ASCII 且不含空格"组成。
+  bytes_all_in "$1" '!-~' \
+    || fail_ref_gate "GLASSPANE_REF 含空白、控制字符或非 ASCII 字节：\"$1\""
   case "$1" in
     +*) fail_ref_gate "GLASSPANE_REF 以 \"+\" 开头（强推语义），这里不收：$1" ;;
   esac
@@ -164,7 +193,7 @@ fail_ref_gate() {
 assert_repo_url() {
   # 判序与 cli.js 的 validateGitRepoUrl 一致：空 → "-" 开头 → scheme 白名单 → 空白/控制字符。
   # 顺序要紧：`ext::sh -c …` 被挡下的理由是"不带 scheme 的值会被 git 当成 ext 传输去起
-  # shell"，先撞上空白那条就把它报成"含空白/控制字符"，读者看不出真正被拒的是什么。
+  # shell"，先撞上字节位那条就把它报成"含空白、控制字符或非 ASCII 字节"，读者看不出真正被拒的是什么。
   [ -n "$1" ] || fail "GLASSPANE_REPO_URL 为空。只接受这些地址形式：https://、ssh://、file://"
   case "$1" in
     -*) fail "GLASSPANE_REPO_URL 以 \"-\" 开头，会被 git 当成命令行选项而不是值：$1" ;;
@@ -179,9 +208,13 @@ assert_repo_url() {
     https://*|ssh://*|file://*) : ;;
     *) fail "GLASSPANE_REPO_URL 必须以 https://、ssh://、file:// 之一开头（实为「$1」）。不带 scheme 的值会被 git 当成传输扩展名（\`ext::…\` 会直接执行后面的命令），因此一律拒绝；本地/镜像 clone 请写 file:///<绝对路径>，scp 式 git@host:path 请写 ssh://git@host/path。" ;;
   esac
-  case "$1" in
-    *[[:space:]]*|*[[:cntrl:]]*) fail "GLASSPANE_REPO_URL 含空白/控制字符：\"$1\"" ;;
-  esac
+  # 最后一档与 assert_ref_shape 同一把尺子（按字节，不看 locale）：值必须完全由"可打印 ASCII 且
+  # 不含空格"组成。这一档从前是 `*[[:space:]]*|*[[:cntrl:]]*`，而 `[[:space:]]` 在 C 档不算
+  # NBSP、在 UTF-8 档算——本机实测 `GLASSPANE_REPO_URL=https://x/y<NBSP>z` 在 C 档放行、UTF-8 档
+  # 拒，installer 那一头（`\s` 按码位）恒拒。现在两侧同一句、同一判据，且地址要求纯 ASCII：
+  # 国际化域名请写 punycode（形如 xn--…）。
+  bytes_all_in "$1" '!-~' \
+    || fail "GLASSPANE_REPO_URL 含空白、控制字符或非 ASCII 字节：\"$1\"。地址必须是纯 ASCII 且不含空白（国际化域名请写 punycode 形式，形如 xn--…）。"
 }
 
 assert_ref() {
@@ -190,13 +223,15 @@ assert_ref() {
   # `A-Za-z0-9._/@+-`。`v1:2`（工作树语法）、`~x`/`%n`（revision 范围与占位符）、`^`、`*`
   # 这类值进 `git clone --branch` 只会换回一条 git 的 fatal，而那条 fatal 会被下面的归因
   # 说成"ref 不存在或网络不可达"——形状问题不该由网络背锅。
-  case "$1" in
-    [A-Za-z0-9]*) : ;;
-    *) fail "GLASSPANE_REF 含不被接受的字符：\"$1\"" ;;
-  esac
-  case "$1" in
-    *[!A-Za-z0-9._/@+-]*) fail "GLASSPANE_REF 含不被接受的字符：\"$1\"" ;;
-  esac
+  # 两档都走上面那把按字节的尺子：`[A-Za-z0-9]*` 与 `*[!…]*` 这两个 case 模式同样跟着 locale 走，
+  # 本机实测 `GLASSPANE_REF=é1.0` 在 en_US.UTF-8 下被当成"字母开头"放行，而 installer 拒它。
+  # （é 这类非 ASCII 现在先被 assert_ref_shape 那一档拦下，这里两档管的是可打印 ASCII 里的越界位，
+  # 例如 `.hidden` 的开头、`v1:2` 的冒号。）
+  _ref_first=${1%"${1#?}"}
+  bytes_all_in "$_ref_first" 'A-Za-z0-9' \
+    || fail "GLASSPANE_REF 含不被接受的字符：\"$1\""
+  bytes_all_in "$1" 'A-Za-z0-9._/@+-' \
+    || fail "GLASSPANE_REF 含不被接受的字符：\"$1\""
 }
 
 # clone 失败的归因：**句子与 installer/cli.js 的 cloneFailureText 逐字同源**（finding 9）。
@@ -257,16 +292,16 @@ sh_quote() { # $1=任意值；stdout 上是一个可照抄的 shell 词
   _sq_in=$1
   _sq_q="'"
   _sq_bare=1
-  # 分类必须**按字节**判（2026-10-31，CI 的 macOS lane 抓到）：`case` 里的 `[!A-Za-z…]` 受
-  # locale 影响，macOS runner 的 en_US.UTF-8 下 `é`（UTF-8 两字节）被当成落在字母类里，于是
-  # 这里印裸的 `é`，而 `installer/cli.js` 的 quoteShellArg 印 `'é'`——同一串 argv 在两条一键
-  # 入口上有两种引号形状（Linux 上反倒一致，所以这一族只在交付平台上现形）。LC_ALL=C 让字符类
-  # 按字节走，与 JS 那张表逐值同判；`installer/test/install-sh.test.mjs` 的表对照钉这件事。
-  if ! printf '%s' "$_sq_in" | LC_ALL=C command grep -q "[^A-Za-z0-9@%+=:,./_-]"; then
-    _sq_bare=1
-  else
-    _sq_bare=0
-  fi
+  # 分类必须**按字节**判，且必须看得见值里的每一个字节（这是两轮修法叠出来的那一格）：
+  #   1. 2026-10-31 CI 的 macOS lane 抓到：`case` 里的 `[!A-Za-z…]` 受 locale 影响，
+  #      en_US.UTF-8 下 `é`（UTF-8 两字节）被当成落在字母类里，于是这里印裸的 `é`，而
+  #      installer/cli.js 的 quoteShellArg 印 `'é'`——同一串 argv 在两条入口上两种引号形状。
+  #   2. 同日改成 `LC_ALL=C grep` 之后仍有洞：grep 逐行读，换行永远不出现在它检查的那一行里，
+  #      带换行的值（合法的路径字节）照旧印成裸词。本机读数：`a<NL>b`、`a<NL>`、`<NL>b`
+  #      三枚 grep 判 BARE、按字节的 tr 判 QUOTED。而印出来那一行是给 CI 与操作者**照抄**的，一枚
+  #      裸的多行词就是"粘贴一次、执行两条命令"。
+  # 判据就是上面那唯一一把尺子（`bytes_all_in`），这里不留第二份位集实现。
+  bytes_all_in "$_sq_in" 'A-Za-z0-9@%+=:,./_-' || _sq_bare=0
   case $_sq_in in
     '') _sq_bare=0 ;;
     -*) _sq_bare=0 ;;

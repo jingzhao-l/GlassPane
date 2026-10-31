@@ -585,7 +585,7 @@ GlassPane 的配置面分两层：引擎一层，每个消费者各一层。没�
 | `GLASSPANE_PROBE_SOCK` | 应用内探针 SDK（`GlassPaneProbe`） | `GP.start(socketPath:)` 没给路径时探针去连的那个 socket；默认 `~/.glasspane/probe.sock` |
 | `GLASSPANE_PROJECTS_FILE` | `glasspane-mcp` | `gp_project_*` 读写这个文件，取代 `<状态根>/projects.json`。它指到一个本进程得先创建、再改权限的目录时是被拒（`GP_E_STATE_ROOT_REFUSED`），不是被照做 |
 | `GLASSPANE_PROJECTS_FORCE_OVERWRITE` | `glasspane-mcp`、daemon CLI | 允许把解不开的注册表重建：坏文件被挪成 `<path>.unreadable-<id>` 而非删掉，而其中每一条 entry 就此丢失 |
-| `GLASSPANE_REF` | `install.sh`、安装器 | 要装的发布 tag；`main` 追主干，而主干不是固定产物 |
+| `GLASSPANE_REF` | `install.sh`、安装器 | 要装的发布 tag；`main` 追主干，而主干不是固定产物。首尾的六个 ASCII 空白字节（空格、制表、换行、回车、垂直制表、换页）会被裁掉，整枚都是空白等价于"没设"；其余必须写成 tag/分支名字面量——只许 `[A-Za-z0-9._/@+-]`，且首字符是字母或数字 |
 | `GLASSPANE_UPDATE_DISABLE` | 更新器 | 设为 `1` 后连之后的 `enable` 都拒绝，重装也不会把定时作业带回来 |
 | `GLASSPANE_DECISION_LOG` | GlassPane Harness | 决策账本的写入位置，默认 `~/.local/share/glasspane-harness/decisions.jsonl` |
 | `GLASSPANE_RUN_PLAN` | GlassPane Harness | 运行计划，决定会话压缩时先丢哪一维的历史 |
@@ -593,7 +593,7 @@ GlassPane 的配置面分两层：引擎一层，每个消费者各一层。没�
 | `GLASSPANE_HTTP_TOKEN` | `glasspane-http` | HTTP 网关必需的 bearer token；没设或设成空是**拒绝启动**一个无鉴权网关，而不是启动一个不带 token 的 |
 | `GLASSPANE_INSTALL_DIR` | 安装器 | 树与 `.app` 的落点；以 `-` 开头的值直接拒（它会以"选项"而不是路径的身份传到 git/node 手里） |
 | `GLASSPANE_REPO` | 安装器 | `$PWD` 不是仓库根时指过去；被指的目录必须自己满足 `--repo` 那两条文件判据 |
-| `GLASSPANE_REPO_URL` | 安装器 | clone 源，只收 `git@github.com:`/`https://github.com/` 前缀；本地没有树时用它 |
+| `GLASSPANE_REPO_URL` | `install.sh`、安装器 | clone 源；只收 `https://`、`ssh://`、`file://` 三个前缀（scp 式 `git@github.com:path` 拒，请写 `ssh://git@github.com/path`），且值必须是纯 ASCII、不含空白（国际化域名写 punycode，形如 `xn--…`） |
 | `GLASSPANE_RELEASE` | `install.sh` | 本脚本钉的发布 tag（脚本自己写、installer 读回来）；`main` 不是固定产物 |
 | `GLASSPANE_INSTALL_DRY_RUN` | `install.sh` | 置 `1` 只报告这一趟做的决策：不 clone、不委托给 installer |
 | `GLASSPANE_APPS_DIR` | 更新器 | 放 `GlassPane Daemon.app` 的目录；命令行上的 `--apps-dir` 优先于它 |

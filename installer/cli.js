@@ -2512,7 +2512,12 @@ export function nextStepsText({
 export function resolvePinRef(env = process.env) {
   const raw = env?.GLASSPANE_REF
   if (raw === undefined || raw === null) return REPO_REF
-  const trimmed = String(raw).trim()
+  // 只裁这六个 ASCII 空白字节（与 install.sh 的 GP_WS 同一份）。从前这里是 `.trim()`，
+  // 而它按码位算 Unicode 空白：`GLASSPANE_REF='v1.0<NBSP>'` 在这一头被裁成合法 tag，
+  // 在 shell 那一头（`[[:space:]]`，跟着主机 LANG 走）C 档判成非法字符、UTF-8 档又被裁掉——
+  // 同一枚值三个答案。裁边集合写死成字节之后，两条入口对同一枚值只剩一个答案，
+  // 而 NBSP 归上面那把按字节的尺子拒。
+  const trimmed = String(raw).replace(/^[ \t\n\v\f\r]+/, '').replace(/[ \t\n\v\f\r]+$/, '')
   return trimmed ? trimmed : REPO_REF
 }
 
@@ -2524,12 +2529,26 @@ export const ALLOWED_GIT_URL_PREFIXES = ['https://', 'ssh://', 'file://']
 
 /** 要被拼进 git argv 的三类值（ref / URL / 目录）的共同形状检查。
  *  拒绝的正是两类注入：以 `-` 开头（被 git 当成选项，`--upload-pack=…` 直接起进程），
- *  以及靠空白字符起 shell 的 `ext::sh -c …`。 */
-function unsafeArgvValue(value, label) {
+ *  以及靠空白字符起 shell 的 `ext::sh -c …`。
+ *
+ *  `byteSet` 那一档是给**进 git argv 的两个覆盖位**用的（2026-10-31）：install.sh 的同一档判据
+ *  从前写 `case … in *[[:space:]]*|*[[:cntrl:]]*`，而 POSIX 字符类跟着主机 LANG 走——本机实测
+ *  `GLASSPANE_REPO_URL=https://x/y<NBSP>z` 在 C 档放行、在 en_US.UTF-8 档拒，同一枚值两个答案。
+ *  换成按字节的一条：值必须完全由"可打印 ASCII 且不含空格"组成（`\x21-\x7e`），与 shell 侧
+ *  `bytes_all_in "$1" '!-~'` 同一把尺子、同一句话（值原样打在双引号里，不再 JSON 转义——转义
+ *  形状本身就是两入口对不上的一处）。目录位（`clone 目标目录`）不走这一档：路径里带空格是合法的
+ *  （`/Users/John Smith/glasspane`），把它拒掉是把闸变成障碍。 */
+function unsafeArgvValue(value, label, byteSet = false) {
   const text = String(value ?? '')
   if (!text) return `${label} 为空`
   if (text.startsWith('-')) return `${label} 以 "-" 开头，会被 git 当成命令行选项而不是值：${text}`
-  if (/[\s\u0000-\u001f]/.test(text)) return `${label} 含空白/控制字符：${JSON.stringify(text)}`
+  if (byteSet) {
+    if (!/^[\x21-\x7e]+$/.test(text)) {
+      return `${label} 含空白、控制字符或非 ASCII 字节："${text}"`
+    }
+  } else if (/[\s\u0000-\u001f]/.test(text)) {
+    return `${label} 含空白/控制字符：${JSON.stringify(text)}`
+  }
   if (text.startsWith('+')) return `${label} 以 "+" 开头（强推语义），这里不收：${text}`
   return null
 }
@@ -2554,18 +2573,24 @@ export function validateGitRepoUrl(repoUrl) {
         + '本地/镜像 clone 请写 file:///<绝对路径>，scp 式 git@host:path 请写 ssh://git@host/path。',
     }
   }
-  if (/[\s\u0000-\u001f]/.test(text)) {
-    return { ok: false, error: `GLASSPANE_REPO_URL 含空白/控制字符：${JSON.stringify(text)}` }
+  if (!/^[\x21-\x7e]+$/.test(text)) {
+    return {
+      ok: false,
+      error: `GLASSPANE_REPO_URL 含空白、控制字符或非 ASCII 字节："${text}"。`
+        + '地址必须是纯 ASCII 且不含空白（国际化域名请写 punycode 形式，形如 xn--…）。',
+    }
   }
   return { ok: true, url: text }
 }
 
 /** ref 的形状检查：除通用形状外，还要落在"tag/分支名字面量"的字符集里（要追主干就写 main）。 */
 export function validateGitRef(ref) {
-  const shape = unsafeArgvValue(ref, 'GLASSPANE_REF')
+  const shape = unsafeArgvValue(ref, 'GLASSPANE_REF', true)
   if (shape) return { ok: false, error: `${shape}。ref 只能是 tag/分支名字面量（要追主干就写 main）` }
   if (!/^[A-Za-z0-9][A-Za-z0-9._/@+-]*$/.test(String(ref))) {
-    return { ok: false, error: `GLASSPANE_REF 含不被接受的字符：${JSON.stringify(String(ref))}` }
+    // 原样双引号打印，与 install.sh 那一头逐字相等：走到这一档的值已经过上面那把按字节的尺子，
+    // 里面只剩可打印 ASCII，所以这里不需要 JSON 转义（转义会把 `"` 变成 `\"`，两入口就对不上了）。
+    return { ok: false, error: `GLASSPANE_REF 含不被接受的字符："${String(ref)}"` }
   }
   return { ok: true, ref: String(ref) }
 }

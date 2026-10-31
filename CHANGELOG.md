@@ -212,6 +212,37 @@ Swift 侧 `DailyRound20261030Swift1PathShapeTests`、`…Swift1PermissionHonesty
   版本对外等于一条死命令的签名）。这一档的分岔同时写进 `installer/cli.js` 的 usage 页与
   `install.sh` 的退出码那一格，调用方读 `--help` 就能拿到。
 
+### 同日第三轮：同一族位判据剩下的三处（CI 的 macOS lane 只是它第一次现形）
+
+07:30 那条线把 `sh_quote` 的分类改成 `LC_ALL=C grep`——"按字节判"这件事本身是对的，但那一把尺子
+还剩三处洞，全部在本机两档 locale 下量得出来：
+
+- **grep 逐行读，看不见换行**。`printf … | grep -q "[^…]"` 对 `a<NL>b`、`a<NL>`、`<NL>b` 三枚值都
+  答"没匹配"，于是路径里带一个换行就印成**裸词**——那一行是给 CI 和操作者照抄的，粘贴一次执行
+  两条命令。判据改成 `LC_ALL=C tr -d` + `\001` 哨兵（哨兵不属于任何一套允许位，又把尾部换行顶到
+  中间：命令替换只吃尾部换行，这就是"尾部带换行的值"从前被判成安全的原因）。对照用例的驱动脚本
+  从按行分割改成 **NUL 分隔**（shell 变量装不下 NUL，所以分隔符不可能是值里的字节），表里补进
+  换行/制表/单独一枚换行，并且**同一台机器跑两档 locale**（`C` 加一档 UTF-8；凑不出两档就点名
+  失败，不许把"只跑了一档"当跑过）。反向：判据退回 grep 那一版 ⇒ 具名红在 `值="a\nb"`；退回
+  `case *[!…]*` 那一版 ⇒ 具名红在 `locale=en_US.UTF-8 值="é"`——也就是说 `é` 那一格从前不是
+  "本机测不到"，是那张表只跑了一档 locale。
+- **同一把尺子漏在两个覆盖位的闸上**。`GLASSPANE_REF=v1.0é` 与 `é1.0` 在 C 档被
+  `*[!A-Za-z0-9._/@+-]*` 拒、在 en_US.UTF-8 档**放行**，而 installer 恒拒；
+  `GLASSPANE_REPO_URL=https://x/y<NBSP>z` 反过来在 C 档放行、UTF-8 档拒。`assert_ref_shape` /
+  `assert_ref` / `assert_repo_url` 现在共用同一条 `bytes_all_in`，拒绝句统一成
+  "含空白、控制字符或非 ASCII 字节"，地址改为要求纯 ASCII（国际化域名写 punycode 形如 `xn--…`）。
+  这是一处**对外收紧**，所以两份 README 的环境变量表与 `install.sh --help` 跟着改口径；顺带把
+  README 里 `GLASSPANE_REPO_URL` 那行从前写的"只收 `git@github.com:` 前缀"改成代码真正收的三个
+  scheme（scp 式其实一直是被拒的）。
+- **裁边的集合也跟着 locale 走**。`resolvePinRef` 用 `.trim()`（按码位算 Unicode 空白），shell 用
+  `[[:space:]]`：`GLASSPANE_REF=<NBSP>` 在一头等价于"没设"（安静落回发布 tag），在另一头是非法
+  字符。两侧都改成只裁那六个 ASCII 空白字节，NBSP 归位判据拒；新增一条对照用例，把 install.sh
+  真正钉出去的那一枚 `--branch` 与 `resolvePinRef` 的输出在每一档 locale 下逐一比对。
+
+实测：`node --test installer/test/*.test.mjs` 315 tests / 315 pass / 0 fail（本轮 +1 条用例），
+`npm test --workspace glasspane-update` 746/746。三处反向变异各自点名用例，读数记在
+`specs/GlassPane_每日20261030_发现台账.md` 的变异表（M-C / M-D / M-E）。
+
 ## [1.26.0] — 2026-10-29
 
 **版本判断：minor。** 判据仍是 1.6.2 写下、1.22.0/1.23.0/1.24.0/1.25.0 各自复述过的那一条：patch 要求
