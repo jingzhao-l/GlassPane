@@ -105,9 +105,15 @@ CI 等式。CI 同样跑不了所有依赖真实 GUI 会话、真实 TCC 席位�
 
 - 功能先在 `specs/` 里被规格化、被验收，代码只是它的一种实现。改变**行为**（语义、错误码、降级形态、权限主体、
   证据字段）→ 同一个 PR 里更新对应 `specs/` 文档；只做内部重构且行为逐字节不变 → 在 PR 描述里明确写出这一点。
-- 新增或修改任何 `gp_*` 工具 = 三处必须同步，缺一处即视为未完成：[kernel/schemas/](./kernel/schemas/)（JSON Schema
-  真值）、[engine/Sources/GlassPaneEngine/](./engine/Sources/GlassPaneEngine/) 里的 daemon 方法表与分类器、
-  工具表 [mcp-shell/src/tools.ts](./mcp-shell/src/tools.ts)。
+- 新增或修改任何 `gp_*` 工具 = 两张工具表必须同步，缺一处即视为未完成：
+  [engine/Sources/GlassPaneEngine/](./engine/Sources/GlassPaneEngine/) 里的 daemon 方法表与分类器（`FrameCodec.swift`
+  的 `EngineMethod`——`hello.capabilities` 由它派生，从不手抄）与工具表
+  [mcp-shell/src/tools.ts](./mcp-shell/src/tools.ts)（`TOOL_SPECS`；壳把转发的方法对着在跑的 daemon 的 `hello`
+  做对账，`test/shell-2026-defects.test.mjs` 把两个方向都钉住——数目属于那些表与运行时的 `tools/list`，
+  不属于这句话）。HTTP 面的路由也从工具表派生，不是第三份手抄。
+  [kernel/schemas/](./kernel/schemas/) **只在工具改动数据契约**（证据包字段、selector 规则、决策日志形状）时
+  才进同步：它不发布任何工具清单，这第三块"镜像"其实是数据契约；而且那个目录是已发布 `iterate-kernel`
+  的被钉语料，追平它靠 `node scripts/check-kernel-corpus.mjs --record` 换 pin，不靠手改字节。
 - 错误码表（[ProtocolErrors.swift](./engine/Sources/GlassPaneEngine/ProtocolErrors.swift) 的 `GPErrorCode`）是冻结的：
   失败路径的修法遵循「码不动、语义不动、remedy 可执行」——remedy 必须是代理能直接执行的命令。
 

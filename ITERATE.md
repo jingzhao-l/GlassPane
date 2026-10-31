@@ -68,7 +68,11 @@ socket 的另一个入口，其信任边界写在 `SECURITY.md` §2.3。对外�
 
 见 `iterate.config.yaml` 的 `dimension_sets`：`engine` / `gui` / `mcp` / `bridge` /
 `release` / `docs` 六套。改动落在哪一层就用哪套；跨层改动（例如新增一个 `gp_*` 工具）
-必须同时过 `mcp` + `engine`，因为工具契约在三处镜像（kernel schema、daemon、mcp-shell）。
+必须同时过 `mcp` + `engine`，因为工具面有两张真表（daemon 的 `EngineMethod` 方法表与
+`mcp-shell/src/tools.ts` 的 `TOOL_SPECS`，壳对 `hello.capabilities` 做对账），两处都会被动到。
+`kernel/schemas/` 是被钉的**数据契约语料**（证据包、决策日志、selector 规则），不发布工具
+清单；只有工具改动数据形状时它才进同步，且经 `scripts/check-kernel-corpus.mjs --record`
+换 pin，不手改字节。
 
 ## Iterate 注意点 / Iterate Notes
 

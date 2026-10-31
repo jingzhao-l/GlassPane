@@ -66,7 +66,7 @@ dimension_sets:
       - security
       - style-tests
     focus:
-      spec-compliance: "工具契约三处镜像：kernel schema / daemon / mcp-shell tools.ts"
+      spec-compliance: "工具面两张真表：daemon 的 EngineMethod（hello.capabilities 由其派生）与 mcp-shell/src/tools.ts 的 TOOL_SPECS，壳对 hello 做对账；kernel/schemas 只在数据契约变形时进同步（换 pin，不手改）"
       security: "结构化错误里的 remedy 必须可执行，且不得泄露屏幕内容"
   bridge:
     dimensions:

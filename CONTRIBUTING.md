@@ -108,9 +108,16 @@ and degraded forms included. "CI is green" is never a substitute for "verified o
 
 - Behaviour is specified and accepted in `specs/` first; code is one implementation of it. Change **behaviour** (semantics, error
   codes, degraded forms, permission subject, evidence fields) → update the matching `specs/` document in the same PR; a pure refactor with byte-identical behaviour → say so explicitly in the PR description.
-- Adding or changing a `gp_*` tool means three places stay in sync, and a missing one is an incomplete change:
-  [kernel/schemas/](./kernel/schemas/) (JSON Schema truth), the daemon's method table and classifier in
-  [engine/Sources/GlassPaneEngine/](./engine/Sources/GlassPaneEngine/), and the tool table [mcp-shell/src/tools.ts](./mcp-shell/src/tools.ts).
+- Adding or changing a `gp_*` tool means two tool tables stay in sync, and a missing one is an incomplete change: the daemon's
+  method table and classifier in [engine/Sources/GlassPaneEngine/](./engine/Sources/GlassPaneEngine/) (`EngineMethod` in
+  `FrameCodec.swift` — `hello.capabilities` is derived from it, never hand-copied) and the tool table
+  [mcp-shell/src/tools.ts](./mcp-shell/src/tools.ts) (`TOOL_SPECS`; the shell reconciles its forwarded methods against the
+  running daemon's `hello`, and `test/shell-2026-defects.test.mjs` pins that both ways — the counts belong to those tables
+  and to `tools/list` at runtime, not to this sentence).
+  [kernel/schemas/](./kernel/schemas/) enters the sync **only when the tool changes a data contract** (evidence-pack fields,
+  selector rules, decision-log shape): it publishes no tool list — that third "mirror" leg is the data contract, and since
+  the directory is a pinned corpus mirror of the published `iterate-kernel`, syncing it means bumping the pin with
+  `node scripts/check-kernel-corpus.mjs --record`, never hand-editing the bytes.
 - The error-code table (`GPErrorCode` in [ProtocolErrors.swift](./engine/Sources/GlassPaneEngine/ProtocolErrors.swift)) is frozen:
   fix failure paths under "code unchanged, semantics unchanged, remedy executable" — a remedy is a command an agent can run directly.
 

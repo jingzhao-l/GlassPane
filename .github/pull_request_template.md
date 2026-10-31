@@ -32,7 +32,7 @@
 - [ ] 信号收尾闸：`cd engine && swift build && python3 .signal_smoke.py .build/debug/glasspaned` 通过
       （SIGTERM/SIGINT 干净退出 + socket 被 unlink）
 - [ ] 桥：`cd bridge && python3 -m pytest -q` 全绿（动过 `bridge/` 时）
-- [ ] kernel：`cd kernel && npm test`（C35 与 fixtures 往返）全绿（动过 schema/kernel 时）
+- [ ] kernel 语料：`node scripts/check-kernel-corpus.mjs` 全绿（镜像 ↔ pin ↔ 壳声明版本三处同号；动过 schema/kernel 时。`kernel/` 没有 package.json，`cd kernel && npm test` 是从前的死命令；C35 往返住在 `cd engine && swift test` 里）
 - [ ] mcp-shell：`cd mcp-shell && npm test` 全绿
 - [ ] 发布形态有变动时补跑 publish-shape 守卫：`cd mcp-shell && npm run bundle && npm pack`，
       并在干净目录里装上后完成 MCP `initialize` 握手
@@ -43,7 +43,7 @@
 
 ## 契约与文档同步
 
-- [ ] 改动了 `gp_*` 工具：`kernel/schemas/` + daemon 方法/分类器 + `mcp-shell/src/tools.ts` 三处已同步
+- [ ] 改动了 `gp_*` 工具：daemon 方法表/分类器（`engine/Sources/GlassPaneEngine/`，`hello.capabilities` 由它派生）+ `mcp-shell/src/tools.ts` 工具表两处已同步；工具若改动证据包/selector/决策日志的数据形状，另需经 `node scripts/check-kernel-corpus.mjs --record` 追平 `kernel/schemas/` 的 pin（那里不发布工具清单）
 - [ ] 改动了行为语义（错误码、降级形态、权限主体、证据字段）：对应 `specs/` 文档已更新
 - [ ] 内部重构且行为逐字节不变：在此明确写出「行为不变」并列出对照测试
 - [ ] 版本变更只经 `node scripts/set-version.mjs <version>`，没有手改单个 `package.json`
