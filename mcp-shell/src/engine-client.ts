@@ -1188,14 +1188,34 @@ export class EngineJsonRpcClient {
       for (const entry of this.pending.values()) {
         entry.handedOff = true;
       }
+      // The two self-report caches belong to the connection that filled them, so they are
+      // dropped when a connection is *opened* — not when a handshake succeeds. A daemon
+      // restart (or a swap to another build, which is what `--restore-launchd` and the
+      // updater both do) replaces the producer, and `hello`'s `stateRoot` and `version` are
+      // conditional keys (`EngineCore.hello()` writes them only when it measured them). A
+      // new daemon that answers neither therefore says nothing that could overwrite the
+      // old one's values, and `verifyIdentity` deliberately keeps an absent key absent —
+      // "that daemon does not report it", never "so it must be the last one's". Left as
+      // it was, this process went on answering with the *previous* daemon's self-report:
+      // `project-registry` chose which `projects.json` to write by the root a process that
+      // no longer exists named, and the provider attribution line stated a version this
+      // connection never heard. Both getters now answer null on that path, which is the
+      // "not measured on this connection" the fields are documented to mean: no throw, no
+      // derived guess, no inherited number.
+      this.helloStateRoot = null;
+      this.helloVersion = null;
       this.handshake();
     });
   }
 
   /**
    * The state root the daemon named in its own `hello` (additive since 1.15.0), or null
-   * when no handshake answered that key. `null` means "this daemon does not report it" —
-   * never "therefore it is the home default"; callers say which of the two they used.
+   * when no handshake *on the connection this transport currently holds* answered that key.
+   * `null` means "this daemon does not report it" — never "therefore it is the home
+   * default", and never "therefore it is what the daemon before this one said"; the field is
+   * cleared when a connection opens, which is the only way a reconnecting transport can
+   * answer "not measured" about a producer it has just replaced. Callers say which of the
+   * two they used.
    */
   private helloStateRoot: string | null = null;
 
