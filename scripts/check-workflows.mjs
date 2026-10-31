@@ -1231,7 +1231,7 @@ function sigPipeExitProblems(lines, shells) {
  * that does not read, and `updater/test/daily-20261030-gate-handoff.test.mjs` reddens if the
  * sentence starts promising a receiver again.
  */
-const NO_RECEIVER = "— not enforced from here and blocked by nobody: this file belongs to the harness line "
+export const NO_RECEIVER = "— not enforced from here and blocked by nobody: this file belongs to the harness line "
   + "(its own 10:30 task), and that root's linter implements neither of these two rules — filed in the "
   + "daily ledger for it to absorb"
 
