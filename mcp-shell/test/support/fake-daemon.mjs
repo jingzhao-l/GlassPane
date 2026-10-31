@@ -77,12 +77,21 @@ export const FAKE_DAEMON_CAPABILITIES = Object.freeze([
  *
  * `capabilities` defaults to {@link FAKE_DAEMON_CAPABILITIES}, the pinned literal; a test
  * that wants capability drift passes its own list.
+ *
+ * `stateRoot` is written the way the daemon writes it — `if let stateRootPath` — so it is
+ * present exactly when the caller names one and absent otherwise. That conditional is the
+ * whole shape a reconnecting transport has to get right: a daemon predating 1.15.0 (and
+ * `glasspaned --approval-verify`, which has no root to name) omits the key, so a shell that
+ * keeps the *previous* connection's value would be reporting a root this process never
+ * heard. Omitting the option is how a test asks for that frame; passing it is how a test
+ * asks for the 1.15.0-and-later frame.
  */
 export function fakeHelloResult({
   version = SERVER_INFO.version,
   protocolVersion = ENGINE_PROTOCOL_VERSION,
   capabilities = [...FAKE_DAEMON_CAPABILITIES],
   pid = process.pid,
+  stateRoot,
 } = {}) {
   return {
     engine: "glasspaned",
@@ -90,6 +99,10 @@ export function fakeHelloResult({
     protocolVersion,
     pid,
     capabilities,
+    // Absent, not `undefined`: the daemon's own reply frame omits the key, and a test that
+    // reads this object back has to see the same difference between "not reported" and
+    // "reported blank" that `EngineCore.hello()` writes on the wire.
+    ...(typeof stateRoot === "string" && stateRoot.trim() !== "" ? { stateRoot } : {}),
   };
 }
 
@@ -155,15 +168,27 @@ export function fakeProbeStatusResult() {
  *                         claims, with sane defaults
  * @param options.splitFrames  write every reply in two socket chunks, so the reader
  *                         under test has to reassemble a frame across a boundary
+ * @param options.stateRoot  the `hello.stateRoot` this stand-in reports; left unset it
+ *                         omits the key exactly as a daemon that did not measure a root
+ *                         does (`EngineCore.hello()` writes it under `if let stateRootPath`)
  */
 export async function startFakeDaemon(socketPath, {
   version,
   protocolVersion,
   capabilities,
   splitFrames = false,
+  stateRoot,
 } = {}) {
-  const hello = fakeHelloResult({ version, protocolVersion, capabilities });
+  const hello = fakeHelloResult({ version, protocolVersion, capabilities, stateRoot });
+  // Live peer connections, so `stop()` can end them the way a daemon process exiting does.
+  // `server.close()` alone keeps established connections open and only stops accepting new
+  // ones, so a test that "restarts the daemon" by stopping this fixture and listening again
+  // at the same path would leave its client attached to the *first* daemon's socket — the
+  // reconnect path the test is written to exercise would never run.
+  const peers = new Set();
   const server = net.createServer((conn) => {
+    peers.add(conn);
+    conn.on("close", () => peers.delete(conn));
     conn.setEncoding("utf8");
     // The shell hangs up as soon as its stdin ends, which can land between a request
     // and the reply being written. A dead peer is not a defect in the answer.
@@ -235,6 +260,12 @@ export async function startFakeDaemon(socketPath, {
         fs.rmSync(socketPath, { force: true });
         resolve(undefined);
       });
+      // End every live peer first, or `close`'s callback waits for a connection that
+      // only the client decides to drop — and a client that never learns the daemon is
+      // gone cannot be used to test what happens when it is.
+      for (const peer of peers) {
+        peer.destroy();
+      }
     }),
   };
 }
