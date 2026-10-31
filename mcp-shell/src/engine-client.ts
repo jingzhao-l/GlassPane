@@ -142,9 +142,22 @@ export const LAUNCHD_JOB_LABEL = "com.glasspane.daemon";
 export function defaultSocketPath(): string {
   const named = socketOverride(process.env[ENGINE_SOCKET_ENV]);
   if (named === null) {
-    return path.join(os.homedir(), ".glasspane", "engine.sock");
+    return homeDefaultSocketPath();
   }
   return named;
+}
+
+/**
+ * The socket the engine binds when *nothing* names one — the home default, read straight from
+ * the passwd-independent `os.homedir()` guess the daemon falls back to.
+ *
+ * Separate from `defaultSocketPath()` because a remedy that says "the default is X" must name
+ * the default even while `GLASSPANE_ENGINE_SOCK` is set to something else: echoing the override
+ * back as the default would tell the reader its own mistake is the engine's behaviour. This is
+ * also the one place `$HOME` is spelled for the socket, which `engine-client.test.mjs` counts.
+ */
+export function homeDefaultSocketPath(): string {
+  return path.join(os.homedir(), ".glasspane", "engine.sock");
 }
 
 /**
@@ -236,7 +249,6 @@ export function trustSocket(
   euid: number | null = process.geteuid?.() ?? null,
 ): { code: string; message: string; remedy: string } | null {
   const refusal = (message: string, remedy: string) => ({ code: GP_E_SOCKET_TRUST, message, remedy });
-  const where = (p: string) => quoteShellArg(p);
   // A trust refusal measures the *path*, not the daemon's liveness, so it must never order a
   // lifecycle action: `livenessProbeDecision` reserves the right to name a restart for
   // `GP_E_ENGINE_UNREACHABLE` alone, and kicking a service that is mid-`act` on the user's
@@ -262,7 +274,7 @@ export function trustSocket(
     return refusal(
       `the engine socket at ${target} could not be inspected (${(error as NodeJS.ErrnoException).code ?? "unknown error"}), `
       + "so this process cannot say whether the thing listening there is the engine",
-      `make the path stat-able (\`ls -ld ${where(target)}\`); ${job} reads the running job's own arguments, `
+      `make the path stat-able (\`ls -ld ${quoteShellArg(target)}\`); ${job} reads the running job's own arguments, `
       + "which is how to find the socket the engine actually bound — nothing is restarted by this answer",
     );
   }
@@ -270,8 +282,8 @@ export function trustSocket(
   if (!socket.isSocket()) {
     return refusal(
       `${target} is not a socket, so nothing can answer as the engine from it`,
-      `see what is really at that path with \`ls -l ${where(target)}\`, then point ${ENGINE_SOCKET_ENV} at the socket `
-      + `the engine binds (default ${where(path.join(os.homedir(), ".glasspane", "engine.sock"))}); ${job} reads the `
+      `see what is really at that path with \`ls -l ${quoteShellArg(target)}\`, then point ${ENGINE_SOCKET_ENV} at the socket `
+      + `the engine binds (default ${homeDefaultSocketPath()}); ${job} reads the `
       + "running job's arguments and is the way to check that root without restarting anything",
     );
   }
@@ -284,7 +296,7 @@ export function trustSocket(
     return refusal(
       `the directory holding the engine socket (${directory}) could not be inspected `
       + `(${(error as NodeJS.ErrnoException).code ?? "unknown error"}), so this process cannot say who may replace ${target}`,
-      `make it readable with \`ls -ld ${where(directory)}\`; ${job} prints the root the job really runs under, `
+      `make it readable with \`ls -ld ${quoteShellArg(directory)}\`; ${job} prints the root the job really runs under, `
       + "and this answer authorises no restart",
     );
   }
@@ -298,8 +310,8 @@ export function trustSocket(
       `the engine ${kind} ${place} belongs to uid ${entry.uid}, not to this process (uid ${euid}), so whatever listens `
       + "there was not placed there by this account",
       `run this shell as the account that owns \`glasspaned\`, or point ${ENGINE_SOCKET_ENV} at the socket that account `
-      + `bound (default ${where(path.join(os.homedir(), ".glasspane", "engine.sock"))}); check the owner with `
-      + `\`ls -ld ${where(place)}\``,
+      + `bound (default ${homeDefaultSocketPath()}); check the owner with `
+      + `\`ls -ld ${quoteShellArg(place)}\``,
     );
   }
 
@@ -307,15 +319,15 @@ export function trustSocket(
     return refusal(
       `the engine socket ${target} carries mode ${(socket.mode & 0o7777).toString(8)}, which lets another account send `
       + "requests to it — an answer from there is not evidence of what the engine said",
-      `tighten it to owner-only with \`chmod 600 ${where(target)}\` — that is the mode the engine binds with; `
-      + `to confirm the socket belongs to the service rather than to someone else, read \`ls -l ${where(target)}\``,
+      `tighten it to owner-only with \`chmod 600 ${quoteShellArg(target)}\` — that is the mode the engine binds with; `
+      + `to confirm the socket belongs to the service rather than to someone else, read \`ls -l ${quoteShellArg(target)}\``,
     );
   }
   if (dir.mode & 0o022) {
     return refusal(
       `the directory holding the engine socket (${directory}) carries mode ${(dir.mode & 0o7777).toString(8)}, so another `
       + `account can create or replace ${target}; this process cannot tell the engine's socket from one planted next to it`,
-      `make it owner-only with \`chmod 700 ${where(directory)}\`; ${job} prints the state root the job really uses, `
+      `make it owner-only with \`chmod 700 ${quoteShellArg(directory)}\`; ${job} prints the state root the job really uses, `
       + "and no restart is authorised by this answer",
     );
   }
