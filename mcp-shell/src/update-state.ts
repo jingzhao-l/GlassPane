@@ -46,6 +46,21 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { quoteShellArg } from "./errors.js";
+import { escapeTerminalControl } from "./evidence-report.js";
+
+/**
+ * 状态文件里的值是**外来的**：写它的是 updater，而任何本机进程都能改它。这句话会被
+ * `gp_diagnose` 原样念给 agent，所以它既要有限长（一个 40 MB 的 `update-state.json` 不该让
+ * 一次诊断去分配、去打印），也要中和控制字符（一段 ANSI 能把光标移走、覆盖掉它自己刚说的
+ * 话——同仓对报告与 daemon id 早就是这个规矩）。
+ */
+const FOREIGN_MAX_CHARS = 240;
+
+export function foreignValue(value: unknown, max: number = FOREIGN_MAX_CHARS): string {
+  const text = escapeTerminalControl(String(value));
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}… (${text.length - max} more characters not shown)`;
+}
 
 /** Env the daemon's own `--state-dir` maps to for this process (X-22 family). */
 export const STATE_DIR_ENV = "GLASSPANE_STATE_DIR";
@@ -362,7 +377,7 @@ function decodeRuntime(value: unknown): { ok: true; runtime: RuntimeReading } | 
       agentVerified,
       at: at.value,
       code: code.value,
-      detail: typeof rawDetail === "string" && rawDetail.trim() !== "" ? rawDetail : null,
+      detail: typeof rawDetail === "string" && rawDetail.trim() !== "" ? foreignValue(rawDetail) : null,
     },
   };
 }
@@ -469,6 +484,107 @@ function runCheckSentence(stateFile: string): string {
  * missing or broken update file is a fact about the machine, not a reason to fail
  * the diagnosis.
  */
+/**
+ * Open, judge and read the update-state file through **one** file descriptor.
+ *
+ * The three-step shape it replaces (`existsSync` → `lstatSync` → `readFileSync`) let another
+ * process swap the path between the mode that was approved and the bytes that were read: the
+ * 0600 regular file was checked, something else was presented. `O_NOFOLLOW` also means a link
+ * planted at this path is refused rather than followed — the daemon refuses that leaf by name
+ * (`StateRoot.swift:140-147` `leafSymlinkDefect`), and a reader that narrated it as data would
+ * be reporting whatever the link points at as this machine's freshness.
+ *
+ * Read is bounded (`UPDATE_STATE_MAX_BYTES`): this file is written by the updater, but a
+ * hostile or buggy writer can make it enormous, and `gp_diagnose` must not allocate whatever
+ * size an untrusted file happens to have in order to print one line.
+ */
+export const UPDATE_STATE_MAX_BYTES = 1 << 20;
+
+type OwnerOnlyRead =
+  | { kind: "absent" }
+  | { kind: "refusal"; message: string }
+  | { kind: "read"; stat: ReturnType<typeof fs.fstatSync>; text: string };
+
+function openOwnerOnlyForRead(stateFile: string): OwnerOnlyRead {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(stateFile, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code ?? "";
+    if (code === "ENOENT") return { kind: "absent" };
+    if (code === "ELOOP") {
+      // 说得出模式才有下一步：链接本身可以 `lstat`（不跟随），它的答案解释了为什么这里读不到。
+      let mode = "unknown";
+      try {
+        mode = (fs.lstatSync(stateFile).mode & 0o777).toString(8);
+      } catch {
+        // 连链接都量不到就是 `could not be stat-ed` 那一档，下面照旧说不知道。
+      }
+      return {
+        kind: "refusal",
+        message: `${stateFile} is not a regular file (it is a symlink, so the bytes read through it belong to `
+          + `whatever it points at) (mode ${mode}), so nothing was parsed from it; freshness is unknown, `
+          + "which is not the same as up to date",
+      };
+    }
+    return {
+      kind: "refusal",
+      message: `${stateFile} exists but could not be opened for reading (${code || String(error)}); `
+        + "freshness is unknown, which is not the same as up to date",
+    };
+  }
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
+      return {
+        kind: "refusal",
+        message: `${stateFile} is not a regular file (mode ${(stat.mode & 0o777).toString(8)}), so nothing `
+          + "was parsed from it; freshness is unknown, which is not the same as up to date",
+      };
+    }
+    if ((stat.mode & 0o077) !== 0) {
+      return {
+        kind: "refusal",
+        message: `${stateFile} is mode ${(stat.mode & 0o777).toString(8)} — group/world readable, so this `
+          + "reader will not present it as the owner-only document it claims to be. Run "
+          + `\`chmod 600 ${quoteShellArg(stateFile)}\` (the updater writes it 0600) and read again; freshness stays unknown, `
+          + "which is not the same as up to date",
+      };
+    }
+    if (stat.size > UPDATE_STATE_MAX_BYTES) {
+      return {
+        kind: "refusal",
+        message: `${stateFile} declares ${stat.size} bytes, more than this reader will hold for one state file `
+          + `(${UPDATE_STATE_MAX_BYTES}); freshness is unknown, which is not the same as up to date`,
+      };
+    }
+    const chunks: Buffer[] = [];
+    const buffer = Buffer.alloc(Math.max(stat.size, 1));
+    let read = 0;
+    while (read < stat.size) {
+      const got = fs.readSync(fd, buffer, 0, stat.size - read, read);
+      if (got === 0) break;
+      read += got;
+    }
+    chunks.push(buffer.subarray(0, read));
+    return { kind: "read", stat, text: Buffer.concat(chunks).toString("utf8") };
+  } catch (error) {
+    return {
+      kind: "refusal",
+      message: `${stateFile} exists but could not be read (${String(error)}); freshness is unknown, `
+        + "which is not the same as up to date",
+    };
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // 已经拿到的判决不因收尾的一次 close 失败而改写；fd 由进程退出兜住。
+      }
+    }
+  }
+}
+
 export function readUpdateState(env: NodeJS.ProcessEnv = process.env, stateRootOverride?: string): UpdateStateReading {
   const stateFile = updateStateFile(env, stateRootOverride);
   if (stateFile === null) {
@@ -479,7 +595,13 @@ export function readUpdateState(env: NodeJS.ProcessEnv = process.env, stateRootO
         + "nothing was read and no claim about GlassPane's freshness is being made",
     };
   }
-  if (!fs.existsSync(stateFile)) {
+  // 判与读必须是**同一个 inode**。原来是三步：`existsSync` → `lstatSync` → `readFileSync`，
+  // 于是在判模式与读字节之间，别的东西可以把这个路径换成一枚符号链接或另一个文件——被批准的
+  // 是那一份 0600 的常规文件，读回来的却是换进去的那一份，而这份摘要会以"这台机器新不新"的
+  // 事实被 gp_diagnose 念出来。同仓的 `project-registry.ts` 存盘用 `O_NOFOLLOW`，这里对齐：
+  // 先开（不跟随链接）、对同一个 fd `fstat`、判完再从这个 fd 读。
+  const opened = openOwnerOnlyForRead(stateFile);
+  if (opened.kind === "absent") {
     return {
       kind: "absent",
       stateFile,
@@ -487,58 +609,10 @@ export function readUpdateState(env: NodeJS.ProcessEnv = process.env, stateRootO
         + "the installed GlassPane is current; " + runCheckSentence(stateFile),
     };
   }
-  // 文件头把"a mode that is not owner-only"写进 unreadable 那一档已经很久了，但这里从来没
-  // 执行过：任何本机进程把这份文件留成 0644，它照样被读、照样由 gp_diagnose 当事实念出来
-  // （包括那句 "Nothing to do"）。同仓的 sibling `project-registry.ts` 对它的状态文件是
-  // "核模式、读回来、不合格就拒"（tightenMode），这里对齐那条口径：判据落在读之前，
-  // 拒绝的那句话说得出路径、当前模式和可执行的修法。
-  let stat: ReturnType<typeof fs.lstatSync>;
-  try {
-    // `lstat`, not `stat`: `stat` follows a link planted at this path, so the file type and the
-    // mode judged below — and the summary presented as this machine's freshness — would all be
-    // facts about whatever the link points at. The daemon refuses that shape by name
-    // (`StateRoot.swift:140-147` `leafSymlinkDefect`: "its owner-only mode cannot be set without
-    // acting on the file or directory it points at"); this reader must not present it as data.
-    stat = fs.lstatSync(stateFile);
-  } catch (error) {
-    return {
-      kind: "unreadable",
-      stateFile,
-      summary: `update state: ${stateFile} exists but could not be stat-ed (${String(error)}); freshness is unknown, `
-        + "which is not the same as up to date",
-    };
+  if (opened.kind === "refusal") {
+    return { kind: "unreadable", stateFile, summary: `update state: ${opened.message}` };
   }
-  if (!stat.isFile()) {
-    return {
-      kind: "unreadable",
-      stateFile,
-      summary: `update state: ${stateFile} is not a regular file`
-        + (stat.isSymbolicLink() ? " (it is a symlink, so the bytes read through it belong to whatever it points at)" : "")
-        + ` (mode ${(stat.mode & 0o777).toString(8)}), so nothing `
-        + "was parsed from it; freshness is unknown, which is not the same as up to date",
-    };
-  }
-  if ((stat.mode & 0o077) !== 0) {
-    return {
-      kind: "unreadable",
-      stateFile,
-      summary: `update state: ${stateFile} is mode ${(stat.mode & 0o777).toString(8)} — group/world readable, so this `
-        + "reader will not present it as the owner-only document it claims to be. Run "
-        + `\`chmod 600 ${quoteShellArg(stateFile)}\` (the updater writes it 0600) and read again; freshness stays unknown, `
-        + "which is not the same as up to date",
-    };
-  }
-  let text: string;
-  try {
-    text = fs.readFileSync(stateFile, "utf8");
-  } catch (error) {
-    return {
-      kind: "unreadable",
-      stateFile,
-      summary: `update state: ${stateFile} exists but could not be read (${String(error)}); freshness is unknown, `
-        + "which is not the same as up to date",
-    };
-  }
+  const text = opened.text;
   let parsed: Record<string, unknown>;
   try {
     const decoded: unknown = JSON.parse(text);
@@ -599,9 +673,9 @@ export function readUpdateState(env: NodeJS.ProcessEnv = process.env, stateRootO
   }
   const bits = [
     `status=${status}`,
-    `current=${String(parsed.current ?? "unknown")}`,
-    `latest=${String(parsed.latest ?? "none-seen")}`,
-    `lastCheckAt=${String(parsed.updatedAt ?? "never")}`,
+    `current=${foreignValue(parsed.current ?? "unknown")}`,
+    `latest=${foreignValue(parsed.latest ?? "none-seen")}`,
+    `lastCheckAt=${foreignValue(parsed.updatedAt ?? "never")}`,
     // `disabled` 缺失与 `disabled: false` 不是一件事：前者是"这份记录没说"，后者是
     // "记录说了：没关"。从前两者都掉进 `on-by-default`，等于替这台机器宣布自动更新
     // 开着——而本文件开头立的规矩恰恰是 absent 不许读成友好态。
@@ -622,11 +696,11 @@ export function readUpdateState(env: NodeJS.ProcessEnv = process.env, stateRootO
     const message = typeof lastError.message === "string" && lastError.message !== ""
       ? lastError.message
       : "(the record carries a code with no message: the code is all this shell can honestly say)";
-    bits.push(`lastError=${code}: ${message}`);
+    bits.push(`lastError=${foreignValue(code)}: ${foreignValue(message)}`);
   }
   const staged = parsed.staged as { version?: string; digest?: string } | null | undefined;
   if (staged && typeof staged.version === "string") {
-    bits.push(`staged=${staged.version}${staged.digest ? ` (${String(staged.digest).slice(0, 12)}…)` : ""}`);
+    bits.push(`staged=${foreignValue(staged.version)}${staged.digest ? ` (${foreignValue(staged.digest, 12)}…)` : ""}`);
   }
   return { kind: "read", stateFile, summary: `update state: ${bits.join("; ")}`, ca: ca.ca, runtime: runtime.runtime };
 }

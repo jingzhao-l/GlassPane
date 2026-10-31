@@ -17,6 +17,7 @@ import {
   GP_E_PAYLOAD_TOO_LARGE,
   GP_E_PROJECT_LIMIT,
   GP_E_REGISTRY_DRIFT,
+  GP_E_SOCKET_TRUST,
   GP_E_STATE_ROOT_REFUSED,
   GP_E_UNKNOWN,
 } from "../dist/errors.js";
@@ -52,6 +53,7 @@ const SHELL_ONLY = [
   GP_E_ENGINE_BACKLOG,
   GP_E_ENGINE_TIMEOUT, GP_E_ENGINE_UNREACHABLE, GP_E_NO_USER_RECORD, GP_E_REGISTRY_DRIFT,
   GP_E_STATE_ROOT_REFUSED, GP_E_UNKNOWN,
+  GP_E_SOCKET_TRUST,
 ];
 
 function daemonCodes() {
@@ -108,6 +110,24 @@ test("errors.ts' split between shared and shell-only codes matches the daemon's 
   const wronglyClaimedShellOnly = SHELL_ONLY.filter((code) => codes.has(code));
   assert.deepEqual(wronglyClaimedShellOnly, [],
     `这些码的注释说 daemon 没有对应物，而枚举里有了：${wronglyClaimedShellOnly.join(", ")}`);
+});
+
+test("SHELL_ONLY 是一份派生集合的抄件，抄漏了就红（GP_E_SOCKET_TRUST 就是这么漏掉过一次）", async () => {
+  // `errors.ts` 顶部写着"每个壳自用码都在本文件的 SHELL_ONLY 里"。那句话此前没有任何东西
+  // 核得过：新增一个码不必读这份手抄清单，于是壳自用的新码可以安静地不去过"daemon 词表里
+  // 到底有没有它"这一问——2026-10-30 的 GP_E_SOCKET_TRUST 正就是这样漏的（同一天它还被
+  // HTTP 答成 422，见 774506ea）。这里改成对着 `errors.ts` 的导出与 Swift 的枚举实测派生，
+  // 再要求手抄那份与派生那一份逐值相同：漏一格红，多一格（码已从 errors.ts 删掉）也红。
+  const errorsModule = await import("../dist/errors.js");
+  const daemon = daemonCodes();
+  const derived = [...new Set(Object.values(errorsModule)
+    .filter((value) => typeof value === "string" && value.startsWith("GP_E_") && !daemon.has(value)))]
+    // `SHELL_REQUEST_REFUSAL_CODES` 是一份数组导出，不是码；上面按前缀已经把它滤掉了。
+    .filter((value) => value !== "GP_E_INTERNAL" || !daemon.has("GP_E_INTERNAL"))
+    .sort();
+  assert.ok(derived.length >= 4, `只派生出 ${derived.length} 个壳自用码，扫描方式跟不上 errors.ts`);
+  assert.deepEqual([...SHELL_ONLY].sort(), derived,
+    "这份 SHELL_ONLY 与从 errors.ts + daemon 枚举派生出的集合不一致——按派生那份改它，别改判据");
 });
 
 test("a probe answer of \\\"engine error\\\" may not forbid the restart the daemon itself orders", () => {

@@ -376,12 +376,6 @@ export class McpServer {
   }
 
   /**
-   * The names this server actually answers with, nearest the caller's guess first. Every
-   * name offered here is one `tools/list` just advertised: a suggestion the caller cannot
-   * call is worse than no suggestion, and the point of the sentence is to end the guessing
-   * loop a bare `Unknown tool: gp_acti` left the caller in.
-   */
-  /**
    * Caller-authored text that rides a protocol error frame: bounded in length, neutralised
    * for terminal control. The same product escapes a daemon-authored id with
    * `renderForeign` and a report body with `escapeTerminalControl`, because an ESC can move
@@ -398,6 +392,12 @@ export class McpServer {
       + `${value.length - maxChars} are not echoed back)`;
   }
 
+  /**
+   * The names this server actually answers with, nearest the caller's guess first. Every
+   * name offered here is one `tools/list` just advertised: a suggestion the caller cannot
+   * call is worse than no suggestion, and the point of the sentence is to end the guessing
+   * loop a bare `Unknown tool: gp_acti` left the caller in.
+   */
   private publishedNamesNear(guess: string): string {
     const names = this.specs.map((spec) => spec.name);
     const near = names.filter((candidate) => candidate.startsWith(guess.slice(0, 6)));

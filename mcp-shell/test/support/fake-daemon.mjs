@@ -244,21 +244,42 @@ export async function startFakeDaemon(socketPath, {
       }
     });
   });
+  // 夹具的失败形状必须和生产一致：**拒绝并说清是哪一步**。这里从前是常驻的
+  // `server.on("error", (error) => { throw error; })`——socket 那一侧任何异步错误都被抛进
+  // uncaughtException，端到端测试于是崩成进程退出（拿到一个空判决），而不是一个可以点名的
+  // 失败。`startFakeDaemon` 现在把第一颗错误装成具名 Error 交给等待它的那次 await；就绪之后
+  // 才发生的错误记进 `handle.failure`，由 `stop()` 报出来，不会安静消失。
+  const failure = { error: null, settle: null, ready: false };
   server.on("error", (error) => {
-    throw error;
+    const named = new Error(
+      `the fake daemon could not serve ${socketPath}: ${error.code ?? error.message}`,
+      { cause: error },
+    );
+    failure.error = failure.error ?? named;
+    if (!failure.ready && failure.settle !== null) failure.settle(named);
   });
   fs.rmSync(socketPath, { force: true });
   await new Promise((resolve, reject) => {
+    failure.settle = reject;
     server.once("error", reject);
-    server.listen(socketPath, resolve);
+    server.listen(socketPath, () => {
+      failure.ready = true;
+      resolve();
+    });
   });
   return {
     socketPath,
     hello,
-    stop: () => new Promise((resolve) => {
+    get failure() {
+      return failure.error;
+    },
+    stop: () => new Promise((resolve, reject) => {
       server.close(() => {
         fs.rmSync(socketPath, { force: true });
-        resolve(undefined);
+        // 运行中才浮出来的错误（EMFILE、监听句柄被系统收回）不许在收尾时消失：
+        // 报给这一条用例，让它红在这里，而不是红在下一条莫名其妙的超时上。
+        if (failure.error !== null) reject(failure.error);
+        else resolve(undefined);
       });
       // End every live peer first, or `close`'s callback waits for a connection that
       // only the client decides to drop — and a client that never learns the daemon is

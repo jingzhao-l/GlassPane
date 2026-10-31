@@ -179,6 +179,16 @@ test("the fixture's probe rows are ProbeInbox's rows", () => {
     "timestamps are ProbeInbox.iso8601's own format, not a local ISO string");
 });
 
+test("the stand-in fails the way a daemon fails: a named rejection, not an uncaught throw", async () => {
+  // 常驻的 `server.on("error", () => { throw })` 以前把这种情形变成 uncaughtException——
+  // 进程退出、判决为空，而这一条用例的存在就是让它变成一个可点名的拒绝。
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "gp-fixture-noserve-"));
+  const unreachable = path.join(base, "not-created-yet", "engine.sock");
+  await assert.rejects(() => startFakeDaemon(unreachable), /could not serve/,
+    "路径不可用时夹具没有拒绝，那它多半是抛了出去（崩进程），这条用例看不见判决");
+  fs.rmSync(base, { recursive: true, force: true });
+});
+
 test("the answer on the socket is the fixture's documented reply, through the daemon's framing", async () => {
   // The fixture refuses what it was not written to answer instead of replying `{}` — a
   // stand-in that answered every method would endorse a capability no daemon in the test

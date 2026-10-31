@@ -16,6 +16,7 @@ import {
   callerDeadlineMs,
   daemonUnreachableRemedy,
   defaultSocketPath,
+  homeDefaultSocketPath,
   engineClientOver,
   engineDeadlineMs,
   lateReplyRoute,
@@ -1722,6 +1723,24 @@ test("the two lookups are each spelled in exactly one source file", () => {
     "socket 猜测也必须只有一个出口");
   assert.equal((body.match(/os\.userInfo\(/g) ?? []).length, 0,
     "socket 回落不得改用 passwd 记录 —— 见 defaultSocketPath 的 R8-中9 注释");
+
+  // 第三档在两处 `--help` 里被**描述**（`stdio-session.ts`、`http-gateway-cli.ts`）。描述本身
+  // 应该继续写 `$HOME/…` 而不是某个展开的绝对路径——那一句话说的是"这一档读的是本进程的
+  // HOME"，换成 `/Users/x/…` 反而把规则藏起来了。但"哪两个路径段"必须是同一份：这两处
+  // 各抄一遍目录名/文件名，代码改了而 help 不改，读者就会去一个壳不会去的地方找 socket。
+  const segments = homeDefaultSocketPath().split("/").slice(-2).join("/");
+  assert.ok(segments.length > 0 && segments.includes("/"), `从 homeDefaultSocketPath() 拆不出路径段：${segments}`);
+  const helpSites = [];
+  for (const name of ["stdio-session.ts", "http-gateway-cli.ts"]) {
+    const text = fs.readFileSync(fileURLToPath(new URL(`../src/${name}`, import.meta.url)), "utf8");
+    for (const m of text.matchAll(/\$HOME\/([^\s—(]+)/g)) {
+      helpSites.push(`${name}:${m[1]}`);
+      assert.equal(m[1], segments,
+        `${name} 的 --help 把第三档写成 ${m[1]}，而 defaultSocketPath 猜的是 ${segments}——两处不再是同一条规则`);
+    }
+  }
+  assert.equal(helpSites.length, 2,
+    `只读到 ${helpSites.length} 处 "$HOME/" 那一档的帮助文字（期望 2）——取材点变了，重读上面这段`);
 });
 
 /* ------------------------------------------------------------------ *
