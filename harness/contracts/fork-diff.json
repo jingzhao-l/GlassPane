@@ -3965,7 +3965,7 @@
     },
     {
       "file": "packages/opencode/test/tool/glasspane-provider-registration.test.ts",
-      "forkHash": "39c4cbff604e725e00debc7b5b6586d316d75f6e"
+      "forkHash": "013f233202bb0872d8e13569892e0baf0cbcbd57"
     },
     {
       "file": "packages/opencode/test/tool/glasspane-surface.test.ts",
@@ -4021,7 +4021,7 @@
     },
     {
       "file": "SYNCLOG.md",
-      "forkHash": "ad9b77e55fb7383eb17fa014e56811856dad493c"
+      "forkHash": "3b7542b59cff3ff8c5397cbb247df590424e20e9"
     }
   ]
 }
