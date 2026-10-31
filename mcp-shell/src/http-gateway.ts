@@ -25,6 +25,7 @@ import {
   GP_E_REGISTRY_DRIFT,
   GP_E_STATE_ROOT_REFUSED,
   GP_E_UNKNOWN,
+  GP_E_SOCKET_TRUST,
 } from "./errors.js";
 import { dimensionAttributionLine, engineBody, validateDimension } from "./dimension.js";
 import { escapeHTML, renderHTML, renderMarkdown } from "./evidence-report.js";
@@ -1502,6 +1503,10 @@ function httpStatusForEngineCode(code: string): number {
       // 说成调用方的错（走 default 的 422）会让 curl 那一侧去改它本来就没错的参数，
       // 而真正的动作是再读一次盘、把同一次登记重发一遍。
       return 503;
+    // 2026-10-30: an untrusted engine socket is this gateway's own transport judgement —
+    // the HTTP caller's arguments were never the question, so 4xx would send curl back to
+    // a body that is not at fault. Same family as GP_E_ENGINE_UNREACHABLE's 503.
+    case GP_E_SOCKET_TRUST:
     case GP_E_STATE_ROOT_REFUSED:
       // 同样是 503：这一码说的不是"你的参数不对"，而是"后台服务在 hello 里自报了一个
       // 本壳不会创建、也不会改权限的根，所以这次什么都没读、什么都没写"。把它答成 4xx
