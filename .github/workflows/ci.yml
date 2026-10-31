@@ -633,7 +633,15 @@ jobs:
   # workspace 安装，所以这条 job 不跑 `bun install`。
   publish-gate-selftest:
     name: publish gate selftest (verify-published, macOS-only product)
-    runs-on: macos-14
+    # 与全仓其余 macOS job 同一个镜像标签（本文件 32 行那两条都是 ）。
+    # 从前这里钉死 ，而 GitHub 已排定该镜像 **2026-11-02 退役**并正在做
+    # scheduled brownout：brownout 窗口里这条 job 被直接取消（annotation 原文：
+    # "This job failed because of a scheduled macOS 14 runner image brownout"），
+    # 于是整条 CI 的结论是 cancelled——其余十道 job 全绿也救不回来，而
+    # / 要的就是 ci.yml 在被 tag 那笔 sha 上 success。
+    # 结果：发布链被一张正在下线的镜像钉死。这不是"改判据让它变绿"：macOS 这一侧仍是
+    # **测量**（本 job 存在的理由一个字没动），换的只是那张机器叫什么。
+    runs-on: macos-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
