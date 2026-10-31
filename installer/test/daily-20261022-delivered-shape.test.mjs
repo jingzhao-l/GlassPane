@@ -41,6 +41,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { platformRefusal } from '../cli.js'
+
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PKG = path.resolve(HERE, '..')
 const MANIFEST = path.join(PKG, 'package.json')
@@ -275,15 +277,36 @@ test('交付形状跑 --help：退出 0，usage 一个字节都不许少（前�
   assert.equal(r.stdout.slice(-1), '\n', '最后一行必须完整到达')
 })
 
-test('交付形状跑参数错误：仍是文档承诺的退出码 2，并说人话', (t) => {
+test('交付形状跑参数错误：macOS 上是文档承诺的 2，非 macOS 主机先撞平台闸（1）——两种都不是 0 字节', (t) => {
   if (skipUnlessMeasured(t)) return
   const r = execInstalled(artifact.localBin, ['--definitely-not-an-option'])
   assert.equal(r.error, undefined, String(r.error))
-  assert.equal(r.status, 2,
-    `参数错误必须退出 2；实得 ${r.status}（stdout=${r.stdout.length} 字节，stderr=${r.stderr.length} 字节）`
-    + '——0 字节 + 退出 0 是入口没跑的签名\nstderr: ' + r.stderr)
-  assert.match(r.stderr, /参数错误/, r.stderr)
-  assert.ok(r.stderr.length > 500, `参数错误后面该跟着整份 usage，实到 ${r.stderr.length} 字节`)
+  // 2026-10-31：这一档的答案按主机分岔，是本轮把两条一键入口的次序定死之后的样子——
+  // `entryDecision` 里平台判据排在"未知参数"之前（同一串 argv 在 install.sh 与 cli.js 上
+  // 必须同答，那是 CI 的 ubuntu 格抓到的分叉）。判据只能是"按平台问哪一支该跑"，
+  // 既不是把 darwin 那一支硬塞给别的主机（那是假红，CI 就是这么红的），也不是放宽成
+  // "1 或 2 都算过"（那是没有闸）。两支各有一条会红的断言，共同的不变量写在最后。
+  if (process.platform === 'darwin') {
+    assert.equal(r.status, 2,
+      `参数错误必须退出 2；实得 ${r.status}（stdout=${r.stdout.length} 字节，stderr=${r.stderr.length} 字节）`
+      + '——0 字节 + 退出 0 是入口没跑的签名\nstderr: ' + r.stderr)
+    assert.match(r.stderr, /参数错误/, r.stderr)
+    assert.ok(r.stderr.length > 500, `参数错误后面该跟着整份 usage，实到 ${r.stderr.length} 字节`)
+  } else {
+    assert.equal(r.status, 1,
+      `非 macOS 主机上这一串 argv 必须先答"这台机器跑不了"（1）；实得 ${r.status}`
+      + `（stdout=${r.stdout.length} 字节，stderr=${r.stderr.length} 字节）\nstderr: ${r.stderr}`)
+    const refusal = platformRefusal()
+    assert.ok(typeof refusal === 'string' && refusal.length > 0,
+      '非 darwin 上 `platformRefusal()` 必须给出一句话——它是这一支的真源')
+    assert.ok(r.stderr.includes(refusal),
+      `装出来的那条命令说的必须与 \`platformRefusal()\` 逐字同源，实到：${r.stderr}`)
+    assert.doesNotMatch(r.stderr, /参数错误/,
+      '平台闸排在用法错之前，非 mac 不该读到那一页')
+  }
+  assert.equal(r.stdout.length, 0,
+    `拒绝走的是 stderr，stdout 不该有半个字节（按 rc 分叉的调用方会把它当结论）：实到 ${r.stdout.length}`)
+  assert.ok(r.stderr.length > 100, `拒绝也要有可读的字节，实到 ${r.stderr.length}`)
   assert.equal(r.stderr.slice(-1), '\n', '最后一条必须完整')
 })
 

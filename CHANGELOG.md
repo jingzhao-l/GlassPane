@@ -11,9 +11,13 @@
 **版本判断：minor。** 判据仍是 1.6.2 写下、1.22.0/1.23.0/1.24.0/1.25.0/1.26.0 各自复述过的那一条：
 patch 要求「状态文件的字段没动、退出码集合没动、CLI 参数没动、npm 包的 `bin` 声明没动」。本版动了四项：
 
-1. **退出码集合**——`install.sh --repo <--旗标>` 这一族从前退 1（按坏目录拒），现在与
-   `installer/cli.js` 一样退 2 并说同一句话；实测同一串 argv 在两条一键入口上从前是两个码两句话
-   （`--repo --help`：1 vs 2；`--repo --no-prompt --help`：0 vs 2）。
+1. **退出码集合**——两条一键入口（`install.sh` 与 `installer/cli.js`）对同一串 argv 的答复现在由
+   一份写死的次序给出（`entryDecision`）：`--repo` 没接到取值 / 接到的是旗标 ⇒ 2；显式定位位不合
+   判据 ⇒ 与主机无关的 1；`--help` ⇒ 0；平台不是 macOS ⇒ 1；未知参数 ⇒ 2。从前 `install.sh --repo
+   <--旗标>` 退 1（按坏目录拒）而 `installer/cli.js` 退 2，同一串 argv 两个码两句话（实测
+   `--repo --help`：1 vs 2；`--repo --no-prompt --help`：0 vs 2）。附带一条按主机分岔：非 macOS
+   主机上"未知参数"这一档由 2 变成 1（那台机器跑不了这个产品，第一句该说这件事；macOS 上仍是 2
+   并带整份 usage），`--help` 在两种主机上都还回 0，所以用法页永远读得到。
 2. **对外报文与词表**——`probe_status` 新增 `probeListener`（`live` / `absent (…)`，缺席原因由起
    daemon 的那一段申报）；`--permissions` 两席的取值不再由一个布尔产出 `notDetermined`；
    壳侧新增错误码 `GP_E_SOCKET_TRUST`。
@@ -24,9 +28,11 @@ patch 要求「状态文件的字段没动、退出码集合没动、CLI 参数�
    `.d.ts` 一直 `import` 它，而它只列在 devDependencies，消费者装不到，于是 README 教的
    "嵌进自己进程"那条路在类型面上撞 TS2307。捆好的 JS 一个字节没变。
 
-本版**合并了两个未发布运行的全部改动**：`v1.26.0` 之后的 2026-10-30 一轮（本文件下面第 1-24 条）与
-2026-10-31 07:30 那一轮（协议层错误帧不再无界复述调用方原文、故障出路按引擎方法分支等）。
-两轮的产物都没进过任何 tag，registry 与 GitHub Release 此前都停在 1.26.0。
+本版**合并了两个未发布运行的全部改动**：`v1.26.0` 之后的 2026-10-30 一轮（引擎权限词表、socket 身份、
+注册表与更新状态文件那一族）与 2026-10-31 07:30 那一轮（协议层错误帧不再无界复述调用方原文、故障出路
+按引擎方法分支等）。逐条的「发现 → 修在哪 → 具名测试 → 反向破坏」记在
+`specs/GlassPane_每日2026-10-31_发现台账.md`：29 条发现 / 29 条修复 / 未修项 0，另有 4 条判为不成立并
+各附证据。两轮的产物都没进过任何 tag，registry 与 GitHub Release 此前都停在 1.26.0。
 
 ### 证据诚实性（本产品的立身之本）
 
@@ -190,12 +196,21 @@ Swift 侧 `DailyRound20261030Swift1PathShapeTests`、`…Swift1PermissionHonesty
   只发 `granted | unverifiable`（真机实测两把读数），历史读数标注所属版本而不改写；
   `CONTRIBUTING` 双语 / `ITERATE.md` / PR 模板 / `iterate.config.yaml` 的"工具契约三处镜像"改成
   实测形状（`kernel/schemas` 不发布工具清单，它是被钉的数据契约语料，追平靠换 pin）。
-- **CI 抓到、本机跑不到的两条**（合入本号的最后一批，`fix(installer)` @ 8085b155）：
+- **CI 抓到、本机跑不到的三条**（合入本号的最后一批，前两条 `fix(installer)` @ 8085b155、第三条
+  随本条提交）：
   `--no-such-flag` 与 `--repo <非仓库目录>` 在 Linux runner 上两入口一个回 1 一个回 2（入口把
   "未知参数"排在平台判据之前，而 install.sh 判不出未知参数），次序现在定死并由新纯函数
   `entryDecision` 整表验证（7 串 argv × 2 种平台，本机跑满）；`install.sh` 的 `sh_quote` 用受
   locale 影响的 `case` 字符类判惰性，macOS runner 的 en_US.UTF-8 下把 `é` 读成字母，于是同一
   值在两入口印出两种引号形状（Linux 上反倒一致，只在交付平台现形）——分类改按字节判。
+  **第三条是前一条收口之后才现形的**：次序改成"平台判据先于未知参数"以后，ubuntu 的
+  `install-gate` 红了三条交付形状闸（`daily-20261022-delivered-shape` 与 `failure-exit` 的
+  `端到端 经 npm 的 bin 符号链接`），因为它们把"未知参数 ⇒ 2"当跨主机的普适承诺写死，而本机
+  （darwin）314/314 全绿看不见那一档。改的是判据的形状而不是它的松紧：三条各按平台分两支，
+  非 darwin 那一支从 `platformRefusal()` 取句子真源并断言其中不含"参数错误"，两支之外留下共同
+  不变量（stdout 零字节、stderr 有字节且末字节换行、绝不是"0 字节 + 退 0"——那是这个包 19 个
+  版本对外等于一条死命令的签名）。这一档的分岔同时写进 `installer/cli.js` 的 usage 页与
+  `install.sh` 的退出码那一格，调用方读 `--help` 就能拿到。
 
 ## [1.26.0] — 2026-10-29
 

@@ -23,8 +23,7 @@
   壳 `node --test mcp-shell/test/*.test.mjs` 704 tests / 699 pass / **5 fail**；
   安装器 306 / 301 / **5 fail**；updater 735 / 735 / 0。
 
-## 本轮发现 → 修复 → 具名测试（发现 28 条，修复 28 条，未修项 0；其中 #25-#26 由 CI 的
-## ubuntu / macOS 两条 lane 现形、本机跑不到，#27-#28 是本机套件抓到但归在别的族里）
+## 本轮发现 → 修复 → 具名测试（发现 29 条，修复 29 条，未修项 0；#25-#26 由本机套件抓到，#27-#29 由 CI 的 lane 现形——#27/#29 在 ubuntu、#28 在 macOS，本机都走不到那一档）
 
 | # | 发现（触发输入 → 错误行为） | 修在哪 | 具名测试 | 反向破坏 |
 |---|---|---|---|---|
@@ -56,6 +55,7 @@
 | 26 | `test/support/fake-daemon.mjs` 常驻 `server.on("error", () => { throw })` 与 `listen` 上的 `once("error", reject)` 并存：路径不可用时抛进 uncaught，端到端崩成进程退出而不是一个具名判决 | 具名拒绝 + 运行中错误由 `stop()` 报出 | `the stand-in fails the way a daemon fails: a named rejection, not an uncaught throw` | 退回 `throw` ⇒ 该条拿不到 reject |
 | 27 | **CI 现形（ubuntu lane）**：`--no-such-flag` 在 Linux 上 install.sh 回 1（平台句）、cli.js 回 2（参数句）；`--repo <非仓库目录>` 反向分叉。本机（darwin）永远走不到那一档 | 入口次序抽成 `entryDecision`：`--repo` 用法错 → 显式位判据（与主机无关）→ `--help` → 平台 → 未知参数 | `入口次序整表：非 darwin 那一档在两种主机上都是同一个答案`（7 串 × 2 平台） | 把平台判据挪到判据之前并去掉守卫 ⇒ 该行点名 `在 linux 上判成 platform`（实测红→恢复绿） |
 | 28 | **CI 现形（macOS lane）**：`install.sh` 的 `sh_quote` 用 `case` 字符类判惰性，runner 的 en_US.UTF-8 下把 `é` 读成字母 → 印裸 `é`，而 `quoteShellArg` 印 `'é'`；两入口对同一值两种引号形状（Linux 上反倒一致） | 分类改按字节（`LC_ALL=C` 的 grep 判据），与 JS 表逐值同判 | `install.sh 的 sh_quote 与 installer/cli.js 的 quoteShellArg 逐值同判`（13 值 + `eval set --` 回读必须是 `$#=1` 逐字节等值） | 还原 `case` 那一支 ⇒ 在 UTF-8 locale 下 `é` 那一格红（本轮实测在 macOS runner 上就是它先红的） |
+| 29 | **CI 现形（ubuntu lane，是 #27 那次收口的另一半）**：次序定成"平台判据先于未知参数"之后，三条**交付形状**闸（`daily-20261022-delivered-shape` 的 arg-error、`failure-exit` 的端到端 arg-error 与符号链接 bin）仍把"未知参数 ⇒ 2"当跨主机承诺写死 ⇒ ubuntu 的 `install-gate` 红 3 条，而本机 314/314 全绿看不见。根因与 #27 同族：一条按主机分岔的判据被当成普适契约钉进测试 | 三条各按平台分两支（沿用 `failure-exit` 里 2026-10-23 定下的纪律：按平台问哪一支该跑；既不把 darwin 那一支硬塞给 ubuntu，也不放宽成"1 或 2 都算过"）。非 darwin 那一支的句子从 `platformRefusal()` 取真源并断言其中**不含**"参数错误"；两支之外的共同不变量＝stdout 零字节、stderr 有字节且末字节是换行、绝不是"0 字节 + 退 0"（那 19 个版本的签名）。这一档次序同时写进 `installer/cli.js` 的 usage 页与 `install.sh` 的退出码那一格 | 改名后的那三条 + `入口次序整表：非 darwin 那一档在两种主机上都是同一个答案` + `非 macOS 上两入口的**码**仍然同答` | 把 `entryDecision` 里 usage-error 那一支挪回平台判据之前，再用 `NODE_OPTIONS` 注入一枚把 `process.platform` 定成 linux 的桩跑本机 ⇒ 四条具名红（交付形状那条、端到端 arg-error、整表、码同答）；恢复用 `/bin/cp` 备份 + `diff -q`（sha256 `41605e40…` 两侧逐字节相等）。**边界如实记下**：符号链接 bin 那一支本机证不了——`runInstalled` 的 env 是刻意最小的（只有 PATH/HOME/NO_COLOR），桩进不了那个子进程，它在桩下恒红是模拟的产物而不是产品缺陷；那一支的真验证落在 CI 的 ubuntu 格（本轮红的那三条就是它） |
 
 覆盖面不足的领域（本轮补了其中 6 项，其余留给后续）：remedy 的"命令名是否真在 PATH 上"（本轮成闸）、
 双入口 argv 全矩阵（本轮 9 格）、跨连接状态生命周期（本轮 1 格）、可选/inbox-gated 键的增删即红

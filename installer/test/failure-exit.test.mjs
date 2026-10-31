@@ -12,9 +12,11 @@
  *  (1) 机制——同一段大输出，`process.exit()` 是否真丢字节由本机**实测**，量不到就如实说
  *      "本机不可观测"并跳过；这条永远不是产品闸，只是存在性证明。
  *  (2) 形状——入口那一段里一个 `process.exit(` 都不许留（静态、跨平台、每个 CI 都跑）。
- *  (3) 端到端——三条在**任何**平台都走得到的拒绝路径（--help、参数错误、把 PATH 抽干净逼出
- *      环境预检拒绝），各看退出码与"已经写出去的字节一个都不许少"；真安装失败那一条要等
- *      swift 在场才可达，按前置条件跳过并说明原因。
+ *  (3) 端到端——三条拒绝路径（--help、参数错误、把 PATH 抽干净逼出环境预检拒绝），各看退出码
+ *      与"已经写出去的字节一个都不许少"。"参数错误"那一档的答案 2026-10-31 起按主机分岔：
+ *      `entryDecision` 把平台判据排在它之前，所以非 macOS 回 1 并说平台那句、macOS 回 2 并带
+ *      整份 usage，两支各自具名（不许合成"1 或 2 都算过"）；真安装失败那一条要等 swift 在场
+ *      才可达，按前置条件跳过并说明原因。
  *  (4) 交付形状——按 `npm install -g` 落地的目录与**符号链接形式的 bin**跑一遍 --help 与
  *      参数错误；第 (3) 层用真路径，测不到用户实际敲的那条命令（见该层注释里的实测数字）。
  *
@@ -136,11 +138,23 @@ test('端到端 --help：退出码 0，且 usage 一个字节都不许少', () =
   assert.equal(r.stdout.slice(-1), '\n', '被抢退的 stdout 通常断在一行中间；最后一行必须完整')
 })
 
-test('端到端 参数错误：退出码 2，stderr 与 usage 都完整到达', () => {
+test('端到端 参数错误：macOS 回 2 并带整份 usage，非 macOS 主机先回平台的 1——两支都不许是 0 字节', () => {
   const r = runCli(['--definitely-not-an-option'])
-  assert.equal(r.status, 2, `stdout: ${r.stdout}\nstderr: ${r.stderr}`)
-  assert.match(r.stderr, /参数错误/, r.stderr)
-  assert.ok(r.stderr.length > 500, `参数错误后面该跟着整份 usage，实到 ${r.stderr.length} 字节`)
+  // 次序由 `entryDecision` 定死（2026-10-31，CI 的 ubuntu 格抓到两条入口分叉后收的口）：
+  // 平台判据排在"未知参数"之前，所以这一档的答案按主机分岔。下面两支各自具名，
+  // 谁把顺序换回去、谁把哪一支的文案放宽成"都算过"，都会有条断言红。
+  if (process.platform === 'darwin') {
+    assert.equal(r.status, 2, `stdout: ${r.stdout}\nstderr: ${r.stderr}`)
+    assert.match(r.stderr, /参数错误/, r.stderr)
+    assert.ok(r.stderr.length > 500, `参数错误后面该跟着整份 usage，实到 ${r.stderr.length} 字节`)
+  } else {
+    assert.equal(r.status, 1, `非 macOS 上这一串 argv 该先答平台拒绝，实得 ${r.status}\nstderr: ${r.stderr}`)
+    const refusal = platformRefusal()
+    assert.ok(r.stderr.includes(refusal),
+      `那句必须与 \`platformRefusal()\` 逐字同源（不在测试里抄一遍），实到：${r.stderr}`)
+    assert.doesNotMatch(r.stderr, /参数错误/, '平台闸排在用法错之前，非 mac 不该读到那一页')
+  }
+  assert.equal(r.stdout.length, 0, `拒绝不该往 stdout 写字节，实到 ${r.stdout.length}`)
   assert.equal(r.stderr.slice(-1), '\n', '最后一条必须完整')
 })
 
@@ -315,15 +329,30 @@ test('端到端 经 npm 的 bin 符号链接：--help 的 usage 一个字节都�
   }
 })
 
-test('端到端 经 npm 的 bin 符号链接：未知参数仍是退出码 2 并说人话', () => {
+test('端到端 经 npm 的 bin 符号链接：未知参数在两种主机上都给出具名拒绝，绝不是 0 字节 + 退 0', () => {
   const cli = npmInstalledCli()
   try {
     const r = runInstalled(cli, ['--definitely-not-an-option'])
-    assert.equal(r.status, 2,
-      `参数错误必须退出 2；实得 ${r.status}（stdout=${r.stdout.length} 字节，stderr=${r.stderr.length} 字节）`
-      + `——0 字节 + 0 退出正是入口没跑的签名\nstderr: ${r.stderr}`)
-    assert.match(r.stderr, /参数错误/, r.stderr)
-    assert.ok(r.stderr.length > 500, `参数错误后面该跟着整份 usage，实到 ${r.stderr.length} 字节`)
+    // 这条闸盯的签名是"入口没跑"（0 字节 + 退出 0，见 CHANGELOG [1.12.3]）：那一档在两种主机上
+    // 都不许发生。至于跑了以后答哪一支，2026-10-31 起按主机分岔（`entryDecision` 把平台判据排在
+    // "未知参数"之前，为的是两条一键入口对同一串 argv 同答），所以两支分别具名。
+    if (process.platform === 'darwin') {
+      assert.equal(r.status, 2,
+        `参数错误必须退出 2；实得 ${r.status}（stdout=${r.stdout.length} 字节，stderr=${r.stderr.length} 字节）`
+        + `——0 字节 + 0 退出正是入口没跑的签名\nstderr: ${r.stderr}`)
+      assert.match(r.stderr, /参数错误/, r.stderr)
+      assert.ok(r.stderr.length > 500, `参数错误后面该跟着整份 usage，实到 ${r.stderr.length} 字节`)
+    } else {
+      assert.equal(r.status, 1,
+        `非 macOS 上该先答平台拒绝（1）；实得 ${r.status}（stdout=${r.stdout.length} 字节，`
+        + `stderr=${r.stderr.length} 字节）——0 字节 + 0 退出正是入口没跑的签名\nstderr: ${r.stderr}`)
+      const refusal = platformRefusal()
+      assert.ok(r.stderr.includes(refusal),
+        `那句必须与 \`platformRefusal()\` 逐字同源，实到：${r.stderr}`)
+    }
+    assert.ok(r.stderr.length > 100,
+      `符号链接那条 bin 真的被执行了才会有拒绝的字节，实到 ${r.stderr.length}`)
+    assert.equal(r.stderr.slice(-1), '\n', '最后一条必须完整')
   } finally {
     removeRoot(cli.env.HOME)
     removeRoot(cli.root)
