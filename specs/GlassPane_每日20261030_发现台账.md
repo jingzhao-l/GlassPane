@@ -294,3 +294,53 @@ engine Swift（证据语义/socket/信号/CLI/面板）、探针与面板+脚本
 - **回滚**：`node scripts/set-version.mjs 1.27.0` 把 15 个声明位点与两份 lockfile 退回原值，
   `git revert` 取号那一笔即可；**不碰 v1.27.0 那个 tag 与已发布的 npm 版本**（这一条本来就是
   "让号而不覆盖"的纪律）。
+
+### 收口读数（1.28.0，逐字命令 + 实际计数）
+
+发布三线实测：`git rev-parse v1.28.0^{commit}` = `0c9e12a0`；`git ls-remote --tags origin
+refs/tags/v1.28.0` = `6f3e66bb…`（tag 对象）；`git verify-tag` 用产品钉的那把公钥回读，
+GOODSIG + 密钥 `0929EA31DF4F7429F63FC53189D88B1D043A1298`，与 `updater/lib/signature.js` 的
+`PINNED_PRIMARY_FINGERPRINT` 逐字相等。Release：`isDraft=false`、`isPrerelease=false`、
+`targetCommitish=0c9e12a0…`、4 件资产；`SHA256SUMS` 里那枚哈希 = API 的 `assets[].digest`
+= 本机经 `gh api /repos/…/releases/assets/<id>`（Accept: octet-stream）取回的字节
+（4823808 字节，与 API `size` 相等；sha256 `9f5d1be6…`）。归档 `--verify` rc=0：787 entries、
+21 条声明命令与 schema 全在、`harness/` 与 `.iterate_decisions.md` 下 0 条。
+**内容可复现这一格是实测的**：本机在同一棵 tag 的树上重造一份归档（787 entries、4823816 字节），
+两份解开后 `diff -rq` 输出 0 行——字节容器差 8 字节而**逐文件内容相同**，所以报"内容一致、
+容器封装差 8 字节"，不报"字节全等"。
+
+npm：`--ref v1.28.0` 先 dry（run `41235641974` success）后 publish（run `41235677894` success）；
+registry 回查 `glasspane-mcp@1.28.0` 与 `glasspane-install@1.28.0` 均 `--prefer-online` 读到
+`1.28.0`，两包 `versions --json` 各 44 个、末尾三个 `1.26.0, 1.27.0, 1.28.0`；
+`dist.shasum` 分别是 `71feb3ad…` / `41a4f6ac…`。本机 `npm pack --dry-run` 的 shasum 是
+`99dfdff6…`（31 files / 359.5 kB）——**与 registry 不同是预期**：同一版本两次打包的字节本就不同
+（10-16 那轮记过的事实），所以这一格只判"存在与版本一致"，字节由 provenance 那一条自证。
+
+门禁逐字复跑（`battery-128/rc.tsv`，16 步全 rc=0；计数取自各自完整日志，不截断后下结论）：
+
+| 命令 | 实际计数 |
+|---|---|
+| `npm ci` / `npm run build` | rc 0 / rc 0 |
+| `npm test --workspaces --if-present` | glasspane-mcp 728 tests / 728 pass / 0 fail / 0 skipped；glasspane-install 315 / 315 / 0 / 0；glasspane-update 746 / 746 / 0 / 0；`^✖ ` 计数 0 |
+| `node scripts/check-version.mjs` | OK：版本线一致（1.28.0），15 个声明位点 + 2 份 lockfile |
+| `node scripts/check-doc-links.mjs` | 文档 32 份 / 仓库内链接 270 条 / 外链 44 条不请求 / markdown 表格 461 张（扫 124 份），含"每张表格每行格数一致" |
+| `node scripts/check-workflows.mjs --self-test` | 46 case(s) each verified to fail — 27 变异必须被抓 / 19 合法形状必须沉默 |
+| `node scripts/check-workflows.mjs` | 5 workflow file(s) clean |
+| `swift build --package-path engine` | rc 0 |
+| `swift test --package-path engine` | XCTest：Executed **1577** tests, 5 skipped, 0 failures；Swift Testing：Test run with **66** tests in 7 suites passed |
+| `swift test --package-path engine/probe` | XCTest：Executed **58** tests, 1 skipped, 0 failures；Swift Testing：0 tests（这个包没有 Swift Testing 用例，如实记） |
+| `python3 -m pytest -q bridge` | 201 passed, 1 skipped |
+| `sh -n install.sh` | rc 0 |
+| `node scripts/check-kernel-corpus.mjs` | 26 份语料与 pin 同号（iterate-kernel@0.1.10），installed-package leg 与 mcp-shell leg 各自核过 |
+| `node harness/tools/tool-surface.mjs --check` | 面 A 16 files / 22.19%，面 B 229 files / 20.80%，结论 "no growth past the recorded baseline"（超 10% 那两行是基线本身就在限外，如实保留） |
+| 信号闸 `cd engine && python3 .signal_smoke.py .build/debug/glasspaned` | SIGNAL SMOKE OK：SIGTERM / SIGINT 各自退 0 且 socket 被 unlink（三次起停，各自一个点名并由 daemon 自己收紧的状态根） |
+| 发布形态闸 `cd mcp-shell && npm run bundle && npm pack --dry-run` | rc 0，31 files / 359.5 kB |
+
+端到端（发布归档，不是工作树）：`gh release download v1.28.0` → `--verify` rc=0（4823808 字节、
+harness 0 条）→ 解包 `npm ci` / `npm run build` / `npm run bundle` / `npm pack` 全 rc=0 →
+装进干净前缀（`glasspane-mcp`、`glasspane-http` 两个 bin，装的 package.json 版本 1.28.0）→
+stdin 一条 `initialize` 回 `serverInfo = {name: glasspane-mcp, version: 1.28.0}` →
+tag 那棵树重造的 daemon 在隔离 `--state-dir` 上 `--permissions` 回
+`{accessibility: granted, developer-tools: unverifiable, input-monitoring: granted,
+screen-recording: granted}`、verdict granted、seatsNotGranted []，并如实打出两行
+"--permissions/--version reads no state…"；`glasspaned 1.28.0` rc=0。
