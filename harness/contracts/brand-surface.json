@@ -1,5 +1,5 @@
 {
-  "observedAt": "2026-10-29",
+  "observedAt": "2026-10-31",
   "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
   "rules": [
     {
@@ -53,8 +53,8 @@
     "packages/core/src/plugin/skill/customize-harness.md"
   ],
   "lineage": {
-    "occurrences": 9634,
-    "filesScanned": 3329
+    "occurrences": 9632,
+    "filesScanned": 3330
   },
   "shippedFiles": 1323,
   "shippedSrc": 5,
