@@ -1506,3 +1506,45 @@ helper 是自写的 `/var/tmp/glasspane-main-check-20261030/gp-ax-walk.swift`（
 未观测的一格（物理边界，不是"没做"）：`gp-refresh-daemon-stats` 这一枚标识在这次构建的面板上
 不存在（10-29 那节记录的名字），所以我按的是当次真的列出来的 `gp-nav-updates`；补它不需要人工动作，
 下一轮按实际列出的标识点名即可。
+
+## 每日真机核对 2026-10-31（本轮 07:30 那条线，本机 GUI 会话；被测产物＝收口树 `9a21fca2` 的 debug 构建，本节的提交只动这份文档）
+
+helper 沿用 `/var/tmp/glasspane-main-check-20261030/gp-ax-walk.swift`（本机无 pyobjc；`cliclick`
+点不动裸可执行文件，AX 才点得动）。全部运行都带 `--state-dir <临时根>`，`--prune-evidence`
+一类破坏性旗标一次都没有执行过。
+
+1. **daemon 在隔离根上的自报**：`glasspaned --state-dir <根> --permissions` 退 0，回包
+   `{"accessibility":"granted","developer-tools":"unverifiable","input-monitoring":"granted",
+   "screen-recording":"granted"}`、`verdict: granted`、`seatsNotGranted: []`，
+   `verdictExcludes` 里 developer-tools 那一项自己写明"这一席本命令不量，报 granted/denied
+   都是没读到的判决"，next 指 `--check-developer-tools`。同一句 note 也如实说了
+   `--permissions` 不咨询 `--state-dir`（"nothing was read, created, tightened or written under it"），
+   事后核对那个目录里只有本 run 的两份日志。
+2. **两枚一次性旗标**：`--check-input-permission` 打 `granted` 退 0，`--check-accessibility`
+   同样 `granted` 退 0 —— 与本轮改后的 `smoke.md` 词表一致：这两席只发 `granted | unverifiable`，
+   不再产出 `notDetermined`（那条正是本轮 24 项里的第 24 项：文档说三态、代码只发两态）。
+3. **面板按标识可读且不自造读数**：权限页一次遍历 31 个 `gp-*` 标识，席位徽标把**实测值**写进
+   标识本身——`gp-perm-accessibility-granted`、`gp-perm-input-monitoring-granted`、
+   `gp-perm-screen-recording-granted`、`gp-perm-developer-tools-unverifiable`，与 1 的 daemon 自报
+   逐项一致（面板不代测、不借用别的卡读数）。
+4. **控件按得动、确实换页**：`kAXPressAction` 打 `gp-nav-updates` 得 `ok=1 err=0`
+   （按压前该标识 `enabled=1`）；按压后重走一遍，标识集合 31 → 30：权限页的 `gp-perm-*` 不再
+   出现，更新页的 `gp-update-status`、`gp-update-state-root-source` 出现。这一格只证到
+   "按下去换了可见面"，不写成"证到了状态刷新"——那需要面板真的读到一次新数据，本次不据此下结论。
+5. **进程归属两次 `pgrep` 判决**：本 run 起的 daemon 与面板在 `SIGTERM` 后
+   `pgrep -f "state-dir <临时根>"` 命中 0 行（第一次就 0，兜底 `pkill -KILL` 之后仍 0），
+   临时根随后 `rm -rf` 回收。在册的真 daemon 与用户自己开着的三枚面板进程
+   （`~/Applications/GlassPane.app/...`，pid 48862 / 95564 / 96452）本 run 没碰：它们的路径与
+   启动方式都不是本 run 起的，按"归属不明一律不动"处理。
+6. **顺手量掉的一条怀疑**：连跑 3 次 `--check-developer-tools`（每次真的 `spawn` 一个 lldb 子进程）
+   之后，全系统僵尸进程计数从 2 变 0 —— 这条量的是"收尾没 `waitUntilExit` 会不会攒僵尸"这个怀疑，
+   量不出累积，所以那一处**不改**（理由与证据记在 `specs/GlassPane_每日2026-10-31_发现台账.md`）。
+XEOF
+node -e "
+const fs=require(\"fs\");
+const add=fs.readFileSync(\"/var/tmp/glasspane-main-check-20261031/smoke-record.md\",\"utf8\");
+const p=\"engine/smoke.md\";
+const t=fs.readFileSync(p,\"utf8\");
+fs.writeFileSync(p, t.replace(/\s*$/,\"\")+\"\\n\"+add);
+console.log(\"appended\");
+"; git diff --numstat -- engine/smoke.md; node scripts/check-doc-links.mjs > /var/tmp/glasspane-main-check-20261031/dl2.log 2>&1; echo "doc-links rc=$?"; tail -2 /var/tmp/glasspane-main-check-20261031/dl2.log | cut -c1-120
