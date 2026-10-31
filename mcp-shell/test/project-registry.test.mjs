@@ -381,9 +381,10 @@ test("the named escape hatch moves the unloadable file aside instead of deleting
     const before = read(reg.filePath);
     process.env[FORCE_OVERWRITE_ENV] = "1";
 
-    const entry = projectSet(baseArgs);
+    const entry = projectSet(baseArgs, reg.root);
     assert.match(entry.projectId, /^prj_[0-9A-HJKMNP-TV-Z]{26}$/);
-    assert.equal(entry.requiresDaemonRestart, true);
+    assert.equal(entry.requiresDaemonRestart, true,
+      "挪开坏文件之后重建的这份表同样是那个根下 daemon 会载的，重启前它看不见");
 
     const stored = JSON.parse(read(reg.filePath));
     assert.equal(stored.length, 1, "the rebuilt registry holds exactly the new entry");
@@ -435,8 +436,14 @@ test("writes use a unique temp name and never reuse a fixed .tmp", () => {
 test("projectSet result states that the running daemon has not seen the entry", () => {
   const reg = useRegistry();
   try {
-    const entry = projectSet(baseArgs);
-    assert.equal(entry.requiresDaemonRestart, true);
+    const entry = projectSet(baseArgs, reg.root);
+    assert.equal(entry.requiresDaemonRestart, true,
+      "写了盘、而这份文件正是那个根下 daemon 会载的——重启之前活着的服务看不见它");
+    const again = projectSet({ ...baseArgs, projectId: entry.projectId }, reg.root);
+    assert.equal(again.requiresDaemonRestart, false,
+      "同一份内容重发一次没有改动任何登记，不许说服务还在等它");
+    assert.equal(projectSet(baseArgs, null).requiresDaemonRestart, null,
+      "daemon 没自报过根就是量不出该比哪一份文件，答案是不知道，不是沿用 true");
     assert.match(entry.daemonRestartNotice, /background service/);
     assert.match(entry.daemonRestartNotice, /restart/i);
     assert.match(entry.daemonRestartNotice, /GP_E_NOT_FOUND/);
@@ -616,7 +623,8 @@ test("gp_project_set surfaces the restart requirement in the tool result", async
     const outcome = await executeTool(TOOL_BY_NAME.get("gp_project_set"), baseArgs, engine, new EvidenceAuditSession());
     assert.equal(outcome.isError, false, outcome.content[0].text);
     const parsed = JSON.parse(outcome.content[0].text);
-    assert.equal(parsed.project.requiresDaemonRestart, true);
+    assert.equal(parsed.project.requiresDaemonRestart, null,
+      "这台假 daemon 没在 hello 里自报过根，壳量不出该比哪一份文件——答不知道，不许沿用旧的那个 true");
     assert.match(parsed.project.daemonRestartNotice, /background service/);
     const storedAfterCreate = read(reg.filePath);
 

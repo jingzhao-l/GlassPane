@@ -15,6 +15,7 @@ import {
   quoteShellArg,
 } from "./errors.js";
 import { daemonUnreachableRemedy } from "./engine-client.js";
+import { canonicalJson } from "./canonical.js";
 
 /* ------------------------------------------------------------------ *
  * Project Registry — MCP-layer access (P1 spec v1.4 §4)
@@ -30,8 +31,9 @@ import { daemonUnreachableRemedy } from "./engine-client.js";
  *   out of, so they are validated here rather than trusted downstream.
  * - Honest failure: an unreadable/unusable projects.json is reported, never
  *   folded into "0 projects" and then overwritten.
- * - Honest success: a write is reported together with the fact that the
- *   running daemon has not loaded it yet (see `ProjectSetResult`).
+ * - Honest success: a write is reported together with what the running daemon can
+ *   already see of it, measured from the file and the daemon's own root report (see
+ *   `ProjectSetResult` and `daemonRestartPending`) — never asserted as a constant.
  * ------------------------------------------------------------------ */
 
 const CROCKFORD_BODY_RE = "[0-9A-HJKMNP-TV-Z]{26}";
@@ -392,17 +394,28 @@ export interface ProjectEntry {
 /**
  * `projectSet` result: the stored entry plus how the write lands from the
  * daemon's point of view. `gp_project_*` writes projects.json directly while
- * the running background service keeps the copy it loaded at start, so the
- * entry is not usable by `gp_attach`/`projectId` lookups until that service
- * restarts — the same "written, but the running instance read it once at
- * startup" distinction the settings panel makes for permissions that need a
- * restart. Surfacing it here is what keeps a successful-looking write from
- * being followed by an unexplained GP_E_NOT_FOUND. See {@link
- * daemonRestartNotice}: when this shell wrote a file other than the one the
- * daemon loads, a restart is required but not sufficient.
+ * the running background service keeps the copy it loaded at start, so a
+ * registration can be on disk and still be invisible to `gp_attach` — the same
+ * "written, but the running instance read it once at startup" distinction the
+ * settings panel makes for permissions that need a restart. Surfacing it is what
+ * keeps a successful-looking write from being followed by an unexplained
+ * GP_E_NOT_FOUND. It is a *reading*, not a claim: {@link daemonRestartPending}
+ * answers from the two facts this shell actually holds (did this call change the
+ * file, and does the service name this file as the one it loads), and
+ * {@link daemonRestartNotice} states the third case, where a restart is required
+ * but not sufficient.
  */
 export interface ProjectSetResult extends ProjectEntry {
-  requiresDaemonRestart: true;
+  /**
+   * Whether **this** write left an entry the running service has not loaded yet — see
+   * {@link daemonRestartPending} for the three readings and why a constant here was the
+   * defect. It is a discriminator with a reader (`tools.ts`'s `GP_E_PROJECT_LIMIT` advice
+   * says the reply's value states whether a restart is pending, and the daemon's own
+   * removal replies carry the same key computed the same way:
+   * `ProjectRegistry.swift:707` `!dryRun`, `main.swift:1459` `pruned > 0`), so the value
+   * has to be a measurement rather than a claim.
+   */
+  requiresDaemonRestart: boolean | null;
   daemonRestartNotice: string;
   /** Set only when the escape hatch moved an unreadable registry aside. */
   discardedUnreadableFile?: string;
@@ -1055,6 +1068,11 @@ export function projectSet(args: ProjectSetArgs, daemonStateRoot?: string | null
   const { projects, discarded, baseline: openedAs } = requireUsableRegistry(filePath, snapshot);
 
   let entry: ProjectEntry;
+  // Did this call put anything into the file that was not already in it? A re-issued
+  // `gp_project_set` with the fields the entry already holds rewrites the file and changes
+  // no registration, so the running service cannot be "waiting" for it — that is the case
+  // the daemon's own `requiresDaemonRestart` refuses to invent (`main.swift:1459`).
+  let changedByThisCall = true;
   const projectId = args.projectId;
 
   if (projectId) {
@@ -1064,6 +1082,7 @@ export function projectSet(args: ProjectSetArgs, daemonStateRoot?: string | null
       throw new ProjectRegistryError(GP_E_NOT_FOUND, `unknown projectId ${projectId}`);
     }
     entry = applyPatch(existing, args);
+    changedByThisCall = canonicalJson(existing) !== canonicalJson(entry);
     assertSingleIdentity(entry, args, existing, filePath);
     projects[projects.indexOf(existing)] = entry;
   } else {
@@ -1087,8 +1106,8 @@ export function projectSet(args: ProjectSetArgs, daemonStateRoot?: string | null
   saveProjects(filePath, projects);
   return {
     ...entry,
-    requiresDaemonRestart: true,
-    daemonRestartNotice: daemonRestartNotice(filePath, daemonStateRoot),
+    requiresDaemonRestart: daemonRestartPending({ filePath, daemonStateRoot, changed: changedByThisCall }),
+    daemonRestartNotice: daemonRestartNotice(filePath, daemonStateRoot, changedByThisCall),
     ...(discarded !== undefined ? { discardedUnreadableFile: discarded } : {}),
   };
 }
@@ -1201,6 +1220,57 @@ function damagedStoredIdentityMessage(entry: ProjectEntry, args: ProjectSetArgs,
     + "Do not hand-edit the file: the running service holds its own copy of the table and rewrites it, so a hand repair disappears at its next save.";
 }
 
+/** The root the running daemon named in its own `hello`, or null when it named none. */
+function reportedRoot(daemonStateRoot?: string | null): string | null {
+  const named = typeof daemonStateRoot === "string" ? daemonStateRoot.trim() : "";
+  return named === "" ? null : named;
+}
+
+/**
+ * The reading behind `ProjectSetResult.requiresDaemonRestart`.
+ *
+ * It used to be the literal `true`, written on every successful `gp_project_set` whatever
+ * the file said — and the very next field in the same payload, `daemonRestartNotice`, could
+ * answer "no restart of the service will make it load this one". A field that can never be
+ * false is not a discriminator, and this one has a reader: `tools.ts`'s `GP_E_PROJECT_LIMIT`
+ * advice tells the agent that "the reply's requiresDaemonRestart says whether one is
+ * pending", and the daemon computes the same key for the same purpose on its own removal
+ * replies (`ProjectRegistry.swift:707` writes `!dryRun`, `main.swift:1459` writes
+ * `pruned > 0`, `main.swift:1550` writes `gone`; the panel reads it as `needsRestart` at
+ * `ConsoleModel.swift:1048`). The daemon's own doctrine is quoted in its test suite at
+ * `DailyRound20261022ProtocolTests.swift:427` — a run that changed nothing must not invent a
+ * restart to-do — so the value here is measured from the two facts this process actually
+ * holds:
+ *
+ *  - `false` — this call wrote nothing the file did not already hold (the same entry the
+ *    service read at start, field for field), so there is nothing for a restart to pick up;
+ *  - `false` — the daemon named a root in its `hello` and this write landed in a **different**
+ *    file, which is exactly the case the notice says no restart will fix;
+ *  - `true` — the daemon named a root, this call changed the file at `<that root>/projects.json`,
+ *    and the service read that file once when it started;
+ *  - `null` — the daemon named no root (`hello` has no `stateRoot`, or no handshake answered
+ *    it), so which file the running service loads is not knowable from here. Saying so is the
+ *    same rule `EngineJsonRpcClient.reportedStateRoot` states: "not measured", never a guess
+ *    at the home default, and never a throw.
+ */
+export function daemonRestartPending(facts: {
+  /** The projects file this call wrote. */
+  filePath: string;
+  /** The root the running daemon reported about itself, if it reported one. */
+  daemonStateRoot?: string | null;
+  /** Whether this call put anything into the file that was not already in it. */
+  changed: boolean;
+}): boolean | null {
+  if (!facts.changed) {
+    return false;
+  }
+  const named = reportedRoot(facts.daemonStateRoot);
+  if (named === null) {
+    return null;
+  }
+  return path.resolve(facts.filePath) === path.resolve(daemonProjectsPath(named));
+}
+
 /**
  * One user-facing sentence for the tool result. The panel already keeps "the
  * file is written" apart from "the running service can act on it"; the MCP
@@ -1226,10 +1296,23 @@ function damagedStoredIdentityMessage(entry: ProjectEntry, args: ProjectSetArgs,
  * therefore name the `--state-dir` case, hand over the one discriminator the
  * surface actually has, and say what each outcome means:
  * {@link rootDiscriminator}.
+ *
+ * `changed` is the same measurement {@link daemonRestartPending} answers from: a call that
+ * re-wrote the entry the file already held left nothing new for the service to pick up, and
+ * a notice that still promised a `GP_E_NOT_FOUND` until a restart would be a second way of
+ * saying a thing this call did not do. Callers that only have the file and the root (the
+ * tool-layer refusal paths, the tests) leave it out, which reads as the changed case.
  */
-export function daemonRestartNotice(filePath: string, daemonStateRoot?: string | null): string {
-  const named = typeof daemonStateRoot === "string" && daemonStateRoot.trim() !== "" ? daemonStateRoot.trim() : null;
+export function daemonRestartNotice(filePath: string, daemonStateRoot?: string | null, changed: boolean = true): string {
+  const named = reportedRoot(daemonStateRoot);
   const daemonPath = daemonProjectsPath(named);
+  // The payload's machine-readable half, stated here so the two cannot be read as
+  // contradicting each other. `projectSet` passes the value it is about to send; a caller
+  // that asks for the sentence alone gets the reading a changed write would produce.
+  const pending = daemonRestartPending({ filePath, daemonStateRoot, changed });
+  const paired = ` The field and this sentence are the same measurement: this reply carries `
+    + `\`requiresDaemonRestart: ${JSON.stringify(pending)}\`, computed from these two facts (which file this write `
+    + "reached, and which root the service named for itself) rather than asserted.";
   // Two different authorities, and the sentence has to say which one spoke: a daemon that
   // answered `hello.stateRoot` names the root it loads, while an older binary (or no
   // handshake) leaves only the home default, which is a guess about the default and not
@@ -1238,12 +1321,26 @@ export function daemonRestartNotice(filePath: string, daemonStateRoot?: string |
     ? "its default root is the folder under this user's home record (where a service started with no --state-dir looks)"
     : `its root is the one the running daemon named in its hello (${named})`;
   if (path.resolve(filePath) !== path.resolve(daemonPath)) {
-    return `Saved in ${filePath}. The background service does not read this path because of anything in its own configuration: ${authority}. It loads ${daemonPath} once when it starts, and ${PROJECTS_FILE_ENV} — the variable that pointed this write here — is honoured by this MCP shell only, so as far as the service's own configuration goes it never reads that file, and no restart of the service will make it load this one. ${rootDiscriminator()} To land the entry where that root looks: unset ${PROJECTS_FILE_ENV} for this shell (or point it at ${daemonPath}) and repeat gp_project_set, then restart the background service so it reloads — ${restartCommand()}`;
+    return `Saved in ${filePath}. The background service does not read this path because of anything in its own configuration: ${authority}. It loads ${daemonPath} once when it starts, and ${PROJECTS_FILE_ENV} — the variable that pointed this write here — is honoured by this MCP shell only, so as far as the service's own configuration goes it never reads that file, and no restart of the service will make it load this one. ${rootDiscriminator()} To land the entry where that root looks: unset ${PROJECTS_FILE_ENV} for this shell (or point it at ${daemonPath}) and repeat gp_project_set, then restart the background service so it reloads — ${restartCommand()}.${paired}`;
   }
   if (named !== null) {
-    return `Saved in ${filePath} — the projects file of the state root the running daemon reported in its own hello (${named}), so this is the file that service loads. It read that file once when it started, so gp_attach will keep returning GP_E_NOT_FOUND for this projectId until the service restarts: ${restartCommand()}`;
+    return `Saved in ${filePath} — the projects file of the state root the running daemon reported in its own hello (${named}), so this is the file that service loads. ${reloadSentence(changed)}: ${restartCommand()}.${paired}`;
   }
-  return `Saved in ${filePath}, the projects file under the home record this user's state root defaults to. If this is the root the service was started on — which is not knowable from here, because this daemon's hello reported no stateRoot — then the running background service loaded that file once when it started, so gp_attach will keep returning GP_E_NOT_FOUND for this projectId until the service restarts: ${restartCommand()}. ${rootDiscriminator()}`;
+  return `Saved in ${filePath}, the projects file under the home record this user's state root defaults to. If this is the root the service was started on — which is not knowable from here, because this daemon's hello reported no stateRoot — then ${reloadSentence(changed)}: ${restartCommand()}. ${rootDiscriminator()}${paired}`;
+}
+
+/**
+ * What the service's own copy of the table does with this write, in the two cases the
+ * notice must not blur: a call that changed a registration is invisible to the running
+ * service until it reloads, and a call that re-wrote the entry the file already held is
+ * not a new registration at all.
+ */
+function reloadSentence(changed: boolean): string {
+  return changed
+    ? "the running background service loaded that file once when it started, so gp_attach will keep returning "
+      + "GP_E_NOT_FOUND for this projectId until the service restarts"
+    : "this call rewrote the entry that file already held, field for field, so it left no new registration for "
+      + "the service to pick up — restarting changes nothing about an entry that was already there";
 }
 
 /**

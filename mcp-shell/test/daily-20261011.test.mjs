@@ -45,7 +45,7 @@ test("丢更新的判据能红，抛出点用的是词表里的代号（remedy �
       projectId: existing, displayName: "first", bundleId: "first",
       createdAt: "2026-10-11T00:00:00.000Z",
     }]), { mode: 0o600 });
-    const patched = projectSet({ projectId: existing, displayName: "second" });
+    const patched = projectSet({ projectId: existing, displayName: "second" }, dir);
     assert.equal(patched.displayName, "second", "对照：正常的补丁式登记要真能写");
     assert.equal(patched.requiresDaemonRestart, true, "写完但活着的服务仍读它启动时那份——这条要说");
 
