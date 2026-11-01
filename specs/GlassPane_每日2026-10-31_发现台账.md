@@ -23,7 +23,7 @@
   壳 `node --test mcp-shell/test/*.test.mjs` 704 tests / 699 pass / **5 fail**；
   安装器 306 / 301 / **5 fail**；updater 735 / 735 / 0。
 
-## 本轮发现 → 修复 → 具名测试（发现 29 条，修复 29 条，未修项 0；#25-#26 由本机套件抓到，#27-#29 由 CI 的 lane 现形——#27/#29 在 ubuntu、#28 在 macOS，本机都走不到那一档）
+## 本轮发现 → 修复 → 具名测试（发现 31 条，修复 31 条，未修项 0；#25-#26 由本机套件抓到，#27-#29 由 CI 的 lane 现形——#27/#29 在 ubuntu、#28 在 macOS，本机都走不到那一档；#30-#31 在收口取证时发现，晚于 `v1.27.0` 那枚 tag，随 `v1.28.1` 发出）
 
 | # | 发现（触发输入 → 错误行为） | 修在哪 | 具名测试 | 反向破坏 |
 |---|---|---|---|---|
@@ -56,11 +56,19 @@
 | 27 | **CI 现形（ubuntu lane）**：`--no-such-flag` 在 Linux 上 install.sh 回 1（平台句）、cli.js 回 2（参数句）；`--repo <非仓库目录>` 反向分叉。本机（darwin）永远走不到那一档 | 入口次序抽成 `entryDecision`：`--repo` 用法错 → 显式位判据（与主机无关）→ `--help` → 平台 → 未知参数 | `入口次序整表：非 darwin 那一档在两种主机上都是同一个答案`（7 串 × 2 平台） | 把平台判据挪到判据之前并去掉守卫 ⇒ 该行点名 `在 linux 上判成 platform`（实测红→恢复绿） |
 | 28 | **CI 现形（macOS lane）**：`install.sh` 的 `sh_quote` 用 `case` 字符类判惰性，runner 的 en_US.UTF-8 下把 `é` 读成字母 → 印裸 `é`，而 `quoteShellArg` 印 `'é'`；两入口对同一值两种引号形状（Linux 上反倒一致） | 分类改按字节（`LC_ALL=C` 的 grep 判据），与 JS 表逐值同判 | `install.sh 的 sh_quote 与 installer/cli.js 的 quoteShellArg 逐值同判`（13 值 + `eval set --` 回读必须是 `$#=1` 逐字节等值） | 还原 `case` 那一支 ⇒ 在 UTF-8 locale 下 `é` 那一格红（本轮实测在 macOS runner 上就是它先红的） |
 | 29 | **CI 现形（ubuntu lane，是 #27 那次收口的另一半）**：次序定成"平台判据先于未知参数"之后，三条**交付形状**闸（`daily-20261022-delivered-shape` 的 arg-error、`failure-exit` 的端到端 arg-error 与符号链接 bin）仍把"未知参数 ⇒ 2"当跨主机承诺写死 ⇒ ubuntu 的 `install-gate` 红 3 条，而本机 314/314 全绿看不见。根因与 #27 同族：一条按主机分岔的判据被当成普适契约钉进测试 | 三条各按平台分两支（沿用 `failure-exit` 里 2026-10-23 定下的纪律：按平台问哪一支该跑；既不把 darwin 那一支硬塞给 ubuntu，也不放宽成"1 或 2 都算过"）。非 darwin 那一支的句子从 `platformRefusal()` 取真源并断言其中**不含**"参数错误"；两支之外的共同不变量＝stdout 零字节、stderr 有字节且末字节是换行、绝不是"0 字节 + 退 0"（那 19 个版本的签名）。这一档次序同时写进 `installer/cli.js` 的 usage 页与 `install.sh` 的退出码那一格 | 改名后的那三条 + `入口次序整表：非 darwin 那一档在两种主机上都是同一个答案` + `非 macOS 上两入口的**码**仍然同答` | 把 `entryDecision` 里 usage-error 那一支挪回平台判据之前，再用 `NODE_OPTIONS` 注入一枚把 `process.platform` 定成 linux 的桩跑本机 ⇒ 四条具名红（交付形状那条、端到端 arg-error、整表、码同答）；恢复用 `/bin/cp` 备份 + `diff -q`（sha256 `41605e40…` 两侧逐字节相等）。**边界如实记下**：符号链接 bin 那一支本机证不了——`runInstalled` 的 env 是刻意最小的（只有 PATH/HOME/NO_COLOR），桩进不了那个子进程，它在桩下恒红是模拟的产物而不是产品缺陷；那一支的真验证落在 CI 的 ubuntu 格（本轮红的那三条就是它） |
+| 30 | **收口取证时发现的、我自己造的那一条**：那 9 行的字节自己写着来历：**那次追加用的命令文本**（一块以 `node -e "` 开头、读 `smoke-record.md` 再 `writeFileSync("engine/smoke.md")` 的脚本，末尾还跟着几句 shell，heredoc 标记是 `XEOF`）被当成正文写进了被跟踪的文件。哪一层引号先收尾没有现场留下，这一行只陈述留下来的字节，不补一个我没量过的机制。它随 `82ef1416` 进了 main，也进了 `v1.27.0` 与 `v1.28.0` 两份签名归档，而 `check-doc-links` 一路绿（见 #31）。取证时我逐文件读尾巴才发现 | 删到第 1541 行（正文最后一句），文件以换行收尾；`git diff --numstat` 为 0 插入 / 9 删除，其余 1541 行一字未动（备份 `/var/tmp/glasspane-main-check-20261031/smoke-backup.md`） | 残渣闸本身（`updater/test/scripts-check-doc-links.test.mjs` 那 35 条里的两条：真仓库此刻零残渣 + 名单外那枚标记也要抓） | 把备份 `cp` 回去复跑 `node scripts/check-doc-links.mjs` ⇒ rc=1 且点名 `engine/smoke.md:1542 正文里有一行恰好是一枚全大写标记（XEOF）`（实测）；恢复后 rc=0，sha256 `3443a907…` |
+| 31 | **#30 之所以能一路绿的根因**：残渣闸判据①是一份手抄的名字名单（`EOF/MSG/PY/SQL/OUT/YAML/JSON`），`XEOF` 不在里面；判据②的命令词也是手抄的（`echo\|wc\|printf\|cat\|sed\|grep\|ls\|nohup\|tar`），漏进去的那块是 `node -e "` 开头，两个名单都接不住。**同一形状在本仓第三次出现**（`SHELL_ONLY`、`tool-surface` 的 keep-list 都是这样红的），所以这不是"再补一个名字"的事 | 判据①改成形状：一行去掉空白后恰好是 `[A-Z][A-Z0-9_]{1,15}` 就算一枚 heredoc 标记；判据②不动（它的豁免形状由另两条用例钉着，见其注释），但边界如实记在下面那一节 | `shell 残渣闸：不在旧名单里的那枚标记（XEOF）也要抓到——名单形状改为形状判据`（2 条点名 + 围栏里那枚必须不红） | 把形状判据换回那份名单（同一文件、两处）⇒ 这条具名用例红（35 条里唯一的一条红，实测 `34 pass / 1 fail`）；`/bin/cp` 恢复后 `diff -q` 无输出、sha256 `99ba157f…` 两侧相等、35/35 复绿 |
 
-覆盖面不足的领域（本轮补了其中 6 项，其余留给后续）：remedy 的"命令名是否真在 PATH 上"（本轮成闸）、
+覆盖面不足的领域（本轮补了其中 7 项，其余留给后续）：remedy 的"命令名是否真在 PATH 上"（本轮成闸）、
 双入口 argv 全矩阵（本轮 9 格）、跨连接状态生命周期（本轮 1 格）、可选/inbox-gated 键的增删即红
 （本轮改派生）、`chmod` 返回 0 而模式不粘的卷（本机造不出目录级现场，留接缝 + 具名用例，见
-`DailyRound20261031LaneDPermissionTighteningTests` 的 `apply` 注入）。
+`DailyRound20261031LaneDPermissionTighteningTests` 的 `apply` 注入）、按主机分岔的判据写成普适承诺
+（本轮 3 条改成两支，见 #29）、**残渣闸判据②那份手抄的命令词**（`echo|wc|printf|cat|sed|grep|ls|nohup|tar`，
+`node -e "` 这一族不在里面；本轮只把①从名单改成形状，②仍是名单）。②没跟着改的理由写在它的注释里：
+英文文档本来就靠"首词是命令词"这一半豁免，把词表放宽成"像命令"会误红人话——本轮已经被这样的
+判据误红过一次（`harness/glasspane-harness/SYNCLOG.md:684`）。补它的确切做法：给②也加一条"整行是
+一段被泄漏的脚本"的形状判据（例如含 `fs.writeFileSync(` 且不在围栏里），并在 125 份 markdown 上
+先量零误红再进闸，而不是直接放宽。
 
 ## 判为不成立 / 不改的（各附证据）
 
@@ -88,4 +96,41 @@
 
 ## 真机与端到端读数
 
-见本文件末尾【收口】小节与 `engine/smoke.md` 的 2026-10-31 记录。
+见下面【收口】那一节的 4-6 条，与 `engine/smoke.md` 的 2026-10-31 那一节（面板 31 个 `gp-*` 标识、
+`kAXPressAction` 按得动且真换页、daemon 隔离根自报三席 granted）。
+
+## 收口
+
+1. **main**：本轮最后一笔 `3ddd6031`（`fix(installer)` #29 那三条判据），CI run 41228271824
+   （event=push，十格）全 success。签名 tag `v1.27.0`（gpg `0929EA31DF4F7429F63FC53189D88B1D043A1298`，
+   `git tag -v` 报"完好的签名"）指向它。
+2. **发布三线**：GitHub Release `v1.27.0` 非草稿、`--latest`、target=`3ddd6031`、4 件资产；
+   归档 4,812,704 字节 / 787 条目 / 21 条声明的命令与 schema 全在 / `grep -cE "(^|/)harness/"` 命中 **0**；
+   本机 sha256 `88fd5c5e…663c4` == API `assets[].digest` == `SHA256SUMS-1.27.0.txt` 那一行（三处逐字相等），
+   两份 `.asc` 用仓库内嵌公钥在隔离 `GNUPGHOME` 验签 rc=0。npm 两次 dispatch 都显式带 `--ref v1.27.0`
+   （dry=41231290749、publish=41231339141，两个 job 的每一条前置判据步骤都 success），
+   registry `--prefer-online` 下 `glasspane-mcp` 与 `glasspane-install` 的 latest 与钉名读数都 = 1.27.0。
+3. **端到端**（跑的是发布归档，不是本机重建）：解包 → 树内 `npm pack` rc=0 → 装进干净前缀 rc=0 →
+   `node_modules/.bin/glasspane-mcp` 是符号链接 → stdin 一条 MCP `initialize` 两条路径
+   （`dist/index.js` 与那条 bin 软链）各回 171 字节、`serverInfo` 点名 `glasspane-mcp` / `1.27.0`。
+4. **取号的后半程**：`edbee85e → 0c9e12a0（release: 1.28.0）→ f4df4693` 由同日另一条会话完成，
+   `v1.28.0`（→ `0c9e12a0`）的 Release 与 npm 两包也都实测到位。**#30 与 #31 是在这两者之后才发现的**
+   （取证时逐文件读尾巴），已发布的 tag 一律不动，所以这两条随 `1.28.1` 发出——patch 的理由是四条判据
+   一条都没碰（状态文件字段、退出码集合、CLI 旗标、npm `bin` 声明），改的只有一份文档正文与一把闸的形状。
+5. **一条我自己的读数差错（不改产品，只记账）**：`e2e.sh` 把 GitHub 的 `assets[].digest` 当 base64 解码，
+   打印出一条假的 `match=no`；`sign-verify.sh` 改成逐字比形状 `sha256:<hex>` 之后同一条字节读出
+   `local==api: yes` 与 `local==sums: yes`。被改的是脚本，不是判据。
+6. **门禁逐字复跑的读数**（干净树 `3ddd6031`，日志在 `/var/tmp/glasspane-main-check-20261031/final-3ddd6031/`）：
+   `npm ci`/`npm run build`/`npm test --workspaces --if-present` rc=0，三包分别 728/314/746 全 pass、0 fail、0 skipped；
+   `check-version` OK（1.27.0，20 个位点）；`check-doc-links` 32 份 / 内链 270 / 外链 44 / 表格 459（扫 125 份 md）；
+   `check-workflows --self-test` 46 条（27 个变异必须抓 + 19 个合法形状必须静默）、`check-workflows` 5 份文件 clean；
+   `check-kernel-corpus` 26 份镜像逐文件核过、pin 与捆的版本同为 `iterate-kernel@0.1.10`；
+   `swift build` rc=0；`swift test --package-path engine` 1577 XCTest / 5 skipped / 0 failures，
+   同一次运行里 Swift Testing 66 tests / 7 suites passed；`swift test --package-path engine/probe` 58 / 1 skipped / 0 failures；
+   `python3 -m pytest -q bridge` 201 passed / 1 skipped；`sh -n install.sh` rc=0；
+   五把尺子：tool-surface 无新增（面 A 22.19% 是"金样本身超 10%"的既有事实）、surface-semantics 23 文件 0 命中、
+   product-surface 6587 处一致 / 0 问题、brand-surface 血缘 9632/9632 扫 3330 文件、fork-diff 4637/6746 逐字节相同
+   （288 改 / 114 增 / 1707 删）与在册分叉一致、hook-liveness 两把钩子离线核过绑定位；
+   信号闸 `SIGNAL SMOKE OK`（SIGTERM/SIGINT 自退 0 且 socket 被 unlink，三次起停各自跑在点名状态根）；
+   发布形态 `npm run bundle` + `npm pack --dry-run` rc=0，产出 `glasspane-mcp-1.27.0.tgz`。
+
