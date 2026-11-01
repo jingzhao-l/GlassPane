@@ -833,11 +833,19 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
  * 此前这里只认 ```，于是 `~~~` 围栏里的示例命令被误红，而误红文案教作者"放进 ``` 围栏"——
  * 对已经在一个合法围栏里的行自相矛盾（S10-5，2026-10-29）。
  *
+ * ①的那份**名单**（`EOF/MSG/PY/SQL/OUT/YAML/JSON`）在 2026-10-31 被同一类事故否证：那一轮往
+ * `engine/smoke.md` 追加读数时用的是 `<<'XEOF'`，`XEOF` 不在名单里 ⇒ 残渣连同后面的整块 node 脚本
+ * 一路绿着进了 main 和 `v1.27.0` 的归档。手抄的词表就是这道闸的盲区（同一个形状在本仓第三次出现：
+ * 名单永远少下一枚），所以判据改成形状——一行去掉空白后**恰好**是 `[A-Z][A-Z0-9_]{1,15}`，就当它是
+ * 一枚 heredoc 标记。实测边界：现在扫的 32 份文档、以及全仓 125 份 markdown，围栏之外符合这个形状的
+ * 行**只有那一条 `XEOF`**（也就是缺陷本身），零条误红；代价是正文里将来单独成行的大写词（`NOTE`、
+ * `TODO` 之类）也要进围栏或改写，这一条写在这里而不是等谁被红了才发现。
+ *
  * "整行不含汉字"这一半不是凑数：判据第一版只看命令词，于是
  * `harness/glasspane-harness/SYNCLOG.md:684` 那句人话（"grep 会把这种管道输入当"二进制"而停止
  * 匹配。"）被判成了残渣——**一道新闸第一次运行就误红了一条别人的文档**。命令词后面接中文不是命令。
  */
-const HEREDOC_TERMINATORS = new Set(['EOF', 'MSG', 'PY', 'SQL', 'OUT', 'YAML', 'JSON'])
+const HEREDOC_TERMINATOR = /^[A-Z][A-Z0-9_]{1,15}$/
 const HAN = /[\p{Script=Han}]/u
 
 export function shellResidue({ rootDir = ROOT, docs = DOCS } = {}) {
@@ -849,9 +857,10 @@ export function shellResidue({ rootDir = ROOT, docs = DOCS } = {}) {
       if (isFenceLine(line)) { fenced = !fenced; return }
       if (fenced) return
       const trimmed = line.trim()
-      if (HEREDOC_TERMINATORS.has(trimmed)) {
-        problems.push(`${doc}:${i + 1} 正文里有一行恰好是 heredoc 结束标记（${trimmed}）——`
-          + '这是 shell 追加脚本自己漏进正文的残渣，不是文档内容')
+      if (HEREDOC_TERMINATOR.test(trimmed)) {
+        problems.push(`${doc}:${i + 1} 正文里有一行恰好是一枚全大写标记（${trimmed}）——`
+          + '这是 shell 追加脚本的 heredoc 结束标记漏进正文的残渣，不是文档内容；'
+          + '要么放进 ``` 围栏，要么把它删掉')
         return
       }
       const commandShaped = /^(echo|wc|printf|cat|sed|grep|ls|nohup|tar)\b/.test(trimmed)

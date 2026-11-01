@@ -308,6 +308,27 @@ test('shell 残渣闸：本轮真漏进正文的那两行必须被点名', () =>
   fs.rmSync(root, { recursive: true, force: true })
 })
 
+test('shell 残渣闸：不在旧名单里的那枚标记（`XEOF`）也要抓到——名单形状改为形状判据', () => {
+  // 2026-10-31 实测的盲区：追加 `engine/smoke.md` 用的是 `<<'XEOF'`，而判据第一版是一份写死的名单
+  // （EOF/MSG/PY/SQL/OUT/YAML/JSON），`XEOF` 不在里面 ⇒ 残渣连同整块 node 脚本一路绿着进了 main
+  // 与 v1.27.0 的归档。这一条钉的就是"下一枚不在名单里的名字"这一族。
+  const root = residueRoot([
+    '正文一句话。',
+    'XEOF',
+    'RECORD_2',
+    '```',
+    'XEOF',
+    '```',
+    '围栏里那一枚不算（上面第一条用例的豁免形状一样要成立）。',
+    '',
+  ].join('\n'))
+  const problems = shellResidue({ rootDir: root, docs: ['x.md'] })
+  assert.equal(problems.length, 2, JSON.stringify(problems))
+  assert.match(problems[0], /x\.md:2.*全大写标记（XEOF）/)
+  assert.match(problems[1], /x\.md:3.*全大写标记（RECORD_2）/)
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
 test('shell 残渣闸：围栏里的 shell 记录不算残渣（那是文档的正常内容）', () => {
   const root = residueRoot([
     '跑这一串：',
