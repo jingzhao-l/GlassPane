@@ -1539,12 +1539,3 @@ helper 沿用 `/var/tmp/glasspane-main-check-20261030/gp-ax-walk.swift`（本机
 6. **顺手量掉的一条怀疑**：连跑 3 次 `--check-developer-tools`（每次真的 `spawn` 一个 lldb 子进程）
    之后，全系统僵尸进程计数从 2 变 0 —— 这条量的是"收尾没 `waitUntilExit` 会不会攒僵尸"这个怀疑，
    量不出累积，所以那一处**不改**（理由与证据记在 `specs/GlassPane_每日2026-10-31_发现台账.md`）。
-XEOF
-node -e "
-const fs=require(\"fs\");
-const add=fs.readFileSync(\"/var/tmp/glasspane-main-check-20261031/smoke-record.md\",\"utf8\");
-const p=\"engine/smoke.md\";
-const t=fs.readFileSync(p,\"utf8\");
-fs.writeFileSync(p, t.replace(/\s*$/,\"\")+\"\\n\"+add);
-console.log(\"appended\");
-"; git diff --numstat -- engine/smoke.md; node scripts/check-doc-links.mjs > /var/tmp/glasspane-main-check-20261031/dl2.log 2>&1; echo "doc-links rc=$?"; tail -2 /var/tmp/glasspane-main-check-20261031/dl2.log | cut -c1-120
