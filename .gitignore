@@ -15,6 +15,12 @@ __pycache__/
 # npm pack 产物（发布用，不入库；历史上误提过一枚 glasspane-mcp-shell-0.1.0.tgz）
 *.tgz
 
+# 隔离工作树的落点。`scripts/check-doc-links.mjs` 的 MD_SKIP_DIRS 早就把它当"不是仓库内容"
+# 排除掉（否则一次未追踪的 scratch 状态会让同一棵 main 的树因为旁边有没有工作树而给出不同
+# 读数），但 git 自己没这条规则 ⇒ 任何一轮照流程 `git worktree add` 建树的会话，收口时
+# `git status --porcelain` 永远多一行 `?? .worktrees/`。
+/.worktrees/
+
 # 上游参照克隆（223 MB，含 .git）。两把尺子共用它：fork-diff 读 ls-files -s，
 # hook-liveness 读源码树。绝不进版本控制。
 .external/
