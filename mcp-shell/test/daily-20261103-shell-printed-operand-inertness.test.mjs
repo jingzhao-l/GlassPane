@@ -97,6 +97,9 @@ test('真进程惰性：打印出来的那两句照抄进 bash，目录名里的
     env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' },
   })
   try {
+    const binDir = path.join(root, 'bin')
+    fs.mkdirSync(binDir, { recursive: true })
+    fs.writeFileSync(path.join(binDir, 'uname'), '#!/bin/sh\n[ "$1" = "-s" ] && echo Darwin || echo Darwin\n', { mode: 0o755 })
     const src = path.join(root, 'src')
     fs.mkdirSync(path.join(src, 'engine'), { recursive: true })
     fs.mkdirSync(path.join(src, 'mcp-shell'), { recursive: true })
@@ -115,6 +118,10 @@ test('真进程惰性：打印出来的那两句照抄进 bash，目录名里的
       cwd: root, encoding: 'utf8', stdin: 'ignore', timeout: 90_000,
       env: {
         ...process.env,
+        // CI 的三条 lane 里有 ubuntu：这一支测的是"走到那两句打印"，平台闸必须先按 macOS 答。
+        // 桩 `uname` 是本仓既有夹具的做法（installer/test 里 makeShFixture/stubBin 同一形），
+        // 不是新发明的一种口径。本机（Darwin）带着这个桩也照样成立，两个环境同判据。
+        PATH: `${binDir}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
         GLASSPANE_REPO: '',
         GLASSPANE_INSTALL_DIR: spaced,
         GLASSPANE_REF: 'nosuchtag',

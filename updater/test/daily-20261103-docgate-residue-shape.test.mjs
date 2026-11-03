@@ -26,7 +26,6 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { shellResidue, RESIDUE_DOCS, fenceAfter, proseOf } from '../../scripts/check-doc-links.mjs'
 
@@ -48,9 +47,14 @@ const run = (body) => withDoc(body, (root) => shellResidue({ rootDir: root, docs
 /* ------------------------------------------------------------------ ② 形状 */
 
 test('②：真残渣删掉 heredoc 标记那一行之后，仍必须被抓到（旧手抄词表在这里报 0 条）', () => {
-  const leaked = execFileSync('git', ['show', '9c41a7ae^:engine/smoke.md'], {
-    cwd: REPO, encoding: 'utf8',
-  }).split('\n').slice(1541).join('\n')
+  // 夹具是 2026-10-31 那 9 行的**逐字字节**（本机从 `git show 9c41a7ae^:engine/smoke.md` 取出后
+  // 原样抄在这里，第 1542-1550 行）。不在测试里去读 git 历史：CI 的 checkout 是 fetch-depth 1
+  // 的浅树，那个对象在 runner 上根本不存在——本轮第一版就是这么写的，本机绿、CI 红。
+  // 抄下来的真字节比"合成一个长得像的"更硬：它是那次事故留下的东西。
+  const leaked = "XEOF\nnode -e \"\nconst fs=require(\\\"fs\\\");\nconst add=fs.readFileSync(\\\"/var/tmp/glasspane-main-check-20261031/smoke-record.md\\\",\\\"utf8\\\");\nconst p=\\\"engine/smoke.md\\\";\nconst t=fs.readFileSync(p,\\\"utf8\\\");\nfs.writeFileSync(p, t.replace(/\\s*$/,\\\"\\\")+\\\"\\\\n\\\"+add);\nconsole.log(\\\"appended\\\");\n\"; git diff --numstat -- engine/smoke.md; node scripts/check-doc-links.mjs > /var/tmp/glasspane-main-check-20261031/dl2.log 2>&1; echo \"doc-links rc=$?\"; tail -2 /var/tmp/glasspane-main-check-20261031/dl2.log | cut -c1-120"
+  const hitsFull = withDoc(leaked, (root) => shellResidue({ rootDir: root, docs: ['x.md'] }))
+  assert.ok(hitsFull.length >= 5,
+    `整块 9 行残渣该至少报 5 条（旧判据只报 1 条，就是 XEOF 那一行），实际 ${hitsFull.length}`)
   const withoutMarker = leaked.split('\n').filter((l) => l.trim() !== 'XEOF').join('\n')
   const hits = withDoc(withoutMarker, (root) => shellResidue({ rootDir: root, docs: ['x.md'] }))
   assert.ok(hits.length >= 1, `2026-10-31 那 9 行去掉标记后旧判据一条都不报；新判据也必须至少报一条，实际 ${hits.length}`)
