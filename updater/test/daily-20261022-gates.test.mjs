@@ -460,7 +460,7 @@ test('文档闸：~~~ 围栏里的示例命令不是残渣，搬到围栏之外�
     write('正文一行：\nwc -l "$(printf %s f)"\n')
     const outside = shellResidue({ rootDir: root, docs: ['README.md'] })
     assert.equal(outside.length, 1, JSON.stringify(outside))
-    assert.match(outside[0], /裸露的 shell 命令行/, outside[0])
+    assert.match(outside[0], /裸露的语句形状/, outside[0])
     // 闭栏之后重新计数：`~~~` 关掉围栏，下一段正文里的裸露命令要能被看见。
     write('~~~bash\nwc -l "$(printf %s f)"\n~~~\nls -l "$(printf %s f)"\n')
     const afterClose = shellResidue({ rootDir: root, docs: ['README.md'] })

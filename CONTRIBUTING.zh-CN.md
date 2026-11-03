@@ -45,7 +45,7 @@ GlassPane 是 **macOS 上给 AI 编程代理用的 GUI 测试与验证层**：�
 | `install-gate` | ubuntu-latest | 发布形态所依据的根布局：`node scripts/check-kernel-corpus.mjs`（镜像的内核语料必须等于 Swift C35 腿所读的 pin——内核校验是这里的一个**步骤**，不是单独一条 job）、安装器单测、mcp-shell 构建（内核是已发布依赖）、全部 workspace 测试 |
 | `macos-node-gate` | macos-latest | **在 macOS 真的存在的那台机器上**再跑一遍两套 Node 套件：`glasspane-update` 与 `glasspane-install`。它们里面有十几条断言在非 macOS 上自跳（`process.platform !== 'darwin'`）——launchd/plutil 那几条形状、导出的根归档、plist 转义。只在 ubuntu 上跑，这些 lane 是"什么都没量到却绿了"，而这个产品只发 macOS |
 | `version-line` | ubuntu-latest | 每个版本位点与根 manifest 是否一致 |
-| `docs` | ubuntu-latest | 对外文档体检：相对链接可达、页内/跨页锚点存在、双语两侧都在位（`node scripts/check-doc-links.mjs`） |
+| `docs` | ubuntu-latest | 对外文档体检，一个脚本六类判据：相对链接可达、页内/跨页锚点存在、双语两侧都在位、可复算主张与真源一致、每张 markdown 表格每行格数一致、安装落点不是 world-writable 目录里的固定名字、正文里不许残留被贴进去的 shell/JS 语句（先 `node scripts/check-doc-links.mjs --self-test`，再 `node scripts/check-doc-links.mjs`——电池跑在正查之前，因为一条没人见它红过的判据不算判据） |
 | `harness-rulers` | ubuntu-latest | `harness/` 那套已记录基线：fork 分歧度、工具面与产品面、品牌漂移、pinned 上游 tag 上的扩展点存活、内核出处（`node harness/tools/*.mjs --check`）。这一条读的是 `harness/**`，而发布归档里从不带它 |
 | `publish-gate-selftest` | macos-14 | 发布闸自身的固定点测试：`verify-published.ts` 必须给出三个不同的答案（good / 错误页 / 永不 listening）。产品是 macOS-only——这道闸在 Linux 上会 exit 2「什么都没验」——所以它跑在 macOS runner 上，此刻是真的在测量 |
 | `workflow-lint` | ubuntu-latest | workflow 文件本身：`node scripts/check-workflows.mjs` 拒掉 GitHub 根本不会加载的写法（重名 job、`if:` 里引用 `secrets`、未加引号的 `value: `、指向不存在脚本的步骤、未声明就使用的 `workflow_dispatch` 输入） |

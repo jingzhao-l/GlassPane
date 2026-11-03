@@ -131,15 +131,11 @@ export function headingsOf(text) {
   const out = new Set()
   let fence = null
   for (const line of text.split('\n')) {
-    const open = /^\s{0,3}(`{3,}|~{3,})/.exec(line)
+    const wasOpen = fence !== null
+    fence = fenceAfter(line, fence)
+    if (wasOpen) continue
     if (fence !== null) {
-      const close = /^\s{0,3}(`{3,}|~{3,})\s*$/.exec(line)
-      if (close && close[1][0] === fence[0] && close[1].length >= fence.length) fence = null
-      continue
-    }
-    if (open) {
-      // 带 info string 的开栏（```jsonc）也算开栏；闭合栏必须是同一种字符且不更短。
-      fence = open[1]
+      // 这一行开了栏（或还在栏里）：围栏里的行不参与 GitHub 的锚点，跟着它走。
       continue
     }
     const m = /^(#{1,6})\s+(.*)$/.exec(line)
@@ -176,14 +172,46 @@ function decodeRef(raw) {
 }
 
 /**
- * 围栏行。``` 与 ~~~ 都算开栏，也都必须能闭栏。
+ * 围栏行。``` 与 ~~~ 都算开栏，闭合栏必须是同一种字符且不更短，且闭合行不许带 info string。
  *
- * 这一个判据有三个读者（`headingsOf`、`shellResidue`、`markdownTableProblems`）。此前
- * `shellResidue` 只认 ```，另外两个认两种，于是用 `~~~` 包住的示例命令被残渣闸误红，
- * 而误红的补救文案——"要么放进 ``` 围栏"——对**已经在 `~~~` 里**的那一行自相矛盾（S10-5）。
- * 三个读者共用一个式子，才不会再各写各的、各自漂移。
+ * 这一个是**状态机**而不是布尔判据，因为它有三个读者（`headingsOf`、`shellResidue`、
+ * `markdownTableProblems`），而布尔版本（旧的 `isFenceLine`：`/^\s*(?:```|~~~)/` 一行翻一次面）
+ * 对其中两个读者是错的：它不记是哪一种字符开的、不记长度、也不管缩进，于是文档里任何一枚
+ * 落单的围栏行——最常见的来源是**缩进 ≥4 空格的代码块里恰好有一行 ``` 开头**——会把之后的
+ * 整篇读成"在围栏里"，那篇文档余下的行**一条都不再被判**。这不是假想的形状：本轮量到
+ * `harness/glasspane-harness/SYNCLOG.md` 里就有缩进代码块，而 `headingsOf` 一直用的是
+ * CommonMark 那一套（`^\s{0,3}` + 同种字符 + 不更短），两边从来不是同一个式子。
+ * 注释里那句"三个读者共用一个式子"（S10-5 写的）因此是被否证的主张，本次一并改成真的。
  */
-export const isFenceLine = (line) => /^\s*(?:```|~~~)/.test(line)
+export const FENCE_MARKER = /^\s{0,3}(`{3,}|~{3,})(.*)$/
+
+/**
+ * @param line 一行正文
+ * @param open 当前打开的围栏标记（null 表示不在围栏里）
+ * @returns 下一状态：仍是标记串，或回到 null
+ */
+export function fenceAfter(line, open) {
+  const m = FENCE_MARKER.exec(line)
+  if (open === null) return m ? m[1] : null
+  if (m && m[1][0] === open[0] && m[1].length >= open.length && m[2].trim() === '') return null
+  return open
+}
+
+/**
+ * 把一行的**正文**取出来：成对的行内代码段（`` `x` ``、`` ``x`` ``）剥掉，替换成一枚空格——
+ * 不留空是因为粘起来会造出假形状（`` `tar -tzf` 与 `grep -c` `` 剥成空格后若不留位，就拼成
+ * 一条"命令 + 竖线 + 命令"的管道，读起来像残渣）。
+ *
+ * **按行配对，不跨行传状态**：CommonMark 的行内代码可以跨软换行，于是"这一段里有一枚落单的
+ * 反引号"（散文里当引号用、或写 ` 时忘了配对）会让跨行状态在**整段**里翻转——本轮实测踩到过：
+ * `updater/README.md` 一段六行的项目符号里一处配对错位，把下一行的中文正文整段当成"在代码段里"
+ * 剥掉，只剩 `NODE_EXTRA_CA_CERTS` 一枚，残渣闸于是报"正文里有一行恰好是一枚全大写标记"——
+ * 一道为了消灭假绿而加的闸，自己造出一条假红。跨行状态还同时会**造出假绿**（真正贴进正文的
+ * 语句被当成代码剥掉），所以这里退回按行配对：落单的反引号留在正文里，不翻转任何状态。
+ */
+export function proseOf(line) {
+  return line.replace(/(`+)([\s\S]*?)\1/g, ' ').trim()
+}
 
 /** 从 mcp-shell 源码里数出真实工具数（不依赖构建产物）。 */
 function realToolCount(rootDir = ROOT) {
@@ -816,7 +844,8 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
 }
 
 /**
- * shell 残渣闸：文档正文里不许出现 heredoc 结束标记或裸露的 shell 命令行。
+ * shell 残渣闸：文档正文里不许出现 heredoc 结束标记，也不许出现裸露的**语句形状**
+ * （赋值/调用/片段续行/管道/命令替换——旧版只看一份手抄的命令词名单，本轮改成形状，见下面 ②）。
  *
  * WHY（本轮真事中招两次，2026-10-16）。用 `cat >> 文件 <<'EOF' … EOF` 往 `engine/smoke.md`
  * 追加时，外层 `/bin/bash -c '…'` 的单引号提前收尾，于是**包装脚本自己的那一行**被当成正文写进
@@ -829,9 +858,12 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
  * ① 一行恰好是 heredoc 结束标记；② 一行是**命令形状**的 shell 行——小写命令词开头、整行不含汉字、
  * 且带着只有命令行才有的东西（`$(`、第二个词以 `-` 或 `/` 开头、或紧跟引号）。两者都只在
  * **围栏之外**生效——``` 与 `~~~` 里面的 shell 记录是文档的正常内容（这一页就有好几段），把围栏也扫进去
- * 是一道永远会误红的闸。开/闭判定与 `markdownTableProblems`、`headingsOf` 共用 `isFenceLine`：
- * 此前这里只认 ```，于是 `~~~` 围栏里的示例命令被误红，而误红文案教作者"放进 ``` 围栏"——
- * 对已经在一个合法围栏里的行自相矛盾（S10-5，2026-10-29）。
+ * 是一道永远会误红的闸。开/闭判定与 `markdownTableProblems`、`headingsOf` 共用**同一个状态机**
+ * （`fenceAfter`）：此前这里只认 ```，于是 `~~~` 围栏里的示例命令被误红，而误红文案教作者
+ * "放进 ``` 围栏"——对已经在一个合法围栏里的行自相矛盾（S10-5，2026-10-29）。那一版修的是
+ * "两种围栏字符都认"，没有修"布尔翻面"本身：注释当时写的是"三个读者共用 `isFenceLine`"，
+ * 而 `headingsOf` 用的是另一套（CommonMark：缩进 ≤3、同种字符、闭合不更短）——**主张与代码不符**，
+ * 本轮按 `fenceAfter` 把它变成真的（缺陷 #3）。
  *
  * ①的那份**名单**（`EOF/MSG/PY/SQL/OUT/YAML/JSON`）在 2026-10-31 被同一类事故否证：那一轮往
  * `engine/smoke.md` 追加读数时用的是 `<<'XEOF'`，`XEOF` 不在名单里 ⇒ 残渣连同后面的整块 node 脚本
@@ -845,29 +877,125 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
  * `harness/glasspane-harness/SYNCLOG.md:684` 那句人话（"grep 会把这种管道输入当"二进制"而停止
  * 匹配。"）被判成了残渣——**一道新闸第一次运行就误红了一条别人的文档**。命令词后面接中文不是命令。
  */
-const HEREDOC_TERMINATOR = /^[A-Z][A-Z0-9_]{1,15}$/
+const HEREDOC_TERMINATOR = /^[A-Z][A-Z0-9_]{1,63}$/
 const HAN = /[\p{Script=Han}]/u
+/**
+ * ①′：标记与下一条语句写在**同一行**（`EOF; git diff --numstat …`）。本轮把真残渣喂进判据量过：
+ * 只认"独立成行"的那一版，遇到这种共享行就整块漏掉。①″：heredoc 的引入式（`<<'EOF'`）——引号
+ * 包住的标记是脚本语法，不是散文。① 的宽度从 `{1,15}` 放到 `{1,63}`：`GLASSPANE_SMOKE_APPEND_END`
+ * （24 字符）是一枚合法标记，旧宽度不抓它。首字符仍要求大写：全小写的"整行一个词"在人话里出现
+ * 概率不为零，这一半是取舍，写在这里而不是等谁被红了才发现。
+ */
+const HEREDOC_TERMINATOR_INLINE = /^[A-Z][A-Za-z0-9_]{1,63}[ \t]*(?:;|&&|\|\|)/
+const HEREDOC_INTRODUCER = /<<-?[ \t]*['"][A-Za-z_][A-Za-z0-9_]*['"]/
+/**
+ * ②：**"这是一条语句"的形状**，不是"第一个词是命令词"。
+ *
+ * 旧版 ② 是一份手抄词表（`echo|wc|printf|cat|sed|grep|ls|nohup|tar`）——正是这一版刚刚在 ① 上
+ * 退掉的同一个形状（"名单永远少下一枚"，本仓第四次）。本轮实测：把 2026-10-31 漏进
+ * `engine/smoke.md` 的那 9 行**删掉 `XEOF` 那一行**再喂进旧判据，报 **0 条**。剩下 8 行是
+ * `node -e "`、`const fs=require("fs");`、`fs.writeFileSync(p, …);`、`console.log("appended");`、
+ * `"; git diff --numstat …`——没有一条以名单上的词开头，也没有一条是"命令词 + 运算元"的形状。
+ *
+ * 按形状判的四类：赋值语句、调用语句、以闭引号/闭括号/分隔符开头的**片段延续**（被截断的表达式
+ * 才这么起头，人话不），以及 `$()` / 管道 / `&&` 接命令这类强运算元。判的一律是剥掉行内代码段
+ * 之后的正文；含汉字的行一律不判（第一版就是因为只看命令词误红了 SYNCLOG 那句人话）。
+ * 围栏之外的缩进代码块（≥4 空格）同样不判——`harness/glasspane-harness/SYNCLOG.md:564` 那条
+ * `curl -fsSL …` 就是缩进代码块，是合法的文档形状；把它判红等于误红一条本轮不许改的文件。
+ */
+/**
+ * 赋值语句两种起头才算：JS 声明词开头，或等号右边是"值的写法"（引号、反引号、`$`、`[`、`{`、`(`）。
+ * `rc=0（"no changes"…）`、`GLASSPANE_CA_REEXEC=1` 不算——等号右边是一个裸字面量时，那句是在
+ * **讲值**，不是贴了一条语句（本轮实测：前者在 harness 线的 SYNCLOG:1268，后者在 updater/README:27，
+ * 把任一条判红都要我去改一条不属于本轮的文档）。
+ */
+const STATEMENT_ASSIGN = /^(?:const|let|var)[ \t]+[A-Za-z_$][\w.$]*[ \t]*=[^=]|^[A-Za-z_$][\w.$]*[ \t]*=["'`$[(]/
+const STATEMENT_CALL_HEAD = /^[A-Za-z_$][\w.$]*\s*[([]/
+/** 语句的收口是 `);` ——只写到 `)` 的那一行是"提到了一个函数"，不是"贴了一条语句"。 */
+const STATEMENT_CALL_TAIL = /[)\]]\s*;\s*$/
+/** 被截断的字符串续行：闭引号后面**立刻**接 shell 运算符（`"; git diff …`）。 */
+const FRAGMENT_HEAD = /^["']\s*[;|)&]/
+/**
+ * 管道形状：小写命令词开头、中间有**真运算元**（`-x`、`/path`、引号包住的值），再接 `| 另一条命令`。
+ * 运算元那一半是必需的：`curl | bash` 是在**说这条管道**，不是贴了一条待执行的命令
+ * （实测于 harness 线 SYNCLOG:3693，那条文件本轮不许改；旧版靠"第一个词在名单里"躲过了它）。
+ */
+const PIPELINE = /^[a-z][\w.+-]*(?:[ \t]+(?:-\S+|\/[^\s]*|["'][^\s]*["']))+[ \t]*[|][ \t]*[a-z][\w.+-]+/
+/**
+ * 命令替换：`wc -l "$(printf %s f)"`。要求 `$( ` 前面是行首、空白或引号——`gui/$(id -u)/…`
+ * 那种**黏在路径里**的写法是在讲一个名字（本轮实测它在 specs 台账的一行里，那一行不许本轮改），
+ * 不是贴了一条待执行的替换。
+ */
+const COMMAND_SUBST = /(?:^|[ \t["'`])\$\(/
+/**
+ * 调用开头：一个小写词紧跟一枚选项（`wc -l file`、`node -e "`、`ls -l "$(…)"`）。
+ * 这是**动词无关**的形状——旧版靠手抄的九个命令词，名单永远少下一枚；这里不问动词，
+ * 只问"第二个 token 是不是一枚选项"。两条实测边界：`curl | bash`（在讲这条管道，没有选项）
+ * 与 `either the  -mapped spelling.`、`identifier "<id>"' --verify --strict`。
+ * （散文里选项样式的词落在第三个以后的位置）都不算——把它们判红会误红 SECURITY.md 与一份
+ * 本轮不许改动的 specs 台账，实测这两条正是被"选项必须紧跟动词"这一半挡掉的。
+ */
+const FLAGGED_INVOCATION = /^[a-z][\w.+-]{0,15}[ \t]+-{1,2}[A-Za-z]/
 
-export function shellResidue({ rootDir = ROOT, docs = DOCS } = {}) {
+/**
+ * 残渣闸的扫描集：登记的文档 **加上 specs/**。
+ *
+ * 旧版只扫登记的 32 份，而同一个文件里的 `markdownTableProblems` 走的是全仓 markdown——
+ * 于是"往正文里贴脚本"这一习惯每轮真正落笔的地方（台账）反而不在闸下。本轮把它对齐：
+ * specs/ 里的行内代码段与缩进代码块按同一套 CommonMark 判据剥掉之后，实测零误红
+ * （`specs/GlassPane_每日审查_2026-10-14_记录.md:68` 那枚折行的 `gui/$(id -u)/…` 正是靠
+ * 跨行的行内代码配对才不被读成残渣）。specs/ 的内容本轮不许改，所以这条对齐必须是零误红才成立。
+ */
+export const RESIDUE_DOCS = (() => {
+  try {
+    const specs = fs.readdirSync(path.join(ROOT, 'specs')).filter((f) => f.endsWith('.md')).sort()
+    return [...DOCS, ...specs.map((f) => `specs/${f}`)]
+  } catch {
+    return [...DOCS]
+  }
+})()
+
+export function shellResidue({ rootDir = ROOT, docs = RESIDUE_DOCS } = {}) {
   const problems = []
   for (const doc of docs.filter((d) => fs.existsSync(path.join(rootDir, d)))) {
     const text = read(doc, rootDir)
-    let fenced = false
+    let fence = null
     text.split('\n').forEach((line, i) => {
-      if (isFenceLine(line)) { fenced = !fenced; return }
-      if (fenced) return
-      const trimmed = line.trim()
-      if (HEREDOC_TERMINATOR.test(trimmed)) {
-        problems.push(`${doc}:${i + 1} 正文里有一行恰好是一枚全大写标记（${trimmed}）——`
-          + '这是 shell 追加脚本的 heredoc 结束标记漏进正文的残渣，不是文档内容；'
-          + '要么放进 ``` 围栏，要么把它删掉')
+      const wasInFence = fence !== null
+      fence = fenceAfter(line, fence)
+      if (wasInFence) return
+      // CommonMark 的缩进代码块：围栏之外、行首 ≥4 空格或制表符，那也是代码，不是正文。
+      if (/^(?: {4}|\t)/.test(line)) return
+      // markdown 表格的行由 `markdownTableProblems` 那道判据管，这里不重复判：表格单元里
+      // 出现 `|`、`(`、`"` 都是合法形状，把它们读成残渣会让这道闸去误红每一份对比表。
+      if (mdRow(line)) return
+      if (line.trim() === '') return
+      const body = proseOf(line)
+      if (body === '') return
+      if (HEREDOC_TERMINATOR.test(body)) {
+        problems.push(`${doc}:${i + 1} 正文里有一行恰好是一枚全大写标记（${body}）——`
+          + '这**通常**是 shell 追加脚本的 heredoc 结束标记漏进正文的残渣；如果它确实是正文'
+          + '（某个常量名、某个代号），把它放进 ``` 围栏或改写成一句话，'
+          + '让"这是一枚标记"与"这是散文"由渲染决定，而不是由形状猜')
         return
       }
-      const commandShaped = /^(echo|wc|printf|cat|sed|grep|ls|nohup|tar)\b/.test(trimmed)
-        && !HAN.test(trimmed)
-        && (/\$\(/.test(trimmed) || /^\w+\s+[-/]/.test(trimmed) || /^\w+\s+["']/.test(trimmed))
-      if (commandShaped) {
-        problems.push(`${doc}:${i + 1} 正文里出现裸露的 shell 命令行（${trimmed.slice(0, 60)}）——`
+      if (HEREDOC_TERMINATOR_INLINE.test(body)) {
+        problems.push(`${doc}:${i + 1} 正文以全大写标记 ${body.slice(0, 24)} 起头并紧跟 shell 运算符——`
+          + '这是 heredoc 标记与下一条语句写在同一行的残渣形状；要么放进 ``` 围栏，要么删掉那段脚本')
+      }
+      if (HEREDOC_INTRODUCER.test(body)) {
+        problems.push(`${doc}:${i + 1} 正文里有 heredoc 引入式（<<'…'）——`
+          + '那是追加脚本自己的语法，作为正文既不能执行也不能被读者当话；放进 ``` 围栏')
+      }
+      if (HAN.test(body)) return
+      const statementShaped = STATEMENT_ASSIGN.test(body)
+        || (STATEMENT_CALL_HEAD.test(body) && STATEMENT_CALL_TAIL.test(body))
+        || (FRAGMENT_HEAD.test(body) && /[();|]/.test(body))
+        || PIPELINE.test(body)
+        || COMMAND_SUBST.test(body)
+        || FLAGGED_INVOCATION.test(body)
+      if (statementShaped) {
+        problems.push(`${doc}:${i + 1} 正文里出现裸露的语句形状（${body.slice(0, 60)}）——`
           + '要么放进 ``` 围栏，要么写成 `反引号`；作为正文它既不能执行也不能被读者当话')
       }
     })
@@ -1116,12 +1244,15 @@ export function markdownTableProblems({ rootDir = ROOT } = {}) {
       continue
     }
     const lines = text.split('\n')
-    let fenced = false
+    // 与 `shellResidue`、`headingsOf` 共用同一个围栏状态机：布尔版 `isFenceLine` 一行翻一次面，
+    // 一枚落单的（或缩进代码块里的）围栏行会把之后整篇读成"在栏内"，表格形状那一整轮就此空过。
+    let fence = null
     let i = 0
     while (i < lines.length) {
       const line = lines[i]
-      if (isFenceLine(line)) { fenced = !fenced; i += 1; continue }
-      if (fenced || !mdRow(line)) { i += 1; continue }
+      const wasInFence = fence !== null
+      fence = fenceAfter(line, fence)
+      if (wasInFence || !mdRow(line)) { i += 1; continue }
       const header = mdCells(line)
       const next = lines[i + 1] ?? ''
       if (!mdRow(next)) {
@@ -1222,13 +1353,33 @@ if (process.argv.includes('--self-test')) {
       // 于是这条合法写法被误红，而误红文案叫作者"放进 ``` 围栏"——对已经在 `~~~` 里的行自相矛盾。
       files: { 'README.md': '~~~bash\nwc -l "$(printf %s f)"\n~~~\n' },
       run: (rootDir) => shellResidue({ rootDir, docs: ['README.md'] }),
-      absent: /裸露的 shell 命令行/,
+      absent: /裸露的语句形状/,
     },
     {
       id: '同一行搬到围栏之外必须是残渣（S10-5 的反向）',
       files: { 'README.md': '正文一行：\nwc -l "$(printf %s f)"\n' },
       run: (rootDir) => shellResidue({ rootDir, docs: ['README.md'] }),
-      expect: /裸露的 shell 命令行/,
+      expect: /裸露的语句形状/,
+    },
+    {
+      id: '①：正文里一枚独立的全大写标记必须红（旧版这道电池只测 ②，删掉 ① 那一支照样打印 8 case 退 0）',
+      // 2026-10-31 那次事故的**正是这一支**：`XEOF` 落在正文里。电池里没有它的变异例，
+      // 意味着把 `HEREDOC_TERMINATOR.test` 那一整块删掉，这道电池仍然全绿。
+      files: { 'README.md': '正文一段。\nXEOF\nnode -e "\nconst fs=require("fs");\n' },
+      run: (rootDir) => shellResidue({ rootDir, docs: ['README.md'] }),
+      expect: /恰好是一枚全大写标记/,
+    },
+    {
+      id: '①：夹在成对反引号里、或写在围栏里的大写词不许红（对照）',
+      files: { 'README.md': '环境变量 `NODE_EXTRA_CA_CERTS` 与 `GLASSPANE_CA_REEXEC` 各管一件事。\n\n```\nXEOF\n```\n' },
+      run: (rootDir) => shellResidue({ rootDir, docs: ['README.md'] }),
+      absent: /恰好是一枚全大写标记/,
+    },
+    {
+      id: '围栏：缩进代码块里的一枚 ``` 不许把整篇读成"在栏内"（旧布尔翻面的假绿形状）',
+      files: { 'README.md': '段落：\n\n    ```\n\n' + 'fs.writeFileSync(p, "x");\n' },
+      run: (rootDir) => shellResidue({ rootDir, docs: ['README.md'] }),
+      expect: /裸露的语句形状/,
     },
     {
       id: '一键安装把落点交给 /tmp 里的固定名字（S10-7）',

@@ -304,7 +304,7 @@ test('shell 残渣闸：本轮真漏进正文的那两行必须被点名', () =>
   const problems = shellResidue({ rootDir: root, docs: ['x.md'] })
   assert.equal(problems.length, 2, JSON.stringify(problems))
   assert.match(problems[0], /x\.md:2.*heredoc 结束标记/)
-  assert.match(problems[1], /x\.md:3.*裸露的 shell 命令行/)
+  assert.match(problems[1], /x\.md:3.*裸露的语句形状/)
   fs.rmSync(root, { recursive: true, force: true })
 })
 
