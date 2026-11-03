@@ -154,11 +154,14 @@ export class McpServer {
     try {
       parsed = JSON.parse(line);
     } catch {
-      return this.error(PARSE_ERROR, "Parse error", null);
+      // 三字段纪律（`{code, message, remedy}`）在这一层同样成立：兄弟两条臂
+      // （INVALID_PARAMS 两支）都带 `| remedy:`，而这三条协议错从前只回一句话——
+      // 拿到 "Parse error" 的代理不知道下一步做什么，只能猜（缺陷 #19，P3）。
+      return this.error(PARSE_ERROR, 'Parse error | remedy: 每帧是一条以换行结尾的 JSON-RPC 对象；先把这一行单独喂给 JSON.parse 自查，再重发一帧 {"jsonrpc":"2.0","id":1,"method":"tools/list"}', null);
     }
 
     if (!this.isRequestBody(parsed)) {
-      return this.error(INVALID_REQUEST, "Invalid Request", null);
+      return this.error(INVALID_REQUEST, 'Invalid Request | remedy: 一帧只装一个对象，键必须是 {"jsonrpc":"2.0","id":<数字或字符串>,"method":"<名字>","params":{…}}；id 不能省（本壳的归属靠它），params 对 initialize/tools/list/ping 可以给空对象', null);
     }
     const request = parsed as IncomingRequest;
 
@@ -169,7 +172,9 @@ export class McpServer {
       return null;
     }
     if (typeof request.id !== "number" && typeof request.id !== "string") {
-      return this.error(INVALID_REQUEST, "Invalid Request", null);
+      // 缺陷 #19 的另外两臂：同一条纪律，同一个文件里还有两处只回报代号（本轮实测：喂
+      // `{"id":42}` 那种非字符串/非数字的 id 进得来这一臂，读到的仍然是一句 "Invalid Request"）。
+      return this.error(INVALID_REQUEST, 'Invalid Request | remedy: id 只能是数字或字符串这一族（JSON-RPC 归属靠它匹配在途请求）；把 id 换成 1 或 "1" 再发一帧 {"jsonrpc":"2.0","id":1,"method":"tools/list"}，或改发一条不带 id 的通知（notifications/initialized 这类只处理不回答）', null);
     }
 
     try {
@@ -226,7 +231,7 @@ export class McpServer {
 
   private async dispatch(request: IncomingRequest, id: number | string): Promise<RpcResponse> {
     if (typeof request.method !== "string") {
-      return this.error(INVALID_REQUEST, "Invalid Request", id);
+      return this.error(INVALID_REQUEST, 'Invalid Request | remedy: method 必须是一个字符串名；这一版认 initialize、ping、tools/list、tools/call 四个，形状是 {"jsonrpc":"2.0","id":<数字或字符串>,"method":"tools/list"}', id);
     }
 
     switch (request.method) {
@@ -249,7 +254,7 @@ export class McpServer {
       case "tools/call":
         return this.callTool(id, request.params);
       default:
-        return this.error(METHOD_NOT_FOUND, `Method not found: ${this.echoForeign(String(request.method))}`, id);
+        return this.error(METHOD_NOT_FOUND, `Method not found: ${this.echoForeign(String(request.method))} | remedy: 这一版认四个 method——initialize、ping、tools/list、tools/call；要工具名与参数形状就发 {"jsonrpc":"2.0","id":${JSON.stringify(request.id ?? 1)},"method":"tools/list"}`, id);
     }
   }
 

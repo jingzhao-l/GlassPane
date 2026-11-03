@@ -1486,12 +1486,12 @@ export class EngineJsonRpcClient {
     this.report(`dropped late-reply tracking for '${evicted.method}' (id ${evicted.id}): retention cap ${LATE_REPLY_RETENTION} reached`);
   }
 
-  private handleMessage(line: string): void {
+  private handleMessage(line: string, raw?: Buffer): void {
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
     } catch {
-      this.report(`engine sent a non-JSON frame, dropped: ${frameBodyNotLoggedNote(line)}`);
+      this.report(`engine sent a non-JSON frame, dropped: ${frameBodyNotLoggedNote(line, raw)}`);
       return;
     }
     // 形状也要过这一遍，不能只挡住"不是 JSON"。`null`、数组、一个数字都是合法的
@@ -1500,7 +1500,7 @@ export class EngineJsonRpcClient {
     // 把所有在途请求一起带走。stdio 那一侧的 `isRequestBody` 早就防到这个形状了，
     // 引擎这一侧漏了：同一份"对端不可信"的判断，两半必须同一口径。
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      this.report(`engine sent a frame that is not a JSON object, dropped: ${frameBodyNotLoggedNote(line)}`);
+      this.report(`engine sent a frame that is not a JSON object, dropped: ${frameBodyNotLoggedNote(line, raw)}`);
       return;
     }
     const frame = parsed as CallFrame;
@@ -1523,7 +1523,7 @@ export class EngineJsonRpcClient {
               + (kept.settled ? " (caller already answered)" : "")).join(", ");
         this.report(
           `engine sent a frame for request id ${id}, which this client never issued (or already gave up on); `
-          + held + ": " + frameBodyNotLoggedNote(line),
+          + held + ": " + frameBodyNotLoggedNote(line, raw),
         );
         return;
       }
@@ -1601,17 +1601,17 @@ export class EngineJsonRpcClient {
         // guessed result to a live caller would answer it with another request's
         // data — so nothing is settled here and the request keeps its own
         // deadline.
-        this.report(`engine sent an id-less frame with a result while '${target.method}' (id ${target.id}) is still waiting for its answer; an id-less answer from this daemon is an error frame, so this one was not delivered to any caller: ${frameBodyNotLoggedNote(line)}`);
+        this.report(`engine sent an id-less frame with a result while '${target.method}' (id ${target.id}) is still waiting for its answer; an id-less answer from this daemon is an error frame, so this one was not delivered to any caller: ${frameBodyNotLoggedNote(line, raw)}`);
         return;
       }
       this.report(frame.error
         // `null`, and not a guess at a method: this frame is being reported precisely
         // because no request this client still tracks owns it.
-        ? `engine reported ${this.engineError(frame.error, null).code} with no request in flight: ${frameBodyNotLoggedNote(line)}`
-        : `engine sent an id-less frame with no request in flight: ${frameBodyNotLoggedNote(line)}`);
+        ? `engine reported ${this.engineError(frame.error, null).code} with no request in flight: ${frameBodyNotLoggedNote(line, raw)}`
+        : `engine sent an id-less frame with no request in flight: ${frameBodyNotLoggedNote(line, raw)}`);
       return;
     }
-    this.report(`engine sent a frame with a non-numeric request id (${shortFieldValue(id)}), which this client never issues: ${frameBodyNotLoggedNote(line)}`);
+    this.report(`engine sent a frame with a non-numeric request id (${shortFieldValue(id)}), which this client never issues: ${frameBodyNotLoggedNote(line, raw)}`);
   }
 
   private settleFromFrame(entry: Pending, frame: CallFrame): void {
@@ -2005,10 +2005,13 @@ function attribute(error: EngineCallError, entry: Pending, inferred = true): Eng
  *
  * The reverse mutation is to interpolate the frame back into any of those seven lines.
  */
-export function frameBodyNotLoggedNote(serializedFrame: string): string {
-  const bytes = Buffer.byteLength(serializedFrame, "utf8");
-  const digest = createHash("sha256").update(serializedFrame, "utf8").digest("hex").slice(0, 12);
-  return `a ${bytes}-byte frame (sha256 ${digest}) whose text is not written to this log: on this `
+export function frameBodyNotLoggedNote(serializedFrame: string, wireBytes?: Buffer): string {
+  // 有真字节就用真字节；没有（例如这条注记是从一个已经只剩文本的路径来的）就照文本算，
+  // 但**不再声称**它是线字节——下面那句 "as decoded by this transport" 就是这一半老实话。
+  const source = wireBytes ?? Buffer.from(serializedFrame, "utf8");
+  const bytes = source.length;
+  const digest = createHash("sha256").update(source).digest("hex").slice(0, 12);
+  return `a ${bytes}-byte frame (sha256 ${digest}, ${wireBytes ? "of the exact bytes this transport received" : "of the frame text as this transport decoded it"}) whose text is not written to this log: on this `
     + "socket a frame body is on-screen accessibility content — element titles and values, "
     + "sometimes a document's text — and this log's sink is a file this product never sets the mode "
     + "of, so the state root's 0700 does not cover it. Anything the daemon did record is in its "

@@ -440,25 +440,24 @@ const ALREADY_QUOTED_PRODUCERS = new Set([
  * a command an agent runs. Position, not vocabulary — hence the anchor at the end of the
  * text that precedes each hole.
  */
-const COMMAND_PREFIX = new RegExp(
-  // The boundary is "any non-identifier character", and the operand may sit behind an opening
-  // quote. Both halves matter: the scan used to accept only whitespace/backtick/semicolon/paren/
-  // quote before the command word and only whitespace after it, so
-  // `…补救（不需要手敲 launchctl）：node "${cliPath}" --restore-launchd` — a command operand behind
-  // a full-width colon, wrapped in the very double quotes this rule exists to refuse — was
-  // invisible to it. Measured: reverting that site to the double-quoted shape left the gate green.
-  //
-  // 2026-11-03, the same shape a fourth time in this repo: the verb **list** was the blind spot.
-  // `installer/cli.js` printed `git -C "${repoDir}" tag -v …` at eight sites while the same
-  // function quoted that very variable 24 lines below — and the gate could not see it, because
-  // `git` was never added to the hand-copied alternation. A list is always missing the next verb.
-  // So the verb is now a **shape**: a lowercase word (2-16 chars) in command position. Which
-  // operand needs quoting stays decided by position plus PATH_TYPED, exactly as before — only the
-  // verb half stopped being a list.
+// 两半并集，谁也不许单独担责：
+// ① 旧的动词名单——留着是为了不比今天少测任何东西（`cat ${file}`、`plutil -p ${file}` 这类
+//    没有选项的调用位，只有名单认得）。
+// ② 动词无关的**形状**：一枚选项（`-C`、`--branch`）紧贴在参数位前面，或紧跟在参数位后面。
+//    这一半才是本轮补上的那块：名单里没有 `git`，于是 `git -C "${repoDir}" tag -v …` 十四处
+//    全在闸的盲区里（本轮实测：把它们改回双引号，旧版一条都不红）。
+const COMMAND_VERB_PREFIX = new RegExp(
   "(?:^|[^A-Za-z0-9_$])(?:/?(?:usr/)?(?:bin|s?bin)/)?"
-  + "[a-z][a-z0-9_.+-]{1,15}"
-  + "(?:\\s+(?:-[A-Za-z0-9_-]+|\\d{3,4}))*[\"'\\s]+$"
+  + "(?:chmod|chown|chgrp|mv|cp|cat|ls|df|plutil|python3|node|npx|launchctl|diskutil|"
+  + "kill|rm|mkdir|touch|open|curl|security|defaults|export|gzip|tar|sqlite3|grep|stat|find|sh|"
+  + "glasspaned|updater|installer)(?:\\s+(?:-[A-Za-z0-9_-]+|\\d{3,4}))*[\"'\\s]+$"
 );
+/** 参数位紧邻一枚选项：`git -C <洞>`、`node <洞> --restore-launchd`。 */
+const OPTION_BEFORE = /(?:^|[\s"'([{])-{1,2}[A-Za-z][\w-]*(?:[ \t]+[\w-]+)*[ \t]*["']?$/;
+const OPTION_AFTER = /^[^\n]{0,40}[ \t"']-{1,2}[A-Za-z]/;
+const COMMAND_PREFIX = (before, after) =>
+  COMMAND_VERB_PREFIX.test(before) || (OPTION_BEFORE.test(before) && !/[\w-]{17,}$/.test(before)) || OPTION_AFTER.test(after);
+
 const ANY_HOLE = /\$\{([^{}]*)\}/g;
 /** An interpolation whose name says it carries a filesystem location. */
 const PATH_TYPED = /(?:path|Path|dir|Dir|file|File|root|Root|target|Target|cli|Script|directory)/;
@@ -473,11 +472,27 @@ test("every interpolated value inside a command-shaped literal in src and update
         const literal = match[0];
         if (!literal.includes("${")) continue;
         const body = literal.slice(1, literal.length - 1);
+        // 第二半的结构判据（不是词表）：一条**待照抄的命令**在这个仓库里总是带着至少一枚选项
+        // （`-p`、`--restore-launchd`、`-C`、`--depth`）。没有选项的那一行是"提到一个函数/一个
+        // 模式号"的散文——`chmod ${(dir.mode & 0o7777).toString(8)} failed: ${error.message}`
+        // 与 `homeDefaultSocketPath()` 都是这类，把它们算成缺陷就是让闸去要求一件不可能的事。
+        // 旧的动词名单同样不会碰它们，所以这一半不是放宽，是"改成形状之后必须补上的那一刀"。
         let sawOperand = false;
         for (const hole of body.matchAll(ANY_HOLE)) {
           const expression = (hole[1] ?? "").trim();
           const before = body.slice(Math.max(0, hole.index - 80), hole.index);
-          if (!COMMAND_PREFIX.test(before)) continue;
+          const after = body.slice(hole.index + hole[0].length, hole.index + hole[0].length + 44);
+          // 与文档残渣闸同一句老话（S10-5，2026-10-29）：**汉字后面接的不算命令**。
+  // 这一半是形状判据必需的：`两个都跑不通就是 ${path.dirname(target)} 的权限问题，看 \`ls -ld …\``
+  // 与 `daemon 在 ${socketPath} 应答了 hello…` 都是中文说明，形状里的"选项"来自句中最深处的一个
+  // markdown 代码段，而不是一个待照抄的参数位。本轮实测：少了这一刀，三处中文说明被误报。
+  if (/[\p{Script=Han}]/u.test(before) || /[\p{Script=Han}]/u.test(after)) continue;
+  if (!COMMAND_PREFIX(before, after)) continue;
+          // 选项必须**紧挨着这一枚参数位**——在它前面那一段里，或者紧跟其后（`node "${cli}"
+          // --restore-launchd` 就是后者）。整条字面量里"出现过一根横杠"不算：
+          // `nothing installed at ${appsDir} reports a version (no .app bundle …)` 那句是散文，
+          // 它带着 `.app`、破折号与括号，却没有任何一处是要照抄的参数位（本轮实测它会误报，
+          // 而误报的下一条出路就是有人来把这条闸改松）。
           // 参数位上的插值只有指向**路径**时才需要引号。`(chmod ${(want & 0o777).toString(8)}
           // failed: …)` 是一句"chmod 以模式 600 失败"的说明文字，那个洞是八进制模式号，不是
           // 文件名；把它算成缺陷就是让闸去要求一件不可能的事。
@@ -517,8 +532,14 @@ test("every interpolated value inside a command-shaped literal in src and update
     "installer 的 `--restore-launchd` 补救命令不在扫描结果里");
   // 2026-11-03：动词表改成形状之后，`git` 那一批必须**看得见**——否则"改成形状"这句话没有读数。
   // 这八处是本轮修掉的（`git -C "${repoDir}" tag -v …` 一类），旧名单一条都不报。
-  assert.ok(installerInspected.filter((entry) => entry.includes("tag -v")).length >= 2,
-    `installer 的 git tag -v 出路不在扫描结果里（动词形状没生效）：${installerInspected.join(" | ")}`);
-  assert.ok(installerInspected.some((entry) => entry.includes("rev-parse --show-toplevel")),
-    "targetDir 的 `git -C … rev-parse --show-toplevel` 不在扫描结果里");
+  // 形状那一半的读数：至少一处 `git -C ${quoteShellArg(…)}` 必须真被扫到，否则"名单改成形状"
+  // 这句话没有证据。边界如实写下：紧贴参数位的那一段里含汉字的**中文说明**由上面那一刀跳过
+  // （`下一步：确认 ${targetDir} 是一棵 git 仓库（git -C … rev-parse --show-toplevel 能不能答话）`
+  // 就是这一形）——那一处本轮也改了，但它是靠**改掉双引号**改的，不是靠这条闸抓的；
+  // 抓不到它不等于可以不管它，所以它由 daily-20261103-shell-printed-operand-inertness 那条
+  // 真进程对照与 installer 侧的三条断言一起钉。
+  assert.ok(installerInspected.filter((entry) => entry.includes("git -C ${quoteShellArg(")).length >= 2,
+    `installer 的 git -C 出路不在扫描结果里（动词形状没生效）：${installerInspected.join(" | ")}`);
+  assert.ok(installerInspected.some((entry) => entry.includes("--accept-unverified-signature")),
+    "installer 的 --accept-unverified-signature 出路不在扫描结果里");
 });

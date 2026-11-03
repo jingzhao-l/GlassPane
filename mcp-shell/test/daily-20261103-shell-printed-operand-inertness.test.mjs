@@ -84,39 +84,58 @@ test('本轮修掉的六处命令位，必须仍在扫描集的视野里（否�
   assert.ok(quoted >= 6, `打印行里 sh_quote 只有 ${quoted} 处，六处参数位不可能都惰性`)
 })
 
-test('真进程惰性：把打印出来的那条 GLASSPANE_INSTALL_DIR= 交给 bash，载荷不许执行', () => {
+test('真进程惰性：打印出来的那两句照抄进 bash，目录名里的载荷不许执行', () => {
+  // 夹具走的是 installer/test/daily-20261029-installer-lane7.test.mjs 里那条**已经很快**的路：
+  // 真本地源仓 + 真 clone + 一个远端不存在的 ref ⇒ 走到 418/420 那两句打印。前一版这里给的是
+  // 一个不存在的 file:// 源，install.sh 于是真去试了 clone，一条测试跑了 106 秒——那是负载夹具，
+  // 不是对照。
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-inert-'))
-  // 目录名就是一枚载荷：反引号 + 空格，正是双引号挡不住的那两种东西。
   const marker = path.join(root, 'pwned-by-double-quote')
-  const hostile = path.join(root, 'a `touch ' + marker + '`')
+  const spaced = path.join(root, 'a $(touch ' + marker + ')')
+  const git = (cwd, args) => spawnSync('git', args, {
+    cwd, encoding: 'utf8',
+    env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' },
+  })
   try {
-    fs.mkdirSync(path.join(hostile, 'engine'), { recursive: true })
-    fs.mkdirSync(path.join(hostile, 'mcp-shell'), { recursive: true })
-    fs.writeFileSync(path.join(hostile, 'engine', 'Package.swift'), '// fixture\n')
-    fs.writeFileSync(path.join(hostile, 'mcp-shell', 'package.json'), '{}\n')
-    fs.writeFileSync(path.join(hostile, 'dirty.txt'), 'uncommitted\n')
-    const git = (args) => spawnSync('git', args, { cwd: hostile, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null' } })
-    git(['init', '-q', '.'])
-    git(['add', 'engine/Package.swift', 'mcp-shell/package.json'])
-    git(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'])
+    const src = path.join(root, 'src')
+    fs.mkdirSync(path.join(src, 'engine'), { recursive: true })
+    fs.mkdirSync(path.join(src, 'mcp-shell'), { recursive: true })
+    fs.writeFileSync(path.join(src, 'engine', 'Package.swift'), '// swift-tools-version:5.10\n')
+    fs.writeFileSync(path.join(src, 'mcp-shell', 'package.json'), '{}\n')
+    git(src, ['init', '-q', '.'])
+    git(src, ['add', '-A'])
+    git(src, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'old'])
+    git(src, ['tag', 'v0.0.1-old'])
+    const cloneArgs = ['clone', '--quiet', '--branch', 'v0.0.1-old', '--single-branch', `file://${src}`, spaced]
+    assert.equal(git(root, cloneArgs).status, 0, '夹具：clone 到那枚带载荷的目录名必须成功')
 
     const run = spawnSync('/bin/sh', [path.join(REPO, 'install.sh')], {
-      cwd: REPO, encoding: 'utf8',
-      env: { ...process.env, GLASSPANE_REPO: hostile, GLASSPANE_REF: 'v1.28.1', HOME: root },
-      stdin: 'ignore', timeout: 120_000,
+      // cwd 不能是主仓那一棵：install.sh 先在当前目录定位仓库，那样 GLASSPANE_INSTALL_DIR
+      // 根本轮不到（本轮实测：cwd=主仓时它答"在当前目录定位到仓库"，那两句打印一句都没走）。
+      cwd: root, encoding: 'utf8', stdin: 'ignore', timeout: 90_000,
+      env: {
+        ...process.env,
+        GLASSPANE_REPO: '',
+        GLASSPANE_INSTALL_DIR: spaced,
+        GLASSPANE_REF: 'nosuchtag',
+        GLASSPANE_REPO_URL: `file://${src}`,
+        HOME: root,
+      },
     })
     const out = `${run.stdout ?? ''}${run.stderr ?? ''}`
-    assert.ok(run.status !== 0, `脏树本就该拒装，实退 ${run.status}：${out.slice(0, 200)}`)
-    assert.match(out, /未提交改动|不合判据/, `没有走到那三句归因，这条对照什么也没测：${out.slice(0, 200)}`)
+    assert.match(out, /先 fetch 它|没有 nosuchtag 这个引用/, `前提：这一趟要走到那两句打印：${out.slice(0, 300)}`)
+    assert.equal(fs.existsSync(marker), false, '光是跑 install.sh 就触发了目录名里的载荷')
 
-    const line = out.split('\n').find((l) => l.includes('GLASSPANE_INSTALL_DIR='))
-    if (line) {
-      const value = line.slice(line.indexOf('GLASSPANE_INSTALL_DIR=') + 'GLASSPANE_INSTALL_DIR='.length).split(' ')[0]
-      assert.match(value, /^'/, `打印出来给人照抄的赋值不是单引号惰性词：${value.slice(0, 60)}`)
-      spawnSync('/bin/bash', ['-c', `export ${value} true`], { encoding: 'utf8' })
-      assert.equal(fs.existsSync(marker), false, '照抄这一行会执行目录名里的载荷——惰性引号没生效')
+    const printed = out.split('\n').filter((l) => /git -C /.test(l))
+    assert.ok(printed.length >= 1, `没打印出任何 git -C 那一句：${out.slice(0, 300)}`)
+    for (const line of printed) {
+      assert.ok(line.includes(`git -C '${spaced}'`), `参数位不是惰性词（双引号包不住 $()）：${line.trim().slice(0, 160)}`)
+      assert.ok(!line.includes(`git -C "${spaced}"`), `又回到双引号那一形：${line.trim().slice(0, 160)}`)
     }
-    assert.equal(fs.existsSync(marker), false, `光是跑 install.sh 就触发了目录名里的载荷：${marker}`)
+    // 真把这一行交给 bash：只应报"找不到那枚 tag"，不应造出载荷文件。
+    const command = printed[0].slice(printed[0].indexOf('git -C'))
+    spawnSync('/bin/bash', ['-c', command], { encoding: 'utf8', timeout: 30_000 })
+    assert.equal(fs.existsSync(marker), false, `把打印出来的那一行照抄进终端会执行目录名里的载荷：${command.slice(0, 120)}`)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

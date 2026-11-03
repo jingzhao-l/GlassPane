@@ -702,5 +702,17 @@ export function readUpdateState(env: NodeJS.ProcessEnv = process.env, stateRootO
   if (staged && typeof staged.version === "string") {
     bits.push(`staged=${foreignValue(staged.version)}${staged.digest ? ` (${foreignValue(staged.digest, 12)}…)` : ""}`);
   }
+  // 缺陷 #22（P3）：这一面按 `GLASSPANE_STATE_DIR` 认状态根，而 daemon **从不读**那枚变量
+  // （`glasspane-settings/ConsoleModel.swift` 写得很明白：那是更新器那侧的口径）。环境变量
+  // 一设，这一条读数与出路里钉的 `--state-dir` 就一起挪到了一个后台服务永远不去的位置上，
+  // 而摘要里看不出这一点。不修法不判——判据留在原处，只是**说清它读的是哪一棵**：
+  // 变量驱动的根必须自己报出来，否则"fresh/陈旧"这句话是在替别人的状态根作答。
+  const envDriven = stateRootOverride === undefined && typeof env[STATE_DIR_ENV] === "string"
+    && (env[STATE_DIR_ENV] as string).trim() !== "";
+  if (envDriven) {
+    bits.push(`state root taken from ${STATE_DIR_ENV}="${foreignValue(env[STATE_DIR_ENV] as string, 120)}" — `
+      + "the background service never reads that variable, so this is not necessarily the file the running daemon uses; "
+      + "ask the daemon itself (hello's stateRoot) or pass the root the job actually starts with");
+  }
   return { kind: "read", stateFile, summary: `update state: ${bits.join("; ")}`, ca: ca.ca, runtime: runtime.runtime };
 }

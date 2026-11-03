@@ -48,8 +48,11 @@ const PROJECT_ID_RE = new RegExp(`^prj_${CROCKFORD_BODY_RE}$`);
  * so neither side can move the ceiling without the other going red.
  */
 export const MAX_PROJECTS = 128;
-const MAX_DISPLAY_NAME_LENGTH = 256;
-const MAX_FIELD_LENGTH = 1024;
+// 这两个数由 `tools.ts` 的对外 schema 共用（2026-11-03 缺陷 #20）：那一面从前把 256/1024
+// 重抄了一遍字面量，于是改一处就漂一处——advertised schema 与 live zod 从此可以不同。
+// 同一个文件里 `BUNDLE_ID_MAX_LENGTH` 一直是导出的，界数只有一个来源这条规矩不是新的。
+export const MAX_DISPLAY_NAME_LENGTH = 256;
+export const MAX_FIELD_LENGTH = 1024;
 
 /**
  * The `bundleId` ceiling — one number for both surfaces that carry the identity.
@@ -309,8 +312,8 @@ function refusedStateRootMessage(raw: string, defect: string): string {
     + "Nothing was read and nothing was written: no directory was created, no permission was changed, no projects.json was opened, "
     + "listed or saved. Move the service onto a directory this install owns: start it as "
     + (suggested === null
-      ? "`glasspaned --state-dir <a directory this install owns>` "
-      : `\`glasspaned --state-dir <a directory this install owns>\` (the daemon's own suggested form is \`glasspaned --state-dir ${quoteShellArg(suggested)}\`) `)
+      ? "`$HOME/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned --state-dir <a directory this install owns>` "
+      : `\`$HOME/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned --state-dir <a directory this install owns>\` (the daemon's own suggested form is \`$HOME/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned --state-dir ${quoteShellArg(suggested)}\`) `)
     + `then reconnect so a fresh hello reports the new root, and repeat the call. If the reported root is not one you configured, treat the `
     + "answer to that handshake as untrusted: another process on this account replied to it.";
 }
@@ -322,7 +325,7 @@ function refusedStateRootMessage(raw: string, defect: string): string {
  * mirrors, home record included.
  *
  * It is the *default*, not the only root, and the distinction is load-bearing:
- * `glasspaned --state-dir <path>` (parsed at `glasspaned/main.swift`, resolved
+ * `$HOME/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned --state-dir <path>` (parsed at `glasspaned/main.swift`, resolved
  * through `StateRoot(path:)`) makes the service load `<path>/projects.json`
  * instead — `ProjectRegistry(stateRoot:)` is the route every subcommand takes, so
  * no command honours the flag and misses it. The shell can read that root: since
@@ -555,7 +558,7 @@ function refusedProjectsFileOverride(raw: string, defect: string): ProjectRegist
     + "paths; do not point it at a tree this shell will not create or re-permission, and do not repair a projects "
     + "file for this refusal — the refusal names a directory, and no path under it was touched. If the service "
     + "really is running on a root this shell cannot accept, move the service instead: "
-    + "`glasspaned --state-dir <a directory this install owns>`, then reconnect so a fresh hello reports it",
+    + "`$HOME/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned --state-dir <a directory this install owns>`, then reconnect so a fresh hello reports it",
   );
 }
 
@@ -995,7 +998,7 @@ function saveProjects(filePath: string, entries: ProjectEntry[]): void {
         + "If chmod answers success and the mode stays loose, the volume ignores permissions: find out with "
         + `\`ls -lO ${quoteShellArg(dir)}\` (an immutable flag) and \`diskutil info -live ${quoteShellArg(dir)}\` `
         + "(a read-only or remote mount), and move the service onto a volume that honours them "
-        + "`glasspaned --state-dir <a directory this install owns>`). Do not repair or overwrite projects.json for "
+        + "`$HOME/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned --state-dir <a directory this install owns>`). Do not repair or overwrite projects.json for "
         + `this one, and do not set ${FORCE_OVERWRITE_ENV}: the fault is the mode, not the bytes in the file`,
       );
     }
@@ -1285,7 +1288,7 @@ export function daemonRestartPending(facts: {
  *
  * Round 9 keeps both corrections and drops one premise: "the daemon loads
  * {@link daemonProjectsPath} and nothing else" is only true of a service started
- * with no state root. `glasspaned --state-dir <root>` makes it load
+ * with no state root. `$HOME/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned --state-dir <root>` makes it load
  * `<root>/projects.json` (`ProjectRegistry(stateRoot:)`, and every subcommand
  * resolves through the same root), and the socket cannot be asked which root the
  * running job chose — since 1.15.0 the daemon says so in `hello`'s `stateRoot`, while a
@@ -1358,7 +1361,7 @@ function reloadSentence(changed: boolean): string {
  */
 function rootDiscriminator(): string {
   return "Tell the two cases apart with the service's own answer: gp_project_list reads the file this call wrote, so an entry it lists is on disk, and gp_attach {projectId} is answered by the running service — an entry the list shows plus an attach that answers GP_E_NOT_FOUND means the service is loading a different projects.json than the one this write reached, not that the write failed. "
-    + "Which file the running service loads is not something this shell guesses from $HOME: `glasspaned --state-dir <root>` moves it to <root>/projects.json, and the daemon reports the root it resolved — `hello` names the state root under its `stateRoot` key. A daemon predating 1.15.0 omits the key, and an omitted key means \"that daemon does not report it\", never \"so it must be the home default\": for those binaries the discriminator below is the only read. Cross-check either way — `launchctl print gui/"
+    + "Which file the running service loads is not something this shell guesses from $HOME: `$HOME/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned --state-dir <root>` moves it to <root>/projects.json, and the daemon reports the root it resolved — `hello` names the state root under its `stateRoot` key. A daemon predating 1.15.0 omits the key, and an omitted key means \"that daemon does not report it\", never \"so it must be the home default\": for those binaries the discriminator below is the only read. Cross-check either way — `launchctl print gui/"
     + currentUid()
     + "/com.glasspane.daemon` prints the arguments the job was started with. "
     + "If those arguments name a --state-dir, the entry has to go into that root's projects.json (repeat gp_project_set with "
@@ -1695,12 +1698,13 @@ function generateProjectId(): string {
   const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
   const body: string[] = [];
   const bytes = new Uint8Array(26);
-  // Node 16+ crypto is safe; use globalThis for older runtimes.
-  if (typeof globalThis.crypto?.getRandomValues === "function") {
-    globalThis.crypto.getRandomValues(bytes);
-  } else {
-    for (let i = 0; i < 26; i++) bytes[i] = Math.floor(Math.random() * 256);
-  }
+  // 弱 id 那一臂（`Math.random()`）从前与 crypto 臂并存在同一支函数里：`engines.node >= 18`
+  // 之下它永远不会走，而"永不到达的另一条身份生成路径"就是下一次有人动 engines 字段时
+  // 项目 id 变成可预测的那条路（缺陷 #24，P3）。同一个文件里 operationId 用的就是
+  // `randomBytes`，两处生成本该是同一个来源。
+  randomBytes(26).forEach((byte, index) => {
+    bytes[index] = byte;
+  });
   for (let i = 0; i < 26; i++) {
     const byte = bytes[i]!;
     body.push(CROCKFORD.charAt(byte % 32));

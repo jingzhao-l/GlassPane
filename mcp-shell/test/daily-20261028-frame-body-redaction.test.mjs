@@ -61,9 +61,13 @@ function rawOf(payload) {
 function assertRedacted(note, raw, context) {
   const bytes = Buffer.byteLength(raw, "utf8");
   const digest = createHash("sha256").update(raw, "utf8").digest("hex").slice(0, 12);
+  // 2026-11-03：这句摘要现在**自己声明它算的是什么**——有真线字节时说线字节，只有解码后的
+  // 文本时说文本（缺陷 #23 的诚实那一半）。这里这组夹具喂的是字符串，所以读得到的是"文本"那一形；
+  // 字节那一形由 daily-20261103-shell-and-shell-like-inertness 里那条 Buffer 对照钉。
   assert.ok(
-    note.includes(`a ${bytes}-byte frame (sha256 ${digest})`),
-    `${context}: 这一行要能由帧字节自己复算出来 ${JSON.stringify({ bytes, digest })} -> ${note.slice(0, 300)}`,
+    note.includes(`a ${bytes}-byte frame (sha256 ${digest},`)
+      && note.includes("of the frame text as this transport decoded it)"),
+    `${context}: 这一行要能由帧字节自己复算出来，并说清摘要算的是哪一份字节 ${JSON.stringify({ bytes, digest })} -> ${note.slice(0, 300)}`,
   );
   assert.ok(!note.includes(MARKER), `${context}: 屏幕正文不得出现在这一行 -> ${note.slice(0, 300)}`);
   assert.ok(!note.includes("AXStaticText"), `${context}: 控件角色也是屏幕内容 -> ${note.slice(0, 300)}`);

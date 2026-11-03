@@ -78,6 +78,8 @@ import {
   ProjectSetArgs,
   ProjectGetArgs,
   BUNDLE_ID_MAX_LENGTH,
+  MAX_DISPLAY_NAME_LENGTH,
+  MAX_FIELD_LENGTH,
   registryReaders,
   projectList,
   projectSet,
@@ -691,7 +693,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       additionalProperties: false,
       properties: {
         projectId: { type: "string", pattern: "^prj_[0-9A-HJKMNP-TV-Z]{26}$" },
-        displayName: { type: "string", minLength: 1, maxLength: 256 },
+        displayName: { type: "string", minLength: 1, maxLength: MAX_DISPLAY_NAME_LENGTH },
         // `null` clears the field on update, so these mirror
         // ProjectSetArgs' `.nullish()` rather than the old optional-string form.
         // The ceiling is `gp_attach`'s, from the daemon's own bound — the identity a
@@ -701,9 +703,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         // the daemon stores (an out-of-range pid made Swift fail to decode the
         // whole registry file, which then got rewritten as an empty table).
         pid: { type: ["integer", "null"], minimum: 1, maximum: PID_INT32_MAX },
-        recipeConfigPath: { type: ["string", "null"], maxLength: 1024 },
-        calibrationAssetsPath: { type: ["string", "null"], maxLength: 1024 },
-        evidenceStoragePath: { type: ["string", "null"], maxLength: 1024 },
+        recipeConfigPath: { type: ["string", "null"], maxLength: MAX_FIELD_LENGTH },
+        calibrationAssetsPath: { type: ["string", "null"], maxLength: MAX_FIELD_LENGTH },
+        evidenceStoragePath: { type: ["string", "null"], maxLength: MAX_FIELD_LENGTH },
       },
       required: ["displayName"],
       // Exactly one of bundleId/pid must identify the app *after* an update is
@@ -2466,7 +2468,7 @@ function passedThroughRegistryError(
 export function projectErrorRemedy(code: string): string {
   if (code === GP_E_PROJECT_LIMIT) {
     // What is actually possible. This sentence has been wrong twice in opposite
-    // directions: first it ordered `glasspaned --list-projects` ("delete unused
+    // directions: first it ordered `$HOME/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned --list-projects` ("delete unused
     // projects first") when that flag only prints; then, once 1.7.0 put
     // `--project-remove` / `--project-prune` back, the corrective
     // "this surface offers no delete" became the lie — it told an agent at the
@@ -2475,7 +2477,7 @@ export function projectErrorRemedy(code: string): string {
     // save (`main.swift` says so). `test/tools.test.mjs` pins both halves again:
     // the remedy names the removals that exist and the restart that makes one
     // stick, names no hand-edit, and quotes only flags the daemon parses.
-    return `the limit (${MAX_PROJECTS}) counts the entries stored in the projects file named above, so a new registration cannot be made to fit by changing an existing one: gp_project_set with an existing projectId patches that entry and leaves the count where it is. See what is stored with gp_project_list, then free a slot with a removal this product does implement: \`glasspaned --project-remove <projectId>\` removes exactly one registration, and \`glasspaned --project-prune\` removes only the engine's own test residue — both take \`--dry-run\` to preview and print JSON, and an unknown id exits 3. A running daemon keeps its own copy of the table, so the removal only sticks after it is restarted (the reply's requiresDaemonRestart says whether one is pending; \`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon\`). Do NOT hand-edit the projects file: the next daemon save overwrites it. To read the same set without this shell: glasspaned --list-projects prints the file the service loads by default`;
+    return `the limit (${MAX_PROJECTS}) counts the entries stored in the projects file named above, so a new registration cannot be made to fit by changing an existing one: gp_project_set with an existing projectId patches that entry and leaves the count where it is. See what is stored with gp_project_list, then free a slot with a removal this product does implement: \`$HOME/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned --project-remove <projectId>\` removes exactly one registration, and \`$HOME/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned --project-prune\` removes only the engine's own test residue — both take \`--dry-run\` to preview and print JSON, and an unknown id exits 3. A running daemon keeps its own copy of the table, so the removal only sticks after it is restarted (the reply's requiresDaemonRestart says whether one is pending; \`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon\`). Do NOT hand-edit the projects file: the next daemon save overwrites it. To read the same set without this shell: $HOME/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned --list-projects prints the file the service loads by default`;
   }
   if (code === GP_E_NOT_FOUND) {
     return "check the projectId; use gp_project_list to view available projects";
@@ -2483,7 +2485,7 @@ export function projectErrorRemedy(code: string): string {
   if (code === GP_E_REGISTRY_DRIFT) {
     // 这条拒绝说的不是"参数不对"——参数已经过了 zod 校验。把它交给 "check the tool's
     // input schema and retry" 的兜底，等于指回它刚刚排除掉的成因。
-    return "the projects file changed between the read that produced this reply and the write it attempted, so nothing was written: re-run the same gp_project_set — what this refusal wants is a second read, not different arguments. If it repeats, another writer owns that file (the daemon's maintenance CLI and the settings panel both rewrite it): read the table with `glasspaned --list-projects`, and remember a removal only sticks after the daemon restarts. `GLASSPANE_PROJECTS_FORCE_OVERWRITE=1` moves a file aside before writing, and nothing is overwritten without it.";
+    return "the projects file changed between the read that produced this reply and the write it attempted, so nothing was written: re-run the same gp_project_set — what this refusal wants is a second read, not different arguments. If it repeats, another writer owns that file (the daemon's maintenance CLI and the settings panel both rewrite it): read the table with `$HOME/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned --list-projects`, and remember a removal only sticks after the daemon restarts. `GLASSPANE_PROJECTS_FORCE_OVERWRITE=1` moves a file aside before writing, and nothing is overwritten without it.";
   }
   if (code === GP_E_NO_USER_RECORD) {
     // Distinct from GP_E_INTERNAL on purpose: this failure names no file, and
@@ -2497,7 +2499,7 @@ export function projectErrorRemedy(code: string): string {
     // 一个本壳不会去创建、也不会改权限的根。把 `GP_E_INTERNAL` 那条"去读并修这个文件"
     // 的兜底套在它身上，等于支使 agent 去改一份根本没被碰过的表。能做的动作在 daemon
     // 那一侧：换一个它自己拥有的根重启，或先问清它到底报了哪个根。
-    return "the running service named a state root this shell will not create or re-permission, so nothing was read or written by this call: the refused root is named in the message above, so nothing has to be asked again. To see which root the job really starts with, run `launchctl print gui/$(id -u)/com.glasspane.daemon` (read-only — it prints the job's own arguments), and `glasspaned --state-dir <path> --evidence-stats` echoes that run's `dir` under the root it resolved, which is how to confirm a candidate without writing anything. Then start the service with a directory this install owns (`glasspaned --state-dir <path>`). Do not repair projects.json for this one — the refusal names a root, not a file, and no path under that root was touched";
+    return "the running service named a state root this shell will not create or re-permission, so nothing was read or written by this call: the refused root is named in the message above, so nothing has to be asked again. To see which root the job really starts with, run `launchctl print gui/$(id -u)/com.glasspane.daemon` (read-only — it prints the job's own arguments), and `$HOME/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned --state-dir <path> --evidence-stats` echoes that run's `dir` under the root it resolved, which is how to confirm a candidate without writing anything. Then start the service with a directory this install owns (`$HOME/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned --state-dir <path>`). Do not repair projects.json for this one — the refusal names a root, not a file, and no path under that root was touched";
   }
   if (code === GP_E_INTERNAL) {
     // The readers come from `registryReaders` — the same sentence the registry's own message

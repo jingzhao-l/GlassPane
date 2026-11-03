@@ -28,6 +28,7 @@ import {
   GP_E_SOCKET_TRUST,
 } from "./errors.js";
 import { dimensionAttributionLine, engineBody, validateDimension } from "./dimension.js";
+import { SERVER_INFO } from "./dispatch.js";
 import { escapeHTML, renderHTML, renderMarkdown } from "./evidence-report.js";
 import type { EvidencePackReportView } from "./evidence-report.js";
 import {
@@ -364,7 +365,16 @@ export function createHttpGateway(options: HttpGatewayOptions): HttpGateway {
   setGatewayReportSink(report);
   const client: EngineClientLike = options.connectController !== undefined
     ? options.connectController(options.socketPath)
-    : unixSocketEngineClient(options.socketPath, { surface: "http" });
+    // 缺陷 #17（P2，两面不同答）：stdio 那一面把 `identity` 与 `expectedDaemonMethods`
+    // 交下去，于是"旧 daemon 配新壳"与"daemon 少了一枚方法"都会有人说；网关这一面从前
+    // 只交 `surface`，同一条 R4-06 的量在第二个生产入口上永远是哑的。`DAEMON_FORWARDED_METHODS`
+    // 本来就是这一页用来算路由的那份清单（见上面 `notRouted` 两行），所以这里没有新契约，
+    // 只有把同一份清单交给它一直在用的客户端。
+    : unixSocketEngineClient(options.socketPath, {
+        identity: { version: SERVER_INFO.version },
+        expectedDaemonMethods: DAEMON_FORWARDED_METHODS,
+        surface: "http",
+      });
   // The gateway is a *bridge*, so everything the engine client learns that no
   // HTTP response carries has to be written down here: the remedy text handed to
   // a curl caller says "read this gateway's stderr", and that promise is only

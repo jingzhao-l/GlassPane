@@ -85,7 +85,15 @@ export const MAX_FRAME_BYTES = 4 * 1024 * 1024;
 export const OVERSIZE_PREFIX_BYTES = 512;
 
 export interface LineSink {
-  onLine(line: string): void;
+  /**
+   * @param line the decoded text of one frame
+   * @param raw  the **wire bytes** that frame arrived as, minus its newline. Present
+   *             whenever the transport handed this reader a `Buffer` — which is what
+   *             makes "sha256 of the exact bytes this transport received" a true
+   *             statement: a `setEncoding("utf8")` stream hands over already-decoded
+   *             text, and re-encoding a malformed frame is not its bytes (缺陷 #23).
+   */
+  onLine(line: string, raw?: Buffer): void;
   /**
    * A line crossed the frame cap: reported exactly once, excess dropped,
    * later lines still flowing. Oversize is a per-frame verdict, never a
@@ -105,6 +113,8 @@ export interface LineSink {
  */
 export class LineReader {
   private buffer = "";
+  /** Wire bytes of the line in progress; emptied the moment the line is discarded. */
+  private rawChunks: Buffer[] = [];
   /** UTF-8 bytes seen for the line in progress (counted, not all retained). */
   private bytes = 0;
   /** The line in progress already blew the cap; only the head is retained. */
@@ -112,18 +122,23 @@ export class LineReader {
 
   constructor(private readonly sink: LineSink) {}
 
-  /** @param chunk UTF-8 text fragment received from the stream. */
-  push(chunk: string): void {
-    let rest = chunk;
-    while (rest.length > 0) {
-      const nl = rest.indexOf("\n");
-      const closed = nl !== -1;
-      this.consume(closed ? rest.slice(0, nl) : rest);
-      rest = closed ? rest.slice(nl + 1) : "";
-      if (closed) {
-        this.deliver();
-      }
+  /**
+   * @param chunk a fragment from the stream. A `Buffer` keeps the wire bytes for
+   *        {@link LineSink.onLine}; a string is decoded as UTF-8 first, so the byte
+   *        count stays a byte count either way.
+   */
+  push(chunk: string | Buffer): void {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
+    let start = 0;
+    while (start < bytes.length) {
+      const nl = bytes.indexOf(0x0a, start);
+      const segment = nl === -1 ? bytes.subarray(start) : bytes.subarray(start, nl);
+      this.consume(segment);
+      if (nl === -1) break;
+      this.deliver();
+      start = nl + 1;
     }
+    if (bytes.length === 0) this.consume(bytes);
   }
 
   /** Partial line so far; only the retained head while a line is discarded. */
@@ -131,11 +146,12 @@ export class LineReader {
     return this.buffer;
   }
 
-  private consume(segment: string): void {
-    if (segment.length === 0) {
+  private consume(segment: Buffer): void {
+    const segmentBytes = segment.length;
+    if (segmentBytes === 0 && !this.discarding) {
       return;
     }
-    const segmentBytes = Buffer.byteLength(segment, "utf8");
+    const text = segment.toString("utf8");
     if (this.discarding) {
       this.bytes += segmentBytes;
       return;
@@ -144,11 +160,13 @@ export class LineReader {
       this.discarding = true;
       this.buffer = this.buffer.length >= OVERSIZE_PREFIX_BYTES
         ? this.buffer.slice(0, OVERSIZE_PREFIX_BYTES)
-        : (this.buffer + segment).slice(0, OVERSIZE_PREFIX_BYTES);
+        : (this.buffer + text).slice(0, OVERSIZE_PREFIX_BYTES);
+      this.rawChunks = [];
       this.bytes += segmentBytes;
       return;
     }
-    this.buffer += segment;
+    this.buffer += text;
+    this.rawChunks.push(Buffer.from(segment));
     this.bytes += segmentBytes;
   }
 
@@ -156,13 +174,15 @@ export class LineReader {
     const line = this.buffer;
     const bytes = this.bytes;
     const oversize = this.discarding;
+    const raw = this.rawChunks.length === 0 ? undefined : Buffer.concat(this.rawChunks);
     this.buffer = "";
+    this.rawChunks = [];
     this.bytes = 0;
     this.discarding = false;
     if (oversize) {
       this.sink.onOversize(bytes, line);
     } else {
-      this.sink.onLine(line);
+      this.sink.onLine(line, raw);
     }
   }
 }
@@ -247,7 +267,7 @@ export interface LineIo {
    * 而这一面已经悄悄替它攒了几百 MB。有了这个数，客户端可以选择**不再接活**。
    */
   bufferedBytes?(): number;
-  onMessage(handler: (line: string) => void): void;
+  onMessage(handler: (line: string, raw?: Buffer) => void): void;
   onClose(handler: () => void): void;
   onError(handler: (error: Error) => void): void;
   /**
@@ -265,7 +285,7 @@ export interface LineIo {
  */
 export class StreamLineIo implements LineIo {
   private readonly reader: LineReader;
-  private messageHandler: ((line: string) => void) | null = null;
+  private messageHandler: ((line: string, raw?: Buffer) => void) | null = null;
   private closeHandler: (() => void) | null = null;
   private errorHandler: ((error: Error) => void) | null = null;
 
@@ -274,11 +294,15 @@ export class StreamLineIo implements LineIo {
     private readonly output: Writable,
   ) {
     this.reader = new LineReader({
-      onLine: (line) => this.messageHandler?.(line),
+      onLine: (line, raw) => this.messageHandler?.(line, raw),
       onOversize: (bytes, prefix) => this.errorHandler?.(new OversizeFrameError(bytes, prefix)),
     });
-    input.setEncoding("utf8");
-    input.on("data", (chunk: string) => this.reader.push(chunk));
+    // 不再 `setEncoding("utf8")`：那一步把线字节先变成文本，此后任何人再算字节数或摘要，
+    // 算的都是"重新编码出来的文本"，不是"这一帧到达时的字节"。缺陷 #23 就在这个差别上：
+    // 非 UTF-8 的帧（同用户另一个进程写得出的东西，或半帧）经 `utf8` 解码会带入替换字符，
+    // 回编之后长度与内容都变了，而 `lateReplyBodyNote` 那句"sha256 of the exact bytes this
+    // transport received"当时是假的——摘要与 daemon 自己档案里的字节对不上。
+    input.on("data", (chunk: Buffer | string) => this.reader.push(chunk));
     input.on("close", () => this.closeHandler?.());
     input.on("error", (error) => this.errorHandler?.(error));
   }
