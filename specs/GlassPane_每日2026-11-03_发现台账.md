@@ -59,9 +59,9 @@
 | 31 | P3 | `scripts/assert-test-count.mjs:32/80` | failures 只从 XCTest 行取，Swift Testing 的 `with N issues` 不进账 ⇒ 只有那一半红时闸读成绿 | 吃进 issues 组；测试用本轮真日志，正反两面 | `6af80adf` |
 | 32 | P3 | `mcp-shell/package.json` | `esbuild ^0.28.2` 是唯一剩下的范围依赖，且带 install-time 脚本、跑在发布 lane | 精确钉 `0.28.2`（= lockfile = 实装）。`packageManager` 见下面第 3 节 | `6af80adf` |
 
-## 2. 门禁逐字复跑的读数
+## 2. 门禁逐字命令的读数
 
-见下面【收口】第 4 条，一行一条命令，报的是实际计数不是"全绿"。
+见下面【收口】第 4 条：一行一条命令、报的是实际计数，不是"全绿"两个字。
 
 ## 3. 本轮我替你做了哪些决定（依据 / 回滚）
 
@@ -101,3 +101,68 @@
 - Apple 公证（Developer ID + notarytool）：需要付费账号，owner 未启用；文档没有把它写成已完成。
 - `packageManager` 该钉的 npm 版本：取它的确切命令
   `gh run view <ci-run-id> --repo jingzhao-l/GlassPane --log | grep -i "npm"`（setup-node 那行）。
+
+## 5. 收口
+
+1. **main**：收口 HEAD `b9fa40b8`（本地与 `origin/main` 同一枚 sha，`git status --porcelain` 空）。
+   本轮共 9 笔提交：`31f690c5`（上一轮没走完的 1.28.1 版本线）、`6e748acb`、`2a0f2135`、
+   `bb339daf`、`4fc5f9db`、`38114dd0`、`6af80adf`、`bf5d39a1`（release: 1.29.0）、
+   `36400447`、`264b9a77`、`1bc96173`、`b9fa40b8`。推送走 SSH remote：
+   HTTPS token 被仓库规则拒（`GH013: refusing to allow an OAuth App to create or update
+   workflow .github/workflows/ci.yml without workflow scope`，因为 #30 动了 workflows），
+   按本仓既有的那条 remedy 换成 `git@github.com:jingzhao-l/GlassPane.git` 即通过。
+2. **发布三线**：签名 tag `v1.29.0` → `b9fa40b8`（`git tag -v` 报"完好的签名"，
+   key `0929EA31DF4F7429F63FC53189D88B1D043A1298`，与本仓内嵌公钥同一把）。
+   GitHub Release `v1.29.0`：`isDraft=false`、`Latest`、`targetCommitish=b9fa40b8`、4 件资产
+   （归档 + SUMS + 两份 `.asc`）。Release workflow run 41563835981 两个 job 分别 success/skipped。
+   npm 两次 dispatch **都显式带 `--ref v1.29.0`**：dry=41564315045、publish=41564611390，
+   `publish bare names with provenance` 都 success（trusted publisher 直发，没有 staged publish
+   待批——所以 `npm stage approve` 这一格本轮不需要人工动作）。
+   registry `--prefer-online`：`glasspane-mcp` latest=1.29.0、`glasspane-install` latest=1.29.0，
+   两枚钉名 `@1.29.0` 各自回 1.29.0，版本列表尾部都是 `1.26.0,1.27.0,1.28.0,1.29.0`。
+3. **端到端（跑的是发布归档的字节，不是本机重建）**：归档 `GlassPane-1.29.0.tar.gz` 4,888,678 字节 /
+   795 条目，`make-release-archive.mjs --verify` rc=0（含"21 项声明的命令与 schema 都在"与
+   "no entry under harness/"）；`tar -tzf | grep -cE "(^|/)harness/"` = 0；
+   sha256 三处逐字相等（本机算的 == GitHub `assets[].digest` == `SHA256SUMS-1.29.0.txt` 那一行）；
+   两份 `.asc` 用仓库内嵌公钥在隔离 `GNUPGHOME` 验签 rc=0；解包 → 树内 `npm pack` →
+   装进干净前缀 → stdin 一条 MCP `initialize` 走两条路径（`dist/index.js` 与 `.bin/glasspane-mcp`
+   软链）各回 171 字节、`serverInfo` 点名 `glasspane-mcp` / `1.29.0`；
+   daemon 冒烟一律带 `--state-dir <临时根>`（绝不写 `GLASSPANE_STATE_DIR=… glasspaned`——
+   那枚变量 daemon 不读，见发现 #15）。真机面板/权限读数在 `engine/smoke.md` 的 2026-11-03 那一节。
+   一处如实的下载边界：`gh release download` 那一条在本机第一次跑时只取回了 SUMS 与 `.asc`，
+   4.8 MB 的归档没落地（本机对 release-assets 的直连有代理限制，10-31 那条线也记过同一格），
+   复跑一次取到了完整归档并按上面那串判据核过——不是"读不到就算过"。
+4. **门禁逐字复跑的读数**（最终态 `b9fa40b8`，日志在
+   `/var/tmp/glasspane-main-check-20261103/gates/`，19 条命令全部 rc=0）：
+   `npm ci` rc=0；`npm run build` rc=0；`npm test --workspaces --if-present`
+   mcp-shell 739/739、installer 320/320、updater 770/770，合计 1829 条，0 fail；
+   `node scripts/check-version.mjs` OK（真源 1.29.0，20 个位点全 ✓）；
+   `node scripts/check-doc-links.mjs` 32 份 / 内链 270 / 外链 44（不请求）/ 表格 463 张（扫 126 份 markdown）OK，
+   `--self-test` 11 例（7 个变异必须抓 + 4 个合法形状必须静默）；
+   `node scripts/check-workflows.mjs --self-test` 48 例（28 变异 + 20 静默）、`check-workflows` 5 份文件 clean；
+   `swift build --package-path engine` rc=0；`swift test --package-path engine`
+   XCTest 1577 条 / 5 skipped / 0 failures，同一次运行 Swift Testing 76 tests / 8 suites passed
+   （本轮新增的那个套件是 10 条）；`swift test --package-path engine/probe` 58 / 1 skipped / 0 failures；
+   `python3 -m pytest -q bridge` 201 passed / 1 skipped；`sh -n install.sh` rc=0；
+   信号闸 `SIGNAL SMOKE OK`（SIGTERM/SIGINT 自退 0 且 socket 被 unlink，三次起停各自跑在点名状态根）；
+   发布形态 `cd mcp-shell && npm run bundle && npm pack --dry-run` rc=0，产出 `glasspane-mcp-1.29.0.tgz`；
+   五把尺子：tool-surface `no growth past the recorded baseline`（面 A 22.24% / 面 B 20.75% 仍是
+   "金样本身就超 10%"的既有事实，基线在 `264b9a77` 单独一笔补记）、surface-semantics 无面开始自行
+   判定证据语义、product-surface manifest/build/publish/installers/pipelines 一致、
+   brand-surface 血缘 9632/9632 扫 3330 文件、kernel-corpus 与 pin 同为 `iterate-kernel@0.1.10`；
+   CI run 41562931673（event=push，同一枚 sha）全 job success。
+5. **反向验证（先证明闸能红，再决定改代码还是改基线）**：
+   - 残渣闸：把 `fenceAfter` 换回布尔翻面 ⇒ 2 条具名红、12 条绿；把 ② 换回手抄词表 ⇒ 5 条具名红，
+     含"真残渣删掉标记那一行之后仍必须被抓到"这一条本体。两次都 `diff -q` 无输出、
+     sha256 `df136990…` 与备份一致、14/14 复绿。
+   - `.worktrees` 忽略：删掉那条规则 ⇒ 3 条里 2 条具名红，而"非空转对照"那条**仍绿**（设计如此）。
+   - 引号闸：`COMMAND_PREFIX` 改回旧名单 ⇒ `installer 的 git -C 出路不在扫描结果里` 那条空转对照红。
+   - 数数的闸：`SWIFT_ISSUES` 那一支去掉 ⇒ "只有 Swift Testing 红"那条红（本轮第一次改就是被这条
+     抓出来可选组写法读不到 issues，见 `1bc96173`）。
+   - 棘轮：`--record` 只用于本轮自己的有意增长（+14 行壳 / +80 行 engine，逐行出处写在
+     `264b9a77` 正文里），没有用它洗任何非本轮造成的红。
+6. **本轮起的进程与临时件**：两条 pkill 之后 `pgrep -fl "release/GlassPane"` 与
+   `pgrep -fl "state-dir <临时根>"` 均空命中（第一次就空）；上一轮遗留的
+   `gpg-agent/scdaemon --homedir /var/tmp/glasspane-main-check-20261031/...` 按"kill 前非空、
+   kill 后空命中"两次 pgrep 判决收掉（命中行 2 → 0）。工作树收口后 1 行（只有主树），
+   `git branch -a` 7 行（本地只剩 main + 两个 remote 的引用）。
