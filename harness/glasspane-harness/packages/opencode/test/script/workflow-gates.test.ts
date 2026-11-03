@@ -548,6 +548,21 @@ describe("the release goes public only behind an installer-shaped verification",
     return text.slice(start, end)
   }
 
+  test("the step that flips public visibility runs in the environment the rest of the chain does", async () => {
+    // Every other irreversible step (`checksums`, `publish-platform`, `publish-wrapper`,
+    // `verify-published`) is deployed through the `release` environment, so any protection rule an
+    // owner attaches there bites them. `publish-release` — the one step whose entire effect is making
+    // bytes publicly reachable — was not, which is exactly the asymmetry that turns a protection rule
+    // into a decoration. Measured 2026-11-03: `gh api repos/.../environments/release` answers
+    // `protection_rules: []`, so this buys no behaviour today; it buys the rule a tomorrow can add.
+    const job = await publishReleaseJob()
+    expect(job).toContain("environment: release")
+    // And it is not decoration in the other direction either: the environment line sits on the job,
+    // not inside a step that could be deleted with the step.
+    const header = job.slice(0, job.indexOf("steps:"))
+    expect(header).toMatch(/^ {4}environment: release$/m)
+  })
+
   test("a per-file gpg --verify round trip precedes the draft→public flip", async () => {
     const job = await publishReleaseJob()
     const verify = job.indexOf("gpg --batch --quiet --status-fd 2 --verify")

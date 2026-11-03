@@ -703,6 +703,12 @@ jobs:
     runs-on: ubuntu-latest
     # Ceiling, not ceremony: GitHub's default is 360 minutes, and this job runs on a runner from the hosted pool. One `gh release download` of the assets, a gpg verify round trip per file, one `gh release edit` plus a read-back. (15m.)
     timeout-minutes: 15
+    # The one step in this file whose whole effect is to make bytes publicly reachable, and until
+    # 2026-11-03 it was the only publishing step NOT running in the `release` environment — the rules
+    # an owner attaches there (deploy reviewers, wait timers) would have bitten the signing and npm
+    # jobs and walked straight past the draft→public flip. Measured today: `protection_rules: []`, so
+    # this changes no behaviour yet; it removes the asymmetry that would make a future rule a lie.
+    environment: release
     permissions:
       contents: write
     steps:
