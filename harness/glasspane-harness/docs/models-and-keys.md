@@ -22,6 +22,33 @@ Everything else — Anthropic, OpenAI, Google, GitHub Copilot, Amazon Bedrock, A
 and the rest — is still there, with its own key or its own OAuth flow, exactly as upstream
 defines it.
 
+## Session sharing: what was removed, and what was left in
+
+`product.json` (`models.removedFirstParty`) lists "session sharing to opencode's cloud", and that
+phrasing invites a reading the shipped bytes do not support. So this is the narrow, checkable version.
+
+**Removed: the way out.** No endpoint shares a session anywhere. Ask the server's route table —
+`grep -rn '"/share' packages/opencode/src/server/routes/instance/httpapi` answers nothing — and no URL
+in this tree reaches a share service (`grep -rn 'opencode\.ai/share' packages/*/src` is empty outside
+the lineage log `SYNCLOG.md`). The `share` field a session still carries is one local column
+(`share_url`, `packages/core/src/session/sql.ts`) that nothing in this product fills by contacting a
+service; the GitHub bot's footer, which used to embed a shareable session card, says so where the
+footer is built (`packages/opencode/src/cli/cmd/github.handler.ts`).
+
+**Left in: the shape of the old UI.** The web app is embedded in the binary by default —
+`packages/opencode/script/build.ts` skips it only when you pass `--skip-embed-web-ui` — and inside it
+`packages/app/src/pages/session/timeline/message-timeline.tsx` pins `shareUrl` to `undefined` and
+`shareEnabled` to `false`. Every branch that would have shown a Share button is therefore dead at
+runtime, and it is still *there*: the markup, and the `session.share.*` copy strings in the locale
+files under `packages/app/src/i18n/`. The deprecated `share` and `autoshare` config keys are still
+accepted by the v1 config schema (`packages/core/src/v1/config/config.ts`) and do nothing, and the
+`session_share` table is still created by the existing migrations, because dropping it would be a
+destructive migration on databases that already have those rows.
+
+So the claim about this channel is exactly: **nothing a user does in this product uploads a session
+anywhere**. It is not "the words are gone from the bytes" — the words are in the binary, they render
+nothing, and saying otherwise would be a claim a reader with `strings` could falsify.
+
 ## Supplying a key
 
 Three ways, in the order opencode resolves them:

@@ -1,5 +1,26 @@
 #!/usr/bin/env bash
-
-BUMP_TYPE=${1:-patch}
-
-gh workflow run publish.yml -f bump="$BUMP_TYPE"
+# [gp] Refused. This is upstream's release trigger, and it does not trigger this product's release.
+#
+# What it used to do, from a developer's shell with no gate in front of it:
+#   gh workflow run publish.yml -f bump="$BUMP_TYPE"
+# Two problems, both fatal. `publish.yml` does not exist in this tree — the fork's release lane is
+# `.github/workflows/release.yml`, whose `version-check` job is what proves the tree being released
+# equals trunk's `harness/glasspane-harness` subtree, and whose publish jobs run only on an explicit
+# `workflow_dispatch` with `confirm == true` (`docs/release.md`, product.json -> npm.publishPolicy).
+# So the command either died on a missing workflow, or — the reason this is a refusal and not a
+# comment — it dispatched *whatever `publish.yml` the remote actually holds*, which after an upstream
+# sync is upstream's own publisher: npm-publishing @opencode-ai/* packages this product does not own.
+# Either way it bypassed `version-check` and `script/assert-ci-green.mjs`, both of which exist to
+# stop exactly that.
+#
+# The file stays as a dead end on purpose, in the shape `script/publish.ts` already uses: a future
+# upstream sync lands on a refusal that says why instead of silently re-acquiring a trigger.
+#
+# Remedy — the real release path:
+#   gh workflow run release.yml --repo <product repo> -f confirm=true -f <inputs>   (docs/release.md)
+echo "glasspane-harness: this script triggers no release, on purpose." >&2
+echo "  It ran 'gh workflow run publish.yml', a workflow that is not in this tree. This product" >&2
+echo "  releases through .github/workflows/release.yml, whose version-check and CI-green gates" >&2
+echo "  nothing here passes." >&2
+echo "  Remedy: see docs/release.md, and product.json -> npm.publishPolicy." >&2
+exit 2

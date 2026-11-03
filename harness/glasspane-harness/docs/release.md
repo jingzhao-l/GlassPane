@@ -80,6 +80,7 @@ Things worth knowing, because they are the usual way this is set up wrong:
 2. **Commit** with the golden records in the same commit as the tree changes:
 
    ```bash
+   # from the fork root — `../tools` is harness/tools (the rulers), `../../` is the GlassPane monorepo root
    node ../tools/fork-diff.mjs --record
    node ../tools/tool-surface.mjs --record
    node ../tools/brand-surface.mjs --record

@@ -101,10 +101,28 @@ const targets = singleFlag
 await $`rm -rf dist`
 
 const binaries: Record<string, string> = {}
+// [gp] Cross-platform native artifacts, installed FROM the reviewed lock.
+//
+// These three lines used to be `bun install --os="*" --cpu="*" <name>@<version>` for @opentui/core,
+// @parcel/watcher and @ff-labs/fff-bun. A package argument makes bun run an *add*, not an install,
+// and both halves of that were measured on this repo's bun (1.3.14) against a fixture workspace
+// shaped like this one (root `workspaces.catalog` + a package whose dependency is `"catalog:"`):
+//   · it rewrites the manifest — `"@parcel/watcher": "catalog:"` came back as a literal `"2.5.1"`,
+//     so the file CI's `bun install --frozen-lockfile` (release.yml:336, :887, :1111, :1225, :1257
+//     and ci.yml:55) was given its lock for is edited mid-build;
+//   · it re-resolves, so the integrity recorded is the one for the bytes this run received, not the
+//     one the audited `bun.lock` carries.
+// The step's actual need is narrower: every platform variant must be *materialised* on disk,
+// because `Bun.build({compile})` for a foreign target reads the native package of that target.
+// `--os`/`--cpu` with no package argument does exactly that from the lock, and `--frozen-lockfile`
+// turns "the lock has no such variant" into a refusal instead of a quiet new resolution. Checked
+// against this repository's own lock before the change: the three natives declare 29 platform
+// variants between them (8 `@opentui/core-*`, 13 `@parcel/watcher-*`, 8 `@ff-labs/fff-bin-*`), every
+// one of them is already an entry in `bun.lock` with an `os`/`cpu` gate and a `sha512-` integrity,
+// and `bun install --frozen-lockfile --os="*" --cpu="*" --dry-run` in this package plans all of
+// them — so the frozen form asks for nothing the audited set does not already contain.
 if (!skipInstall) {
-  await $`bun install --os="*" --cpu="*" @opentui/core@${pkg.dependencies["@opentui/core"]}`
-  await $`bun install --os="*" --cpu="*" @parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`
-  await $`bun install --os="*" --cpu="*" @ff-labs/fff-bun@${pkg.dependencies["@ff-labs/fff-bun"]}`
+  await $`bun install --frozen-lockfile --os="*" --cpu="*"`
 }
 for (const item of targets) {
   const name = [

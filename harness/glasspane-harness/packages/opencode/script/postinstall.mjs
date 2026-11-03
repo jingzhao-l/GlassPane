@@ -4,11 +4,9 @@ import childProcess from "child_process"
 import fs from "fs"
 import os from "os"
 import path from "path"
-import { createRequire } from "module"
 import { fileURLToPath } from "url"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const require = createRequire(import.meta.url)
 const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf8"))
 
 const platformMap = {
@@ -175,11 +173,145 @@ function machineLabel() {
   return parts.join(" ")
 }
 
+/**
+ * Which copies this run may load, and what has to be true of them before one is executed.
+ *
+ * This used to be `require.resolve(`${name}/package.json`)`. That walks every `node_modules`
+ * ABOVE this wrapper — out of the project, through the home directory, to `/` — and consults
+ * `NODE_PATH`, so a package planted in an ancestor directory, or in any directory an environment
+ * variable names, satisfied it. The only thing then said about those bytes was `--version` string
+ * equality, which a 3-line shell script answers. This is the channel that copies a binary next to
+ * the user's PATH, chmods it 0755 and runs it.
+ *
+ * Three separate statements are required now, none of them self-reported by the candidate:
+ *  1. it sits inside THIS install's tree. The boundary is the outermost `node_modules` path
+ *     component of the wrapper's own realpath, which is the project's (or the global prefix's)
+ *     store and nothing above it — so every layout a manager really produces is inside it (npm
+ *     hoisting to the project's `node_modules`, npm nesting under the wrapper, pnpm's `.pnpm`
+ *     symlink farm, bun's isolated links), while an ancestor `node_modules` and a `NODE_PATH`
+ *     detour are outside it by construction. This is derived from the path, not from a walk:
+ *     `/Users/me/node_modules` is not a component of `/Users/me/app/node_modules/glasspane-harness`.
+ *  2. its `package.json` names this package at the exact version this wrapper seals in its own
+ *     `optionalDependencies` — a claim about the package, made by the manifest that npm resolved
+ *     for this install, not about what the binary chooses to print.
+ *  3. when the tree keeps an install record — `node_modules/.package-lock.json`, which npm writes
+ *     for project installs (measured absent for `npm install -g`, pnpm and bun) — that record must
+ *     name this directory, this version, an `sha512-` integrity and the `${name}-${version}.tgz`
+ *     tarball it was unpacked from. A directory that exists but is not in the record was not
+ *     placed by this install, which is precisely the pre-positioned-package case.
+ * A copy that fails any of these is not installed; the caller then does its own registry-pinned
+ * fetch, which is the branch that can still prove what it received.
+ */
+/**
+ * The two directories a manager may have placed this wrapper's platform package in, and the tree
+ * that bounds them. `nestedTree` is the wrapper's own `node_modules` (npm nests a copy there when
+ * the hoisted one cannot be used, and every test fixture and pack directory is this shape);
+ * `boundary` is the outermost `node_modules` component of the wrapper's own path — the project's
+ * or the global prefix's store — which is where a hoisted npm copy, pnpm's `.pnpm` farm and bun's
+ * isolated links all live. A wrapper that is not itself inside a `node_modules` has no boundary,
+ * and then only its nested tree can be loaded from.
+ */
+function installTrees() {
+  const own = fs.realpathSync(__dirname)
+  const nestedTree = path.join(own, "node_modules")
+  const segments = own.split(path.sep)
+  let boundary = null
+  for (let index = 1; index < segments.length; index++) {
+    if (segments[index] === "node_modules") boundary = segments.slice(0, index + 1).join(path.sep)
+  }
+  return { nestedTree, boundary }
+}
+
+function candidateDirs(name) {
+  const own = fs.realpathSync(__dirname)
+  const dirs = [path.join(own, "node_modules", name)]
+  const parent = path.dirname(own)
+  if (path.basename(parent) === "node_modules") dirs.push(path.join(parent, name))
+  return dirs
+}
+
+function readJson(file) {
+  return JSON.parse(fs.readFileSync(file, "utf8"))
+}
+
+/** npm's own record of this tree, for this exact directory. Absent record: null, absent entry: a refusal. */
+function installRecord(pkgDir, name, version) {
+  const { nestedTree, boundary } = installTrees()
+  const root = boundary ?? nestedTree
+  const file = path.join(root, ".package-lock.json")
+  if (!fs.existsSync(file)) return { state: "no-record", detail: `${file} does not exist (npm -g, pnpm and bun write no install record)` }
+  let record
+  try {
+    record = readJson(file)
+  } catch (error) {
+    return { state: "refuse", detail: `${file} could not be read: ${error instanceof Error ? error.message : String(error)}` }
+  }
+  const key = `node_modules/${path.relative(root, pkgDir).split(path.sep).join("/")}`
+  const entry = record?.packages?.[key]
+  if (!entry) return { state: "refuse", detail: `${key} is not recorded in ${file}, so this install did not place it` }
+  if (entry.version !== version) {
+    return { state: "refuse", detail: `${file} records ${key} at ${entry.version}, this wrapper seals ${version}` }
+  }
+  if (!/^sha512-/.test(String(entry.integrity ?? ""))) {
+    return { state: "refuse", detail: `${file} records no sha512 integrity for ${key}` }
+  }
+  // npm's own layout for a registry tarball: `<registry>/<name>/-/<basename>-<version>.tgz`, where
+  // the basename drops the `@scope/` prefix. Shape read off a real `npm install` record on this
+  // machine (`node_modules/@parcel/watcher-darwin-arm64` → resolved
+  // `https://registry.npmjs.org/@parcel/watcher-darwin-arm64/-/watcher-darwin-arm64-2.5.1.tgz`).
+  const url = String(entry.resolved ?? "")
+  if (!url.includes(`/${name}/-/`) || !url.endsWith(`-${version}.tgz`)) {
+    return { state: "refuse", detail: `${file} records ${key} as arriving from ${JSON.stringify(url)}, not the ${name}@${version} tarball` }
+  }
+  return { state: "recorded", detail: `${key} is recorded here as ${name}@${version} from ${entry.resolved}` }
+}
+
 function resolveBinary(name) {
-  const packageJsonPath = require.resolve(`${name}/package.json`)
-  const binaryPath = path.join(path.dirname(packageJsonPath), "bin", sourceBinary)
-  if (!fs.existsSync(binaryPath)) throw new Error(`Binary not found at ${binaryPath}`)
-  return binaryPath
+  const declaredVersion = packageJson.optionalDependencies?.[name]
+  if (!declaredVersion) throw new Error(`${name} is not one of this wrapper's optionalDependencies — there is no version to check it against`)
+  const { nestedTree, boundary } = installTrees()
+  const seen = []
+  for (const dir of candidateDirs(name)) {
+    if (!fs.existsSync(dir)) continue
+    let real
+    try {
+      real = fs.realpathSync(dir)
+    } catch (error) {
+      seen.push(`${dir}: unreadable (${error instanceof Error ? error.message : String(error)})`)
+      continue
+    }
+    const inside = (tree) => tree !== null && (real === tree || real.startsWith(tree + path.sep))
+    if (!inside(boundary) && !inside(nestedTree)) {
+      seen.push(`${real} is not inside this install (${boundary ?? nestedTree})`)
+      continue
+    }
+    let manifest
+    try {
+      manifest = readJson(path.join(dir, "package.json"))
+    } catch (error) {
+      seen.push(`${real}: no readable package.json (${error instanceof Error ? error.message : String(error)})`)
+      continue
+    }
+    if (manifest.name !== name) {
+      seen.push(`${real}: its package.json names ${JSON.stringify(manifest.name)}, not ${name}`)
+      continue
+    }
+    if (manifest.version !== declaredVersion) {
+      seen.push(`${real} is ${manifest.name}@${manifest.version}, this wrapper seals ${declaredVersion}`)
+      continue
+    }
+    const record = installRecord(real, name, declaredVersion)
+    if (record.state === "refuse") {
+      seen.push(record.detail)
+      continue
+    }
+    const binaryPath = path.join(dir, "bin", sourceBinary)
+    if (!fs.existsSync(binaryPath)) throw new Error(`Binary not found at ${binaryPath}`)
+    return binaryPath
+  }
+  throw new Error(
+    `no copy of ${name}@${declaredVersion} inside this install is loadable${seen.length === 0 ? "" : `:\n  ${seen.join("\n  ")}`}`,
+  )
 }
 
 function installPackage(name) {
@@ -211,6 +343,20 @@ function installPackage(name) {
     )
     if (result.status !== 0) return
     const packageDir = path.join(temp, "node_modules", name)
+    // The fetch asked for `${name}@${version}` by name; what npm unpacked is checked rather than
+    // trusted, because this is the branch that runs when nothing in the tree could be attributed
+    // to this install and it is the one branch whose bytes we have not seen before.
+    let fetched
+    try {
+      fetched = readJson(path.join(packageDir, "package.json"))
+    } catch (error) {
+      console.error(`the package this run fetched has no readable manifest: ${error instanceof Error ? error.message : String(error)}`)
+      return false
+    }
+    if (fetched.name !== name || fetched.version !== version) {
+      console.error(`the package this run fetched is ${fetched.name}@${fetched.version}, not ${name}@${version} — refusing it`)
+      return false
+    }
     copyBinary(path.join(packageDir, "bin", sourceBinary), targetBinary)
     return true
   } finally {
