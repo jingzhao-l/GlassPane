@@ -1310,7 +1310,14 @@ function invokedAsEntrypoint() {
   }
 }
 
-if (process.argv.includes('--self-test')) {
+// 上面那段注释写的前提是"lint 脚本必须可以被安全 import"，而它此前只守住了最后那一格：
+// `--self-test`、不认识参数、`--help` 三条出口照样在 **import** 时执行。实测（本机 2026-11-03）：
+// 一份 import 本模块的测试文件，宿主 argv 带 `--self-test` 时打出的是这道闸的 11 档电池并退 0，
+// 带 `--help` 时打出用法并退 0，带任意不认识参数时**退 2 把宿主整个带走**——三种情况下那份测试
+// 自己的用例一条都没登记。用法只在被当作命令执行时才有效，所以四条出口共用同一个守卫。
+const isEntrypoint = invokedAsEntrypoint()
+
+if (isEntrypoint && process.argv.includes('--self-test')) {
   // 与 `check-workflows.mjs --self-test` 同一契约：每条判据各打一档坏形状（必须被点名）与一档
   // 合法形状（必须安静）。规则没见过红就等于没有规则；而"只会红"的规则明天的修法是删掉它。
   const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = fs
@@ -1460,13 +1467,15 @@ if (process.argv.includes('--self-test')) {
   process.exit(0)
 }
 
-const unknownArgs = process.argv.slice(2).filter((a) => a !== '--self-test' && a !== '--help')
+const unknownArgs = isEntrypoint
+  ? process.argv.slice(2).filter((a) => a !== '--self-test' && a !== '--help')
+  : []
 if (unknownArgs.length) {
   console.error(`check-doc-links: 不认识的参数 ${unknownArgs.join(', ')}——可用的只有 --self-test 与 --help`)
   console.error('（不认识参数却照常跑完，等于 CI 里写错一个 flag 名以后那道闸做的事没人知道；与 check-workflows.mjs 同一条规矩）')
   process.exit(2)
 }
-if (process.argv.includes('--help')) {
+if (isEntrypoint && process.argv.includes('--help')) {
   console.log(`usage: node scripts/check-doc-links.mjs [--self-test | --help]
 
 判的六类：仓库内相对链接可达 / 页内与跨文档锚点存在（含百分号解码，坏转义是一句话不是一个栈）/

@@ -27,7 +27,7 @@
  * Exit codes: 0 clean, 1 a workflow is broken, 2 no workflows found (caliber
  * error — refusing to report success over an empty set).
  */
-import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync, writeSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeFileSync, writeSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -40,8 +40,30 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 // one is scanned with the same rules.
 const wfRoots = [path.join(repoRoot, ".github", "workflows"), path.join(repoRoot, "harness", "glasspane-harness", ".github", "workflows")]
 
+/**
+ * 只有被当成命令直接执行时才跑 CLI；被 `import` 的进程只拿导出。
+ *
+ * 为什么这条在本仓不是洁癖：`updater/test/daily-20261030-gate-handoff.test.mjs` 就是 import 这个
+ * 模块取 `NO_RECEIVER` 的，而此前**整段 CLI 都在模块顶层**——那次 import 顺手把五份 workflow
+ * 重扫一遍，`--self-test` 在宿主 argv 里时还会打出这道闸自己的 48 档电池然后 `process.exit(0)`，
+ * 于是那份测试文件的用例一条不登记却报绿。守卫与 `check-doc-links.mjs`、`make-release-archive.mjs`
+ * 同一条：两侧都 realpath（node 按真实路径载入 ESM 入口，经符号链接调用时 `process.argv[1]` 是
+ * 链接、`import.meta.url` 是被指的那份，永不相等），realpathSync 抛＝"不是被直接运行"。
+ */
+function invokedAsEntrypoint() {
+  const entry = process.argv[1]
+  if (!entry) return false
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+}
+
+const isEntrypoint = invokedAsEntrypoint()
+
 const primary = wfRoots[0]
-if (!existsSync(primary)) {
+if (isEntrypoint && !existsSync(primary)) {
   console.error(`check-workflows: ${path.relative(repoRoot, primary)} does not exist — nothing was verified`)
   process.exit(2)
 }
@@ -62,7 +84,7 @@ for (const dir of wfRoots) {
     })
   }
 }
-if (!targets.length) {
+if (isEntrypoint && !targets.length) {
   console.error("check-workflows: no workflow files found — refusing to report success over an empty set")
   process.exit(2)
 }
@@ -1531,7 +1553,7 @@ function resolveWorkspace({ root, spec }) {
 // touch stays silent — because a rule that fires on legal syntax gets switched off,
 // and that is how a control dies. The mutations run against a synthetic target in a
 // temp dir, so they never touch the tree.
-if (process.argv.includes("--self-test")) {
+if (isEntrypoint && process.argv.includes("--self-test")) {
   const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs")
   const { tmpdir } = await import("node:os")
 
@@ -2214,7 +2236,9 @@ jobs:
   process.exit(0)
 }
 
-const unknown = process.argv.slice(2).filter((a) => a !== "--self-test" && a !== "--jobs")
+const unknown = isEntrypoint
+  ? process.argv.slice(2).filter((a) => a !== "--self-test" && a !== "--jobs")
+  : []
 if (unknown.length) {
   console.error(`check-workflows: unknown argument(s) ${unknown.join(", ")} — the flags are --self-test and --jobs`)
   process.exit(2)
@@ -2227,7 +2251,7 @@ if (unknown.length) {
 // Exit 2 on an empty answer: `[]` printed for a broken scan is indistinguishable from "no jobs",
 // and a caller that treats that as a passing answer is the silent-green shape this file exists to
 // refuse.
-if (process.argv.includes("--jobs")) {
+if (isEntrypoint && process.argv.includes("--jobs")) {
   const rows = []
   for (const target of targets) {
     const text = readFileSync(path.join(target.dir, target.file), "utf8")
@@ -2254,27 +2278,31 @@ if (process.argv.includes("--jobs")) {
   process.exit(0)
 }
 
-let bad = 0
-for (const target of targets) {
-  const { jobs, problems, advisories } = inspect(target)
-  if (!jobs.length) {
-    console.error(`check-workflows: ${target.label} declares no jobs at all — nothing verified`)
-    bad++
-    continue
+// 主体检只在被当作命令执行时才跑：import 这份模块的测试文件要拿的是导出，不是这道闸的结论。
+// 否则"仓库的 workflow 此刻有没有问题"会决定那份测试文件能不能登记自己的用例——两个读者两件事。
+if (isEntrypoint) {
+  let bad = 0
+  for (const target of targets) {
+    const { jobs, problems, advisories } = inspect(target)
+    if (!jobs.length) {
+      console.error(`check-workflows: ${target.label} declares no jobs at all — nothing verified`)
+      bad++
+      continue
+    }
+    for (const p of problems) {
+      console.error(`  ✗ ${target.label}: ${p}`)
+      bad++
+    }
+    // `△` is this repository's existing spelling for "measured, announced, not this gate's verdict"
+    // (see the two reverse cases in patched-deps' selftest). It is printed so a scope limit stays a
+    // finding somebody sees every run, rather than a comment nobody reads.
+    for (const a of advisories) console.log(`  △ ${target.label}: ${a}`)
+    if (!problems.length) console.log(`  ok ${target.label}: ${jobs.length} job(s), every referenced script exists`)
   }
-  for (const p of problems) {
-    console.error(`  ✗ ${target.label}: ${p}`)
-    bad++
-  }
-  // `△` is this repository's existing spelling for "measured, announced, not this gate's verdict"
-  // (see the two reverse cases in patched-deps' selftest). It is printed so a scope limit stays a
-  // finding somebody sees every run, rather than a comment nobody reads.
-  for (const a of advisories) console.log(`  △ ${target.label}: ${a}`)
-  if (!problems.length) console.log(`  ok ${target.label}: ${jobs.length} job(s), every referenced script exists`)
-}
 
-if (bad > 0) {
-  console.error(`check-workflows: ${bad} problem(s) in ${targets.length} workflow file(s).`)
-  process.exit(1)
+  if (bad > 0) {
+    console.error(`check-workflows: ${bad} problem(s) in ${targets.length} workflow file(s).`)
+    process.exit(1)
+  }
+  console.log(`check-workflows: ${targets.length} workflow file(s) clean`)
 }
-console.log(`check-workflows: ${targets.length} workflow file(s) clean`)
