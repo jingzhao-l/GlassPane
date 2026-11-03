@@ -1,5 +1,5 @@
 {
-  "observedAt": "2026-10-31",
+  "observedAt": "2026-11-03",
   "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
   "rules": [
     {
@@ -53,10 +53,10 @@
     "packages/core/src/plugin/skill/customize-harness.md"
   ],
   "lineage": {
-    "occurrences": 9632,
-    "filesScanned": 3330
+    "occurrences": 9638,
+    "filesScanned": 3338
   },
   "shippedFiles": 1323,
   "shippedSrc": 5,
-  "lineageNote": "2026-10-29 0.12.4 (9607→9634, +27 over 3329 files): 全部是本轮修复在注释/文档里点名它正在改掉或正在 dual-read 的那个上游名——server/auth.ts 与其测试写 OPENCODE_SERVER_PASSWORD/OPENCODE_SERVER_USERNAME 是因为那条规则就是「产品名 orElse 上游名」；tool/registry.ts 的 [gp] 边界说明写 opencode/opencode-go 是因为那两个析取支就是被删的对象；docs/kernel-integration.md、CHANGELOG、uninstall.ts 同理。没有一处把它作为产品名称呈现，也没有新增请求头/包名/registry。"
+  "lineageNote": "2026-11-03: 9632 -> 9638 (+6 over 8 files)，增量全部落在本轮新增的拒绝型测试语料里（postinstall 的祖先目录/NODE_PATH 劫持夹具、upstream-dev-mutators 的旁路脚本、models-and-keys 的分享通道宣称、tree-anchor / assert-ci-green / workflow-gates / cli-copy 的夹具与注释）——它们点名上游名是为了证明自己的判据能拒； shipped 产品字节未变，血缘只许减不许增的棘轮在这里由归属说明承担。"
 }
