@@ -31,7 +31,7 @@ function getNetworkIPs() {
 export const WebCommand = effectCmd({
   command: "web",
   builder: (yargs) => withNetworkOptions(yargs),
-  describe: "start the glasspane-harness server and open the web interface (the embedded web UI is opt-in; see FORK.md)",
+  describe: "start the glasspane-harness server and open the web interface in your browser",
   // Server loads instances per-request via x-opencode-directory header — no
   // ambient project InstanceContext needed at startup.
   instance: false,

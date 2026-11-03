@@ -52,19 +52,16 @@ export function recordToolExecution(
   env: NodeJS.ProcessEnv = process.env,
 ): DecisionLogNote | undefined {
   if (!input.tool.startsWith(GLASSPANE_TOOL_PREFIX)) return undefined
-  // The prefix is not provenance. `tool/registry.ts` auto-imports a project's own
-  // `{tool,tools}/*.{js,ts}`, so a repo-committed tool file whose exported id starts with this
-  // prefix, returning a kernel-shaped
-  // `{ok:true, result:{evidencePack}}` used to mint a chain entry for a verdict that never
-  // crossed the socket — and shape validation cannot tell those apart, because a forged pack and
-  // an engine pack parse identically. The ledger records what the engine decided, so it records
-  // only results this surface got back from `Daemon.call`.
-  if (!fromDaemonSurface(output.metadata)) {
-    return { status: "skipped", reason: "a gp_-named reply that did not come from this surface's daemon call" }
-  }
-
+  // Production shape first: `refused` in `index.ts` renders every refusal — the engine's error
+  // frames included — without the DAEMON_ORIGIN marker, because a refusal mints no ledger entry
+  // and half of the refusals are written by the transport before any byte crosses the socket.
+  // So the failure check runs BEFORE the provenance check. The other order made every real
+  // engine refusal take the provenance skip with the sentence "a gp_-named reply that did not
+  // come from this surface's daemon call" — a false claim about a refusal the surface itself
+  // rendered from the engine's frame — and left the `gp call did not succeed` branch below
+  // unreachable from product code.
   const metadata = output.metadata as
-    | { ok?: boolean; method?: string; code?: string; message?: string; remedy?: string; result?: unknown }
+    | { ok?: boolean; method?: string; code?: string; message?: string; remedy?: string; dimension?: unknown; result?: unknown }
     | undefined
 
   // A failed tool call is not a decision about the app — the engine never got to
@@ -72,6 +69,18 @@ export function recordToolExecution(
   // the audit chain that is supposed to say what the interface did.
   if (!metadata || metadata.ok !== true) {
     return { status: "skipped", reason: `gp call did not succeed (${metadata?.code ?? "no metadata"})` }
+  }
+
+  // The prefix is not provenance, and neither is `ok: true`. `tool/registry.ts` auto-imports a
+  // project's own
+  // `{tool,tools}/*.{js,ts}`, so a repo-committed tool file whose exported id starts with this
+  // prefix, returning a kernel-shaped
+  // `{ok:true, result:{evidencePack}}` used to mint a chain entry for a verdict that never
+  // crossed the socket — and shape validation cannot tell those apart, because a forged pack and
+  // an engine pack parse identically. The ledger records what the engine decided, so it records
+  // only results this surface got back from `Daemon.call`.
+  if (!fromDaemonSurface(metadata)) {
+    return { status: "skipped", reason: "a gp_-named reply that did not come from this surface's daemon call" }
   }
 
   // Both kernel calls are wrapped, and the wrapper is the point rather than a detail:
@@ -106,6 +115,12 @@ export function recordToolExecution(
     logged = logDecision(read.pack, {
       env,
       extraSummary: `${input.tool} in session ${input.sessionID}`,
+      // The declared dimension belongs in the chain, not only in the transcript metadata the
+      // compaction pass is about to throw away: the ledger is the audit artifact, and a ledger
+      // that records 0 dimensions for a run that declared them says the audit saw no review
+      // dimension. A non-string here is refused by `logDecision` (the surface validates the id
+      // before `present` echoes it back), never silently dropped.
+      dimension: typeof metadata.dimension === "string" ? metadata.dimension : null,
     })
   } catch (error) {
     return ledgerFault("appending to the decision ledger", error)

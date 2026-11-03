@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 
 import { GlasspaneDecisionLogPlugin, decisionLogWarning, recordToolExecution } from "../../src/plugin/glasspane-decision-log"
+import { present, refused } from "../../src/tool/glasspane/index"
 import { DAEMON_ORIGIN, fromDaemonSurface } from "../../src/tool/glasspane/daemon"
 import { verifyLedger } from "../../src/tool/glasspane/kernel"
 
@@ -30,9 +31,18 @@ function ledgerEnv() {
   return { dir, env: { GLASSPANE_DECISION_LOG: path.join(dir, "decisions.jsonl"), HOME: dir } }
 }
 
-function toolResult(result: unknown, ok = true, fromSurface = true) {
+/**
+ * A metadata fixture with the EXACT key set `present`/`refused` in `index.ts` produce:
+ * `ok, method, code, message, remedy, dimension, provider, result`, plus — on the success
+ * branch only — the `DAEMON_ORIGIN` marker. A fixture drifting from the production shape is
+ * how this file's failure case once passed for the wrong reason: the refusal branch of the
+ * real surface carries no `DAEMON_ORIGIN`, the fixture copied that faithfully, and the skip
+ * it asserted blamed "not this surface's daemon call" for a refusal that DID come off the
+ * engine. Both halves are pinned now — the shape here, and the reason below.
+ */
+function toolResult(result: unknown, ok = true, fromSurface = true, dimension: string | null = null) {
   return {
-    title: "gp_observe: observe ok",
+    title: "gp_observe: observe answered",
     output: "observed 1 window; no anomaly",
     metadata: ok ? {
       ok: true,
@@ -40,6 +50,8 @@ function toolResult(result: unknown, ok = true, fromSurface = true) {
       code: null,
       message: null,
       remedy: null,
+      dimension,
+      provider: null,
       result,
       // The real surface sets this in `present()`; a fixture that omits it is pretending to be a
       // project-local tool that merely calls itself `gp_*`, which is case "a gp_-named reply from
@@ -51,12 +63,56 @@ function toolResult(result: unknown, ok = true, fromSurface = true) {
       code: "GP_E_NOT_ATTACHED",
       message: "no window is attached",
       remedy: "call gp_attach first",
+      dimension,
+      provider: null,
       result: null,
+      // No `DAEMON_ORIGIN` here on purpose: `refused` never marks, in production either —
+      // the half of refusals the transport writes before a byte crosses the socket is why.
     },
   }
 }
 
 const input = (tool: string) => ({ tool, sessionID: "ses_test", callID: "call_test" })
+
+describe("the fixture is the surface's shape, not a copy of it", () => {
+  // The comment above `toolResult` says its key set is the EXACT key set `present`/`refused`
+  // produce. Until now nothing measured that: the fixture was a hand-written list, and a surface
+  // that renamed `dimension` to anything else would keep this file green while the ledger went
+  // back to recording zero dimensions for a run that declared them — the plugin reads
+  // `metadata.dimension` by name. Both halves are pinned: the key sets, and the value that
+  // actually reaches the chain when the input is a row the real surface rendered.
+  test("present() and refused() produce the keys the fixture claims", () => {
+    const produced = present("gp_observe", "observe", { ok: true, result: { evidencePack: pack("ok-01") } }, () => "observed", "security")
+    const rejected = refused("gp_observe", "observe", { code: "GP_E_NOT_ATTACHED", message: "no window is attached", remedy: "call gp_attach first" })
+
+    const fixture = toolResult({ evidencePack: pack("ok-01") })
+    const fixtureRefusal = toolResult(null, false)
+
+    // `Object.keys` leaves the `DAEMON_ORIGIN` symbol out of both sides, which is the comparison
+    // this test is about: the JSON-visible fields the plugin reads.
+    expect(Object.keys(fixture.metadata).sort()).toEqual(Object.keys(produced.metadata as object).sort())
+    expect(Object.keys(fixtureRefusal.metadata).sort()).toEqual(Object.keys(rejected.metadata as object).sort())
+
+    // The values the fixture hard-codes are the ones the surface hard-codes: `null` for the three
+    // error fields on a success, and no marker on a refusal.
+    expect(fixture.metadata).toMatchObject({ ok: true, code: null, message: null, remedy: null, provider: null })
+    expect(fixtureRefusal.metadata).toMatchObject({ ok: false, dimension: null, result: null })
+    expect(rejected.metadata).not.toHaveProperty("undefined")
+    expect(fromDaemonSurface(rejected.metadata)).toBe(false)
+    expect(fromDaemonSurface(produced.metadata)).toBe(true)
+  })
+
+  test("a dimension the surface rendered is the dimension the chain records", () => {
+    // End to end on a production-shaped row: the annotation is written by `present`, read by name
+    // here, and transcribed into the ledger entry. A key rename on either side reddens this.
+    const { env, dir } = ledgerEnv()
+    const output = present("gp_last_evidence", "last_evidence", { ok: true, result: { evidencePack: pack("ok-01") } }, () => "pack", "security")
+    const note = recordToolExecution(input("gp_last_evidence"), { title: output.title, output: output.output, metadata: output.metadata }, env)
+    expect(note?.status).toBe("logged")
+    const entry = JSON.parse(readFileSync(path.join(dir, "decisions.jsonl"), "utf8").trim())
+    expect(entry.dimension).toBe("security")
+  })
+})
 
 describe("what the plugin records", () => {
   test("a gp_* result carrying an evidence pack lands in the chain", () => {
@@ -131,12 +187,56 @@ describe("what the plugin refuses to invent", () => {
     expect(verifyLedger(path.join(dir, "decisions.jsonl"))).toEqual({ ok: true, exists: false, entries: 0 })
   })
 
-  test("a failed gp_* call writes no decision — the engine never got to evidence anything", () => {
+  test("a failed gp_* call is skipped AS the failed call it is, and writes no decision", () => {
+    // The engine's refusal frame renders through `refused` without `DAEMON_ORIGIN` (see the
+    // fixture), so this input is production-shaped: a real refusal. The skip reason used to
+    // blame provenance — "did not come from this surface's daemon call" — for a frame the
+    // surface itself rendered from the engine, and the `gp call did not succeed` branch was
+    // unreachable from product code because the provenance check ran first. Both orders pass
+    // the ledger assertion; only this one pins which fact the note is allowed to state.
     const { env, dir } = ledgerEnv()
     const note = recordToolExecution(input("gp_observe"), toolResult(null, false), env)
     expect(note?.status).toBe("skipped")
+    if (note?.status !== "skipped") return
+    expect(note.reason).toContain("gp call did not succeed (GP_E_NOT_ATTACHED)")
+    expect(note.reason).not.toContain("did not come from")
     expect(verifyLedger(path.join(dir, "decisions.jsonl")).entries).toBe(0)
     expect(verifyLedger(path.join(dir, "decisions.jsonl")).exists).toBe(false)
+  })
+
+  test("the ledger line carries the dimension the decision was made for", () => {
+    // The ledger is the audit artifact; the transcript metadata the coverage line reads is
+    // the thing compaction throws away. `DecisionLogDraft.dimension` has been in the kernel
+    // since the chain schema froze, and the plugin was passing nothing, so a session that
+    // declared `security` on the recorded call still left a chain with zero dimensions.
+    const { env, dir } = ledgerEnv()
+    const note = recordToolExecution(input("gp_last_evidence"), toolResult({ evidencePack: pack("ok-01") }, true, true, "security"), env)
+    expect(note?.status).toBe("logged")
+    if (note?.status !== "logged") return
+    const entry = JSON.parse(readFileSync(path.join(dir, "decisions.jsonl"), "utf8").trim())
+    expect(entry.dimension).toBe("security")
+  })
+
+  test("a call that declared no dimension records none — absent, never null or guessed", () => {
+    const { env, dir } = ledgerEnv()
+    const note = recordToolExecution(input("gp_observe"), toolResult({ evidencePack: pack("ok-01") }), env)
+    expect(note?.status).toBe("logged")
+    const line = readFileSync(path.join(dir, "decisions.jsonl"), "utf8")
+    expect(line).not.toContain('"dimension"')
+  })
+
+  test("a dimension the kernel would refuse is refused here, not dropped on the way in", () => {
+    // The surface validates the id before `present` echoes it, so a malformed one reaching the
+    // plugin means a producer that bypassed the gate; writing it would put a token into the
+    // chain that can never match a planned dimension, silently renaming what the run covered.
+    // Silent dropping would be the same lie in the other direction — the ledger test asserts
+    // the refusal and that the chain stayed empty.
+    const { env, dir } = ledgerEnv()
+    const note = recordToolExecution(input("gp_last_evidence"), toolResult({ evidencePack: pack("ok-01") }, true, true, "Spec Compliance"), env)
+    expect(note?.status).toBe("failed")
+    if (note?.status !== "failed") return
+    expect(note.code).toBe("GP_E_DIMENSION")
+    expect(verifyLedger(path.join(dir, "decisions.jsonl")).entries).toBe(0)
   })
 
   test("a result with no evidence frame is reported, not guessed at", () => {

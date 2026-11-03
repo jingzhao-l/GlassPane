@@ -39,12 +39,14 @@ import {
   KernelSchemaError,
   diagnoseAttribution,
   emptyProviderRegistry,
+  evidenceAttribution,
   glasspaneProviderDrafts,
   glasspaneProviderRegistry,
   parseProviderRegistration,
   providerIdsInCommon,
   registerProvider,
   requireDiagnoseMethod,
+  requireEvidenceMethod,
   requireMethod,
   resolveProvider,
 } from "../../src/tool/glasspane/providers"
@@ -265,6 +267,45 @@ describe("GlassPane registers its two producers", () => {
     expect(attributed.provider.method).toBe("diagnose")
     expect(attributed.provider.version).toBe(InstallationVersion)
     expect(attributed.provider.requires).toEqual(FIXTURE.input.methods[0]!.requires)
+  })
+
+  test("the evidence provider is resolved by the surface that answers from it", () => {
+    // `glasspane-evidence` registered `last-evidence` while NO `src/` path resolved either.
+    // A registration is a claim another harness relies on, and `gp_last_evidence` — the call
+    // whose reply is the artifact every UI-change claim cites — answered with `provider: null`
+    // beside a registry entry that said exactly who provided it. The decoration is now
+    // consumed: this attribution names the registered id, the declared method and the empty
+    // `requires` claim, taken from the same registry `requireMethod` answers against.
+    const attributed = evidenceAttribution("last-evidence")
+    expect(attributed.ok).toBe(true)
+    if (!attributed.ok) return
+    expect(attributed.provider.id).toBe(GLASSPANE_EVIDENCE_PROVIDER_ID)
+    expect(attributed.provider.method).toBe("last-evidence")
+    expect(attributed.provider.requires).toEqual([])
+    expect(attributed.provider.version).toBe(InstallationVersion)
+  })
+
+  test("asking the evidence provider for a method only the AE side declares is refused", () => {
+    // No cross-provider fallback on the attribution path either: `diagnose` is registered and
+    // resolvable, but not from the evidence id — answering it there would attribute an AE
+    // verdict to the provider that fetches the evidence pack.
+    const refused = evidenceAttribution("diagnose")
+    expect(refused.ok).toBe(false)
+    if (refused.ok) return
+    expect(refused.error.code).toBe(PROVIDER_CODES.missingMethod)
+    expect(refused.error.remedy).toContain("last-evidence")
+    expect(refused.error.remedy).toContain("capture")
+    expect(() => requireEvidenceMethod(SHIPPED, "diagnose")).toThrow(KernelProviderError)
+    expect(requireEvidenceMethod(SHIPPED, "capture").name).toBe("capture")
+  })
+
+  test("gp_last_evidence's rendered rows carry the attribution on both branches", () => {
+    // The wiring, pinned at the call site: `present` alone would leave the refusal branch
+    // unattributed, and the metadata-shape rule in the surface test keeps those one shape.
+    const surface = readFileSync(path.join(import.meta.dir, "..", "..", "src", "tool", "glasspane", "index.ts"), "utf8")
+    expect(surface).toContain('evidenceAttribution("last-evidence")')
+    expect(surface).toContain('if (!attribution.ok) return refused("gp_last_evidence", "last_evidence", attribution.error, params.dimension ?? null)')
+    expect(surface).toContain("return present(\"gp_last_evidence\", \"last_evidence\", reply, (result) => json(result), params.dimension ?? null, attribution.provider)")
   })
 })
 

@@ -53,7 +53,7 @@ import {
   readDecisionLog,
   KernelDecisionLogError,
 } from "iterate-kernel/decision-log"
-import type { DecisionLogEntry, DecisionOutcome } from "iterate-kernel/decision-log-entry"
+import { SUMMARY_MAX_LENGTH, type DecisionLogEntry, type DecisionOutcome } from "iterate-kernel/decision-log-entry"
 import { parseEvidencePackRead, parseRunPlan } from "iterate-kernel/parse"
 import { plannedIds, runPlanDigest } from "iterate-kernel/run-plan"
 import { dimensionContext, formatDimensionContext, DIMENSION_ID_MAX_LENGTH, DIMENSION_ID_PATTERN } from "iterate-kernel/dimension-context"
@@ -65,6 +65,13 @@ import type {
 
 export type { DecisionLogEntry, DecisionOutcome, EvidencePack }
 export type { DimensionContext, DimensionContextInput, DimensionStatus }
+
+/**
+ * The kernel's own summary bound, re-exported through this doorway (same precedent as
+ * `entryHashOf`): the truncation below reads THIS binding, so a test can pin that the
+ * product's copy of the limit is the kernel's number, not a literal that can drift from it.
+ */
+export { SUMMARY_MAX_LENGTH }
 
 /**
  * The dimension coverage of a run, computed by the kernel (M4).
@@ -237,15 +244,45 @@ function physicalPath(candidate: string): string {
 }
 
 /**
- * Whether one resolved path is the engine's root or something under it — lexically AND
- * physically. The lexical test stays because it is the one that reads the setting the
- * operator wrote; the physical test is the one that says where the bytes would land.
+ * Whether one resolved path is the engine's root or something under it — lexically,
+ * physically, and once more with the letters' case folded out.
+ *
+ * The lexical test is the one that reads the setting the operator wrote; the physical test
+ * (`realpathSync` of the nearest existing ancestor) is the one that says where the bytes
+ * would land, and it is what catches a symlink into the tree.
+ *
+ * WHY THE FOLDED THIRD TEST EXISTS. Measured 2026-11 on this machine's APFS volume, with
+ * `<home>/.glasspane` already created:
+ *   `node -e "fs.realpathSync('<home>/.GlassPane')"` → `<home>/.GlassPane` (the bytes as typed)
+ *   `bun  -e "fs.realpathSync('<home>/.GlassPane')"` → `<home>/.glasspane` (the name on disk)
+ * Node's realpath does not re-case a name on a case-INSENSITIVE volume, so comparing resolved
+ * strings let `GLASSPANE_DECISION_LOG=$HOME/.GlassPane/decisions.jsonl` past a guard whose whole
+ * job is to keep a second writer out of the engine's tree, and the ledger's bytes still landed
+ * on the engine's own directory. `daemon.ts`'s socket-trust remedy names node as a supported
+ * runtime, so "correct under the runtime these tests happen to use" is not a defence.
+ *
+ * The folded test therefore refuses a candidate that differs from the engine's root by case
+ * ALONE, on every volume and in both directions (a `GLASSPANE_SOCKET` under the capitalised
+ * spelling and a lowercase ledger are the same tree too). The cost is a refusal on a genuinely
+ * case-sensitive volume, where `.GlassPane` and `.glasspane` are two directories — accepted
+ * deliberately, because this guard's failure direction is a second writer in the engine's tree
+ * (audit findings B-1/A-15) and a user who means the other directory can name it with a
+ * different word. `test/tool/glasspane-kernel.test.ts` pins both halves: the refusal, and that
+ * a name differing by MORE than case stays writable.
  */
 function insideStateRoot(candidate: string, state: string): boolean {
   if (candidate === state || candidate.startsWith(state + path.sep)) return true
   const root = physicalPath(state)
   const here = physicalPath(candidate)
-  return here === root || here.startsWith(root + path.sep)
+  if (here === root || here.startsWith(root + path.sep)) return true
+  return sameUpToCase(here, root)
+}
+
+/** Whether two paths are the same tree, or one is under the other, once case is folded away. */
+function sameUpToCase(left: string, right: string): boolean {
+  const foldedLeft = left.toLowerCase()
+  const foldedRight = right.toLowerCase()
+  return foldedLeft === foldedRight || foldedLeft.startsWith(foldedRight + path.sep)
 }
 
 /**
@@ -540,15 +577,30 @@ export function readRunPlan(
   // whoever configures a run in a directory writes its plan there, and a harness session opened on
   // that directory reads exactly that one file. It is *not* a default plan — nothing is
   // synthesised, the path is not searched or guessed, and an absent file keeps the session
-  // unplanned, which renders no coverage line. The guards are the same ones the explicit path gets
-  // (a plan inside the engine's state root is not this harness's to read), and a half-written file
-  // refuses by name rather than reporting zero coverage for a plan nobody could parse.
+  // unplanned, which renders no coverage line. Absence is checked first because it is the honest
+  // answer that costs no rule: a project with no plan file was never configured one, wherever it
+  // sits. The guards then run on the declared plan, and they are the same ones the explicit path
+  // gets — a plan inside the engine's state root is not this harness's to read, and it must be
+  // REFUSED, not returned as `plan: null`. `{ok: true, plan: null}` is the sentence "this session
+  // has no plan", and rendering it for a plan the guard declined to open dresses up "we cannot
+  // say" as "there is nothing"; the compaction block then prints no coverage line at all, and the
+  // summary reads like an unreviewed session. A half-written file refuses by name rather than
+  // reporting zero coverage for a plan nobody could parse.
   if (typeof projectDirectory !== "string" || projectDirectory.length === 0) return { ok: true, plan: null }
+  const candidate = path.resolve(projectDirectory, PROJECT_PLAN_DIRECTORY, PROJECT_PLAN_FILE)
+  if (!existsSync(candidate)) return { ok: true, plan: null }
   const state = engineStateRoot(env)
   if (!state.ok) return state
-  const candidate = path.resolve(projectDirectory, PROJECT_PLAN_DIRECTORY, PROJECT_PLAN_FILE)
-  if (insideStateRoot(candidate, state.path)) return { ok: true, plan: null }
-  if (!existsSync(candidate)) return { ok: true, plan: null }
+  if (insideStateRoot(candidate, state.path)) {
+    return {
+      ok: false,
+      error: {
+        code: "GP_E_RUN_PLAN_PATH",
+        message: `the project's own ${PROJECT_PLAN_DIRECTORY}/${PROJECT_PLAN_FILE} at ${candidate} is inside the engine's state root ${state.path}, so this harness will not read it as a plan`,
+        remedy: `the plan belongs to whoever configured the run, outside the engine's tree — keep the project directory outside ${state.path}, or hand the plan in with an absolute GLASSPANE_RUN_PLAN that lives outside it`,
+      },
+    }
+  }
   return readPlanAt(candidate, `the project's own ${PROJECT_PLAN_DIRECTORY}/${PROJECT_PLAN_FILE}`, "project")
 }
 
@@ -571,13 +623,27 @@ export function decisionStamp(at: Date): string {
  * come from the kernel + ledger; the outcome and summary come from the pack. The
  * caller cannot supply either, which is what keeps two shells from writing the
  * same run two different ways.
+ *
+ * `dimension` is the third piece the caller DOES supply, because it is the caller's
+ * own declaration — the review dimension the served (validated at the tool surface
+ * before this point). The kernel's draft schema carries the field
+ * (`decision-log.d.ts`, `DecisionLogDraft.dimension`), and the transcription rules
+ * leave it absent for anything that is not a kernel dimension id — so a ledger written
+ * without it records zero dimensions for a run that declared them. The ledger is the
+ * audit artifact that outlives the transcript: compaction's coverage line reads the
+ * in-memory metadata that compaction is about to throw away, so the dimension belongs
+ * in the chain, and a malformed one is refused rather than silently dropped — a typo
+ * that renamed a dimension is a false statement about what the run covered.
  */
 export function logDecision(
   pack: EvidencePack,
-  options: { readonly env?: NodeJS.ProcessEnv; readonly extraSummary?: string } = {}
+  options: { readonly env?: NodeJS.ProcessEnv; readonly extraSummary?: string; readonly dimension?: string | null } = {}
 ): { ok: true; logged: LoggedDecision } | { ok: false; error: KernelRejection } {
   const resolved = resolveLedger(options.env ?? process.env)
   if (!resolved.ok) return resolved
+  const declared = validateDimension(options.dimension)
+  if (!declared.ok) return declared
+  const dimension = typeof declared.dimension === "string" && declared.dimension.length > 0 ? declared.dimension : undefined
   const ledger = resolved.ledger.path
   const summary = options.extraSummary ? `${decisionSummaryFromEvidence(pack)}; ${options.extraSummary}` : decisionSummaryFromEvidence(pack)
 
@@ -600,9 +666,15 @@ export function logDecision(
     const appended = appendDecisionLogEntry(ledger, {
       entryId: newDecisionEntryId(),
       operationId: pack.operationId,
-      summary: summary.slice(0, 2048),
+      // The kernel's own `SUMMARY_MAX_LENGTH`, imported above — the literal this line used to
+      // carry was a third copy of the bound (schema, transcriber, here) and would have kept
+      // truncating to a stale number the day the kernel's moved.
+      summary: summary.slice(0, SUMMARY_MAX_LENGTH),
       outcome: decisionOutcomeFromEvidence(pack),
       createdAt: decisionStamp(new Date()),
+      // Omitted when the call declared no dimension: the entry schema is strict, and a
+      // `dimension: null` would be inventing a field value the caller never claimed.
+      ...(dimension !== undefined ? { dimension } : {}),
     })
     return {
       ok: true,

@@ -530,12 +530,23 @@ export function probeCapabilities() {
     if (typeof reply.result !== "object" || reply.result === null) return { ok: false, error: noCapabilityList(reply.result) }
     const report = reply.result as Partial<Capabilities>
     if (!Array.isArray(report.capabilities)) return { ok: false, error: noCapabilityList(report) }
+    // A capability entry this layer cannot read is NOT an absent one. The list used to be
+    // `filter`ed down to its string entries here, and `index.ts`'s gate then rendered the
+    // survivor as the engine's word: an advertised entry of `{method: "act"}` (an object,
+    // after an engine-side shape change) made the filtered list lack "act", and the model read
+    // "engine <ver> does not advertise the act capability" — a negative claim about the engine
+    // manufactured out of our own decode. The permissions branch below reads each seat and
+    // says "unreadable" beside its name; a capability list cannot carry that annotation (it is
+    // a closed `string[]`), so the whole probe says what went wrong instead, and no caller may
+    // claim either direction about a method until every entry reads.
+    const unreadable = report.capabilities.filter((item) => typeof item !== "string")
+    if (unreadable.length > 0) return { ok: false, error: unreadableCapabilityList(report.capabilities.length, unreadable) }
     return {
       ok: true,
       report: {
         version: typeof report.version === "string" ? report.version : "unknown",
         protocolVersion: typeof report.protocolVersion === "string" ? report.protocolVersion : "unknown",
-        capabilities: report.capabilities.filter((item): item is string => typeof item === "string"),
+        capabilities: report.capabilities,
         // The daemon's permission seats are strings ("granted" / "denied" / "unverifiable"), and
         // `gp_probe_status` hands this object straight to the model as the engine's seat report.
         // `as Record<string, string>` asserted that shape instead of reading it: a seat carrying a
@@ -562,5 +573,19 @@ function noCapabilityList(given: unknown): DaemonError {
     code: "GP_E_INTERNAL",
     message: `the background service answered hello without a capability list: ${JSON.stringify(given)?.slice(0, 160) ?? String(given)}`,
     remedy: "run gp_probe_status to read the engine's self-report, and read ~/.glasspane/installer-daemon.log if it is empty — no capability is assumed until hello advertises one",
+  }
+}
+
+/**
+ * `hello` advertised a list, and this layer could not read every entry in it. Refusing the
+ * whole probe is the only answer that claims nothing: dropping the unreadable entries lets
+ * the gate assert "does not advertise" about an engine that may well have advertised them,
+ * and passing them through would put a non-string where every consumer reads a method name.
+ */
+function unreadableCapabilityList(total: number, unreadable: readonly unknown[]): DaemonError {
+  return {
+    code: "GP_E_INTERNAL",
+    message: `the background service answered hello with a capability list this harness cannot read: ${unreadable.length} of ${total} entries are not strings (first unreadable entry: ${JSON.stringify(unreadable[0])?.slice(0, 80) ?? String(unreadable[0])})`,
+    remedy: "run gp_probe_status to read the engine's raw self-report and check ~/.glasspane/installer-daemon.log — while an advertised capability entry cannot be read, no gp_* method is either supported or unsupported by this answer; do not treat the refused call as one the engine declined",
   }
 }

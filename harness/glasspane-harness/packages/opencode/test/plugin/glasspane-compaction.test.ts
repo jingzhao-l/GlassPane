@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test"
-import { readFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import path from "node:path"
+
+// The digest is computed from the kernel package itself, not through the doorway the plugin uses:
+// a test whose expected value comes from the same call it is testing grades its own work.
+import { parseRunPlan } from "iterate-kernel/parse"
+import { runPlanDigest } from "iterate-kernel/run-plan"
 
 import {
   GlasspaneCompactionPlugin,
@@ -339,14 +345,30 @@ describe("how many declarations the surface actually lost", () => {
   })
 
   test("a failed call that declared a dimension is a lost declaration too", () => {
-    // The shell echoes the declared dimension in the result metadata, and a rejected call still
-    // carries it — the caller asked for that dimension to be on the record and nothing got there.
+    // THE PART SHAPE IS ONE THE HOST REALLY PRODUCES, and it took the surface changing to make it
+    // reachable. `session/processor.ts`'s `failToolCall` writes the errored part with
+    // `metadata: match.part.state.metadata` — whatever the tool streamed while it was running, and
+    // nothing else, because an execute result that never returned has no metadata to carry. Until
+    // `index.ts` streamed the declaration there, a `gp_*` part in the `error` state had NO
+    // `dimension` key at all (the running state is created as `{status, input, time}` and the
+    // surface never wrote to it), so this fixture described a call the production path could not
+    // make, and the branch it pins could have been deleted without anything going red.
+    // The path is now real: a user who answers the permission prompt with "reject" fails `ctx.ask`,
+    // and the declaration survives because `declareDimension` ran first — pinned by
+    // `test/tool/glasspane-surface.test.ts` ("the declaration is streamed onto the running part
+    // before the prompt is asked"), which drives the shipped `gp_act` with a rejecting prompt.
     const collected = collectEvidenceAnchors([
       message("gp_act", { status: "error", metadata: { ok: false, method: "act", code: "GP_E_NOT_ATTACHED", dimension: "security" } }),
     ])
     expect(collected.calls).toBe(1)
     expect(collected.withoutDecision).toBe(1)
     expect(collected.declaredWithoutAnchor).toBe(1)
+    // The same call as the host writes it for a rejection: only the streamed field, no `ok`,
+    // no `method` — and the declaration still counts, which is what the surface now guarantees.
+    const rejected = collectEvidenceAnchors([message("gp_act", { status: "error", metadata: { dimension: "security" } })])
+    expect(rejected.declaredWithoutAnchor).toBe(1)
+    // A rejected call that declared nothing is not a lost declaration: absence renders as absence.
+    expect(collectEvidenceAnchors([message("gp_act", { status: "error", metadata: { dimension: null } })]).declaredWithoutAnchor).toBe(0)
   })
 
   test("a running call is not settled, so it neither counts as a call nor as a loss", () => {
@@ -355,6 +377,94 @@ describe("how many declarations the surface actually lost", () => {
     ])
     expect(collected.calls).toBe(0)
     expect(collected.declaredWithoutAnchor).toBe(0)
+  })
+})
+
+describe("which directory the project's own run plan is read from", () => {
+  // The plugin binds `readRunPlan(process.env, input.directory)` — the directory this plugin
+  // instance was created for — and the comment beside that call site says why: one harness process
+  // holds sessions for several projects, and a plan read out of the working directory renders
+  // project B's coverage into project A's summary. That claim was unmeasured: replacing
+  // `input.directory` with `process.cwd()` in the source left every test in this file green,
+  // because none of them ever bound a directory the plan could come from.
+  function planAt(directory: string, ids: string[]) {
+    mkdirSync(path.join(directory, ".iterate"), { recursive: true })
+    writeFileSync(
+      path.join(directory, ".iterate", "run-plan.json"),
+      JSON.stringify({ schemaVersion: "iterate.run-plan/0.1", dimensions: ids.map((id) => ({ id })) }),
+    )
+  }
+
+  test("the plan beside the session's directory is the one the block digests", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "gp-compaction-plan-"))
+    const project = path.join(root, "project-a")
+    const elsewhere = path.join(root, "project-b")
+    planAt(project, ["security", "correctness"])
+    planAt(elsewhere, ["style-tests"])
+    const expected = runPlanDigest(parseRunPlan({ schemaVersion: "iterate.run-plan/0.1", dimensions: [{ id: "security" }, { id: "correctness" }] }))
+
+    const client = {
+      session: {
+        messages: async () => ({ data: [message("gp_observe", { metadata: okMetadata({ decisionLog: receipt() }) })] }),
+      },
+    }
+    const hooks = await GlasspaneCompactionPlugin({ client, directory: project } as never)
+
+    // The process is standing in the OTHER project, the one with its own plan file: exactly the
+    // shape the call site's comment refuses. `GLASSPANE_RUN_PLAN` is out of the way so the project
+    // channel — the one under test — is the only one that can answer.
+    const previousRunPlan = process.env.GLASSPANE_RUN_PLAN
+    delete process.env.GLASSPANE_RUN_PLAN
+    const previousCwd = process.cwd()
+    process.chdir(elsewhere)
+    try {
+      const output: { context: string[]; prompt?: string } = { context: [] }
+      await hooks["experimental.session.compacting"]?.({ sessionID: "ses_plan_dir" }, output)
+      expect(output.context.length).toBe(1)
+      const block = output.context[0] ?? ""
+      expect(block).toContain(`[plan ${expected} @ ${path.join(project, ".iterate", "run-plan.json")}]`)
+      expect(block).toContain("0/2 dimensions verified")
+      // Project B's plan is the one the working directory would have produced, and it is absent.
+      expect(block).not.toContain("style-tests")
+      expect(block).not.toContain(path.join(elsewhere, ".iterate", "run-plan.json"))
+    } finally {
+      process.chdir(previousCwd)
+      if (previousRunPlan !== undefined) process.env.GLASSPANE_RUN_PLAN = previousRunPlan
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("a session whose own directory has no plan is reported as unplanned, not as the cwd's plan", async () => {
+    // The other direction: `directory` is what decides, so an unconfigured project must produce no
+    // coverage line even when the working directory is fully configured.
+    const root = mkdtempSync(path.join(tmpdir(), "gp-compaction-noplan-"))
+    const project = path.join(root, "bare-project")
+    const elsewhere = path.join(root, "configured-project")
+    mkdirSync(project, { recursive: true })
+    planAt(elsewhere, ["security"])
+
+    const client = {
+      session: {
+        messages: async () => ({ data: [message("gp_observe", { metadata: okMetadata({ decisionLog: receipt() }) })] }),
+      },
+    }
+    const hooks = await GlasspaneCompactionPlugin({ client, directory: project } as never)
+    const previousRunPlan = process.env.GLASSPANE_RUN_PLAN
+    delete process.env.GLASSPANE_RUN_PLAN
+    const previousCwd = process.cwd()
+    process.chdir(elsewhere)
+    try {
+      const output: { context: string[]; prompt?: string } = { context: [] }
+      await hooks["experimental.session.compacting"]?.({ sessionID: "ses_plan_none" }, output)
+      const block = output.context[0] ?? ""
+      expect(block).toContain("## GlassPane evidence anchors (M4)")
+      expect(block).not.toContain("dimensions verified")
+      expect(block).not.toContain("security")
+    } finally {
+      process.chdir(previousCwd)
+      if (previousRunPlan !== undefined) process.env.GLASSPANE_RUN_PLAN = previousRunPlan
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
 

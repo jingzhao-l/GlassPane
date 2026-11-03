@@ -8,6 +8,7 @@ import * as Truncate from "@/tool/truncate"
 import { Effect, Layer, Schema } from "effect"
 
 import { AttachParams, ObserveParams, engineBody, glasspaneDefs, present, refused, requireCapability } from "../../src/tool/glasspane/index"
+import type { Context as ToolContext } from "../../src/tool/tool"
 import { DIMENSION_ID_LIMITS, validateDimension, validateSelector } from "../../src/tool/glasspane/kernel"
 import * as Daemon from "../../src/tool/glasspane/daemon"
 
@@ -33,25 +34,8 @@ import * as Daemon from "../../src/tool/glasspane/daemon"
  */
 
 describe("what the registry receives", () => {
-  // `Tool.define` needs these two services to construct an info at all; neither
-  // is exercised by an id/description assertion, so both are faked the same way
-  // `test/tool/code-mode.test.ts` fakes them (upstream's own precedent).
-  const loadDefs = () =>
-    Effect.runPromise(
-      glasspaneDefs.pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            Layer.mock(Truncate.Service, {
-              output: (text: string) => Effect.succeed({ content: text, truncated: false as const }),
-            }),
-            Layer.mock(Agent.Service, {
-              get: () => Effect.succeed({ name: "build", permission: [] } as never),
-            }),
-          ),
-        ),
-      ),
-    )
-
+  // `loadDefs` is module-level: the guard-order tests drive the same defs these id/description
+  // assertions read, and two loaders would be two things to keep in agreement.
   test("every def is a unique raw gp_* id with a description and a parser", async () => {
     const defs = await loadDefs()
     const ids = defs.map((def) => def.id)
@@ -725,6 +709,65 @@ describe("what the capability gate says when hello could not answer", () => {
     if (!blocked) return
     expect(blocked.output.split("\n")).toHaveLength(2)
   })
+
+  test("an advertised list carrying an unreadable entry claims nothing, in either direction", async () => {
+    // `probeCapabilities` used to `filter` the advertised list down to its string entries and
+    // hand the survivor to the gate as the engine's word. Both directions were wrong, and this
+    // fixture pins both: an `act` gate facing `["observe", {…}]` asserted `engine <ver> does
+    // not advertise the "act" capability` — a negative statement about the engine manufactured
+    // out of our own decode — and a gate facing `["act", {…}]` let the call through while the
+    // same decode had just discarded an advertised entry, endorsing a capability list it could
+    // not read. The refusal now says the list could not be read, and neither affirms nor denies
+    // any method.
+    const absentAfterDecode = await withGate(
+      "junk-entry-absent",
+      helloAdvertises({ version: "0.9.1", protocolVersion: "1", capabilities: ["observe", { method: "act" }], permissions: {} }),
+    )
+    expect(absentAfterDecode?.metadata).toMatchObject({ ok: false, code: "GP_E_INTERNAL" })
+    expect(absentAfterDecode?.output).toContain("cannot read")
+    expect(absentAfterDecode?.output).toContain("not strings")
+    expect(absentAfterDecode?.output).not.toContain("does not advertise")
+
+    const presentAfterDecode = await withGate(
+      "junk-entry-present",
+      helloAdvertises({ version: "0.9.1", protocolVersion: "1", capabilities: ["act", { method: "actv2" }], permissions: {} }),
+    )
+    expect(presentAfterDecode, "a capability list with an unreadable entry let the call through").toBeDefined()
+    expect(presentAfterDecode?.metadata).toMatchObject({ ok: false, code: "GP_E_INTERNAL" })
+    expect(presentAfterDecode?.output).not.toContain("does not advertise")
+  })
+
+  test("a capability refusal still says which dimension the call declared", async () => {
+    // The refusal half of the audit trail. A call that declared `security` and was stopped at
+    // the gate rendered `dimension: null` — on the ledger of the session, a call that declared
+    // nothing — while `gp_diagnose`'s refusals carried theirs. Both gate branches (the engine's
+    // own failed hello, and the measured "does not advertise") take the declared id now, and
+    // the call sites validate it before `hello` is asked to spend the daemon's single slot.
+    const unadvertised = await withDaemonPeer(
+      "gate-dimension-refusal",
+      helloAdvertises({ version: "0.9.1", protocolVersion: "1", capabilities: ["observe"], permissions: {} }),
+      () => Effect.runPromise(requireCapability("gp_act", "act", "security")),
+    )
+    expect(unadvertised?.metadata).toMatchObject({ ok: false, code: "GP_E_CAPABILITY_UNAVAILABLE", dimension: "security" })
+
+    const busy = await withDaemonPeer(
+      "gate-dimension-busy",
+      (conn) => conn.destroy(),
+      () => Effect.runPromise(requireCapability("gp_observe", "observe", "spec-compliance")),
+    )
+    expect(busy?.metadata).toMatchObject({ ok: false, code: "GP_E_ENGINE_UNREACHABLE", dimension: "spec-compliance" })
+
+    // The three gated tools hand the gate their declared parameter, and validate it first:
+    // an unvalidated id must not reach metadata, and a malformed call must not spend a hello.
+    const source = readFileSync(path.join(import.meta.dirname, "..", "..", "src", "tool", "glasspane", "index.ts"), "utf8")
+    for (const [tool, method] of [["gp_attach", "attach"], ["gp_observe", "observe"], ["gp_act", "act"]] as const) {
+      expect(source, `${tool} must pass its declared dimension to the gate`).toContain(`requireCapability("${tool}", "${method}", params.dimension ?? null)`)
+      const at = source.indexOf(`requireCapability("${tool}", "${method}", params.dimension ?? null)`)
+      const guard = source.lastIndexOf("const declared = validateDimension(params.dimension)", at)
+      expect(guard, `${tool} must validate the dimension before the gate spends a hello`).toBeGreaterThan(-1)
+      expect(guard).toBeLessThan(at)
+    }
+  })
 })
 
 describe("the seat report is read, not asserted", () => {
@@ -926,6 +969,35 @@ describe("the declared review dimension (scenario 2, recorded half)", () => {
     expect(validateDimension("Spec Compliance").ok).toBe(false)
   })
 
+  test("every refusal this file renders keeps the declared dimension", () => {
+    // The rule `index.ts` states beside `requireCapability` is about EVERY refusal the file
+    // writes, not about the two gate branches. The scan that used to sit here checked only
+    // `requireCapability("gp_x", "x", params.dimension ?? null)`, so the next refusal added to
+    // the same call site — the `validateSelector` one, which is exactly what happened — rendered
+    // `dimension: null` for a call that had declared an id, and the file stayed green.
+    //
+    // A call site is therefore parsed, not pattern-matched: `callSites` splits the balanced
+    // argument list, and the owning block decides whether the tool accepts a declaration at all.
+    const source = surfaceIndexSource()
+    const sites = refusalSites(source)
+    // Non-vacuity: the shape this scan reads exists in the file eight times today (the five
+    // dimension guards, the selector guard, and the two provider lookups). A scanner that found
+    // nothing would grade nothing, so the floor is asserted by name rather than assumed.
+    expect(sites.length, "the refused( scan found no call sites — it is measuring itself, not the source").toBeGreaterThanOrEqual(8)
+
+    const offenders = refusalOffenders(source)
+    expect(
+      offenders.map((site) => ({ target: site.target, error: site.error, given: site.given })),
+      `refusals that drop the declared dimension: ${JSON.stringify(offenders.map((site) => site.target))}`,
+    ).toEqual([])
+
+    // The same rule, measured rather than scraped: a declared id refused by the selector guard
+    // still reaches the model's metadata. Pinned beside the scan because the scan can only check
+    // what the source says, not what the rendered row holds.
+    const row = refused("gp_act", "act", { code: "GP_E_SELECTOR", message: "m", remedy: "r" }, "security")
+    expect((row.metadata as Record<string, unknown>).dimension).toBe("security")
+  })
+
   test("the metadata shape stays one shape, refusal included", () => {
     // Upstream infers the tool's metadata type from what `execute` returns, so a key
     // present on one branch and absent on the other becomes a union the registry cannot
@@ -977,6 +1049,162 @@ describe("the declared review dimension (scenario 2, recorded half)", () => {
   })
 })
 
+describe("the order the guards run in, and what each one costs", () => {
+  /**
+   * A daemon peer that answers only what the test tells it to advertise, and records every frame
+   * it received. Both halves are load-bearing: the refusal tests need to count the connections
+   * the surface spends, and a stub that answered every method would be endorsing a capability
+   * the run never advertised — so an unadvertised method comes back as the engine's own
+   * unknown-method frame.
+   */
+  function enginePeer(advertised: string[]) {
+    const frames: { method: string }[] = []
+    const serve = (conn: net.Socket, request: string) => {
+      const parsed = JSON.parse(request.trim()) as { id: number; method: string }
+      frames.push(parsed)
+      if (parsed.method === "hello") {
+        conn.write(
+          `${JSON.stringify({ id: parsed.id, result: { version: "1.23.0", protocolVersion: "1", capabilities: advertised, permissions: { accessibility: "granted" } } })}\n`,
+        )
+        return
+      }
+      if (!advertised.includes(parsed.method)) {
+        conn.write(
+          `${JSON.stringify({ id: parsed.id, error: { code: "GP_E_UNKNOWN_METHOD", message: `the engine has no method ${parsed.method}`, remedy: "run gp_probe_status and read the advertised capabilities" } })}\n`,
+        )
+        return
+      }
+      // `act` answers with the flat operation dict (`EngineCore.swift:1275-1300`), which carries
+      // no evidence pack — the shape `gp_act` renders and the ledger plugin refuses to record.
+      conn.write(
+        `${JSON.stringify({ id: parsed.id, result: { operationId: "op_AAAAAAAAAAAAAAAAAAAAAAAAAA", actConfirmed: true, axChanged: true, pixelChanged: false, latencyMs: 12 } })}\n`,
+      )
+    }
+    return { frames, serve }
+  }
+
+  const actOf = async (defs: Awaited<ReturnType<typeof loadDefs>>) => {
+    const act = defs.find((def) => def.id === "gp_act")
+    if (!act) throw new Error("gp_act is not in the surface — a test that cannot find it proves nothing")
+    return act
+  }
+
+  test("a gp_act this surface refuses locally spends neither the daemon's slot nor a human's answer", async () => {
+    // The order of the guards is a claim about cost, written in `index.ts` as "the local refusal
+    // costs no connection", and it was broken twice over: the selector guard sat *after*
+    // `requireCapability`, so a call this file refuses on sight still paid for a `hello` off the
+    // daemon's single connection slot, and the refusal it rendered dropped the declared dimension.
+    const defs = await loadDefs()
+    const act = await actOf(defs)
+
+    for (const [label, params, code] of [
+      ["a role that would pick a different permission rule", { selector: { role: "AX*Button" }, action: "press", dimension: "security" }, "GP_E_SELECTOR"],
+      ["a malformed dimension", { selector: { role: "AXButton" }, action: "press", dimension: "Spec Compliance" }, "GP_E_DIMENSION"],
+    ] as const) {
+      const peer = enginePeer(["act"])
+      const context = stubContext()
+      const row = await withDaemonPeer(`cost-${code}`, peer.serve, () => Effect.runPromise(act.execute(params, context.ctx)))
+      expect(row.metadata, label).toMatchObject({ ok: false, code })
+      // The declared id survives the selector refusal and is absent (never invented) for the
+      // dimension guard's own refusal, where nothing well-formed was ever declared.
+      expect(row.metadata, label).toMatchObject({
+        dimension: code === "GP_E_SELECTOR" ? "security" : null,
+      })
+      expect(peer.frames, `${label}: a local refusal opened the daemon's single connection slot`).toEqual([])
+      expect(context.seen, `${label}: a local refusal reached the permission plane`).toEqual([])
+    }
+
+    // The control: the same fixture, one legal role, does reach the engine — so the two empty
+    // readings above are about the refusal and not about a peer that never answers.
+    const passing = enginePeer(["act"])
+    const passContext = stubContext()
+    const ok = await withDaemonPeer("cost-pass", passing.serve, () =>
+      Effect.runPromise(act.execute({ selector: { role: "AXButton" }, action: "press", dimension: "security" }, passContext.ctx)),
+    )
+    expect(ok.metadata).toMatchObject({ ok: true, method: "act", dimension: "security" })
+    expect(passing.frames.map((frame) => frame.method)).toEqual(["hello", "act"])
+    expect(passContext.seen).toEqual([
+      { kind: "metadata", value: { dimension: "security" } },
+      { kind: "ask", value: ["act:AXButton:press"] },
+    ])
+  })
+
+  test("the declaration is streamed onto the running part before the prompt is asked", async () => {
+    // A rejected prompt fails the call, and the part the host then keeps carries ONLY what was
+    // streamed while it ran (`session/processor.ts`'s `failToolCall`:
+    // `metadata: match.part.state.metadata`). Without the `ctx.metadata` write, a session whose
+    // user vetoed five `security` clicks reports "dimension declarations that reached no anchor:
+    // 0" — the audit says nothing was declared. That is the shape
+    // `glasspane-compaction.ts`'s `declaredWithoutAnchor` branch reads, so the write has to
+    // happen before the ask: after it, nothing below runs.
+    const defs = await loadDefs()
+    const act = await actOf(defs)
+    const context = stubContext({ reject: "Permission rejected by user" })
+    const peer = enginePeer(["act"])
+    const exit = await withDaemonPeer("prompt-reject", peer.serve, () =>
+      Effect.runPromise(Effect.exit(act.execute({ selector: { role: "AXButton" }, action: "press", dimension: "security" }, context.ctx))),
+    )
+    expect(exit._tag).toBe("Failure")
+    expect(context.seen).toEqual([
+      { kind: "metadata", value: { dimension: "security" } },
+      { kind: "ask", value: ["act:AXButton:press"] },
+    ])
+
+    // A call that declared nothing writes `null` rather than inventing an id, and still writes it
+    // before asking — the order is the same whether or not there is a declaration to carry.
+    const undeclared = stubContext({ reject: "Permission rejected by user" })
+    await withDaemonPeer("prompt-reject-none", enginePeer(["act"]).serve, () =>
+      Effect.runPromise(Effect.exit(act.execute({ selector: { role: "AXButton" }, action: "press" }, undeclared.ctx))),
+    )
+    expect(undeclared.seen).toEqual([
+      { kind: "metadata", value: { dimension: null } },
+      { kind: "ask", value: ["act:AXButton:press"] },
+    ])
+
+    // And every tool that accepts a declaration streams it, not just `gp_act`: the scan reads the
+    // same blocks as the refusal scan above, in the same order-by-position way.
+    const source = surfaceIndexSource()
+    for (const [tool, method] of [
+      ["gp_attach", "attach"],
+      ["gp_observe", "observe"],
+      ["gp_act", "act"],
+      ["gp_diagnose", "diagnose"],
+      ["gp_last_evidence", "last_evidence"],
+    ] as const) {
+      const at = source.indexOf(`refused("${tool}", "${method}"`)
+      expect(at, `${tool} has no refusal this scan can anchor to`).toBeGreaterThan(-1)
+      const stream = source.indexOf(`declareDimension(ctx, params.dimension ?? null)`, at)
+      expect(stream, `${tool} must stream the declaration onto the running part`).toBeGreaterThan(-1)
+      const prompt = source.indexOf("ctx.ask(", stream)
+      expect(prompt, `${tool} has no prompt to order the stream against`).toBeGreaterThan(-1)
+      expect(stream, `${tool} streams the declaration after the prompt`).toBeLessThan(prompt)
+    }
+  })
+
+  test("a refusal this file renders keeps the result shape it was given", () => {
+    // `present` used to write `result: reply.result as object`, the same shape-assertion defect
+    // `daemon.ts` calls out for `permissions`: an `as` on `unknown` says the shape is known when
+    // it is not. It also made `{id, result: null}` — a frame `rawRequest` deliberately passes
+    // through by *presence*, not truthiness — look like an answer that held `{}`, which is
+    // precisely the difference `readEvidenceFrame` refuses on ("no evidence pack" vs "an empty
+    // one"), and what `test/tool/glasspane-surface.test.ts`'s own null-result transport case says
+    // the transport must hand up unchanged.
+    const nullReply: Daemon.DaemonReply = { ok: true, result: null }
+    const nullRow = present("gp_last_evidence", "last_evidence", nullReply, () => "answered")
+    expect((nullRow.metadata as Record<string, unknown>).result).toBeNull()
+    expect(nullRow.title).toBe("gp_last_evidence: last_evidence answered")
+
+    const objectRow = present("gp_observe", "observe", { ok: true, result: { nodeCount: 3 } }, () => "3")
+    expect((objectRow.metadata as Record<string, unknown>).result).toEqual({ nodeCount: 3 })
+
+    // A scalar answer is passed as the scalar it is, not boxed or defaulted.
+    expect((present("gp_diagnose", "diagnose", { ok: true, result: 0 }, () => "0").metadata as Record<string, unknown>).result).toBe(0)
+
+    // The shape assertion is gone from the source, in both spellings the file used for it.
+    expect(surfaceIndexSource()).not.toMatch(/reply\.result\s+as\s+(object|Record)/)
+  })
+})
+
 describe("what the permission plane is handed", () => {
   const surface = readFileSync(path.join(import.meta.dirname, "..", "..", "src", "tool", "glasspane", "index.ts"), "utf8")
 
@@ -1018,6 +1246,172 @@ describe("what the permission plane is handed", () => {
     expect(guard).toBeLessThan(call)
   })
 })
+
+/** The inside of a string literal, or `undefined` when the text is not one. */
+function literalText(argument: string | undefined): string | undefined {
+  const text = (argument ?? "").trim()
+  const quote = text[0]
+  if (quote !== '"' && quote !== "`" && quote !== "'") return undefined
+  if (text.length < 2 || text[text.length - 1] !== quote) return undefined
+  return text.slice(1, -1)
+}
+
+/**
+ * The shipped surface, as one named read. Several tests below are about the source text itself
+ * (a call site's order, a refusal's arguments); they must all read the SAME file, and a test that
+ * re-derives the path is a test that can silently read nothing.
+ */
+function surfaceIndexSource(): string {
+  return readFileSync(path.join(import.meta.dirname, "..", "..", "src", "tool", "glasspane", "index.ts"), "utf8")
+}
+
+/**
+ * The six defs as the registry would receive them.
+ *
+ * `Tool.define` needs the truncate and agent services to construct an info at all; neither is
+ * exercised by what these tests read off a def, so both are faked the same way
+ * `test/tool/code-mode.test.ts` fakes them (upstream's own precedent). Module-level because two
+ * describes need it: the id/description contract, and the guard-order tests that drive a real
+ * `execute`.
+ */
+function loadDefs() {
+  return Effect.runPromise(
+    glasspaneDefs.pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.mock(Truncate.Service, {
+            output: (text: string) => Effect.succeed({ content: text, truncated: false as const }),
+          }),
+          Layer.mock(Agent.Service, {
+            get: () => Effect.succeed({ name: "build", permission: [] } as never),
+          }),
+        ),
+      ),
+    ),
+  )
+}
+
+/**
+ * A `Tool.Context` that records what the surface handed the host, in the order it handed it.
+ *
+ * `ask` is the human's prompt and `metadata` is the running part's stream: the two side effects a
+ * `gp_*` call has outside its own return value, and the ones whose ORDER decides whether a
+ * rejected prompt leaves anything readable behind.
+ */
+function stubContext(options: { reject?: string } = {}) {
+  const seen: { kind: "ask" | "metadata"; value: unknown }[] = []
+  const ctx = {
+    sessionID: "ses_surface",
+    messageID: "msg_surface",
+    agent: "build",
+    abort: new AbortController().signal,
+    messages: [],
+    metadata: (input: { metadata?: unknown }) =>
+      Effect.sync(() => {
+        seen.push({ kind: "metadata", value: input.metadata })
+      }),
+    ask: (request: { patterns?: string[] }) =>
+      Effect.flatMap(
+        Effect.sync(() => {
+          seen.push({ kind: "ask", value: request.patterns })
+        }),
+        () => (options.reject ? Effect.fail(new Error(options.reject)) : Effect.void),
+      ),
+  }
+  return { ctx: ctx as unknown as ToolContext, seen }
+}
+
+/**
+ * The top-level argument list of every `callee(...)` in a source, brace- and paren-matched,
+ * with quote awareness. A regex over `callee\([^)]*\)` cannot see past the first nested `)` —
+ * which is how the timeout scan below missed every `Daemon.call("act", engineBody(params))`
+ * in the shipped surface, and how a refusal scan would read a call site it never parsed.
+ */
+function callSites(source: string, callee: string): { at: number; args: string[] }[] {
+  const found: { at: number; args: string[] }[] = []
+  for (const match of source.matchAll(new RegExp(`\\b${callee}\\(`, "g"))) {
+    const start = (match.index ?? 0) + match[0].length
+    const args: string[] = []
+    let current = ""
+    let depth = 1
+    let quote: string | null = null
+    for (let i = start; i < source.length; i++) {
+      const ch = source[i]
+      if (quote !== null) {
+        current += ch
+        if (ch === "\\") current += source[++i] ?? ""
+        else if (ch === quote) quote = null
+        continue
+      }
+      if (ch === '"' || ch === "`" || ch === "'") {
+        quote = ch
+        current += ch
+        continue
+      }
+      if (ch === "{" || ch === "(" || ch === "[") depth++
+      else if (ch === "}" || ch === ")" || ch === "]") {
+        depth--
+        if (depth === 0) {
+          args.push(current)
+          break
+        }
+      }
+      if (ch === "," && depth === 1) {
+        args.push(current)
+        current = ""
+        continue
+      }
+      current += ch
+    }
+    found.push({ at: match.index ?? 0, args: args.map((arg) => arg.trim()) })
+  }
+  return found
+}
+
+/** The same sites, without the positions — what a scan over one callee usually wants. */
+function callArguments(source: string, callee: string): string[][] {
+  return callSites(source, callee).map((site) => site.args)
+}
+
+/**
+ * Every `refused(...)` call site in `index.ts` that sits inside a tool accepting a declared
+ * dimension — i.e. every refusal this surface renders where there IS a declaration to carry.
+ */
+function refusalSites(source: string) {
+  return callSites(source, "refused")
+    .filter((site) => blockOf(source, site.at).includes("params.dimension"))
+    .map((site) => ({
+      target: literalText(site.args[0]) ?? "<unparsed target>",
+      error: site.args[2] ?? "",
+      given: site.args[3] ?? "",
+      args: site.args,
+    }))
+}
+
+/**
+ * The sites that break the rule `index.ts` states beside `requireCapability`: a refusal renders
+ * the call's declared dimension, and the one exception is the dimension validator's own refusal,
+ * where the id that arrived was malformed and echoing it would put an unplanned dimension on the
+ * record.
+ */
+function refusalOffenders(source: string) {
+  return refusalSites(source).filter((site) =>
+    site.error === "declared.error" ? site.given !== "null" : site.given !== "params.dimension ?? null",
+  )
+}
+
+/**
+ * The source of one `export const …` block, up to the next top-level `export const`.
+ * Used to ask "in which tool's body does this call site live", because the rule a call site
+ * obeys is a rule about the tool it belongs to.
+ */
+function blockOf(source: string, at: number): string {
+  const heads = [...source.matchAll(/^export (?:const|function) /gm)].map((m) => m.index)
+  const owner = heads.filter((index) => index <= at).pop()
+  if (owner === undefined) return ""
+  const next = heads.find((index) => index > owner)
+  return source.slice(owner, next ?? source.length)
+}
 
 function structBody(source: string, name: string): string {
   // Brace-matched, not "up to the first `})`": a one-line `Schema.Struct({})` would
@@ -1075,8 +1469,8 @@ describe("what a remedy is allowed to say", () => {
    * dead end: nobody is reading, and the turn ends with a claim it cannot act on.
    *
    * Three shapes, because the surface writes remedies in three shapes:
-   *  - `remedy: <literal>` in an error object (kernel.ts, providers.ts, the inline daemon
-   *    frame guard),
+   *  - `remedy: <literal>` in an error object (kernel.ts, providers.ts, the ledger plugin's
+   *    `ledgerFault` note, the inline daemon frame guard),
    *  - the third positional argument of `failure(code, message, remedy)` (daemon.ts builds
    *    every transport remedy that way),
    *  - a staged `const …remedy… = <literal>` where a file assembles its own refusal before
@@ -1086,55 +1480,6 @@ describe("what a remedy is allowed to say", () => {
    * built, and 0 in the compaction plugin — and the aggregate guard below could not see
    * either file going dark, which is why each file's own count is asserted by name.
    */
-  const literalText = (argument: string | undefined) => {
-    const text = (argument ?? "").trim()
-    const quote = text[0]
-    if (quote !== '"' && quote !== "`" && quote !== "'") return undefined
-    if (text.length < 2 || text[text.length - 1] !== quote) return undefined
-    return text.slice(1, -1)
-  }
-
-  /** The top-level argument list of every `callee(...)` in the source, split on depth-1 commas. */
-  const callArguments = (source: string, callee: string): string[][] => {
-    const found: string[][] = []
-    for (const match of source.matchAll(new RegExp(`\\b${callee}\\(`, "g"))) {
-      const args: string[] = []
-      let current = ""
-      let depth = 1
-      let quote: string | null = null
-      for (let i = (match.index ?? 0) + match[0].length; i < source.length; i++) {
-        const ch = source[i]
-        if (quote !== null) {
-          current += ch
-          if (ch === "\\") current += source[++i] ?? ""
-          else if (ch === quote) quote = null
-          continue
-        }
-        if (ch === '"' || ch === "`" || ch === "'") {
-          quote = ch
-          current += ch
-          continue
-        }
-        if (ch === "{" || ch === "(" || ch === "[") depth++
-        else if (ch === "}" || ch === ")" || ch === "]") {
-          depth--
-          if (depth === 0) {
-            args.push(current)
-            break
-          }
-        }
-        if (ch === "," && depth === 1) {
-          args.push(current)
-          current = ""
-          continue
-        }
-        current += ch
-      }
-      found.push(args)
-    }
-    return found
-  }
-
   const remediesIn = (file: string) => {
     const source = readFileSync(path.join(import.meta.dir, "../..", file), "utf8")
     const keyed = [...source.matchAll(/remedy:\s*(?:"([^"]*)"|`([^`]*)`)/g)].map((m) => m[1] ?? m[2] ?? "")
@@ -1155,6 +1500,11 @@ describe("what a remedy is allowed to say", () => {
     "src/tool/glasspane/index.ts",
     "src/tool/glasspane/providers.ts",
     "src/plugin/glasspane-compaction.ts",
+    // The ledger plugin writes its own remedy at `ledgerFault` — a hand-written one, in the
+    // same shape as every other file above. Left out of this list, the aggregate scan could
+    // not see the file going dark, which is exactly what the note above says this list exists
+    // to prevent: a plugin remedy that stopped being scanned is a remedy nobody re-measures.
+    "src/plugin/glasspane-decision-log.ts",
   ]
 
   test("the scan finds the remedies it claims to scan, file by file", () => {
@@ -1175,6 +1525,8 @@ describe("what a remedy is allowed to say", () => {
       "src/tool/glasspane/providers.ts": "keyed",
       // The compaction stage assembles its note before returning it, as `const remedy`.
       "src/plugin/glasspane-compaction.ts": "staged",
+      // The ledger plugin hands its fault remedy to the `failed` note as a `remedy:` field.
+      "src/plugin/glasspane-decision-log.ts": "keyed",
     }
     for (const file of files) {
       const found = remediesIn(file)
@@ -1328,13 +1680,51 @@ describe("the timeout table and the call sites that read it", () => {
     }
   })
 
+  /**
+   * Every `call(...)` in a source whose third top-level argument is a numeric literal, i.e. a
+   * budget written at the call site instead of taken from `TIMEOUT_MS`.
+   *
+   * The scan is the parser above, not a regex, and that is the fix: the pattern used to be
+   * `/\bcall\("[a-z_]+",\s*[^)]*?,\s*[\d_]+\s*\)/`, and `[^)]*?` cannot cross the `)` of
+   * `engineBody(params)` — so the four sites that actually talk to the engine were outside its
+   * range, and its "0 found" meant "nothing was read" rather than "nothing is wrong".
+   */
+  function hardCodedTimeouts(source: string) {
+    return callSites(source, "call")
+      .map((site) => ({ at: site.at, method: literalText(site.args[0]), args: site.args }))
+      .filter((site) => site.method !== undefined && site.args.length >= 3 && /^[\d_]+$/.test(site.args[2] ?? ""))
+  }
+
   test("no call site in the surface brings its own number", () => {
     // `hello()` hard-coding 5_000 and `gp_probe_status` hard-coding 8000 were the other
     // half of the defect: the table was not where the product's timings lived.
     for (const [file, source] of files.map((file, i) => [file, surfaceSource[i]!] as const)) {
-      const literals = [...source.matchAll(/\bcall\("[a-z_]+",\s*[^)]*?,\s*[\d_]+\s*\)/g)]
-      expect(literals.length, `${file} passes a hard-coded timeout instead of the table: ${JSON.stringify(literals.map((m) => m[0]))}`).toBe(0)
+      const offenders = hardCodedTimeouts(source)
+      expect(offenders.length, `${file} passes a hard-coded timeout instead of the table: ${JSON.stringify(offenders.map((o) => o.args))}`).toBe(0)
     }
+  })
+
+  test("and that scan reaches the call sites the surface actually has", () => {
+    // THE CONTROL FOR THE SCAN ITSELF, kept because the scan is what was broken. A reader of the
+    // test above cannot tell "no offenders" from "no sites read", so the coverage is stated off the
+    // shipped source, and the shape the old pattern missed is shown caught here.
+    const seen = callSites(surfaceIndexSource(), "call")
+      .map((site) => literalText(site.args[0]))
+      .filter((method): method is string => method !== undefined)
+      .sort()
+    expect(seen).toEqual(["act", "attach", "diagnose", "last_evidence", "observe", "probe_status"])
+
+    // A literal budget written behind a nested call is caught — and the pattern this replaced
+    // (`/\bcall\("[a-z_]+",\s*[^)]*?,\s*[\d_]+\s*\)/`) finds nothing in the same text, because
+    // `[^)]*?` cannot cross the `)` of `engineBody(params)`. The four sites that actually talk to
+    // the engine are written that way, so "0 found" used to mean "nothing was read".
+    const wrapped = `Daemon.call("act", engineBody(params), 60_000)`
+    expect(hardCodedTimeouts(wrapped).map((site) => [site.method, site.args[2]])).toEqual([["act", "60_000"]])
+    expect(/call\("[a-z_]+",\s*[^)]*?,\s*[\d_]+\s*\)/.exec(wrapped)).toBeNull()
+    // The same site without the number is clean, so the control measures the number, not the nesting.
+    expect(hardCodedTimeouts(`Daemon.call("act", engineBody(params))`)).toEqual([])
+    // A non-literal third argument — the table lookup in `call`'s own signature — is not a site budget.
+    expect(hardCodedTimeouts(`function call(method: string, params: object = {}, timeoutMs: number = timeoutFor(method)) {}`)).toEqual([])
   })
 
   test("a method this surface does not send falls through to the default, by measurement", () => {

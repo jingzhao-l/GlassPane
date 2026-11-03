@@ -20,6 +20,7 @@ import {
   readRunPlan,
   resolveLedger,
   summaryOf,
+  SUMMARY_MAX_LENGTH,
   verifyLedger,
 } from "../../src/tool/glasspane/kernel"
 
@@ -259,6 +260,82 @@ describe("the ledger location rule", () => {
     expect(clean.ok).toBe(true)
   })
 
+  test("the engine's state root spelled with another case is still refused", () => {
+    // THE HOLE THE PHYSICAL CHECK LEAVES OPEN ON A CASE-INSENSITIVE VOLUME. `physicalPath`
+    // compares strings, and the two runtimes disagree about what `realpathSync` does to a name's
+    // CASE: measured 2026-11 with `<home>/.glasspane` created,
+    //   node -e "fs.realpathSync('<home>/.GlassPane')" → `<home>/.GlassPane`  (typed bytes)
+    //   bun  -e "fs.realpathSync('<home>/.GlassPane')" → `<home>/.glasspane`  (on-disk name)
+    // Under node the resolved-string test therefore saw "two different trees" for
+    // `$HOME/.GlassPane/decisions.jsonl`, `resolveLedger` answered `{ok: true, source: "env"}`,
+    // and the harness's ledger landed on the engine's own bytes — the projects.json double writer
+    // reopened through a name the guard read case-first. `daemon.ts`'s socket-trust remedy names
+    // node as a supported runtime, so the guard may not be correct only under the runtime these
+    // tests happen to run on.
+    //
+    // READ THIS WITH THE NEXT TEST. Under bun the first two spellings are refused by `realpath`
+    // alone, so they pin the OBSERVABLE (bytes never land in the engine's tree) but not the folded
+    // comparison; the folded layer's own mutation control is the case-spelled root that does not
+    // exist yet, below, which no realpath can re-case because there is nothing on disk to read.
+    const home = privateDir()
+    const state = path.join(home, ".glasspane")
+    mkdirSync(path.join(state, "sub"), { recursive: true })
+    writeFileSync(path.join(state, "projects.json"), "{}\n")
+
+    for (const spelling of [".GlassPane", ".GLASSPANE", ".gLaSsPaNe"]) {
+      const candidate = path.join(home, spelling, "decisions.jsonl")
+      const resolved = resolveLedger({ HOME: home, GLASSPANE_DECISION_LOG: candidate })
+      expect(resolved.ok, `${spelling} is the engine's directory, spelled differently`).toBe(false)
+      if (resolved.ok) continue
+      expect(resolved.error.code).toBe("GP_E_DECISION_LOG_PATH")
+      // The message names the path the operator wrote, not a re-cased one: a reader who set
+      // `GLASSPANE_DECISION_LOG` has to recognise their own string in the refusal.
+      expect(resolved.error.message).toContain(candidate)
+
+      const attempt = logDecision(goodPack("ok-01"), { env: { HOME: home, GLASSPANE_DECISION_LOG: candidate } })
+      expect(attempt.ok, `${spelling} must not be writable`).toBe(false)
+      expect(existsSync(path.join(state, "decisions.jsonl"))).toBe(false)
+      expect(existsSync(path.join(state, "sub", "decisions.jsonl"))).toBe(false)
+    }
+
+    // A nested spelling, because the guard is a prefix test and only one component differs.
+    const nested = resolveLedger({ HOME: home, GLASSPANE_DECISION_LOG: path.join(home, ".GLASSPANE", "sub", "decisions.jsonl") })
+    expect(nested.ok).toBe(false)
+
+    // And the refusal is about the destination, not about capital letters: a directory whose name
+    // differs by MORE than case is a different tree and stays writable, so this cannot become the
+    // guard that refuses every path on the volume.
+    const different = path.join(home, ".GlassPane-data")
+    mkdirSync(different)
+    const clean = resolveLedger({ HOME: home, GLASSPANE_DECISION_LOG: path.join(different, "decisions.jsonl") })
+    expect(clean.ok).toBe(true)
+    if (!clean.ok) return
+    expect(clean.ledger.source).toBe("env")
+  })
+
+  test("a case-spelled engine root that does not exist yet is refused too", () => {
+    // THE MUTATION CONTROL FOR THE FOLDED COMPARISON. On a fresh machine the daemon has not
+    // created `~/.glasspane`, so `realpathSync` has nothing to re-case and the resolved strings
+    // really do differ. If the guard passes here it is because "nothing is there to collide with",
+    // which is the same friendly-side guess the projects.json audit got wrong: whoever starts the
+    // engine next gets the directory the harness just made, on a case-insensitive volume.
+    const home = privateDir()
+    const resolved = resolveLedger({ HOME: home, GLASSPANE_DECISION_LOG: path.join(home, ".GlassPane", "decisions.jsonl") })
+    expect(resolved.ok).toBe(false)
+    if (resolved.ok) return
+    expect(resolved.error.code).toBe("GP_E_DECISION_LOG_PATH")
+
+    // The other direction, and the branch production actually takes: with
+    // `GLASSPANE_SOCKET=$HOME/.GlassPane/engine.sock` the engine's tree IS the capitalised
+    // spelling, so a lowercase ledger name is the same directory and must be refused the same way.
+    const socketEnv = { HOME: home, GLASSPANE_SOCKET: path.join(home, ".GlassPane", "engine.sock") }
+    const lowercase = resolveLedger({ ...socketEnv, GLASSPANE_DECISION_LOG: path.join(home, ".glasspane", "decisions.jsonl") })
+    expect(lowercase.ok).toBe(false)
+
+    // Unrelated paths are unaffected by the fold: it fires only when case is the difference.
+    expect(resolveLedger({ ...socketEnv, GLASSPANE_DECISION_LOG: path.join(home, "ledger", "decisions.jsonl") }).ok).toBe(true)
+  })
+
   test("the state root follows GLASSPANE_SOCKET, not just HOME", () => {
     const home = privateDir()
     const socketDir = path.join(home, "somewhere", "engine-state")
@@ -383,6 +460,49 @@ describe("logging a decision, and the chain it joins", () => {
     // Recompute the link without the code that made it.
     const lines = readFileSync(ledger, "utf8").trimEnd().split("\n")
     expect(sha256(Buffer.from(lines[0], "utf8"))).toBe(JSON.parse(lines[1]).prevEntryHash)
+  })
+
+  test("a declared dimension lands in the chain; an absent one stays absent; a bad one is refused", () => {
+    // `DecisionLogDraft.dimension` has been in the kernel since the draft schema froze, and
+    // `logDecision` never passed it — the audit artifact recorded 0 dimensions for a run that
+    // declared them, while compaction's coverage line reads transcript metadata the compaction
+    // is about to drop. The field is threaded now, with the kernel's own rules around it:
+    // omitted when nothing was declared (the entry schema is strict, and `null` would be an
+    // invented value), refused before any write when the id is malformed, never dropped so a
+    // typo cannot quietly rename what the ledger says this run covered.
+    const dir = privateDir()
+    const env = { GLASSPANE_DECISION_LOG: path.join(dir, "decisions.jsonl"), HOME: dir }
+    const declared = logDecision(goodPack("ok-01"), { env, dimension: "security" })
+    expect(declared.ok).toBe(true)
+    const undeclared = logDecision(goodPack("ok-02"), { env, dimension: null })
+    expect(undeclared.ok).toBe(true)
+    const malformed = logDecision(goodPack("ok-03"), { env, dimension: "Spec Compliance" })
+    expect(malformed.ok).toBe(false)
+    if (malformed.ok) return
+    expect(malformed.error.code).toBe("GP_E_DIMENSION")
+
+    const lines = readFileSync(env.GLASSPANE_DECISION_LOG as string, "utf8").trimEnd().split("\n")
+    expect(lines).toHaveLength(2) // the refused write appended nothing
+    expect(JSON.parse(lines[0]).dimension).toBe("security")
+    expect(lines[1]).not.toContain('"dimension"')
+    expect(verifyLedger(env.GLASSPANE_DECISION_LOG as string).ok).toBe(true)
+  })
+
+  test("the summary bound is the kernel's constant, read through this doorway — not a restated number", () => {
+    // The truncation used to spell `2048` a third time (the schema and the transcriber already
+    // own it), so a kernel that moved its bound would keep this copy truncating to the stale
+    // one. The value the entry lands at is asserted against the kernel's own export through
+    // `kernel.ts` — the re-export is the binding under test; a literal here would be the same
+    // third copy in a fourth place.
+    const dir = privateDir()
+    const env = { GLASSPANE_DECISION_LOG: path.join(dir, "decisions.jsonl"), HOME: dir }
+    const long = logDecision(goodPack("ok-01"), { env, extraSummary: "x".repeat(SUMMARY_MAX_LENGTH + 500) })
+    expect(long.ok).toBe(true)
+    if (!long.ok) return
+    expect(long.logged.entry.summary.length).toBe(SUMMARY_MAX_LENGTH)
+    const binding = readFileSync(path.join(import.meta.dirname, "..", "..", "src", "tool", "glasspane", "kernel.ts"), "utf8")
+    expect(binding, "the surface restated the bound as a literal").not.toMatch(/slice\(0,\s*\d+\)/)
+    expect(binding).toContain("summary.slice(0, SUMMARY_MAX_LENGTH)")
   })
 
   test("a corrupt tail is refused and the bytes are left exactly as found", () => {
@@ -672,12 +792,33 @@ describe("the project's own run plan (scenario 2, the producer that was missing)
     expect(read.error.remedy).toContain("the project's own .iterate/run-plan.json")
   })
 
-  test("a project living inside the engine's state root is not read as a plan", () => {
-    // The one-writer rule is about the *engine's* tree, so a candidate path inside it is
-    // treated as "nobody configured this harness a plan", never as a plan to honour.
+  test("a project plan inside the engine's state root is REFUSED, not answered as \"no plan\"", () => {
+    // The one-writer rule is about the *engine's* tree, so a candidate path inside it is not
+    // this harness's to read. The answer it used to give was `{ok: true, plan: null}` — the
+    // sentence "this session has no plan" — for a plan file that exists and was declined.
+    // `renderDimensionCoverage` prints nothing at all for `plan: null`, so the compaction
+    // summary of a session whose plan was declined reads exactly like an unreviewed session:
+    // "we cannot say" dressed up as "there is nothing". The env channel has always answered
+    // this position with `GP_E_RUN_PLAN_PATH`; the project channel now does the same, and the
+    // refusal names the path it declined.
     const home = privateDir()
     const state = path.join(home, ".glasspane")
     projectWithPlan(state, planDocument)
+    const read = readRunPlan({ HOME: home }, state)
+    expect(read.ok).toBe(false)
+    if (read.ok) return
+    expect(read.error.code).toBe("GP_E_RUN_PLAN_PATH")
+    expect(read.error.message).toContain(state)
+    expect(read.error.remedy.length).toBeGreaterThan(20)
+  })
+
+  test("a project inside the engine's state root with no plan file is still simply unplanned", () => {
+    // Absence stays absence: the file is checked before the guard, because a project that was
+    // never handed a plan is not a plan the harness declined. Refusing this position too would
+    // trade the dressed-up "no plan" for an error nobody declared.
+    const home = privateDir()
+    const state = path.join(home, ".glasspane")
+    mkdirSync(state, { recursive: true })
     const read = readRunPlan({ HOME: home }, state)
     expect(read.ok).toBe(true)
     if (!read.ok) return

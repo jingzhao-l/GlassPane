@@ -24,7 +24,7 @@ import { Effect, Schema } from "effect"
 import * as Tool from "../tool"
 import * as Daemon from "./daemon"
 import { DIMENSION_ID_LIMITS, validateDimension, validateSelector } from "./kernel"
-import { diagnoseAttribution } from "./providers"
+import { diagnoseAttribution, evidenceAttribution } from "./providers"
 import type { ProviderAttribution } from "./providers"
 
 /**
@@ -103,7 +103,14 @@ export function present(
       remedy: null,
       dimension,
       provider,
-      result: reply.result as object,
+      // No `as object` here. `reply.result` is `unknown`, and the transport hands up whatever the
+      // engine's frame carried — including `result: null`, which `daemon.ts` deliberately passes
+      // through unchanged (`rawRequest` asks *presence*, not truthiness). Asserting the shape away
+      // at this boundary is what `daemon.ts:541-545` calls a defect: it tells the checker and the
+      // reader that the shape is known when it is not, and it turned a `null` answer into `{}` —
+      // the one difference a downstream reader can act on. Every consumer re-reads the shape
+      // itself (`readEvidenceFrame` in both plugins takes `unknown`); this line only transcribes.
+      result: reply.result,
       [Daemon.DAEMON_ORIGIN]: true,
     },
   }
@@ -161,19 +168,60 @@ const CAPABILITY_REMEDY = "restart the background service with 'launchctl kickst
  * Relabelling a busy engine as `GP_E_CAPABILITY_UNAVAILABLE` told the model the
  * daemon does not speak this method, and sent the user off to restart a service that
  * was fine.
+ *
+ * The declared dimension rides on both refusals. A call that declared
+ * `dimension: "security"` and was blocked here is, on the ledger of the session, a
+ * call that declared security and reached no decision; dropping the annotation made
+ * the audit trail say "what was declared: nothing" for a refusal this file rendered
+ * itself — the same reason `gp_diagnose`'s refusals carry it. The id reaches this
+ * point already validated: the call sites run `validateDimension` first.
+ *
+ * That is a rule about EVERY refusal this file writes, not about the two branches
+ * below: a refusal rendered from `validateSelector` or from a provider lookup owes the
+ * same annotation, and the only one that may render `dimension: null` is the dimension
+ * validator's own refusal, because there the id was never well-formed enough to report.
+ * `test/tool/glasspane-surface.test.ts` ("every refusal this file renders keeps the
+ * declared dimension") scans the call sites and goes red on a missing argument, so the
+ * rule cannot be honoured by one guard and broken by the next.
  */
-export const requireCapability = (tool: string, method: string) =>
+export const requireCapability = (tool: string, method: string, dimension: string | null = null) =>
   Effect.map(Daemon.probeCapabilities(), (probe): Tool.ExecuteResult | undefined => {
-    if (!probe.ok) return refused(tool, method, probe.error)
+    if (!probe.ok) return refused(tool, method, probe.error, dimension)
     if (probe.report.capabilities.includes(method)) return undefined
     return refused(tool, method, {
       code: "GP_E_CAPABILITY_UNAVAILABLE",
       message: `engine ${probe.report.version} does not advertise the "${method}" capability this call needs`,
       remedy: CAPABILITY_REMEDY,
-    })
+    }, dimension)
   })
 
 const json = (value: unknown) => JSON.stringify(value, null, 2)
+
+/**
+ * Write the declared dimension into the part the host is holding *while the call runs*.
+ *
+ * WHY THIS IS NOT REDUNDANT with what `present`/`refused` return. A call that never returns
+ * has no result metadata at all: when the human answers the permission prompt with "reject",
+ * `ctx.ask` fails, and `session/processor.ts`'s `failToolCall` writes the part as
+ * `{status: "error", metadata: <whatever was streamed while running>}` — the execute result is
+ * discarded because it never existed. Compaction reads exactly that shape
+ * (`glasspane-compaction.ts`, the `status !== "completed"` branch of
+ * `collectEvidenceAnchors`), and without this line the declaration is gone: a session where
+ * the user vetoed five `security` clicks reports "dimension declarations that reached no
+ * anchor: 0", i.e. the audit says nothing was declared. Same defect class as the refusals
+ * above, one layer earlier in the pipeline.
+ *
+ * It runs BEFORE `ctx.ask` for the same reason: after the ask has failed, nothing below it
+ * executes. `session/tools.ts` replaces `state.metadata` with what is passed here (it does
+ * not merge), which is safe for this surface because no `gp_*` tool streams any other running
+ * metadata; `present` overwrites the field with the full result shape when the call does
+ * answer, so the two writes never compete for the finished part.
+ *
+ * An absent declaration writes `null`, not the key `undefined`: nothing here may invent an id
+ * the caller did not claim, and a rejected call that declared nothing must not look like one
+ * that declared something.
+ */
+const declareDimension = (ctx: Tool.Context, dimension: string | null) => ctx.metadata({ metadata: { dimension } })
 
 /**
  * Read fields out of a daemon response without asserting its shape away. An
@@ -246,10 +294,15 @@ export const AttachTool = Tool.define(
       parameters: AttachParams,
       execute: (params: Schema.Schema.Type<typeof AttachParams>, ctx: Tool.Context) =>
         Effect.gen(function* () {
-          const blocked = yield* requireCapability("gp_attach", "attach")
-          if (blocked) return blocked
+          // The dimension guard runs before `requireCapability` because the local refusal costs
+          // no connection: `hello` spends one of the daemon's single slot, and a call that is
+          // going to be refused for a malformed id must not spend it. The validated id is then
+          // the one the capability refusals carry.
           const declared = validateDimension(params.dimension)
-          if (!declared.ok) return refused("gp_attach", "attach", declared.error)
+          if (!declared.ok) return refused("gp_attach", "attach", declared.error, null)
+          const blocked = yield* requireCapability("gp_attach", "attach", params.dimension ?? null)
+          if (blocked) return blocked
+          yield* declareDimension(ctx, params.dimension ?? null)
           yield* ctx.ask({ permission: "glasspane", patterns: ["attach"], always: ["attach"], metadata: params })
           const reply = yield* Daemon.call("attach", engineBody(params))
           return present("gp_attach", "attach", reply, (result) => `attached: ${json(result)}`, params.dimension ?? null)
@@ -287,10 +340,11 @@ export const ObserveTool = Tool.define(
       parameters: ObserveParams,
       execute: (params: Schema.Schema.Type<typeof ObserveParams>, ctx: Tool.Context) =>
         Effect.gen(function* () {
-          const blocked = yield* requireCapability("gp_observe", "observe")
-          if (blocked) return blocked
           const declared = validateDimension(params.dimension)
-          if (!declared.ok) return refused("gp_observe", "observe", declared.error)
+          if (!declared.ok) return refused("gp_observe", "observe", declared.error, null)
+          const blocked = yield* requireCapability("gp_observe", "observe", params.dimension ?? null)
+          if (blocked) return blocked
+          yield* declareDimension(ctx, params.dimension ?? null)
           yield* ctx.ask({ permission: "glasspane", patterns: ["observe"], always: ["observe"], metadata: params })
           const body: Record<string, unknown> = {}
           if (params.maxDepth !== undefined) body.maxDepth = params.maxDepth
@@ -329,15 +383,26 @@ export const ActTool = Tool.define(
       parameters: ActParams,
       execute: (params: Schema.Schema.Type<typeof ActParams>, ctx: Tool.Context) =>
         Effect.gen(function* () {
-          const blocked = yield* requireCapability("gp_act", "act")
-          if (blocked) return blocked
-          // Both guards sit before the prompt. A request this surface is going to refuse anyway
-          // must not spend a human's answer, and the string below *is* the permission key —
+          // All three guards sit before the prompt, and before the `hello` connection: a request
+          // this surface is going to refuse anyway must not spend a human's answer, nor the
+          // daemon's single slot, and the string below *is* the permission key —
           // looking at it only after asking would mean authorizing a pattern we have not read.
-          const selector = validateSelector(params.selector.role)
-          if (!selector.ok) return refused("gp_act", "act", selector.error)
+          //
+          // The order of the two local guards is the second half of that sentence, and it was
+          // inverted until 2026-11: with `requireCapability` first, a `gp_act` carrying a role this
+          // file refuses on sight still paid for a `hello` — one connection off the daemon's single
+          // slot, for a call that was never going to reach the engine. `validateSelector` reads
+          // only its own argument, so nothing about the engine can change its answer, and it
+          // belongs ahead of the one step that costs anything.
           const declared = validateDimension(params.dimension)
-          if (!declared.ok) return refused("gp_act", "act", declared.error)
+          if (!declared.ok) return refused("gp_act", "act", declared.error, null)
+          const selector = validateSelector(params.selector.role)
+          if (!selector.ok) return refused("gp_act", "act", selector.error, params.dimension ?? null)
+          const blocked = yield* requireCapability("gp_act", "act", params.dimension ?? null)
+          if (blocked) return blocked
+          // Before the prompt: a rejected prompt fails the call, and the part the host then keeps
+          // carries only what was streamed while it ran (see `declareDimension`).
+          yield* declareDimension(ctx, params.dimension ?? null)
           yield* ctx.ask({
             permission: "glasspane",
             patterns: [`act:${params.selector.role}:${params.action}`],
@@ -388,16 +453,19 @@ export const DiagnoseTool = Tool.define(
       execute: (params: Schema.Schema.Type<typeof DiagnoseParams>, ctx: Tool.Context) =>
         Effect.gen(function* () {
           const declared = validateDimension(params.dimension)
-          if (!declared.ok) return refused("gp_diagnose", "diagnose", declared.error)
-          // R40 scenario ⑤, the consumer half. This is the one call whose reply IS a
-          // verdict (`class=` below is the engine's diagnosis), so it is the one place the
-          // registration contract has to be consulted rather than quoted: the method being
+          if (!declared.ok) return refused("gp_diagnose", "diagnose", declared.error, null)
+          // R40 scenario ⑤, the consumer half. This call's reply IS a verdict (`class=` below
+          // is the engine's diagnosis), so the registration contract has to be consulted rather
+          // than quoted here — one of the two places in this file that does (the other is
+          // `gp_last_evidence`, attributing the fetch the verdict's evidence is cited from):
+          // the method being
           // asked for must be one the AE provider actually declares, and the answer must
           // carry the id/version it is attributed to. Nothing here compares a signal or
           // weighs a threshold — the kernel's `requireMethod` answers a registry question,
           // and the verdict still comes only from the daemon's reply.
           const attribution = diagnoseAttribution("diagnose")
           if (!attribution.ok) return refused("gp_diagnose", "diagnose", attribution.error, params.dimension ?? null)
+          yield* declareDimension(ctx, params.dimension ?? null)
           yield* ctx.ask({ permission: "glasspane", patterns: ["diagnose"], always: ["diagnose"], metadata: params })
           const reply = yield* Daemon.call("diagnose", engineBody(params))
           return present(
@@ -432,10 +500,18 @@ export const LastEvidenceTool = Tool.define(
       execute: (params: Schema.Schema.Type<typeof LastEvidenceParams>, ctx: Tool.Context) =>
         Effect.gen(function* () {
           const declared = validateDimension(params.dimension)
-          if (!declared.ok) return refused("gp_last_evidence", "last_evidence", declared.error)
+          if (!declared.ok) return refused("gp_last_evidence", "last_evidence", declared.error, null)
+          // The evidence provider this repository registers declares `last-evidence`
+          // (providers.ts); until now nothing in `src/` ever resolved that registration, so the
+          // second producer was decoration and this call's answer — the one artifact a claim of
+          // "the UI changed" is cited from — carried no attribution. `gp_diagnose` attributes
+          // its verdict; this attributes its fetch, through the same registry question.
+          const attribution = evidenceAttribution("last-evidence")
+          if (!attribution.ok) return refused("gp_last_evidence", "last_evidence", attribution.error, params.dimension ?? null)
+          yield* declareDimension(ctx, params.dimension ?? null)
           yield* ctx.ask({ permission: "glasspane", patterns: ["last_evidence"], always: ["last_evidence"], metadata: params })
           const reply = yield* Daemon.call("last_evidence", engineBody(params))
-          return present("gp_last_evidence", "last_evidence", reply, (result) => json(result), params.dimension ?? null)
+          return present("gp_last_evidence", "last_evidence", reply, (result) => json(result), params.dimension ?? null, attribution.provider)
         }),
     }
   }),

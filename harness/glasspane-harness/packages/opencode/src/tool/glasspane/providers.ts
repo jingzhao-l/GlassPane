@@ -188,6 +188,11 @@ export function requireDiagnoseMethod(registry: ProviderRegistry, method: string
   return requireMethod(registry, GLASSPANE_AE_PROVIDER_ID, method)
 }
 
+/** The same question against the evidence provider — `last-evidence`/`capture` live there, not on the AE side. */
+export function requireEvidenceMethod(registry: ProviderRegistry, method: string): ProviderMethod {
+  return requireMethod(registry, GLASSPANE_EVIDENCE_PROVIDER_ID, method)
+}
+
 /** What a verdict is attributed to: the registered id, its version, and the declared method. */
 export interface ProviderAttribution {
   readonly id: string
@@ -212,10 +217,35 @@ export function diagnoseAttribution(
   method: string = GLASSPANE_DIAGNOSE_METHOD,
   version: string = InstallationVersion,
 ): { ok: true; provider: ProviderAttribution } | { ok: false; error: KernelRejection } {
+  return attributionFrom(GLASSPANE_AE_PROVIDER_ID, method, version)
+}
+
+/**
+ * The evidence side's half of the same rule.
+ *
+ * `glasspane-evidence` registered `last-evidence` while nothing in `src/` ever resolved the
+ * registration — the answer `gp_last_evidence` returns is exactly the artifact a claim of a UI
+ * change is cited from, and it carried no attribution. Asking the registry, by name, which
+ * method the evidence provider declares, answers a question the kernel owns; it decides nothing
+ * about the engine.
+ */
+export function evidenceAttribution(
+  method: string = "last-evidence",
+  version: string = InstallationVersion,
+): { ok: true; provider: ProviderAttribution } | { ok: false; error: KernelRejection } {
+  return attributionFrom(GLASSPANE_EVIDENCE_PROVIDER_ID, method, version)
+}
+
+/** One resolution path for both providers; the refusal branches are identical by design. */
+function attributionFrom(
+  providerId: string,
+  method: string,
+  version: string,
+): { ok: true; provider: ProviderAttribution } | { ok: false; error: KernelRejection } {
   try {
     const registry = glasspaneProviderRegistry(version)
-    const declared = requireDiagnoseMethod(registry, method)
-    const provider = resolveProvider(registry, GLASSPANE_AE_PROVIDER_ID)
+    const declared = requireMethod(registry, providerId, method)
+    const provider = resolveProvider(registry, providerId)
     return {
       ok: true,
       provider: {
