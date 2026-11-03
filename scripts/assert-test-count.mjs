@@ -36,7 +36,7 @@ const XCUITEST = /Executed (\d+) tests?, with(?: (\d+) tests? skipped and)? (\d+
 // 从前这一行只取了 tests/suites 两个数，failures 永远从 XCTest 那一侧来——于是"只有
 // Swift Testing 那一半红"的运行在这道闸上读起来是绿的（缺陷 #31，P3）。它有自己的退出码，
 // 但这条闸的职责恰恰是"退出码之外再数一遍"。
-const SWIFT_TESTING = /Test run with (\d+) tests? in (\d+) suites? (?:passed|failed) after [\d.]+ seconds(?: with (\d+) issues?)?/
+const SWIFT_TESTING = /Test run with (\d+) tests? in (\d+) suites?(?: with (\d+) issues?)?/
 
 function usage(message) {
   if (message) process.stderr.write(`error: ${message}\n`)

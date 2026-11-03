@@ -613,11 +613,21 @@ test('tagVerifyDecision: 只有 tag 真没签名才继续，签不上与没跑�
   assert.equal(decide('verified').action, 'pass')
   assert.match(decide('verified').text, /签名验证通过/)
 
-  // 缺证明（tag 里确实没有签名层）：黄字继续，但话说清是"缺增量"，不许写成"验签通过"。
+  // 2026-11-03（发现 #24）把这一档从 warn 改成 refuse：`unavailable`（这道检查没跑成）与
+  // `unsigned`（这一版确实没发签名）说的是同一件事——这台机器证明不了作者身份，而旧形状下
+  // **知道得更少的那一档走的是更容易的路**。`SECURITY.md` 那一节写的也是"只有人可以批准"。
+  // 更要紧的是这一条入口常常不是人敲的：`install.sh` 在无终端环境下自己就打印"那三道破坏性
+  // 确认会被跳过"，所以"新装这一路本来就是人在场"这个前提在每天的真实调用里不成立。
   const unsigned = decide('unsigned')
-  assert.equal(unsigned.action, 'warn', 'unsigned 只是缺证明，应当继续')
-  assert.match(unsigned.text, /继续安装/, 'unsigned 的文案要说明确实继续')
+  assert.equal(unsigned.action, 'refuse', '缺来源证明这一档现在也要显式同意')
+  assert.match(unsigned.text, /--accept-unverified-signature/, '拒装必须给得出那枚旗标')
+  assert.ok(!unsigned.text.includes('继续安装'), '拒装文案里不许出现放行话：' + unsigned.text)
   assert.ok(!/签名验证通过/.test(unsigned.text), 'unsigned 不许冒充验签通过')
+  const unsignedWaived = tagVerifyDecision({
+    sig: { status: 'unsigned', detail: 'd' }, pinRef: 'v1.2.3', repoDir: '/repo', acceptUnverified: true,
+  })
+  assert.equal(unsignedWaived.action, 'warn', '显式同意之后才继续——与 unavailable 那一档同一枚旗标')
+  assert.match(unsignedWaived.text, /没有作者身份证明/, unsignedWaived.text)
 
   // 2026-10-28 缺陷 2：`unavailable` 从前和 `unsigned` 合流放行，可它说的不是"这个 tag
   // 没签名"，而是"这道验签在本机没跑成"（没有 gpg / 导入公钥失败 / 验签抛错）。

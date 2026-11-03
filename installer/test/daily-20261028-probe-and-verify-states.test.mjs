@@ -329,13 +329,19 @@ test('缺陷2：gpg 在且验签通过 → 继续（对照，判据不是"永远
     assert.match(verdict.text, /签名验证通过/)
     assert.ok(ok.calls.some((call) => call.includes('verify-tag')), '对照的前提：真跑过 verify-tag')
 
-    // 同一副桩换成"tag 里确实没签名"，仍按文档口径黄字放行（本轮没动这一档）。
+    // 同一副桩换成"tag 里确实没签名"：2026-11-03 起这一档也要显式同意了（发现 #24，
+    // 与 `unavailable` 合流）。这里同时验两半：没同意必须拒，带了同意才放行。
     const unsigned = verifyDouble({ verifyStatus: 1, verifyStderr: 'gpg: no signature found' })
     const sig2 = verifyCloneTagGpg({ repoDir: '/Users/dev/glasspane', ref: 'v1.24.1', tmpDir: home, spawn: unsigned.spawn })
     assert.equal(sig2.status, 'unsigned')
     const say2 = tagVerifyDecision({ sig: sig2, pinRef: 'v1.24.1', repoDir: '/Users/dev/glasspane' })
-    assert.equal(say2.action, 'warn', '真没签名那一档维持原判定')
-    assert.match(say2.text, /继续安装/)
+    assert.equal(say2.action, 'refuse', '缺来源证明的一档现在默认拒，不再白拿放行')
+    assert.ok(!say2.text.includes('继续安装'), say2.text)
+    const say2waived = tagVerifyDecision({
+      sig: sig2, pinRef: 'v1.24.1', repoDir: '/Users/dev/glasspane', acceptUnverified: true,
+    })
+    assert.equal(say2waived.action, 'warn', '显式旗标之后才继续——这一半保证改动不是"永远拒"')
+    assert.match(say2waived.text, /显式放行/)
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }

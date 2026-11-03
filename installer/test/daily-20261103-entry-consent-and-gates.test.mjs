@@ -120,6 +120,9 @@ test('#12 非 macOS 上，既有 clone 那一条路在动它之前就停下—�
       env: {
         ...process.env,
         PATH: `${bin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
+        // 隔离闸（`daily-20261022-install-isolation.test.mjs`）：非 dry-run 真跑 install.sh 必须换 HOME
+        // ——那三枚破坏性确认与 `~/glasspane` 这个默认落点都落在它上面。
+        HOME: work,
         GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: cloneDir, GLASSPANE_REF: 'v9.9.9-new',
         GLASSPANE_REPO_URL: `file://${src}`,
       },
@@ -152,6 +155,7 @@ test('#13 `--repo=<目录>` 连写在付 clone 代价之前就退，且两枚形
         // 桩目录排在最前，真实 PATH 的其余段要留着：install.sh 第一步问 node，
         // 把它挡掉就变成"未找到 Node.js"那一档退 1，测的就不是这里要测的那一道闸了。
         ...process.env, PATH: `${bin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
+        HOME: work,
         GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: cloneDir,
       },
     })
@@ -176,6 +180,7 @@ test('#13 对照：两枚的形式照旧被认下来（这条闸不许把合法�
         // 桩目录排在最前，真实 PATH 的其余段要留着：install.sh 第一步问 node，
         // 把它挡掉就变成"未找到 Node.js"那一档退 1，测的就不是这里要测的那一道闸了。
         ...process.env, PATH: `${bin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
+        HOME: work,
         GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: path.join(work, 'nope'),
       },
     })

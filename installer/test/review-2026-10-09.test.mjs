@@ -425,17 +425,23 @@ test('finding2: 别人签的同名 tag → install() 硬拒，且拒绝发生在
   }
 })
 
-test('finding2: 未签名（unsigned）仍按文档口径继续；验签没跑成（unavailable）改判拒装', () => {
+test('finding2: 缺来源证明的两档（unsigned / unavailable）现在都要显式同意；签名对不上仍是永不可覆盖的硬拒', () => {
   // 这一条钉住"四档分得开"：unsigned 是作者身份无从确证（tag 里确实没签名层），
   // unavailable 是**这道检查没跑成**——后一种从前也走 warn，等于把没做的检查说成做过的。
   const say = (status) => tagVerifyDecision({
     sig: { status, detail: 'd' }, pinRef: 'v1.9.0', repoDir: '/Users/dev/glasspane',
   })
   assert.equal(say('invalid').action, 'refuse', '签名对不上必须停下')
-  assert.equal(say('unsigned').action, 'warn', '没签名只是缺那一层证明，不是被证伪')
+  // 2026-11-03：这一档与下面 `unavailable` 合流到"要显式同意"（发现 #24）。四档仍然分得开：
+  // verified=pass、invalid=永不可覆盖的硬拒、unsigned/unavailable=缺证明但要人来批准，
+  // 只是批准这一件事不再只有一档需要。
+  assert.equal(say('unsigned').action, 'refuse', '没签名只是缺那一层证明，不是被证伪——但缺证明就要人批准')
+  assert.match(say('unsigned').text, /--accept-unverified-signature/, 'unsigned 的拒装也要给得出那枚旗标')
   assert.equal(say('unavailable').action, 'refuse', '没有 gpg 是"这一档没测成"，既不是"验不过"也不是"没签名"——不能拿它当放行理由')
   assert.match(say('unavailable').text, /--accept-unverified-signature/, '拒装要给可执行的下一步（对齐 updater 的 --consent unsigned-release）')
-  assert.match(say('unsigned').text, /继续安装/, '告警那句要明说自己放行')
+  assert.ok(!say('unsigned').text.includes('继续安装'), 'unsigned 未同意时的文案里不许出现放行')
+  assert.match(tagVerifyDecision({ sig: { status: 'unsigned', detail: 'd' }, pinRef: 'v1.9.0', repoDir: '/Users/dev/glasspane', acceptUnverified: true }).text,
+    /显式放行/, '同意之后的放行话要明说是谁放行的')
   assert.ok(!say('invalid').text.includes('继续安装'), '硬拒的文案里不许出现放行')
   assert.ok(!say('unavailable').text.includes('继续安装'), '拒装的文案里也不许出现放行')
   // 一个不认识的新判据不得默默退回"没签名"那一档（上游那份的第四支，本轮保住它）
