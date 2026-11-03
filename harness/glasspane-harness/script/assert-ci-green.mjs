@@ -31,6 +31,14 @@
  * commit is routine, so an old red must not pin this version forever — but "latest" has to really
  * mean latest.
  *
+ * EVERY EVENT COUNTS, because the question is about the commit and not about who pressed the button.
+ * This query used to carry `&event=push`, and on 2026-10-31 that filter cost a release: the push run
+ * for `bb3c2f22` (v0.13.0) was cancelled by an unavailable macOS runner, a `workflow_dispatch` run of
+ * the same ci.yml on the same sha went green on 11-01, and the gate still answered "ci.yml is
+ * cancelled on commit bb3c2f22" — it could not see the run that had just verified the tree. The
+ * documented remedy then dispatches another CI run, which is invisible to the same filter, so the
+ * lane could not be unblocked by following its own instructions.
+ *
  * DELIBERATELY NOT DONE: no `--force`, no skip when `GH_TOKEN` is absent, no reading "no record" as
  * success. Releasing anyway means editing this file, which is where the trace is left.
  */
@@ -41,10 +49,10 @@ import { fileURLToPath } from 'node:url'
 
 /**
  * @param {{workflow_runs?: object[]}} payload GitHub `…/actions/workflows/<file>/runs` response body
- * @param {{workflow: string, sha: string}} asked what was asked, carried into the refusal text
+ * @param {{workflow: string, sha: string, repository?: string}} asked what was asked, carried into the refusal text
  * @returns {{ok: boolean, pending?: boolean, reason: string, run?: object}}
  */
-export function judgeCiGreen(payload, { workflow, sha }) {
+export function judgeCiGreen(payload, { workflow, sha, repository = '' }) {
   const runs = Array.isArray(payload?.workflow_runs) ? payload.workflow_runs : []
   if (runs.length === 0) {
     return {
@@ -68,16 +76,22 @@ export function judgeCiGreen(payload, { workflow, sha }) {
   if (String(latest?.conclusion ?? '') !== 'success') {
     const failed = sorted
       .filter((r) => r.status === 'completed' && r.conclusion !== 'success')
-      .map((r) => `#${r.run_number ?? '?'} ${r.conclusion ?? 'unknown'} ${r.html_url ?? ''}`)
+      .map((r) => `#${r.run_number ?? '?'} ${r.conclusion ?? 'unknown'} (${r.event ?? 'unknown event'}) ${r.html_url ?? ''}`)
       .join('; ')
+    // A cancelled run is not a failing one, and the difference is the whole remedy: nothing about the
+    // tree is wrong, the runner never got a slot. Naming the rerun command is what makes this refusal
+    // executable instead of a description of a dead end.
+    const remedy = latest?.conclusion === 'cancelled'
+      ? `It was cancelled, not failed${latest?.id ? ` — re-run THAT run: \`gh run rerun ${latest.id}${repository ? ` --repo ${repository}` : ''}\`, then re-trigger this release.` : '. Re-run it, then re-trigger this release.'} `
+      : 'Fix the red run before shipping; '
     return {
       ok: false,
       run: latest,
       reason: `${workflow} is ${latest.conclusion ?? 'unknown'} on commit ${sha}: ${failed || `#${latest.run_number} ${latest.html_url ?? ''}`}. `
-        + 'Fix the red run before shipping; loosening this step is how an unverified tree gets a signed release.',
+        + `${remedy}loosening this step is how an unverified tree gets a signed release.`,
     }
   }
-  return { ok: true, run: latest, reason: `${workflow} #${latest.run_number ?? '?'} is success on commit ${sha} (${latest.id})` }
+  return { ok: true, run: latest, reason: `${workflow} #${latest.run_number ?? '?'} (${latest.event ?? 'unknown event'}) is success on commit ${sha} (${latest.id})` }
 }
 
 function arg(name, fallback) {
@@ -97,14 +111,24 @@ function positiveInt(raw) {
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : null
 }
 
+/**
+ * Which runs this gate is allowed to SEE is part of the judgement, not a detail of the transport, so
+ * the query is exported and pinned by a test: it used to carry `&event=push`, which hid the
+ * `workflow_dispatch` run that had verified v0.13.0's tree while a stale cancelled push run answered
+ * "ci.yml is cancelled". Ask about the commit, and let every event of that commit answer.
+ */
+export function runsApiPath({ repository, workflow, sha }) {
+  return `repos/${repository}/actions/workflows/${encodeURIComponent(workflow)}/runs?head_sha=${sha}&per_page=100`
+}
+
 function fetchRuns({ repository, workflow, sha, ghBin }) {
-  const apiPath = `repos/${repository}/actions/workflows/${encodeURIComponent(workflow)}/runs`
-  const got = spawnSync(ghBin, ['api', `${apiPath}?head_sha=${sha}&event=push&per_page=100`], { encoding: 'utf8' })
+  const path = runsApiPath({ repository, workflow, sha })
+  const got = spawnSync(ghBin, ['api', path], { encoding: 'utf8' })
   if (got.error) return { error: `could not run ${ghBin} (${got.error.message}) — the CI-green question was never answered` }
   if (got.status !== 0) {
     return {
       error: `${ghBin} api answered ${got.status}: ${String(got.stderr ?? '').trim().slice(0, 300) || '(no stderr)'}`
-        + ` — asked ${apiPath}?head_sha=${sha}. A job that cannot ask must not answer "green": check the step's `
+        + ` — asked ${path}. A job that cannot ask must not answer "green": check the step's `
         + '`GH_TOKEN` and that this job declares `actions: read`.',
     }
   }
@@ -149,7 +173,7 @@ export function main({ env = process.env, ghBin = 'gh', sleep = (ms) => Atomics.
   for (;;) {
     const fetched = fetchRuns({ repository, workflow, sha, ghBin })
     if (fetched.error) return { code: 1, text: fetched.error }
-    last = judgeCiGreen(fetched.payload, { workflow, sha })
+    last = judgeCiGreen(fetched.payload, { workflow, sha, repository })
     if (last.ok || !last.pending) return { code: last.ok ? 0 : 1, text: last.reason }
     if (Date.now() - started >= budgetMs) {
       return {
