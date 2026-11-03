@@ -1,0 +1,16 @@
+提交正文被 shell 吃掉的那一格的完整文本（原作者失误：heredoc 没用引号形式，反引号被执行了；
+本文件由 git notes 挂在 000499f5 上，SYNCLOG 2026-11-03 那条也记同一段）：
+
+本轮发布链审查发现的一条不对称：checksums、publish-platform、publish-wrapper、verify-published
+都通过 release 环境部署，唯独把字节变公开的那一步 publish-release（permissions 里 contents: write，
+执行 gh release edit --draft=false）不在里面。于是 owner 在该环境上挂的任何保护规则（部署审批人、
+等待时间）都挡得住签名与 npm，挡不住公开。
+
+实测今天的 release 环境 protection_rules: []、can_admins_bypass: true，所以这一笔今天不改变任何
+行为；它改变的是"将来加一条规则会不会是空话"。固定点：
+test/script/workflow-gates.test.ts 的
+`the step that flips public visibility runs in the environment the rest of the chain does`
+——判据读的是 job 头部那一行（^    environment: release$），不是某个 step 里的字面量，删掉整个 step
+也红。反向控制：只在 publish-release 这一段删掉那行 → 该具名用例红（主代理当场跑，red 后按 sha 核回；
+第一次尝试的 needle 同时命中两个 job、没打上，那一次读数不算证据，已重做）。
+workflow-gates.test.ts 现 54 pass / 0 fail / 173 断言。
