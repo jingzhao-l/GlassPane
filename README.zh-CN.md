@@ -257,7 +257,7 @@ GP_INSTALL_SH="$(mktemp "${TMPDIR:-/tmp/}gp-install.XXXXXXXX")" && curl -fsSL ht
 #    每次发版由 `scripts/set-version.mjs` 改写）——要装未发布的树才去 `main`。下面那个 tag 不靠人眼
 #    核对：它是 `scripts/version-sites.mjs` 登记的派生位点，一旦与 install.sh 不一致，
 #    `scripts/check-doc-links.mjs` 就把这一页判红。
-git clone --branch v1.28.1 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
+git clone --branch v1.29.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
 ```
 
 npm 不交付的东西也说清：Swift 引擎。上面三条渠道最后都要在你这台机器上跑一次 `swift build`——
@@ -360,7 +360,7 @@ node installer/cli.js --restore-launchd
   跳过，两份 `.asc` 是事后用同一把 key 手工补签的），`v1.3.1` 早于签名 job。所以：release 压根没发签名，
   或这台机器没有 `gpg`——定时运行会停下并在页面上写明原因；人可以自己放行一次：
   `updater check --consent unsigned-release`，此后状态文件与 `gp_diagnose` 会一直写明这一版是
-  **无作者性证明装上的**。签名发了却对不上则是直接硬拒，任何 consent 都不能覆盖。「安装更新」这个按钮
+  **无作者性证明装上的**。签名发了却对不上则是直接硬拒，任何 consent 都不能覆盖。**新装这一路也问这两道门。** 1.29.0 起安装器不再对没有签名的 tag 放行：「根本没东西可验」这一档——没发 `.asc`，或这台机器没有 `gpg`——都要显式带 `--accept-unverified-signature`，两条一键入口打印的是同一枚旗标。这一版之前，「完全没有签名」只 warn 就继续，而「这道检查没跑成」却硬拒，等于弱结论买了容易的路。「安装更新」这个按钮
   给不了这条确认（它今天只带 `--consent major`），但也用不上终端：检查正是因为这道门停下来的时候，同一页
   会给出「信任这个发布并重新检查」，按下它就是 `updater check --consent unsigned-release`。终端那条写法留给
   没有图形会话的机器。

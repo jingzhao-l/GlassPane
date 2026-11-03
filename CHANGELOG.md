@@ -4,7 +4,139 @@
 
 ## [Unreleased]
 
-（空。1.28.1 收口后没有未归号的条目。)
+（空。1.29.0 收口后没有未归号的条目。)
+
+## [1.29.0] — 2026-11-03
+
+**版本判断：minor。** 判据沿用 1.6.2 写下、此后每一号各自复述过的那一条（patch 要求「状态文件的
+字段没动、退出码集合没动、CLI 参数没动、npm 包的 `bin` 声明没动」）。本版动的是第一条判据 covering
+的**用户可见行为**：`installer/cli.js` 对"发布 tag 没有可核验签名"这一档从前 warn 就继续装，现在
+**必须**显式带 `--accept-unverified-signature` 才继续（同一档上已有的旗标，没有新增对外参数）。
+一条本来能装成功的调用变成需要同意，这是契约的变化，不是补丁。另外 `engine/scripts/make-app.sh`
+的退出码语义改了（未知选项 64→2、零产出从退 0 改退 2）。取 minor 而不是继续 patch，是为了不低估
+一次契约变化。
+
+**本版合并了未发布的 1.28.1。** 开工取证：本地 `main` 比 `origin/main` 多三笔（`e6e43b54`、
+`9c41a7ae`、`336fe35c`）且工作树里躺着 `set-version.mjs 1.28.1` 的全部字节改动与它的 CHANGELOG
+条目——上一轮（2026-11-01）死在"提交并推送"这一步之前，`git tag` 最新仍是 `v1.28.0`、registry 两包
+都还读 1.28.0。判据是文件字节，不是分支名。那一号先按它自己写下的判断落成一笔
+（`31f690c5`，不掺本轮任何改动），再由本版把版本线重新钉到 1.29.0；上面那条 1.28.1 条目**原文保留**，
+它描述的两条缺陷随本版发出。
+
+### 本轮 32 条发现全部修完（发现 32 / 修复 32 / 未修 0）
+
+台账：`specs/GlassPane_每日2026-11-03_发现台账.md`。下面按提交列，每条给失效模式与证据。
+
+**收口类（1 条）** — `6e748acb`
+
+1. `.worktrees/` 不在 `.gitignore` 里，而 `scripts/check-doc-links.mjs` 的 `MD_SKIP_DIRS` 早就把它
+   当"不是仓库内容"排除了。任务流程第 4 条要求"改用隔离工作树"，于是每建一棵树，仓库根就多一行
+   `?? .worktrees/`，让收口硬条件"`git status --porcelain` 为空"字面上不可满足。
+   这是同一形状的半修：A 面（文档闸）知道它不是仓库内容，B 面（git 的忽略表）不知道。
+   测试 3 条，其中一条是"同一枚探针换到仓库根就必须被看见"的非空转对照。
+
+**文档闸（6 条）** — `2a0f2135`。上一轮（`e6e43b54`）把 ① 从手抄名单改成形状，本轮复查量到那一修
+自己还是半修，且这道闸另有三个空转面。
+
+2. ② 那半还是手抄词表。**物证**：把 2026-10-31 漏进 `engine/smoke.md` 的那 9 行删掉 `XEOF`
+   那一行喂进旧判据 ⇒ 报 **0 条**。改成动词无关的语句形状后同一输入报 **7 条**（整块 8 条）。
+3. 围栏开/闭是布尔翻面 `/^\s*(?:```|~~~)/`，而同一文件里 `headingsOf` 用的是 CommonMark——
+   两个读者两套判据，注释却写着"三个读者共用一个式子"（主张与代码不符）。布尔版造**假绿**：
+   一枚落在缩进代码块里的 ``` 把整篇读成"在栏内"，正文余下部分一条不判。统一成 `fenceAfter`。
+4. ① 宽度 `{1,15}` 放过 24 字符的 `GLASSPANE_SMOKE_APPEND_END`；只认独立成行放过
+   `EOF; git diff …`（标记与语句同行）。
+5. `--self-test` 的 8 例里没有 ① 的变异例：把 `HEREDOC_TERMINATOR.test` 整块删掉，电池照样打印
+   "8 case(s)"退 0。补到 11 例（7 变异必须抓 + 4 合法必须静默）。
+6. 残渣闸不扫 `specs/**`，而同文件的表格判据扫它——"往正文里贴脚本"每轮真正落笔的地方在闸外。
+7. ① 的文案把"这一定是残渣"当既成事实写，出路只给"进围栏或删掉"。改成"这**通常**是…"并保留
+   可执行动作；`CONTRIBUTING.md` / `.zh-CN.md` 那条 docs lane 描述也按 CI 实际跑的两条命令补齐。
+   本轮为这道闸自己新增的一条反例：**行内代码跨行配对**会把下一行中文正文整段吃掉，于是
+   `updater/README.md` 里只剩 `NODE_EXTRA_CA_CERTS` 一枚——一道为消灭假绿而改的闸造出一条假红。
+   退回按行配对，并留一条"落单反引号不许让下一行的语句读不见"的对照。
+
+**可粘贴命令的惰性（3 条，P1）** — `bb339daf`
+
+8. `install.sh` 六处把 `_dir/_remote/_ref/REPO_URL` 裸插值或双引号插进"照着跑"的命令里。双引号
+   照样展开 `$( )` 与反引号 ⇒ 目录名是一段可执行代码。同文件 675 行的 dry-run 委托行 2026-10-31
+   已经全走 `sh_quote`，理由就写在那一行上面——纪律的其余半边没跟上。
+9. `installer/cli.js` 八处 `git -C "${repoDir}" tag -v …`，同一个函数 24 行下面用的却是
+   `quoteShellArg(repoDir)`——一处两套口径。
+10. 执行这条纪律的闸（`remedy-shell-quoting.test.mjs`）动词表里**没有 `git`**，扫描集也从不读
+    `install.sh` / `make-app.sh`，所以上面十四处天生看不见。动词改成形状（并保留旧名单作下限，
+    免得"cat/plutil 这些没有选项的调用位"反而少测），加两条"必须看得见"的空转对照。
+    这是"名单永远少下一枚"在本仓的第四次（前三次：SHELL_ONLY 清单、面 A keep-list、刚修的残渣闸②）。
+
+**MCP 壳（7 条）** — `4fc5f9db`
+
+11. `http-gateway` 建引擎客户端时不交 `identity` / `expectedDaemonMethods`，而 stdio 交——
+    daemon 版本旧、能力清单漂移**只有第二个入口会报**。
+12. 五条协议错臂里三条没有出路，兄弟两臂有。
+13. `tools.ts` 把 256/1024 重抄成字面量，同文件其它界都来自常量。
+14. remedy 里印裸 `glasspaned --…`（15 处），而 `registryReaders` 存在的理由正是"裸名走不受控
+    的 PATH"。改成安装位置的绝对形态。
+15. `gp_diagnose` 读壳侧 `GLASSPANE_STATE_DIR`，daemon 从不读它；摘要不点名读的是哪一棵。
+    现在变量驱动的根必须自报，并给出核对它的那条命令。
+16. `io.ts` 先 `setEncoding("utf8")` 再算字节数与 sha256，而对外承诺是"the exact bytes this
+    transport received"。改成把线字节带到 `onLine`；拿不到线字节的路径**改口**说明算的是解码文本。
+17. `generateProjectId` 留着一条 `Math.random()` 弱 id 兜底臂（`engines.node >= 18` 下永不达）。
+
+**Swift 引擎（6 条）** — `38114dd0`
+
+18. `main.swift` 自己实现了一份 `EvidenceStore.ageRetentionReading`，两份字节**已经分叉**，
+    而函数头上的合并说明明写"合并后本函数删掉"。同一条事实在 socket `stats()` 与 `--evidence-stats`
+    两个门面上印成两句话。旧测试把缺陷的位置当成了基线（断言 main.swift 里恰好 1 处），本轮改成
+    "main.swift 0 处 + 库里恰好 1 处"。
+19. `EngineCore.swift` 把注册的绝对路径与沿祖先走出的 `cursor.path` 回显到线上，违反
+    `Dispatcher.swift:50-60` 自己立的规矩（这帧到得了同用户任何进程，也到得了跨账号可寻址的
+    loopback 网关）。加 `redactHome`，七处过它。
+20. `<op>.json.tmp-<pid>-<uuid>` 在 write 与 rename 之间被打断后**无人回收**——`.tmp-*` 过不了
+    `isEntryName`，`clear()`、两种 prune 与 `stats()` 一起跳过它。新增按 pid 存活判据的回收，
+    还活着的写者的半份文件不碰。
+21. `smoke.md` 断言 `gp-refresh-daemon-stats` "在这次构建的面板上不存在"，而它在
+    `EvidenceStatsView.swift:126` 自 2026-10-10 就在（只是那个状态不渲染）——假主张，且下一节继承了它。
+    更正写在 `engine/smoke.md` 的 2026-11-03 那一节，并新增一条测试把这枚标识钉在源码上。
+22. `UpdateModel` 超时那一支 `terminate()` 后不收尸、不 join、不关句柄；兄弟 `ConsoleModel`
+    早已把顺序连理由一起写在注释里。
+23. 两处面板控件把"为什么禁用 + 下一步"只放在 `.help`（悬停才读得到）；补 `accessibilityHint`。
+
+**两条一键入口与构建脚本（6 条）** — `6af80adf`
+
+24. **信任倒置**：`unsigned`（确实没有签名）只 warn 就继续，而 `unavailable`（检查没跑成）硬拒。
+    `SECURITY.md` 写的是这一档要人来批准（updater 侧就是 `--consent unsigned-release`）。现在两档
+    都要显式同意，`invalid` 仍是任何同意都不覆盖的硬拒。
+25. 非 macOS 上，平台闸那句"一个字节都不写"被它上面几行的 `advance_existing_clone` 否证（fetch
+    写对象、checkout 重写工作树）。闸的位置是既有决定，所以让**动树那一步**自己先问平台。
+    测试断的是 HEAD 与 `.git/objects` 条目的字节。
+26. `--repo=<目录>` 连写在 install.sh 不认识 ⇒ 先付一次 depth-1 网络 clone 再由 installer 退 2；
+    两条入口退码相同、只有这条写了盘，而那枚旗标存在的理由就是"别 clone"。
+27. `make-app.sh` 的 `sips` 在 `set -eu` 下没守卫（同段 `iconutil` 有）：图标失败 = bundle 构建
+    致命失败 = 更新器 staged build 在这台机器上永远过不去。
+28. 同脚本：未知选项退 64（两处入口用 2）；`--settings-bin --skip-daemon` 把旗标当路径吞掉；
+    两个 skip 都给时零产出却退 0 并打印"输出目录"。
+29. 同脚本的候选解释器里有 `/opt/miniconda3/bin/python3`——开发机路径进了产品脚本。
+
+**CI 与数数的闸（3 条）** — `6af80adf`
+
+30. `ci.yml` 十条 job 与 `harness-contract.yml` 两条 job 按可变 tag 取第三方 action
+    （`release.yml` 早按 SHA 钉），而 `check-workflows.mjs` 把钉 SHA 的判据只作用于声明了
+    `environment:` 的 job——旧注释自己写着"扩到只读 lane 是另一次改动"，这次就是那一次。
+    三条 tag 先 `gh api repos/<action>/commits/<tag>` 量到 commit 再钉，其中两条与本仓已有钉法
+    逐字相同。电池 46→48；改 BASE 夹具时抓到电池自己的一次假绿（"裸 SHA 无 owner/repo"那条的
+    replace 锚点失效后静默空过）。
+31. `assert-test-count.mjs` 的 failures 只从 XCTest 行取，而 Swift Testing 的总计行自带
+    `with N issues`——只有那一半红的一趟在闸上读起来是绿的。测试吃的是本轮 `swift test` 那份真日志。
+32. `mcp-shell` 的 `esbuild` 从 `^0.28.2` 改成精确 `0.28.2`（唯一剩下的范围依赖，且带 install-time
+    脚本、跑在发布 lane）。`packageManager` 那一半**本轮不写**：CI 的 npm 由 `setup-node` 给，
+    本机读不到确切版本，写一个没量过的数字进去正是本仓反复修的"主张没有出处"。取到它的那条命令
+    写在下面【仍属未观测】。
+
+### 仍属未观测（物理边界，不是没做）
+
+- `npm stage approve`：需要 owner 的 2FA。
+- Apple 公证（Developer ID + notarytool）：需要付费账号，owner 未启用。
+- `packageManager` 该钉哪个 npm：`gh run view <ci-run> --log` 里 setup-node 那行能读到 CI 的确切版本，
+  本机没有等价读法。
+
 
 ## [1.28.1] — 2026-11-01
 

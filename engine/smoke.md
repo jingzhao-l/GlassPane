@@ -1539,3 +1539,49 @@ helper 沿用 `/var/tmp/glasspane-main-check-20261030/gp-ax-walk.swift`（本机
 6. **顺手量掉的一条怀疑**：连跑 3 次 `--check-developer-tools`（每次真的 `spawn` 一个 lldb 子进程）
    之后，全系统僵尸进程计数从 2 变 0 —— 这条量的是"收尾没 `waitUntilExit` 会不会攒僵尸"这个怀疑，
    量不出累积，所以那一处**不改**（理由与证据记在 `specs/GlassPane_每日2026-10-31_发现台账.md`）。
+
+
+## 每日真机核对 2026-11-03（本轮 07:30 那条线，本机 GUI 会话；被测产物＝收口树的 **release** 构建 `engine/.build/release`，本节的提交只动这份文档）
+
+helper 沿用 `/var/tmp/glasspane-main-check-20261030/gp-ax-walk.swift`（本机无 pyobjc；`cliclick`
+点不动裸可执行文件，AX 才点得动）。全部运行都带 `--state-dir <临时根>` 与 `--socket-path <临时根>/engine.sock`，
+`--prune-evidence` / `--project-remove` / `--project-prune` / 「重启后台服务」一类破坏性或改状态的
+旗标与控件**一次都没有执行过**。
+
+1. **daemon 在隔离根上的自报**：`glasspaned --state-dir <根> --permissions` 退 0，回包三席
+   `granted`、`developer-tools: unverifiable`、`verdict: granted`、`seatsNotGranted: []`；
+   `verdictExcludes` 里 developer-tools 那一项自己写明"这一席本命令不量，报 granted/denied 都是
+   没读到的判决"，next 指 `--check-developer-tools`。同一句 note 也如实说了 `--permissions` 不咨询
+   `--state-dir`（"nothing was read, created, tightened or written under it"）——事后核对那个目录里
+   只有本 run 的一份 `daemon.log`，`~/.glasspane/evidence` 582 条前后计数不变。
+2. **hello 的三个数**（真 socket 上的真帧，不是读源码）：`version: 1.29.0`、`stateRoot` = 那枚临时根、
+   `capabilities` **11** 枚 = `act, assert_element, attach, audit_ui, capture_view, diagnose,
+   last_evidence, observe, probe_status, restore, snapshot`。这 11 与 `mcp-shell` 的
+   `DAEMON_FORWARDED_METHODS` 同数同集合（本轮把网关那一面也接上了这份清单，见发现 #11），
+   而 `mcp-shell/src/tools.ts` 的 `TOOL_SPECS` 是 16 枚——多出的 5 枚
+   （`gp_export_evidence`、`gp_recent_reports` 与三枚 project 工具）是不转发给 daemon 的那一类。
+3. **面板按标识可读且不自造读数**：权限页一次遍历 **31** 个 `gp-*` 标识，席位徽标把实测值写进
+   标识本身（`gp-perm-accessibility-granted`、`gp-perm-input-monitoring-granted`、
+   `gp-perm-screen-recording-granted`、`gp-perm-developer-tools-unverifiable`），与 1 逐项一致。
+4. **控件按得动、确实换页**（`kAXPressAction`，每次按压前该标识 `enabled=1`）：
+   `gp-nav-updates` ok=1 → 标识集合 31 → 30（`gp-perm-*` 消失、`gp-update-status` 出现）；
+   `gp-nav-projects` ok=1 → 11 枚，含 `gp-prune-projects`；`gp-nav-recipes` ok=1 → 11 枚；
+   `gp-nav-approvals` ok=1 → 14 枚，含 `gp-refresh-approvals`、`gp-reveal-approval-ledger`；
+   `gp-nav-evidence` ok=1 → 31 枚，含 `gp-refresh-evidence`；回到权限页按 `gp-refresh` ok=1。
+   这一格证到的是"按下去换了可见面 / 按得动"，不写成"证到了状态刷新"。
+5. **对 2026-10-31 那一节的一处更正（发现 #21）**：那一节写"`gp-refresh-daemon-stats` 这一枚标识
+   在这次构建的面板上不存在"。按源码核对它是**登记的**：`EvidenceStatsView.swift:126` 自 2026-10-10
+   起就带这枚标识（本轮把它钉成测试 `panelIdentifiersAreStillEnumerated` +
+   `daemonStatsRefreshIdentifierExists`，在 `engine/Tests/.../DailyRound20261103EngineTests.swift`）。
+   本轮真机走查的实测是另一句话：**权限页 / 更新页 / 项目页 / 配方页 / 台账页 / 档案页六次遍历里
+   都没出现它**（在档案页 press 回 `identifier-not-found`）。所以正确的结论是"这一版源码登记了它，
+   但在本次走查覆盖到的那几个渲染状态里它不出现"，而不是"这枚标识不存在"——10-31 那一节由"不存在"
+   推出的那句"我按的是 gp-nav-updates"仍然成立，本节不据此改动它，只把**理由**改正到源码这一边。
+6. **进程归属两次 `pgrep` 判决**：本 run 起的 daemon 与面板在 `SIGTERM` 之后
+   `pgrep -fl "release/GlassPane"` 与 `pgrep -fl "state-dir <临时根>"` 都是**空命中**（第一次就空），
+   兜底 `pkill -KILL` 之后复测仍空。临时根随后 `rm -rf` 回收。
+   在册的真 daemon（`/Users/ethanlin/Applications/GlassPane Daemon.app/…/glasspaned`）**没碰**：
+   本 run 的两条 pkill 模式（`release/GlassPane.app`、`state-dir <我的临时根>`）都匹配不到它。
+   一条如实的观察：这台机器上那枚已安装 daemon 的 pid 在本轮之内从 39150 变成 36748，
+   且 36748 的命令行不带 `--socket-path`——它起于 08:15:43（早于本 run 任何一次 kill），
+   归属判据是"启动方式与路径都不是本 run 起的 ⇒ 一律不动"，本节只记录现象，不解释它为什么换。
