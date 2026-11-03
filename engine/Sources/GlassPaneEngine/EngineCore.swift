@@ -712,30 +712,30 @@ public final class EngineCore {
                 && failure.code == NSFileReadNoSuchFileError {
                 attributes = [:]  // genuinely not there: ask the directory above it
             } catch let failure as NSError {
-                return "\(cursor.path) cannot be examined (\(failure.domain) \(failure.code)), "
+                return "\(redactHome(cursor.path)) cannot be examined (\(failure.domain) \(failure.code)), "
                     + "so nothing here can say who would be able to write into it"
             } catch {
-                return "\(cursor.path) cannot be examined (unclassified stat failure), "
+                return "\(redactHome(cursor.path)) cannot be examined (unclassified stat failure), "
                     + "so nothing here can say who would be able to write into it"
             }
             if !attributes.isEmpty {
                 guard let number = attributes[.posixPermissions] as? NSNumber else {
-                    return "\(cursor.path) exists but its permissions cannot be read"
+                    return "\(redactHome(cursor.path)) exists but its permissions cannot be read"
                 }
                 let mode = Int(truncating: number)
                 if mode & 0o022 != 0 {
-                    return "\(cursor.path) is writable by group or other (mode "
+                    return "\(redactHome(cursor.path)) is writable by group or other (mode "
                         + String(format: "%04o", mode) + "), so an evidence pack under it is not tamper-evident"
                 }
                 let owner = attributes[.ownerAccountID] as? NSNumber
                 if (owner?.intValue ?? -1) != Int(getuid()) {
-                    return "\(cursor.path) is owned by uid \(owner?.intValue ?? -1), not this process (uid \(getuid()))"
+                    return "\(redactHome(cursor.path)) is owned by uid \(owner?.intValue ?? -1), not this process (uid \(getuid()))"
                 }
                 return nil
             }
             let parent = cursor.deletingLastPathComponent()
             if parent.path == cursor.path {
-                return "\(path) has no existing ancestor this process can examine"
+                return "\(redactHome(path)) has no existing ancestor this process can examine"
             }
             cursor = parent
         }
@@ -762,9 +762,25 @@ public final class EngineCore {
         guard let defect = evidenceStoragePathDefect(stored) else { return nil }
         return GPError(
             code: .badParams,
-            message: "project \(projectId) stores evidenceStoragePath \"\(stored)\", which \(defect). The daemon writes evidence files into that directory and deletes expired ones out of it, so it refuses to adopt the stored value — and it will not quietly archive somewhere else while reporting this project's path either.",
+            message: "project \(projectId) stores evidenceStoragePath \"\(redactHome(stored))\", which \(defect). The daemon writes evidence files into that directory and deletes expired ones out of it, so it refuses to adopt the stored value — and it will not quietly archive somewhere else while reporting this project's path either.",
             remedy: evidenceStorageRemedy
         )
+    }
+
+    /// A path echoed onto the wire keeps the account name out of it.
+    ///
+    /// WHY. `Dispatcher.swift`'s own rule is that this frame reaches any same-user process
+    /// holding the socket *and the opt-in loopback gateway, which other local accounts can
+    /// address with one bearer token*. A registered archive directory is almost always under
+    /// the user's home, so printing it verbatim publishes the account name across accounts —
+    /// the same reason `gp_last_evidence`'s late-reply note names the state root's *shape*
+    /// rather than its bytes. `~` keeps every fact the caller needs to act (which subtree,
+    /// which defect) and drops the one the caller can already read from their own registry.
+    static func redactHome(_ path: String, home: String = NSHomeDirectory()) -> String {
+        let strippedHome = stripFirmlink(home)
+        if path == strippedHome { return "~" }
+        if path.hasPrefix(strippedHome + "/") { return "~" + path.dropFirst(strippedHome.count) }
+        return path
     }
 
     /// A project that never named a directory owns no archive. Pruning

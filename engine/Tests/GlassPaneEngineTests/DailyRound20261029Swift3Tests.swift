@@ -834,12 +834,24 @@ final class DailyRound20261029Swift3AgeRetentionTests: XCTestCase {
     }
 
     /// 那条句子的拼写只有一处（泳道 2 的纪律：事实只有一个出口）。
-    /// REVERSE：在 main.swift 里再写一遍同一句 → 这一条红。
+    ///
+    /// 2026-11-03 改了判据的**位置**：这条从前断言 main.swift 里恰好 1 处，而那一处正是
+    /// `EvidenceStore.ageRetentionReading` 的副本——合并说明写的就是"合并后本函数删掉，
+    /// 载荷那一行直接转读 `stats.ageRetention`"。副本删掉之后 main.swift 是 0 处，唯一的
+    /// 拼写在库里。判据没有放宽，是问的对象变了：现在两半都问，一处不多一处不少。
+    /// REVERSE：在 main.swift 里再写一遍同一句 → 第一条红；把库里那份删掉 → 第二条红。
     func testTheNotEnforcedSentenceIsSpelledOnce() throws {
         let text = S3Source.codeOnly(try S3Source.main())
         XCTAssertEqual(
-            text.components(separatedBy: "--prune-evidence --older-than <days> is the only age path").count - 1, 1,
-            "同一句在 main.swift 里被写了两遍：合并后它就是两套答案"
+            text.components(separatedBy: "--prune-evidence --older-than <days> is the only age path").count - 1, 0,
+            "main.swift 里又出现了那句的副本：两个门面就会说两种话（缺陷 #25 的形状）"
+        )
+        XCTAssertTrue(text.contains("\"ageRetention\": stats.ageRetention"),
+                      "--evidence-stats 的载荷必须转读库里那一份，而不是自己拼")
+        let store = S3Source.codeOnly(try S3Source.engineFile("GlassPaneEngine/EvidenceStore.swift"))
+        XCTAssertEqual(
+            store.components(separatedBy: "--prune-evidence --older-than <days> is the only age path").count - 1, 1,
+            "库里那唯一一份拼写不见了或被抄成两份：这条句子必须只有一个出口"
         )
     }
 }

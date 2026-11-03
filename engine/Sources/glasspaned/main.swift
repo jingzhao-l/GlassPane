@@ -1695,23 +1695,6 @@ if options.approvalAudit || options.approvalVerify {
 /// `--prune-evidence` 的一次性参数，不是留存配置），所以每次写都跑的那趟按年龄清理在生产里
 /// 恒为空操作。`{count, totalBytes}` 两读数配上模块头那句"older than N day(s)"，读者就当成
 /// 档案会按年龄自己到期——一条没人设置过的承诺。这里把唯一说得出这条的主体（这个 store
-/// 实例此刻有没有年龄闸）折算成一句话，没设年龄闸时**不许**出现"多少天以后到期"。
-///
-/// 合并说明（给主代理）：分支 `daily/main-20261029-swift1`（f49f8341）已把同一句存成
-/// `EvidenceStore.ageRetentionNotEnforced` 并由 `stats().ageRetention` 发出；本分支还没有那
-/// 一条，所以这里按同一语义、同一字面量自己接。合并后本函数删掉，载荷那一行直接转读
-/// `stats.ageRetention`——判据不留两处拼写。
-private func evidenceAgeRetentionReading(_ store: EvidenceStore) -> String {
-    // 这一句是"没有年龄闸"时唯一的实话，也是设了闸时那半句的尾巴：一处拼写，两处使用。
-    let onlyAgePath = "--prune-evidence --older-than <days> is the only age path"
-    guard let maxAgeDays = store.maxAgeDays else {
-        return "not enforced by the daemon; \(onlyAgePath)"
-    }
-    return "age gate of \(maxAgeDays) day(s) set in this process by a caller of EvidenceStore — "
-        + "no daemon flag and no configuration path sets one, so a daemon started from the CLI runs "
-        + "with age retention not enforced; \(onlyAgePath)"
-}
-
 if options.pruneEvidence || options.evidenceStats {
     // 目录解析与批三 pruneEvidence 同口径：项目维度查 registry →
     // evidenceStoragePath（缺失或不合法即拒绝，不回落共享档案）；
@@ -1851,7 +1834,11 @@ if options.pruneEvidence || options.evidenceStats {
             "dir": dir,
             // 泳道 2 交接（S2-3）：值在引擎那一侧，这一面负责把它发出去。读不到归档时
             // 它同样要说实话——"没测出条数"与"没有年龄闸"是两件不同的事实。
-            "ageRetention": evidenceAgeRetentionReading(store)
+            // 本轮收掉的那处重复（缺陷见 CHANGELOG）：这里曾自己实现过一份同语义的字符串，
+            // 两份的字节已经分叉（"no daemon flag and no configuration path" vs "…or…"），
+            // 于是同一条事实在 socket `stats()` 与 `--evidence-stats` 两个门面上印成两句话。
+            // 合并说明写的就是"删掉本函数，直接转读 stats.ageRetention"——现在照做。
+            "ageRetention": stats.ageRetention
         ]
         writeJSON(payload)
         // `--prune-evidence` 20 行之前对同一个事实（`listFailure != nil`）回的是 1，

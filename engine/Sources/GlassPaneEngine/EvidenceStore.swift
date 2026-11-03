@@ -161,6 +161,59 @@ public final class EvidenceStore {
         ParamValidation.matchesWhole(name, regex: entryNameRegex, utf16Length: entryNameLength)
     }
 
+    /// The pid a staging name was written by, or nil when the name is not a staging file.
+    ///
+    /// WHY this exists at all. `DurableFileWrite.stage` opens `<op>.json.tmp-<pid>-<uuid>`
+    /// with `O_CREAT|O_EXCL` and renames it into place. A shutdown that lands between the
+    /// write and the rename leaves that file behind, and a `.tmp-*` name does not pass
+    /// `isEntryName` — so `clear()`, both prunes and `stats()` walk straight over it. The
+    /// store's own words at the failed-cleanup site are "nothing will ever reclaim it".
+    /// That is a real leak of an unreclaimable file per interrupted write, and the only
+    /// honest reclaim point is a moment when no write of ours can be in flight: startup,
+    /// and the maintenance passes that already enumerate the directory.
+    ///
+    /// The pid is the whole safety argument: a staging file is removed only when the
+    /// process that named itself into that name is **not alive** (`kill(pid, 0)` says
+    /// `ESRCH`). A live writer's half-file is left exactly alone, so this can never race a
+    /// concurrent daemon into deleting the bytes it is still writing.
+    static func stagingTempPid(_ name: String) -> pid_t? {
+        guard let range = name.range(of: ".json.tmp-", options: .backwards) else { return nil }
+        guard range.upperBound < name.endIndex else { return nil }
+        let tail = name[range.upperBound...]
+        // 名字的形状由 `temporaryPath` 决定：`<pid>-<uuid>`。pid 段是十进制数字，
+        // 认不出这一段就不是这一族的名字，不动它。
+        guard let dash = tail.firstIndex(of: "-") else { return nil }
+        let digits = tail[..<dash]
+        guard !digits.isEmpty, digits.allSatisfy({ $0.isNumber }) else { return nil }
+        guard let value = Int32(digits) else { return nil }
+        return value > 0 ? value : nil
+    }
+
+    /// Remove staging files left by processes that are gone. Returns how many went.
+    public func reclaimStaleStagingFiles() -> Int {
+        let url = URL(fileURLWithPath: directory, isDirectory: true)
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory) else {
+            return 0  // 读不到目录就是"这一趟没量到"，不是"没有残渣"
+        }
+        var removed = 0
+        for name in names.sorted() {
+            guard let pid = EvidenceStore.stagingTempPid(name) else { continue }
+            // 0 == 还活着（不碰）；-1/ESRCH == 那个进程没了，这一枚才轮到我们收。
+            if kill(pid, 0) == 0 { continue }
+            let target = url.appendingPathComponent(name)
+            let values = try? target.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            // 只收自己创建的普通文件；符号链接与目录一律不动（与 `isDeletableEntry` 同一条理由）。
+            guard values?.isRegularFile == true, values?.isSymbolicLink != true else { continue }
+            do {
+                try FileManager.default.removeItem(at: target)
+                removed += 1
+            } catch {
+                log.error("the stale staging file \(target.path) could not be removed (\(error))")
+            }
+        }
+        return removed
+    }
+
     /// Deletion identity for every destructive pass: an entry this store owns
     /// is a *regular, non-symlink file* whose name matches `entryNamePattern`.
     /// Anything that cannot be measured (stat failed, entry vanished mid-list)
@@ -819,8 +872,11 @@ public final class EvidenceStore {
     /// directory returns 0.
     @discardableResult
     public func clear() -> Int {
+        // 先收 `.tmp-*` 残渣：它们过不了 `isEntryName`，`archiveEntryURLs` 一条都看不见，
+        // 于是"清空档案目录"这句话会漏掉目录里真实存在的字节（清完还在，就是假清完）。
+        let reclaimed = reclaimStaleStagingFiles()
         let urls = archiveEntryURLs(keys: [])
-        var removed = 0
+        var removed = reclaimed
         for url in urls {
             if (try? FileManager.default.removeItem(at: url)) != nil {
                 removed += 1
@@ -886,6 +942,8 @@ public final class EvidenceStore {
     @discardableResult
     public func prune(olderThanDays: Int) -> Int {
         guard olderThanDays >= 1 else { return 0 }
+        // 与 `clear()` 同一半：这一趟是"按年龄清"，残渣不属于任何年龄档，不收就永远留在目录里。
+        _ = reclaimStaleStagingFiles()
         return removeExpired(effectiveMaxAgeDays: olderThanDays, now: now())
     }
 

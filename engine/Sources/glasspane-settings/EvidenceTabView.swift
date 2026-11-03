@@ -183,6 +183,11 @@ struct EvidenceTabView: View {
             .help(model.evidenceState == .loading
                   ? "扫描进行中：这一趟还没回话。等它回话后再点——这一枚会把档案目录重扫一次，并再向后台服务要一次统计"
                   : "重新扫描档案目录，并再向后台服务要一次统计")
+            // 理由不能只活在 tooltip 里：`.help` 要鼠标悬停才读得到，键盘与 VoiceOver 用户
+            // 按下去只听见"已禁用"，听不见"为什么"与"下一步"。同一句话给 accessibility 一面。
+            .accessibilityHint(model.evidenceState == .loading
+                                ? "禁用中：扫描进行中，这一趟还没回话。等它回话后再点。"
+                                : "可用：重新扫描档案目录，并向后台服务再要一次统计。")
             .accessibilityIdentifier("gp-refresh-evidence")
             .disabled(model.evidenceState == .loading)
 
@@ -194,6 +199,7 @@ struct EvidenceTabView: View {
             // 禁用态那一句也要说禁用态：从前 help 无论按得动按不动都写着"在访达中打开 …"，
             // 于是按不动的时候屏幕上那句话讲的是一件它没做的事，下一步也没有。
             .help(model.evidenceDirectoryControl.help)
+            .accessibilityHint(model.evidenceDirectoryControl.help)
             .disabled(!model.evidenceDirectoryControl.enabled)
         }
     }

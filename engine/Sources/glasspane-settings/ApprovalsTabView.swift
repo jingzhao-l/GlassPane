@@ -80,6 +80,10 @@ struct ApprovalsTabView: View {
                       ? "在访达中显示这一页读过的那份台账：\(model.approvalsLedgerPath)"
                       : "「台账文件」现在按不动：\(model.approvalLedgerUnavailableReason)"
                         + "（这一页去看的位置是 \(model.approvalsLedgerPath)，核对它是不是后台服务实际在用的那个状态根。）")
+                // 同一条规矩：禁用理由与下一步也要读得到，不只悬停得到（键盘/VoiceOver）。
+                .accessibilityHint(model.canRevealApprovalLedger
+                      ? "可用：在访达中显示这一页读过的那份台账。"
+                      : "禁用中：\(model.approvalLedgerUnavailableReason)")
                 .disabled(!model.canRevealApprovalLedger)
                 .accessibilityIdentifier("gp-reveal-approval-ledger")
             }

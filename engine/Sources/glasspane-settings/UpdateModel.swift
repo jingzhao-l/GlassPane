@@ -415,9 +415,18 @@ final class UpdateModel: ObservableObject {
         }
         if group.wait(timeout: .now() + timeoutSeconds) == .timedOut {
             process.terminate()
+            // `terminate()` 只发 SIGTERM，不 reap：面板是长命进程，每点一次「应用更新」多一个僵尸，
+            // 而那条 reader 还握着 `group.enter()`。顺序与 `ConsoleModel.runDaemonCLI` 同一份
+            // （那里把这件事写成注释，这一处此前只有 terminate）：terminate → waitUntilExit
+            // （收尸，同时解掉写端让 reader 见 EOF）→ group.wait() → 关读端。
+            // 上面那个 `timeoutSeconds` 预算一个字没动：一个只在机器安静时成立的时限判断不是控制。
+            process.waitUntilExit()
+            group.wait()
+            pipe.fileHandleForReading.closeFile()
             return .timedOut
         }
         process.waitUntilExit()
+        pipe.fileHandleForReading.closeFile()
         let text = String(data: box.value, encoding: .utf8) ?? ""
         return .completed(stdout: text, exitCode: process.terminationStatus)
     }
