@@ -145,6 +145,115 @@ R1 的八条是"上一批修复自己留下的洞"（`validateSelector` 的拒�
 字面量、`set -u` 下引用未赋值的 `$log`）。最后一条本轮是**复验为已清**：按 step 体扫过
 `rm -f "$log"` 与 `log="$(mktemp)"` 的先后，7 次释放全部在 2 次赋值之后，无一步越序。
 
+### 五、收尾读数（同一会话）· 发布三格、两个补不了的号、端到端三通道
+
+**发布链的实际状态（每条都是当场问出来的）。**
+
+| 格 | 读数 |
+| --- | --- |
+| 主仓 main | 本轮 10 笔 `[gp]` 提交，收口 HEAD 见本笔；`git status --porcelain` 空；`git rev-list --count origin/main..HEAD` = 0 |
+| 搬运仓 main | `8de46320`，tree `05ec92f8…` == 主干 `harness/glasspane-harness` 子树（`git rev-parse` 两侧逐字相等才推的）；`release-artifact --check` 两格都 `✓`（无 `△`） |
+| tag | `v0.14.1` 已打已推，签名 key `0929EA31DF4F7429F63FC53189D88B1298…`（`git verify-tag` 报"完好的签名"） |
+| GitHub Release | `draft=false`，6 件资产（arm64.zip 46,450,803 / x64.zip 48,634,603、各自 `.asc` 833、`SHA256SUMS.txt` 204 与其 `.asc` 833），`targetCommitish` = **被 tag 的 commit** `8de46320`（不是分支名——v0.6.4 那格的可复现性锚点改进项，本轮实测已成立） |
+| Release run | `41584248230` 十一格全 `success`，含本轮新写的三类判据：`tag…CI all agree`（内含 `assert-ci-green` 去 event 过滤 + `tree-anchor` + tag 身份验签）与 `Make the release visible…`（内含 flip 前的按安装器方式验签） |
+| npm run | `41585027473`：`publish-gate` 的跨链闸 `success`（先证明 Release 公开且资产齐整才准发 npm），三包 `success` |
+| registry | `npm view … --prefer-online` 逐个点名：`glasspane-harness` latest **0.14.1**、`glasspane-harness-darwin-arm64` latest **0.14.1**、`glasspane-harness-darwin-x64` latest **0.14.1**，再按 `glasspane-harness@0.14.1` 显式点名一次也答 0.14.1（npm 读副本延迟实测存在：发布刚完那几分钟 `npm install -g glasspane-harness@0.14.1` 报过 `ETARGET`，几分钟后同一条命令装上） |
+| `verify-published 0.14.1` | **两格都绿**：CI 那一格是 Release run 的最后一步 `install the published bytes and run them` = success（run `41585027473`）；本机那一格 `cd packages/opencode && bun run script/verify-published.ts 0.14.1` rc=0，逐条打出 「装的是发布物」「两个命令名都报 0.14.1」「那份 macOS 二进制真的在供内嵌 web（content-type=text/html, doctype=true, assets=referenced）」 |
+| 端到端 | 三条通道实测，读数在下面的"三通道"一段 |
+
+**v0.14.0 这一格为什么不补、也不撤。** tag 在（签名完好，且现在有服务端 ruleset 拒移动它），它的
+Release run 十格里九格绿、只有 `make-visible` 红，读数是
+`release v0.14.0 carries signature sidecars for files it does not serve: signer`——那一步把自己刚解出来的
+公钥写进了它要扫的目录。GitHub 执行的是触发 commit 自带的 workflow 文件，所以 `gh run rerun --failed`
+只会再自伤一次；而修复落在主干的 `release.yml`，落在 tag 之后，按纪律只能由下一个号吸收——那就是
+0.14.1。它的 draft release 本轮删除（不留悬挂 draft），npm 上从来没有 0.14.0 的字节，
+`latest` 直接从 0.13.0 走到 0.14.1。
+
+**v0.13.0 这一格：npm 补齐了，GitHub Release 结构上不可补。** 本轮 `41567080762`（dispatch on tag）
+把 wrapper + 两个平台包的 0.13.0 全部上架，`install the published bytes and run them` 那一格也绿；
+`npm view … --prefer-online` 三包逐个点名都答 0.13.0。Release 那一格补不了的原因与 v0.14.0 同源：
+`create-release`/`binaries`/`checksums` 只在 **tag push** 事件上跑（`if: github.event_name == 'push'`），
+而那次 push 用的正是它自己那棵树的字节相等判据——主干收过台账之后等式永不成立，重跑必然红；
+签名 tag 不可移动。所以 v0.13.0 的形态是"npm 完整、Release 缺席"，它违反的正是本轮新加的那条跨链闸，
+而这条闸对它无能为力（它是在那次发布之后才存在的）。手工在本机造两个二进制再上传不是补救而是另一种
+失效：那会让 `latest` 的资产不是被 CI 造、被 CI 验的那一份。
+
+**三条安装通道（本机实测，不是 selftest 的桩）。**
+
+1. npm 全局：`npm install -g --prefix "$HOME/.local" glasspane-harness` → 装上 0.14.1，
+   `~/.local/bin/glasspane-harness --version` = **0.14.1**、别名 `gp-harness --version` = **0.14.1**；
+   npm 11 对首次见到的包照例打 `install-scripts` 警告（postinstall 被 gate），装出来的
+   `node_modules/glasspane-harness/node_modules/glasspane-harness-darwin-arm64` 在位，两个命令名都答版本号。
+   这条警告文案与 `scripts/install.sh` 打印的补救一致（`--allow-scripts=<包名>`）。
+2. curl 兜底（资产 + 签名通道，**强制**走它：`PATH` 里不给 node/npm，读数是
+   `node? absent / npm? absent`）：先按①的两步纪律把发布物落到临时目录再执行，
+   输出逐条是 `npm not found on PATH — using the GitHub release asset instead` →
+   `sha256 verified against SHA256SUMS.txt` → `GPG provenance verified: release asset signature is
+   from the signing key` → `installed via release asset (… sha256: verified; GPG: verified
+   (signing key 0929EA31DF4F7429F63FC53189D88B1D043A1298))` → `glasspane-harness --version -> 0.14.1`，
+   临时前缀里的两个命令名都答 0.14.1。这里的 gpg 是真 `/opt/homebrew/bin/gpg`，不是 selftest 的桩。
+   同一通道还实测了**拒绝分支**：把代理相关环境变量从环境里剥掉（`env -i`，本机 TLS 由拦截代理重签），
+   清单那一跳只拿到 `HTTP 302`，安装器答
+   `the checksum manifest for v0.14.1 could not be fetched (HTTP 302) — this is not the same as it being
+   unpublished` + `refusing to install bytes that no manifest vouches for`，rc=1 且**不落任何二进制**。
+   这正是 10-26 那条"任何失败都当成就没发布、然后警告一声继续装"的反面。
+3. bun 全局：`bun add -g glasspane-harness@0.14.1` rc=0（"2 packages installed"），
+   `~/.bun/bin/glasspane-harness --version` = **0.14.1**。
+
+**两个本轮补/关掉的格。**
+
+- v0.13.0 的 npm 三格：`41567080762`（dispatch on `--ref v0.13.0`）全绿，
+  `npm view glasspane-harness@0.13.0` / `-darwin-arm64@0.13.0` / `-darwin-x64@0.13.0` 逐个点名都答 0.13.0，
+  且同一条 run 的 `install the published bytes and run them` 也绿——三包在 0.13.0 上是齐的，
+  不再是上一轮记的"三个都查不到"。
+- 父仓那条把语料钉在子树实时 △ 上的控制：本轮吸收掉全部移交之后它必然红（两条 job 同因），
+  已按"控制移动而不是删除"修在 `updater/test/daily-20261030-gate-wiring.test.mjs`——
+  没有活移交时它改问那条闸自己的电池，要求三类判据各自还在 "verified to fail" 的用例行里。
+  实测 `node --test updater/test/daily-20261030-gate-wiring.test.mjs` 4 pass / 0 fail。
+  **主仓那侧的判据与版本线本轮没动**（这是工具/测试层的一处耦合修复，不属于 1.29.0 那条产品发布）。
+
+**一条明确维持现状的（不是待办）。** `scripts/install.sh` 的开场横幅写着
+"an opencode fork — https://github.com/anomalyco/opencode"。本轮把它判为**血缘陈述**而不是分发面：
+产品纪律禁的是上游 npm 名、上游平台包名与上游 registry（ghcr / AUR / homebrew tap / opencode.ai install），
+而 `brand-surface` 的 `upstream-in-user-text` 扫的就是那几形；血缘名按 `FORK.md`/`README` 的口径不洗
+（2,700 个文件的内部标识全洗会毁掉同步能力）。同一轮里被修掉的三处用户文本是另一类形状——
+`web` 命令指向不随包发布的 FORK.md（安装后是死指针）、两处把操作者送去上游文档站——那些是
+"指向不存在/别人家"的问题，不是"说出来源"的问题。
+
+### 六、清理盘点
+
+| 项 | 处置 | 判据 |
+| --- | --- | --- |
+| 主仓 worktree | 只剩主工作树 1 个 | 本轮自建的 `/var/tmp/…/tagtree`（跑 tree-anchor 真树判据用的分离树）确认 `status --porcelain` 空后 `git worktree remove` + `prune` |
+| 主仓本地分支 | `main` 一条 | `split/glasspane-harness` 是本轮搬运产物（内容已由 tag `v0.14.1` 与 split 仓 main 承载），按纪律用完删；`refs/tmp/splitmain*` 是本轮比对用的临时 ref，一并删 |
+| 主仓远端分支 | 无本轮开的分支 | `git fetch --prune` 后只有 `origin/main` 与 dependabot 那条 |
+| split 仓 | `main` + 40 个 tag，无游离分支 | tag 是发布锚点，不删（本轮还给它加了 ruleset 强制不移动） |
+| split 仓 PR | 开着的 0 条 | 开工时那条 dependabot PR（#7）本轮收口时已不在 open 列表 |
+| `/var/tmp/glasspane-harness/` | 保留 `ca-bundle.pem`（环境）+ 本轮 `daily-20261103/*` | 上一轮的 `20261030-harness-daily`、`daily-20261102` 与 11-01 那批临时脚本（`dispatch-ci.sh`、`inventory-*`、`orphans-*`、`preflow-*`、`relcheck2.sh`、`relstate-*`、`runinspect.sh`、`setup-wt.sh`、`state-*`）已删 |
+| 进程 | 本会话起的后台命令全部退出 | 判据是两次 `pgrep`，不是"我执行过 pkill"；见本表下方读数 |
+| 未追踪件 | 0 条 | 我自己跑 tag 验签步骤时留在仓库根的 `signer.asc/tag.obj/tag.payload/tag.sig` 已清；`fork-diff` 曾因 `harness/glasspane-harness/signer.asc` 拒绝记录金样，那条守卫说对了 |
+
+### 七、未观测（只限物理边界，各附补它的确切一条命令）
+
+1. **真模型轮次 / 真 TUI 会话观感。** 本机没有可用的真 provider 轮次（第一轮就把这一格挂为"未观测"而非
+   "能修"），TUI 的四态互异本轮只核到代码与断言层（`packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx`
+   的四元组断言在 36 pass 里）。补它的一条：`cd harness/glasspane-harness/packages/opencode && bun dev`
+   （真 provider key 就位后），观察 `gp_*` 行的 ✗/文本是否把"引擎拒绝"与"这轮没结果"分开。
+   **本轮判定维持现状**：`engine-failure` 与 `call-error` 共用 ✗ 字形但有不同文本，两者都不是真结果，
+   必须区分的是"拒绝 ↔ 真结果"，那一条已由四元组断言钉住。
+2. **M2 决策日志 `logged` 分支的那一次证据成包真轮次。** 台账写侧翻转后 `logged` 只在真会话真轮次里
+   走到；本机 daemon 在跑但没有真 provider 轮次可成包。补它的一条：
+   `cd harness/glasspane-harness/packages/opencode && GLASSPANE_STATE_DIR=$(mktemp -d) bun dev` 后跑一轮
+   `gp_observe` + `gp_diagnose`，再 `grep -c '"dimension"' "$GLASSPANE_STATE_DIR"/*.jsonl` 应非零
+   （本轮把 dimension 真正写进台账，这一条从"没读者"变成可核）。
+3. **musl/baseline 目标**：**本轮否证为不成立**，不是未观测。量法：
+   `node -p "JSON.stringify(require('./harness/glasspane-harness/product.json').platformTargets)"` →
+   只有 darwin arm64/x64；`release.yml` 两处矩阵与之互比（`product-surface` 的 `release-target-matrix`）。
+   没有 lane 是因为没有目标，`product.json:63` 的 `platformTargetsNote` 写的就是这件事。
+4. **`packages/{app,session-ui,desktop}` 与 TUI 的取舍**：维持现状（默认答案），依据与代价已写在
+   `product.json` 与本轮 `docs/models-and-keys.md` 的收口里——真要开回来需连同构建通道、
+   brand/product 闸与 CI lane 一起做。本轮**没有**扩任何产品面：分享通道那一格是按"宣称跟上事实"收的。
+
 ## 2026-10-31（第二十六次会话）· 跨到 11-01 收尾· 取号 0.13.0：注册表给不存在的能力作背书、两条命令把拒绝化妆成成功、以及上一轮本线拒绝签字的那笔面 A
 
 本轮开工就撞上一个新形态：**四条修复泳道全部在"写代码的中途"被平台额度上限打断**，
