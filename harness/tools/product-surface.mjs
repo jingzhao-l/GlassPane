@@ -588,23 +588,38 @@ check("config-names", candidatesLine.includes(`${product.name}.json`), "config.t
 
 // ---- the repository's own project directory is the product's, and the legacy
 // `.opencode` name survives only as a compatibility read in a user's project
+//
+// Both names used to be literals in this file while product.json's `repoLayout` described the same fact
+// in prose and asserted, under `enforcedBy`, that this rule read it. It did not: the assertion was a
+// second copy of the truth, not the source of it, so a deliberate rename in product.json would have
+// reddened this lane instead of being followed by it. The needles come from product.json now, and a
+// `repoLayout` that is missing or malformed is "cannot observe" (exit 2) rather than a silent pass.
+const repoLayout = product.repoLayout ?? {}
+if (typeof repoLayout.projectDir !== "string" || repoLayout.projectDir.trim() === "")
+  die(2, "product.json carries no repoLayout.projectDir — this rule cannot tell what the product's own project directory is called")
+if (!Array.isArray(repoLayout.compatReadDirs) || repoLayout.compatReadDirs.length === 0)
+  die(2, "product.json carries no repoLayout.compatReadDirs — this rule cannot tell which legacy names must keep being probed")
+const productDir = repoLayout.projectDir.trim().replace(/\/+$/, "")
+const compatDirs = repoLayout.compatReadDirs.map((entry) => String(entry).trim().replace(/\/+$/, ""))
 const forkRootEntries = readdirSync(forkRoot, { withFileTypes: true }).map((e) => e.name)
 check(
   "project-dir",
-  forkRootEntries.includes(".glasspane-harness") === true,
-  "the repo's own project directory is not `.glasspane-harness/` — the product should dogfood its own name",
+  forkRootEntries.includes(productDir) === true,
+  `the repo's own project directory is not \`${productDir}/\` — the product should dogfood its own name`,
 )
-check(
-  "project-dir",
-  forkRootEntries.includes(".opencode") === false,
-  "a `.opencode/` directory is back at the fork root — it is upstream's dev-config name; ours is `.glasspane-harness/` (the legacy name is only a read-compat target in a user's project)",
-)
+for (const legacy of compatDirs)
+  check(
+    "project-dir",
+    forkRootEntries.includes(legacy) === false,
+    `a \`${legacy}/\` directory is back at the fork root — it is upstream's dev-config name; ours is \`${productDir}/\` (the legacy name is only a read-compat target in a user's project)`,
+  )
 const paths = stripComments(read("packages/opencode/src/config/paths.ts"))
-check(
-  "project-dir",
-  paths.includes('".opencode"') && paths.includes('".glasspane-harness"'),
-  "the legacy `.opencode` project dir is no longer probed — an existing upstream checkout must keep working",
-)
+for (const legacy of compatDirs)
+  check(
+    "project-dir",
+    paths.includes(`"${legacy}"`) && paths.includes(`"${productDir}"`),
+    `the legacy \`${legacy}\` project dir is no longer probed — an existing upstream checkout must keep working`,
+  )
 
 // ---- macOS-only distribution: the npm side must refuse other platforms, not ship them
 const platform = product.platform ?? {}

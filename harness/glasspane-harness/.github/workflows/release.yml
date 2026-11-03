@@ -953,6 +953,109 @@ jobs:
           fi
           echo "cross-chain anchor held: ${WANT} is public with $(printf '%s\n' "$HAVE" | grep -c .) asset(s), covering every target in product.json — npm and the release are the same version's bytes"
 
+      - name: The registry must not already hold this version as a partial set
+        # The half-release this lane keeps producing is not detected by anything that runs BEFORE it.
+        # Measured on 2026-10-31T16:38:25Z, run 41219619435: `npm darwin-x64` published glasspane-harness-
+        # darwin-x64@0.13.0 with provenance, the `npm darwin-arm64` leg was cancelled, and the wrapper leg
+        # never started. A reader only found out afterwards, from `gh release view v0.13.0` → not found and
+        # `npm view glasspane-harness@0.13.0` → 404 while the x64 package was live. npm versions are
+        # irreversible and the three packages publish from three different jobs, so the set can be left
+        # part-published by a cancel, a runner eviction, or a single leg's failure — and the next dispatch
+        # of the same number then walks into it blind: two legs get E409, one publishes, and the result is
+        # a version whose wrapper names a package nobody built bytes for.
+        #
+        # So the set is asked about BEFORE anything irreversible happens. Three states, two of which pass:
+        # none of the set present (a clean publish), all of the set present (a re-dispatch of a version
+        # already fully published — safe, and the per-package duplicate branch in `publish-platform` is
+        # what makes it so; this gate deliberately does not re-litigate that case). A PARTIAL set refuses,
+        # because completing one by dispatching under it is a publish whose legs were built by different
+        # runs with different inputs, and "take a new number" is the only remedy that keeps the version a
+        # unit. Recorded precedent for finishing an OLD number on purpose: run 41567080762 completed
+        # 0.13.0's npm set by dispatching `--ref v0.13.0`, which runs the YAML tagged 0.13.0 carries —
+        # dispatched workflows use the ref's own file, so this refusal cannot and does not reach it.
+        #
+        # The classification is the one packages/opencode/script/registry-readiness.ts `npmAnswer` uses,
+        # copied rather than re-derived so the lane cannot hold two answers to "did the registry speak":
+        # exit 0 with a version that is not the one asked for, and any non-zero whose stderr is not the
+        # registry's own E404, are BOTH "could not ask" — never "not published". `2>/dev/null || true`,
+        # which an earlier step in this file uses, is not usable here: it folds an outage into an absence,
+        # and an absence is exactly the answer this gate licenses a publish with.
+        run: |
+          set -euo pipefail
+          # One node read of product.json for the version, the registry and the package set. The set
+          # uses the same naming rule the rest of this file uses, re-derived from product.json rather
+          # than written out, and is the wrapper plus every platform package this version would put on
+          # the registry. Three separate `node` calls would be three process starts to answer one
+          # question, and this file's other lanes read the same file three times for the same reason.
+          readout="$(node -e 'const p=require("./product.json");const n=(t)=>[p.name,t.os,t.arch,t.avx2===false?"baseline":undefined,t.abi].filter(Boolean).join("-");console.log(p.version);console.log(p.registry);console.log(p.name);for(const t of p.platformTargets)console.log(n(t))')"
+          # Split by builtin, not by `sed`: this body is one process start in CI and a dozen in the
+          # battery that runs it, and three forks per pass is three chances to time out there.
+          ver=""; reg=""; packages=""; at=0
+          while IFS= read -r line; do
+            at=$((at + 1))
+            case "$at" in
+              1) ver="$line" ;;
+              2) reg="$line" ;;
+              *) packages="${packages}${packages:+$'\n'}${line}" ;;
+            esac
+          done <<<"$readout"
+          case "$ver" in
+            ""|undefined)
+              echo "::error::product.json does not name a version (read ${ver:-nothing}), so there is no set to ask the registry about"
+              exit 1 ;;
+          esac
+          present=""
+          absent=""
+          unaskable=""
+          asked=0
+          while IFS= read -r pkg; do
+            [ -n "$pkg" ] || continue
+            asked=$((asked + 1))
+            err="$(mktemp)"
+            rc=0
+            got="$(npm view "${pkg}@${ver}" version --registry "$reg" --prefer-online 2>"$err")" || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              if [ -z "$got" ]; then
+                unaskable="${unaskable}${unaskable:+ }${pkg}@${ver} (npm exited 0 and named no version)"
+              elif [ "$got" = "$ver" ]; then
+                present="${present}${present:+ }${pkg}@${ver}"
+              else
+                unaskable="${unaskable}${unaskable:+ }${pkg}@${ver} (the registry named $got for a question about $ver)"
+              fi
+            elif grep -qE 'code E404|404 Not Found' "$err"; then
+              absent="${absent}${absent:+ }${pkg}@${ver}"
+            else
+              # `$(<file)` is a builtin read, so the trouble branch costs no process start and no pipe
+              # whose early-exit consumer could turn the refusal into a 141.
+              detail="$(<"$err")"
+              [ -n "$detail" ] || detail="no message"
+              unaskable="${unaskable}${unaskable:+ }${pkg}@${ver} (npm exited $rc: ${detail//$'\n'/ /})"
+            fi
+            rm -f "$err"
+          done <<<"$packages"
+          # Counted across the walk rather than tested as `[ -z "$packages" ]` before it: a blank entry
+          # is skipped by the loop, so the string and the set can disagree — and an empty set would
+          # otherwise fall through to the "nothing is present, so this is a clean publish" branch. A
+          # gate whose input vanished has to say so instead of certifying nothing.
+          if [ "$asked" -eq 0 ]; then
+            echo "::error::product.json named no package to ask the registry about (the wrapper plus its platformTargets), so there is nothing this gate could certify — an unreadable set is a broken read, not a release with no npm legs"
+            exit 1
+          fi
+          if [ -n "$unaskable" ]; then
+            echo "::error::the registry could not be asked about the set at ${ver}:${unaskable}. \"could not ask\" is not \"not published\", and this gate is the one that licenses a publish — refusing while refusing still costs nothing."
+            exit 1
+          fi
+          if [ -n "$present" ] && [ -n "$absent" ]; then
+            echo "::error::this version is half-published on the registry — present:${present} absent:${absent}."
+            echo "::error::remedy: take a new number. Do not publish under ${ver}: its legs were put there by different runs, and the wrapper would name a set no single run built. Bump product.json and the two manifests to the next patch, re-split, cut the signed tag, let the push-side chain make its release public, then dispatch the new number."
+            exit 1
+          fi
+          if [ -n "$present" ]; then
+            echo "registry set at ${ver} is complete:${present} — this gate passes so the duplicate-version branch downstream can absorb a re-dispatch without publishing a second copy"
+          else
+            echo "registry set at ${ver} is empty:${absent} — a clean publish"
+          fi
+
   publish-platform:
     name: npm ${{ matrix.target }}
     # `success() &&` is load-bearing: a `needs:` edge alone does NOT gate the job when its

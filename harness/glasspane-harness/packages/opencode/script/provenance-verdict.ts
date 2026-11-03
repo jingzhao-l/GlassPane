@@ -76,5 +76,3 @@ export const parseRegistryMetadata = (raw: string): unknown | null => {
     return null
   }
 }
-
-export const KNOWN_ATTESTATION_KEYS = KNOWN_KEYS

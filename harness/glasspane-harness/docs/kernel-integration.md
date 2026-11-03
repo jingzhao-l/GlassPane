@@ -187,9 +187,14 @@ for any R40 scenario; every one of them was blocked on kernel API work first.
   checked against the golden recorded in `contracts/kernel-conformance.json`, which is a real guard —
   against *this* implementation drifting. Comparing the installed `dist` with a canonical kernel
   checkout (where the zod-major error-prose difference is reported as a note) needs `--impl` pointed at
-  that checkout, and no CI step does that. The Python side is the same shape:
-  `scripts/diff_kernel_implementations.py` exists, is an operator command, and measured rc=2 on the
-  2026-10-25 machine because no built `iterate-kernel` dist was reachable. So what is unattended
+  that checkout, and no CI step does that. There is no other second-implementation comparison in this
+  product: the sentence here used to name `scripts/diff_kernel_implementations.py` and report that it
+  "exists, is an operator command, and measured rc=2 on the 2026-10-25 machine". No such file exists in
+  this fork or in the canonical kernel checkout — measured 2026-11-03 rather than recalled: `ls` of
+  `harness/glasspane-harness/scripts/` and `/Volumes/Eng-Dev/iterate-skill/scripts/` both come up
+  without it. A document that cites a command nobody can run is the failure this repository calls a
+  dead remedy, so the boundary is now written as what actually exists: `--impl` over the pinned corpus,
+  on an operator's command, in neither CI lane. So what is unattended
   between the two implementations is the sha256-pinned corpus (`tests/kernel_fixtures/manifest.json`,
   whose own comment says it is deliberately NOT generated from the kernel but a copy pinned by sha256),
   not a run of both. One more reading to keep honest: `contracts/kernel-conformance.json` carries

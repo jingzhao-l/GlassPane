@@ -69,7 +69,7 @@ const treeSitterWorker = await Bun.file(fileURLToPath(import.meta.resolve("@open
 // the failure nobody saw was the typecheck itself failing.
 const product = (await Bun.file(path.join(import.meta.dirname, "..", "..", "..", "product.json"))
   .json()
-  .catch(() => null)) as { name?: string; version?: string; platformTargets?: PlatformTarget[]; repo?: string; homepage?: string } | null
+  .catch(() => null)) as { name?: string; version?: string; platformTargets?: PlatformTarget[]; repo?: string; repoUrl?: string } | null
 if (!product?.platformTargets?.length) {
   console.error("product.json is missing or has no platformTargets — refusing to build a product with an unrecorded target matrix")
   process.exit(2)
@@ -253,7 +253,11 @@ for (const item of targets) {
         // both --provenance and the staged fallback were rejected. Same source of
         // truth as the wrapper (product.json), so the two cannot drift.
         ...(product.repo ? { repository: { type: "git", url: `git+https://github.com/${product.repo}.git` } } : {}),
-        ...(product.homepage ? { homepage: product.homepage } : {}),
+        // This read `product.homepage`, a field product.json does not have, so the spread silently
+        // emitted nothing and the platform packages shipped without a homepage while the wrapper had
+        // one. `repoUrl` is the declared field and `#readme` is the form npm's own metadata uses, so
+        // the two manifests now come from one source instead of one being read from a name nobody wrote.
+        ...(product.repoUrl ? { homepage: `${product.repoUrl}#readme` } : {}),
         ...(product.repo ? { bugs: { url: `https://github.com/${product.repo}/issues` } } : {}),
         license: "MIT",
         preferUnplugged: true,

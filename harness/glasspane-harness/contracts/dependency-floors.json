@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "Version floors for direct dependencies whose code this product actually executes.",
+    "A floor is not a preference: every entry here is the first version a public advisory marks as fixed,",
+    "so a manifest below it ships a known hole, and the advisory id is the citation that says so.",
+    "",
+    "Why this lives in the fork tree next to kernel-pin.json: this product is a fork pinned to upstream's",
+    "manifest bytes. A future sync replays upstream's `package.json` over ours, and a dependency downgrade",
+    "arrives looking like a merge, not like a decision -- which is the same shape this repository already",
+    "recorded for v0.7.10, where a security bump lived only in the transport repo and the next split would",
+    "have silently reverted it. `packages/opencode/script/dependency-floors.ts` reads this file and",
+    "`packages/opencode/test/script/dependency-floors.test.ts` is its fixed point; the CI lane runs the test",
+    "list (`test/script/*.test.ts`), so a reverted pin turns red in CI rather than in an audit two weeks later."
+  ],
+  "floors": [
+    {
+      "package": "glob",
+      "floor": "14.0.2",
+      "advisory": "GHSA-3g3m-2fjr-6pw4",
+      "cve": "CVE-2026-118773",
+      "vulnerable": ">= 9.0.0, <= 14.0.1",
+      "why": "AbortSignal cancellation bypass: a traversal that was timed out or aborted keeps walking the filesystem afterwards. `packages/core/src/util/glob.ts` is what feeds this matcher, and its patterns come from repositories this product opens (config/plugin.ts plugin trust, config/agent.ts, tool/registry.ts), so the input is not ours."
+    },
+    {
+      "package": "minimatch",
+      "floor": "11.0.1",
+      "advisory": "GHSA-g3hv-75wg-m249",
+      "cve": "CVE-2026-118764",
+      "vulnerable": "< 11.0.1",
+      "why": "Denial of service through globparts amplification: one crafted pattern can exhaust the process that matches it. Same call path as above -- Glob.match() is used for ignore rules and for deciding which files a config directive reaches."
+    }
+  ]
+}

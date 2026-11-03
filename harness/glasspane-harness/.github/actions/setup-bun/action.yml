@@ -39,7 +39,15 @@ runs:
     - name: Get cache directory
       id: cache
       shell: bash
-      run: echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
+      # Written as one statement before: `echo "dir=$(bun pm cache)"` exits 0 even when `bun pm cache`
+      # fails, because the substitution's status is not the command's. The step then publishes an empty
+      # `dir`, and the restore below points at nothing — which shows up as an ordinary cold run rather
+      # than as a broken cache. Ask for the number and refuse when there isn't one.
+      run: |
+        set -euo pipefail
+        dir="$(bun pm cache)"
+        [ -n "$dir" ] || { echo "::error::bun pm cache answered an empty directory — refusing to restore a cache keyed on nothing" >&2; exit 1; }
+        echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
     - name: Restore Bun dependencies
       id: bun-cache

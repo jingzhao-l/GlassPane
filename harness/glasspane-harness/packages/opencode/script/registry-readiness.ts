@@ -62,6 +62,12 @@ export type Readiness =
       readonly waitedMs: number
       readonly budgetMs: number
       readonly lastTransportError?: string
+      /**
+       * The last version the registry DID answer with, when it answered something other than the one
+       * asked for. Carried out because "the registry is replying about another artifact" and "the
+       * registry has not heard of it yet" are different sentences with different remedies.
+       */
+      readonly answeredInstead?: string
     }
 
 /**
@@ -80,6 +86,7 @@ export async function waitForRegistryVersion(input: ReadinessInput): Promise<Rea
   const started = input.now()
   let attempts = 0
   let lastTransportError: string | undefined
+  let answeredInstead: string | undefined
 
   for (;;) {
     attempts += 1
@@ -94,9 +101,19 @@ export async function waitForRegistryVersion(input: ReadinessInput): Promise<Rea
       note(`attempt ${attempts}: registry not readable (${lastTransportError})`)
     }
     if (typeof seen === "string" && seen.trim() !== "") {
+      const answered = seen.trim()
       const waitedMs = input.now() - started
-      if (attempts > 1) note(`attempt ${attempts}: readable after ${waitedMs} ms of waiting`)
-      return { ok: true, seen: seen.trim(), attempts, waitedMs }
+      // `ready` has meant "served exactly this version" in this file's header since day one, but the
+      // boolean did not enforce it: an ok:true carrying a replica's older answer was handed to callers
+      // whose only reading of the type is `ok`. The mismatch is now a keep-waiting event, and the last
+      // mismatch seen is carried out so the log can name what the registry did answer.
+      if (answered !== input.version) {
+        answeredInstead = answered
+        note(`attempt ${attempts}: ${input.pkg} answered ${answered}, which is not ${input.version} — still waiting`)
+      } else {
+        if (attempts > 1) note(`attempt ${attempts}: readable after ${waitedMs} ms of waiting`)
+        return { ok: true, seen: answered, attempts, waitedMs }
+      }
     }
     if (seen === undefined && lastTransportError === undefined) {
       note(`attempt ${attempts}: ${input.pkg}@${input.version} not in ${input.registry} yet`)
@@ -110,6 +127,7 @@ export async function waitForRegistryVersion(input: ReadinessInput): Promise<Rea
         waitedMs: elapsed,
         budgetMs,
         ...(lastTransportError === undefined ? {} : { lastTransportError }),
+        ...(answeredInstead === undefined ? {} : { answeredInstead }),
       }
     }
     await input.sleep(Math.min(pollMs, budgetMs - elapsed))

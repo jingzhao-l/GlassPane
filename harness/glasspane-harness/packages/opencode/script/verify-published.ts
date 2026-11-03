@@ -205,15 +205,15 @@ try {
     if (!readiness.ok) {
       notServed(
         "the registry can read this published version",
-        `${product.name}@${version} never became readable from ${registry} within ${Math.round(readiness.waitedMs / 60000)} min across ${readiness.attempts} look(s)${readiness.lastTransportError ? `; the last one failed to ask: ${readiness.lastTransportError}` : "; the registry kept answering that the version is not there yet"}`,
+        `${product.name}@${version} never became readable from ${registry} within ${Math.round(readiness.waitedMs / 60000)} min across ${readiness.attempts} look(s)${readiness.lastTransportError ? `; the last one failed to ask: ${readiness.lastTransportError}` : readiness.answeredInstead ? `; every answer was about ${readiness.answeredInstead}, a different artifact from the one this tag names` : "; the registry kept answering that the version is not there yet"}`,
       )
     }
     // The observation is named whether or not it had to wait. Printing only
     // `ok npm install of the published package` left no record in a green log that the registry
     // was read first at all — and "it installed" is a different claim from "this registry could
-    // serve this version", which is the whole reason the wait exists. `seen` is the version the
-    // registry answered with, so the line also fails loudly if a read replica ever answers with
-    // something other than the version this tag names.
+    // serve this version", which is the whole reason the wait exists. `waitForRegistryVersion` now
+    // only says ok when the answer IS this version, so the comparison below is the second copy of
+    // that fact rather than the only one: it stays because the line prints what was seen.
     check(
       "the registry can read this published version",
       readiness.seen === version,

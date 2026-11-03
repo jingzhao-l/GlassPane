@@ -157,7 +157,7 @@ npm install -g glasspane-harness
 bun add -g glasspane-harness
 
 # or one-click (npm first, GitHub release asset as fallback)
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.14.1/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.14.2/scripts/install.sh | bash
 ```
 
 Two commands are installed: **`glasspane-harness`** and the short alias **`gp-harness`**. npm and
@@ -275,9 +275,12 @@ What stays where it belongs: the engine decides what the application did; neithe
 an interface on its own. The gate reports and withholds — it does not run the recipe, because
 neither product ships a recipe executor. The formats above come from one published contract
 layer, [`iterate-kernel`](https://www.npmjs.com/package/iterate-kernel), and the boundary is
-stated honestly: whether the two implementations still agree on a case the corpus never wrote
-down is answered by `scripts/diff_kernel_implementations.py`, an operator command rather than a
-CI step. The exchange from the loop's side is documented in the iterate-harness README
+stated honestly: `bun script/kernel-conformance.mjs --impl <canonical checkout>` runs both
+implementations over the *pinned* corpus and requires byte-identical answers, and nothing in this
+repository — no CI step, no operator command — compares the two on a case the corpus never wrote down.
+The sentence that used to live here named `scripts/diff_kernel_implementations.py`, a file that exists
+in neither this fork nor the canonical kernel checkout, which made it a pointer to nowhere rather than a
+boundary. The exchange from the loop's side is documented in the iterate-harness README
 ([Two-way integration with GlassPane](https://github.com/jingzhao-l/iterate-harness#-two-way-integration-with-glasspane)),
 and from the engine's side in [GlassPane's two-way integration section](https://github.com/jingzhao-l/GlassPane#two-way-integration-with-the-review-loop).
 Implementation detail: [`docs/kernel-integration.md`](docs/kernel-integration.md) and
@@ -285,6 +288,8 @@ Implementation detail: [`docs/kernel-integration.md`](docs/kernel-integration.md
 
 ## Documentation
 
+- [`docs/index.md`](docs/index.md) — the page map and the four laws; every other page in this
+  directory is linked from it
 - [`docs/install.md`](docs/install.md) — install paths, permissions, verification
 - [`docs/models-and-keys.md`](docs/models-and-keys.md) — the model catalog and how to supply
   your own API keys

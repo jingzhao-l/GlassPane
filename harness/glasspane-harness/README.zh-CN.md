@@ -135,7 +135,7 @@ Azure、OpenRouter 等等全在——几百个模型——每一个都用**你�
 ```bash
 npm install -g glasspane-harness     # 推荐
 bun add -g glasspane-harness
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.14.1/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.14.2/scripts/install.sh | bash
 ```
 
 会装出两个命令：**`glasspane-harness`** 与短别名 **`gp-harness`**。npm 与 bun 从 wrapper 的
@@ -230,8 +230,10 @@ GlassPane Harness 是第二对产品里的一半。引擎回答"这次操作到�
 各归各位：应用做了什么由引擎判定，两个 harness 都不自行给界面下结论。闸只报与拦，不执行配方——
 两个产品都没有配方执行器。上面这些格式来自同一份发布出去的契约层
 [`iterate-kernel`](https://www.npmjs.com/package/iterate-kernel)，边界也说清楚：
-"两份实现对语料没写过的案子还一致吗"由 `scripts/diff_kernel_implementations.py` 回答——它是给操作者
-跑的命令，不在 CI 步骤里。回路那一侧的说明见 iterate-harness README 的
+`bun script/kernel-conformance.mjs --impl <canonical checkout>` 会让两份实现对同一份**钉住的**语料
+给出逐字节相同的答案；语料没写过的案子，这个仓里没有任何东西（CI 步骤或操作者命令）去比对两份实现。
+原先这里写的是 `scripts/diff_kernel_implementations.py`——那个文件在本 fork 与 canonical 内核检出里
+都不存在，所以它不是一条边界，是一个指向别处的指针。回路那一侧的说明见 iterate-harness README 的
 [与 GlassPane 的双向集成](https://github.com/jingzhao-l/iterate-harness/blob/main/README.zh-CN.md#-与-glasspane-的双向集成)，
 引擎那一侧见 [GlassPane 的双向集成小节](https://github.com/jingzhao-l/GlassPane#two-way-integration-with-the-review-loop)。
 实现细节：[`docs/kernel-integration.md`](docs/kernel-integration.md) 与
@@ -239,6 +241,7 @@ GlassPane Harness 是第二对产品里的一半。引擎回答"这次操作到�
 
 ## 文档
 
+- [`docs/index.md`](docs/index.md) — 页面索引与四条铁律；这个目录里每一页都由它连出去
 - [`docs/install.md`](docs/install.md) — 安装通道、权限、自检
 - [`docs/models-and-keys.md`](docs/models-and-keys.md) — 模型目录，以及怎么把你自己的 API key
   交进去

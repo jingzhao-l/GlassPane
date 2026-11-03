@@ -12,6 +12,86 @@ contract does not).
 
 （空。本轮收口后没有未归号的条目。）
 
+## [0.14.2] — 2026-11-03
+
+**版本判断：patch。** 本版是两条在产依赖的安全升级加一批"文档/闸说的和自己做的不一致"的修复：
+产品面、CLI 形状、`product.json` 的目标矩阵、`gp_*` 的方法表一字未动。判据按本文件既有口径写在
+条目开头，不靠事后解释。
+
+- **`glob` 与 `minimatch` 带着两条公开告警活在生产依赖里。** 实测：父仓 Dependabot open alert
+  #67/#68/#69/#70（`GHSA-3g3m-2fjr-6pw4` / CVE-2026-118773，`glob >= 9.0.0, <= 14.0.1`，AbortSignal
+  取消被绕过 ⇒ 已超时的遍历继续走文件系统；`GHSA-g3hv-75wg-m249` / CVE-2026-118764，`minimatch < 11.0.1`，
+  globparts 放大 DoS），搬运仓同一组四条（#99–#102）。它们不是构建期依赖：
+  `packages/core/src/util/glob.ts` 把这两个匹配器交给 8 条产品路径（`config/plugin.ts` 的项目插件信任、
+  `config/agent.ts`、`config/command.ts`、`tool/registry.ts`、`skill/index.ts`、`filesystem/ignore.ts`、
+  `fs-util.ts`、`util/filesystem.ts`），而模式来自被打开的陌生仓库。两包在两个清单里都写在
+  `dependencies`（`packages/core` 13.0.5 / 10.2.5，`packages/opencode` 13.0.5 / 10.2.3）。
+  修：四处升到 `glob@14.0.2`、`minimatch@11.0.1`，`bun.lock` 重解析（diff 56 行，逐条归属只有
+  glob/minimatch 家族：`brace-expansion 5.0.6→5.0.12`、新增 `path-scurry@3.0.0` 与
+  `@isaacs/nonrecursive-glob-match@1.0.3`）。行为证据：`test/util/glob.test.ts` 在新版下 **17 pass / 0 fail**
+  （含 brace expansion 与 dot files 两条），`bun run typecheck` 在 `packages/core` 与 `packages/opencode`
+  都 rc=0——这两条不是形式检查，`src/util/glob.ts` 用的是 `glob`/`globSync`/`GlobOptions` 与 `minimatch`
+  具名导出，major 换版最先断的就是这里。
+- **新守卫：版本地板，且它必须由 CI 跑。** 升级本身防不住下一次 fork 同步——本产品钉的是上游的
+  `package.json` 字节，同步会把旧 pin 当成 merge 结果盖回来，这正是本仓记过的"安全修复只在搬运仓活了一份、
+  下一次 split 会静默回退"的形状。所以 `contracts/dependency-floors.json` 逐条记
+  `{package, floor, advisory, cve, vulnerable, why}`（没有 advisory 引用的地板判 exit 2：地板必须是
+  一次比较而不是一个意见），`packages/opencode/script/dependency-floors.ts` 读各 workspace 清单比下限，
+  尺子的三种答案分开：低于地板 / 读不出（`catalog:`、`*`、`latest`、`workspace:` 都算，不当作通过）/
+  量不到（契约缺失、地板清单为空、一个清单都没交到、某个 `package.json` 解析不了 → exit 2）。
+  固定点 `test/script/dependency-floors.test.ts`（**17 条 / 0 失败**，走 CI 已有的
+  `test/script/*.test.ts` 名单），两条反直觉的数值控制各自钉住：`9.0.0` 必须低于 `14.0.2`（字符串比较
+  会说相反），`14.0.10` 必须不低于 `14.0.2`（字符串比较会要求一次毫无必要的再升级）。
+- **发布链：一次被取消的 npm 腿可以把一个版本号永远留在半发布状态。** 实测形状是 10-31 那一发：
+  run `41219619435` 的 `npm darwin-x64` 成功上架（199,557,257 字节，带 SLSA provenance），
+  `npm darwin-arm64` 被取消，wrapper 那格 `needs:` 它所以整条跳过——于是 registry 上有一个
+  `glasspane-harness-darwin-x64@0.13.0`，而 `glasspane-harness@0.13.0` 是 404。npm 的版本不可覆盖，
+  下一次同版本号的重发会走进 E409，读到的却是"这个号发过了"。修法：`publish-gate` 在**任何不可逆步骤之前**
+  问一次整包的集合——全空＝干净发布，全有＝可重发（下游的重复分支吸收它，本闸不重复裁决），
+  **部分在场就拒绝**并点名 present/absent 与唯一补救（取新号）。固定点
+  `test/script/registry-half-publish.test.ts`：把真工作流里那一步的 bash 正文切出来，对着 PATH 上的
+  假 `npm` 真跑，逐包给答案才能摆出"部分在场"这一形；分类沿用 `registry-readiness.ts` 的 `npmAnswer`
+  口径（退 0 却答出别的版本、以及任何非零且不是注册表自己 E404 的输出，都算"问不出来"而不是"没发布"），
+  因为 `2>/dev/null || true` 会把一次网络故障洗成"这个版本不存在"——而"不存在"正是本闸放行发布的那个答案。
+- **`registry-readiness` 的 `ok` 之前不检查它答的是不是被问的那个版本。** 文件头的定义是
+  "the registry served exactly this version"，`servedProbe` 的注释说"调用方会比较"，而比较确实存在于
+  `verify-published.ts`——但 `ok:true` 的语义只在散文里，任何只读 `ok` 的新调用方都会把一个陈旧副本的
+  旧答案当成就绪。修：不匹配不再算 `ready`，继续等待，并在预算耗尽时把最后一次答出的版本作为
+  `answeredInstead` 带出来，失败句子从"它一直说还没有"改成"它每次答的都是另一个东西"。
+  固定点在 `test/script/registry-readiness.test.ts`（**24 条 / 0 失败**）里原有的两条之上，那条
+  `readiness.seen === version` 的调用侧断言保留为第二把锁。
+- **`script/build.ts` 读了一个 `product.json` 里没有的字段。** 它写 `...(product.homepage ? {…} : {})`，
+  而 `product.json` 的 23 个顶层键没有 `homepage`（实测 `node -p` 枚举）⇒ 两个平台包发布时静默地没有
+  homepage，同一行上面的注释却声称"和 wrapper 同一个真源，两者不会分叉"——真源是 `repoUrl`，
+  wrapper 的值就是它加 `#readme`。改：由 `repoUrl` 推出 homepage，清单侧不再多一个会腐烂的字段。
+- **`product.json` 的 `repoLayout.enforcedBy` 之前是一句自称的散文。** 它说 `product-surface.mjs ::
+  project-dir` 会读它，而那条规则把 `.glasspane-harness` 与 `.opencode` 硬写在尺子代码里——所以真相存了
+  两份，且故意改名时红的是尺子而不是被命名的目录。改：`project-dir` 现在从 `repoLayout.projectDir` 与
+  新的结构化 `repoLayout.compatReadDirs` 取名字，两个字段任一缺失即 exit 2（"读不到声明"不等于"没问题"）；
+  实测断言数 **6615 条一致 / 0 问题**（这一族从 3 条变 4 条，因为兼容读取改成按声明逐条走）。
+  同批删掉 `tagline`：全树没有任何读者（`grep` 覆盖 ts/mjs/sh/yml 与 `harness/tools`），那句话的等价物
+  已经在 `README.md:20` 的 banner alt 文本里——`product.json` 是机器可读契约，不是放散文的地方。
+- **两份 README 和 `docs/kernel-integration.md` 指向一个两边都不存在的命令。** 三处都写
+  `scripts/diff_kernel_implementations.py`，最后一处还声称"exists, is an operator command, and measured
+  rc=2 on the 2026-10-25 machine"。实测 2026-11-03：本 fork 的 `scripts/` 只有 `install.sh`，
+  canonical 内核仓 `/Volumes/Eng-Dev/iterate-skill/scripts/` 也没有它。一条指不到文件的补救就是本仓
+  说的死路，所以改成写清真实边界：`bun script/kernel-conformance.mjs --impl <canonical checkout>` 让两份
+  实现对**钉住的**语料给逐字节相同的答案，而语料没写过的案子没有任何东西去比对——这个缺口现在是明说的，
+  不是用一个不存在的脚本盖住的。
+- **`docs/index.md` 没有入口，却自称是每一页的索引。** 实测：它自己连着 8 个页面链接（`grep -o "](x.md)"`
+  去重后正好是其余 8 页），而两份 README 的文档清单都跳过了它。各补一条。
+- **`.github/actions/setup-bun` 的缓存目录那步在替换失败时仍然退 0。** `echo "dir=$(bun pm cache)"` 的
+  退出码是 `echo` 的，`bun pm cache` 失败时它发布一个空 `dir`，下一步 `actions/cache/restore` 拿到空路径，
+  在日志里长得像一次普通的冷启动。改成显式 `set -euo pipefail` 并拒绝空值。
+- **删掉 `.github/actions/setup-git-committer`。** 实测 `grep -rn setup-git-committer .github` 在搬运仓
+  与父仓都是零命中：没有任何 job 引用它，而它会铸一个 GitHub App token 并把 token 拼进
+  `git remote set-url`，输入名是 `opencode-app-id`/`opencode-app-secret`——本产品没有那两个凭据。
+  留着它的代价不是磁盘，是下一个人可能引用一个"要上游 App 密钥才能跑"的动作。上游血缘名不洗那条纪律
+  保护的是 2,700 个文件里的内部标识，不是一个没人调用的发布动作。
+- **`provenance-verdict.ts` 的 `KNOWN_ATTESTATION_KEYS` 是一条没有读者的导出**（全树 `grep` 只有定义），
+  删掉；同文件的其余导出各有真调用方。
+
+
 ## [0.14.1] — 2026-11-03
 
 **版本判断：patch。** 本版只有一处代码变动，且它是修一个把发布按住的自伤：产品面、CLI 形状、
