@@ -134,3 +134,25 @@
    信号闸 `SIGNAL SMOKE OK`（SIGTERM/SIGINT 自退 0 且 socket 被 unlink，三次起停各自跑在点名状态根）；
    发布形态 `npm run bundle` + `npm pack --dry-run` rc=0，产出 `glasspane-mcp-1.27.0.tgz`。
 
+7. **上面第 4 条那句"随 `1.28.1` 发出"没有成真，最终落的是 `1.29.0`**（这一句是更正，不改上面那段
+   已经写下过的事实）：我准备好 `set-version 1.28.1` 与它的 CHANGELOG 段落、正要提交 `release: 1.28.1`
+   的那一刻，同日另一条线开工取证，把这四份字节连同三笔提交（`e6e43b54`、`9c41a7ae`、`336fe35c`）一起
+   并进它的 1.29.0——它把这一件事写在自己那条 CHANGELOG 的 `## [1.29.0]` 开头（"本版合并了未发布的
+   1.28.1……上面那条 1.28.1 条目原文保留"），所以两节并存、不重号。实测这三笔都是
+   `v1.29.0^{commit}` = `b9fa40b8` 的祖先（`git merge-base --is-ancestor`，三笔各跑一次）。
+   该号三格当场量到：CI run 41562931673 event=push 在 `b9fa40b8` 上十格全 success，
+   `gh release view v1.29.0` 非草稿、target=`b9fa40b8`、4 件资产，
+   `npm view glasspane-mcp|glasspane-install version --prefer-online` 都回 1.29.0。
+   同一棵树上 CI 报出的实际计数（比我本机那次多两条线的增量）：`mcp-shell` 739 tests / 739 pass / 0 fail；
+   安装器 320（macOS 腿 320 pass，ubuntu 腿 312 pass，差的是按设计 skip 的 darwin-only 断言）；
+   updater 770（macOS 腿 770 pass，ubuntu 腿 755 pass，同理 15 条 skip）；引擎 1577 XCTest / 6 skipped /
+   0 failures；探针 58 XCTest / 0 failures；`bridge` 197 passed / 5 skipped / 27 subtests passed。
+   它还在同一族里往前多走了几步（残渣闸不扫 `specs/**`、判据②仍是手抄词表、①的文案把"这一定是残渣"
+   写成既成事实）——那些记在它自己那号的台账里，我不在这里替它复述结论。
+8. **本机留档没了**：`/var/tmp/glasspane-main-check-20261031/`（第 6 条那批日志、`smoke-backup.md`、
+   `e2e.sh`、`sign-verify.sh` 都放在里面）在下一轮收口清理时被整体删除，我这边一次后台门禁也因此丢了
+   输出目录。所以第 6 条与第 7 条的读数**以这两段文字为准**，指过去的日志路径不再存在——这一句写在这里，
+   是为了下一位读者不去追一条断掉的证据链。字节层面的结论不受影响：修后的 `engine/smoke.md`
+   sha256 `3443a907…` 与闸文件的 sha256 `99ba157f…` 都已进了 `v1.29.0` 的签名归档。
+
+
