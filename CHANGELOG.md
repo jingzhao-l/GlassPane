@@ -6,6 +6,63 @@
 
 （空。1.29.0 收口后没有未归号的条目。)
 
+## [1.29.1] — 2026-11-03
+
+### 版本判断：patch
+
+判据沿用本仓自己写下那一条（1.6.2 条目）：状态文件的字段没动、退出码集合没动、CLI 参数没动、
+npm 包的 `bin` 声明没动。本版动的是两枚**开发期闸脚本**的内部守卫与一份新测试；作为命令执行时
+`check-doc-links.mjs` / `check-workflows.mjs` 的旗标集合与退出码（0 干净 / 1 有问题 / 2 用法错）
+逐字未变，`glasspaned`、`glasspane-install`、`glasspane-mcp` 的对外面一字未动。
+
+### 本版合并了此前未发布的 main 内容
+
+`v1.29.0` 之后 main 上还有 16 笔提交（本线 2 笔文档/测试 + harness 那条线 14 笔）。发布归档 =
+被 tag 的树**减去 `harness/`**，所以本版的归档里真正多出来的产品面字节是
+`specs/GlassPane_每日2026-11-03_发现台账.md` 与 `updater/test/daily-20261030-gate-wiring.test.mjs`，
+其余落在 `harness/` 之外没有变化。
+
+### 闸脚本被 import 时会接管宿主进程（发现 1 / 修复 1 / 未修 0）
+
+**失效模式**：`scripts/check-doc-links.mjs` 与 `scripts/check-workflows.mjs` 的 CLI 段有一部分写在
+模块顶层，只有"跑主体检查"那一格被 `invokedAsEntrypoint()` 挡住了。于是**任何 import 它们的进程**
+——当场数出来是 7 份测试文件（`updater/test/`：`scripts-check-doc-links`、`scripts-daily-20261020`、
+`daily-20261022-gates`、`daily-20261030-gate-handoff`、`daily-20261103-docgate-residue-shape`；
+`installer/test/`：`daily-20261020`、`daily-20261022-preflight-claim`；量法＝在 `*.test.mjs` 里
+匹配 `scripts/(check-doc-links|check-workflows)\.mjs["']` 再按文件去重，spawn 出去当命令跑的不算）
+——拿到的不是导出，而是那道闸自己的结论：
+
+| 宿主 argv | 改前实测 | 后果 |
+|---|---|---|
+| `--self-test` | 打出闸自己的电池然后 `process.exit(0)` | 那份测试文件的用例**一条不登记**却报绿 |
+| `--help` | 打出用法然后 `process.exit(0)` | 同上 |
+| 任意不认识的参数 | `process.exit(2)` | 宿主被整条带走，红得不属于那份测试 |
+| （`check-workflows` 无参数） | 顶层顺手把 5 份 workflow 重扫一遍 | 一份测试文件的成败取决于仓库当下的 workflow 形状，而不是它自己的断言 |
+
+`check-doc-links.mjs` 的注释里**写着**这条前提（"lint 脚本必须可以被安全 import（判据本身要能被
+单测注入），这条守卫是那道前提"），却只覆盖了四个出口里的一个——按本仓的定义那是半修：改了 A 面，
+B 面还按旧行为走，而且把缺陷伪装成进展。
+
+**修法**：四个出口共用同一个 `isEntrypoint`（同一次 `invokedAsEntrypoint()` 读数，不许各自算一遍），
+`check-workflows.mjs` 补上本仓已有的同一把守卫（两侧 realpath，符号链接交付的入口不会被误判成"不是
+入口"——那是 `make-release-archive.mjs` 在 2026-10-19 记过的同一形状）。守卫只管"谁在跑"，
+不改任何一条判据、任何旗标、任何退出码。
+
+**证据**：新测试 `updater/test/daily-20261103-gate-import-safety.test.mjs` 29 条——6 份"有导出且被别人
+import"的脚本 × 4 种宿主 argv，每条判的是"SURVIVED 那一行有没有打出来"（不是退出码：退 0 而没打
+那行＝被 `exit(0)` 接管的假绿）；再加两档反向对照——合成一份 import 时 `exit(0)` 的模块，探针必须
+抓不到 SURVIVED（证明这 24 条判的是空气还是东西），以及"守卫不许把闸关掉"：作为命令执行时
+`--self-test` / `--help` / 不认识参数退 2 / 主体检查读数，四条出口逐条答话。
+
+**反向破坏（两轮，方向相反）**：
+- 把守卫改成恒真（＝回到改前）：29 条里 **6 条具名变红**，正是两份脚本 × `--self-test`/`--help`/未知参数。
+- 把守卫改成恒假（＝守卫顺手关掉 CLI）：**2 条具名变红**（"守卫没把闸关掉"两份）。
+两次都按 `shasum -c` 核回原字节再复跑（29/29 绿）。
+
+**为什么 shipped 代码不在这条里**：同一把探针扫过 `updater/lib`、`installer`、`mcp-shell/src` 里
+15 份"有导出且被别处 import"的模块——0 份接管（产品入口那三枚早就各自带 realpath 守卫）。这一族的
+写域只在开发期闸脚本，实测过才把范围这么写，不靠推断。
+
 ## [1.29.0] — 2026-11-03
 
 **版本判断：minor。** 判据沿用 1.6.2 写下、此后每一号各自复述过的那一条（patch 要求「状态文件的
