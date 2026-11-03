@@ -8,9 +8,19 @@
 #
 # The one-liner above is the documented *moving* entry point (it is product.json's `install.curl`, and
 # only its owner may change it). Everything this script prints back to the user is different in kind:
-# once a version is in hand — given or resolved — the installer URL names that tag, because this script
-# is the thing that verifies the binary and a remedy on a mutable branch hands the verifier to whoever
-# can push that branch.
+# once a version is in hand — given or resolved — the installer URL names that tag rather than a branch,
+# because this script is the thing that verifies the binary and handing the verifier to whoever can push
+# a branch is the failure it exists to avoid. That is a floor, not a ceiling: a tag is re-pointable too
+# (`git tag -f` swaps this script along with the key embedded in it). Two things close that gap, and both
+# were measured rather than assumed. GitHub's ORG-level tag protection endpoint answers 404 here
+# (owner_type=User), but a repository RULESET does the job: `published-tags-immutable` (id 26423927),
+# target tag, include refs/tags/v*, rules update + deletion + non_fast_forward, enforcement active, no
+# bypass actors. A force-push of v0.12.5 to the very commit it already names is refused with "Cannot
+# update this protected ref" and the tag's peel is unchanged afterwards; creating a NEW tag stays
+# allowed, which is what a release does. And where this script prints a command to re-fetch ITSELF it
+# resolves the 40-hex commit the tag names and points there — a commit is content-addressed and cannot
+# be silently moved — printing the fetch and the run as two steps so the bytes are read before they
+# execute. See installer_remedy_url.
 #
 # Mirrors the iterate-ecosystem installer shape (banner, OS detection, dependency
 # check, install, verify, next steps) and reads its identity from product.json at
@@ -63,6 +73,36 @@ pin_installer_url() {
     INSTALLER_REF="main"
   fi
   INSTALLER_URL="$INSTALLER_BASE/$INSTALLER_REF/scripts/install.sh"
+}
+# The immutable anchor for a command that re-runs THIS script.
+#
+# `pin_installer_url` names the installer by its tag, and a tag is only as immutable as whoever can
+# `git tag -f` it: re-pointing `v0.13.0` swaps the verifier AND the signing key embedded in it, so a
+# tag URL is the right ENTRY coordinate (product.json's `install.curl` and the `installer-curl-pinned`
+# gate both require it) but it is not an immutable one, and prose in the release lane that "a tag that
+# shipped never moves" is a habit, not a machine. When this script prints a command to fetch itself
+# again after a refusal, it resolves the single 40-hex commit that tag names right now and points the
+# fetch at that content-addressed object: `git tag -f` cannot move a commit, so the bytes the user
+# lands on disk and reads are guaranteed to be the bytes of that commit.
+#
+# Best-effort by design — this is one GET and it runs only on the refusal path, where the network is
+# already in use; if the API is unreachable or names no commit we fall back to the tag URL and the
+# caller says "tag" instead of overclaiming an immutable anchor it could not establish.
+installer_remedy_url() {
+  # $1 = the concrete version this run is bound to (without the leading `v`); empty when none is known.
+  local v="${1:-}" sha=""
+  if [ -z "$v" ]; then
+    printf '%s\n' "$INSTALLER_URL"
+    return 0
+  fi
+  sha="$(curl -fsSL "https://api.github.com/repos/$REPO/commits/v$v" 2>/dev/null \
+    | grep -oE '"sha"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"' | head -1 \
+    | grep -oE '[0-9a-f]{40}')" || sha=""
+  if [ "${#sha}" -eq 40 ]; then
+    printf '%s/%s/scripts/install.sh\n' "$INSTALLER_BASE" "$sha"
+  else
+    printf '%s/v%s/scripts/install.sh\n' "$INSTALLER_BASE" "$v"
+  fi
 }
 # "No SHA256SUMS.txt / no .asc was published for this release" used to be a warning the
 # installer talked itself past and then installed anyway. That tolerance is not ours to
@@ -146,9 +186,12 @@ Environment:
                              set to 1 to install even when the release publishes no
                              SHA256SUMS.txt or no .asc, or when gpg is not on PATH
                              (default: refuse)
-                             On the curl one-liner the override has to be set for the shell
-                             that reads the script, not for curl:
-                               curl -fsSL $INSTALLER_URL | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash
+                             The override has to be set for the shell that RUNS the script, and the
+                             installer's own bytes should be read before they execute (a VAR=1 placed
+                             before a piped curl is seen by curl, not by the bash on the far side, and
+                             piping straight to bash never lets you look at what is about to run):
+                               curl -fsSL $INSTALLER_URL -o /tmp/glasspane-harness-install.sh
+                               GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash /tmp/glasspane-harness-install.sh
 USAGE
   exit 0
 fi
@@ -210,7 +253,7 @@ if [ "$VERSION" = "" ]; then
 else
   info "1) npm:  $NPM_SPEC        (registry: $NPM_REGISTRY; preferred: platform selection and updates are npm's job)"
   info "2) release asset fallback: $RELEASE_BASE/v$VERSION/$PRODUCT-$PLATFORM.zip (checks sha256 against SHA256SUMS.txt, GPG against the asset's .asc)"
-  info "   installer to re-run if this refuses: $INSTALLER_URL (tagged at v$VERSION, not a moving branch)"
+  info "   installer to re-run if this refuses: $INSTALLER_URL (pinned to the v$VERSION tag; the re-run a refusal prints names the 40-hex commit that tag resolves to, since a tag alone can be re-pointed)"
 fi
 info "   install root (fallback path only): $INSTALL_ROOT/bin"
 if [ "$DRY_RUN" = "1" ]; then
@@ -339,23 +382,36 @@ SHA_STATE="not-run"
 UNVERIFIED_INSTALL=""
 
 remedy_unverified() {
-  # Print the ONE command that carries the override to the shell that actually reads this
-  # script.
+  # Print the commands that (a) carry the override to the shell that actually RUNS the script and
+  # (b) subject this installer to the same discipline it applies to every other byte — land it, read
+  # it, then run it — instead of piping unverified bytes straight to bash.
   #
-  # Until 2026-10-16 every refusal here printed
+  # Two defects lived in the line this function printed. Until 2026-10-16 it was
   #   GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl -fsSL <install.sh> | bash
-  # A leading assignment applies to `curl` alone, so the piped `bash` never had the variable in
-  # its environment: a user who followed the printed advice verbatim was refused again, by the
-  # same line, with the same advice. The assignment has to sit on the far side of the pipe, and
-  # the version this run was asked for has to travel with it — `bash -s --` is how a piped
-  # script takes arguments. `installer-selftest.sh` runs the printed line back through the
-  # stubbed release, so this shape cannot silently rot again.
-  error "refusing to install. If you accept that risk for this run, re-run with the override on"
-  error "the shell that reads the script (a VAR=1 before curl does NOT reach a piped bash):"
-  # The command itself carries no `[ERROR]` prefix: a remedy an agent is meant to run has to be
-  # copy-pasteable as it is printed. It goes to the same stream as the refusal above it, so the
-  # two cannot be separated by a redirect.
-  echo "  curl -fsSL $INSTALLER_URL | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash -s -- --version $VERSION" >&2
+  # and a leading assignment applies to `curl` alone, so the piped `bash` never had the variable in its
+  # environment: a user following the advice verbatim was refused again, by the same line, with the same
+  # advice. It was fixed to put the override on the far side of the pipe — which made the override reach
+  # bash, but left the second defect: `curl … | bash` verifies every byte it downloads except its own, so
+  # the one remedy that exists to get the user PAST an unverified asset was itself an unverified pipe into
+  # a shell, fetched from a tag that `git tag -f` can re-point. `installer-selftest.sh` runs what is printed
+  # back through the stubbed release, so neither shape can silently rot again.
+  #
+  # The fetch URL is the anchor: a 40-hex commit, not a moving ref, so the bytes you land on disk are
+  # content-addressed — what you read is what that commit holds — and the run is a separate step so those
+  # bytes can be inspected or hashed before they execute. This is the same self-anchoring gap every
+  # curl-to-bash has: the script that is running prints the anchor, so it cannot vouch for its FIRST
+  # fetch. It can, however, make every re-run it hands out reproducible, and that is what this prints.
+  local anchor
+  anchor="$(installer_remedy_url "$VERSION")"
+  error "refusing to install. If you accept that risk for this run, re-run the installer itself — but read"
+  error "its bytes before they execute, and set the override on the shell that RUNS the script (a VAR=1"
+  error "before a piped curl is seen by curl, not by the bash on the far side):"
+  # The two commands carry no `[ERROR]` prefix: a remedy an agent is meant to run has to be copy-pasteable
+  # exactly as printed. They go to the same stream as the refusal above them, so a redirect cannot separate
+  # the advice from the reason. No internal identifiers — only the pinned URL and the version this run was
+  # asked for, both things a human can read.
+  echo "  curl -fsSL $anchor -o /tmp/glasspane-harness-install.sh" >&2
+  echo "  GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash /tmp/glasspane-harness-install.sh${VERSION:+ --version $VERSION}" >&2
 }
 
 verify_asset_gpg() {
@@ -705,14 +761,21 @@ if [ "$VERSION_RC" -ne 0 ]; then
   error "    npm install -g --allow-scripts=$PRODUCT ${NPM_SPEC:-$PRODUCT}"
   # Not `bash $0`: through `curl … | bash` $0 is the word `bash`, so the printed remedy was
   # `bash bash` — the same class of broken advice the refusals above used to print.
-  # The URL is the one pinned to the version this run resolved, so the verifier the user is sent to is
-  # the bytes under that tag rather than whatever `main` points at today. With no version resolved at
-  # all (the npm lane, no `--version`), there is no tag to name — so a template is printed instead of
-  # quietly offering the moving branch as if it were reproducible.
+  # The fetch is separated from the run and pointed at the anchor `installer_remedy_url` resolves (the
+  # 40-hex commit this version names, or the tag if the commit could not be read): a re-run handed out by
+  # a verifier should be as reproducible as the verifier's own asset download, and a byte-for-byte
+  # identical `curl … | bash` was neither — it re-fetched a re-pointable tag and executed it unread.
+  # With no version resolved at all (the npm lane, no `--version`), there is no ref to name — so a
+  # template is printed instead of quietly offering the moving branch default as if it were reproducible.
   if [ -n "$VERSION" ]; then
-    error "  Or install the release asset instead (installer tagged at v$VERSION): curl -fsSL $INSTALLER_URL | bash"
+    anchor="$(installer_remedy_url "$VERSION")"
+    error "  Or run the release-asset installer yourself — fetch it from the ref this run resolved, read it, then run it:"
+    echo    "    curl -fsSL $anchor -o /tmp/glasspane-harness-install.sh" >&2
+    echo    "    bash /tmp/glasspane-harness-install.sh --version $VERSION" >&2
   else
-    error "  Or install a tagged release yourself: curl -fsSL $INSTALLER_BASE/vX.Y.Z/scripts/install.sh | bash -s -- --version X.Y.Z"
+    error "  Or run a tagged release's installer yourself — fetch it, read it, then run it:"
+    echo    "    curl -fsSL $INSTALLER_BASE/vX.Y.Z/scripts/install.sh -o /tmp/glasspane-harness-install.sh" >&2
+    echo    "    bash /tmp/glasspane-harness-install.sh --version X.Y.Z" >&2
     error "    (this run resolved no tag, so the branch default \"$INSTALLER_REF\" is not offered as a reproducible command)"
   fi
   exit 1
@@ -727,6 +790,34 @@ esac
 if [ -n "$VERSION" ] && [ "$VERSION_FIRST" != "$VERSION" ]; then
   error "installed command reports $VERSION_FIRST, but this installer asked for $VERSION"
   exit 1
+fi
+# The npm lane with no `--version` resolves nothing, so the comparison above never fires and the run
+# ends with "installed via npm" and exit 0 whatever the registry happened to serve. That silence is a
+# defect with a measured case behind it: on 2026-10-31 `glasspane-harness-darwin-x64@0.13.0` reached
+# npm while the v0.13.0 GitHub Release did not exist, and the wrapper's `latest` stayed on 0.12.5 — two
+# channels, two answers, and the installer named neither. Ask what the newest published release is and
+# say whether this run matched it. A refusal would be wrong (an older install is a working install);
+# silence is what was wrong.
+if [ -z "$VERSION" ]; then
+  NEWEST_RAW="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null || true)"
+  NEWEST_TAG="$(printf '%s' "$NEWEST_RAW" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  NEWEST="${NEWEST_TAG#v}"
+  case "$NEWEST" in
+    [0-9]*.[0-9]*)
+      if [ "$NEWEST" = "$VERSION_FIRST" ]; then
+        success "and that is the newest published release (v$NEWEST) — npm and the release channel answer with one version"
+      else
+        warn "npm served $VERSION_FIRST while the newest published release is v$NEWEST — the two publication channels of this product do not agree on a version."
+        warn "  This install works; it is not the newest build. Remedy: npm install -g ${NPM_PACKAGE}@${NEWEST}"
+        warn "  Or fetch the release's own installer, read it, then run it:"
+        warn "    curl -fsSL $INSTALLER_BASE/v$NEWEST/scripts/install.sh -o /tmp/glasspane-harness-install.sh"
+        warn "    bash /tmp/glasspane-harness-install.sh --version $NEWEST"
+      fi
+      ;;
+    *)
+      warn "the releases API did not answer with a vX.Y.Z tag, so this run cannot say whether $VERSION_FIRST is the newest published release — it installed what npm's latest named, nothing more."
+      ;;
+  esac
 fi
 success "installed via $INSTALLED_VIA"
 success "$PRODUCT --version -> $VERSION_FIRST"

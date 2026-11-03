@@ -430,22 +430,29 @@ assert_has "it names the concrete install that fixes it" "$SCRATCH/no-gpg.log" "
 assert_has "and it names the override that waives it" "$SCRATCH/no-gpg.log" "GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1"
 assert_not_has "no-gpg no longer prints the old skip-and-continue state" "$SCRATCH/no-gpg.log" "skipped (gpg not on PATH)"
 assert_not_has "no-gpg installs nothing" "$SCRATCH/no-gpg.log" "[OK]    installed via"
-# The override still has to be reachable, and reachable the way the printed advice says: set
-# for the shell that reads the script. `GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl … | bash`
-# binds to curl only, which is why this line is the *observed* command, not a hand-written one.
-REMEDY_NOGPG="$(sed -n 's/^[[:space:]]*\(curl -fsSL [^|]* | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash.*\)$/\1/p' "$SCRATCH/no-gpg.log" | head -1)"
-if [ -n "$REMEDY_NOGPG" ]; then
-  pass "the no-gpg refusal prints one copy-pasteable remedy command"
+# The override still has to be reachable, and reachable the way the printed advice says: set for the
+# shell that RUNS the script, with the installer landed on disk before it executes. `GLASSPANE_HARNESS_
+# ALLOW_UNVERIFIED=1 curl … | bash` binds to curl only; and `curl … | bash` runs bytes never inspected —
+# the very thing the refusal is warning about. So the remedy is now fetch-then-run, and this executes
+# exactly those printed lines rather than a hand-written look-alike.
+REMEDY_NOGPG="$(sed -n \
+  -e 's|^[[:space:]]*\(curl -fsSL .*\-o /tmp/glasspane-harness-install\.sh\)$|\1|p' \
+  -e 's|^[[:space:]]*\(GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash /tmp/glasspane-harness-install\.sh.*\)$|\1|p' \
+  "$SCRATCH/no-gpg.log")"
+if printf '%s\n' "$REMEDY_NOGPG" | grep -q '^curl -fsSL .*-o /tmp/glasspane-harness-install.sh$' \
+  && printf '%s\n' "$REMEDY_NOGPG" | grep -q '^GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash /tmp/glasspane-harness-install.sh'; then
+  pass "the no-gpg refusal prints a land-then-run remedy (fetch, then run the file with the override)"
 else
-  fail "the no-gpg refusal printed no 'curl … | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash' command"
+  fail "the no-gpg refusal did not print the two-step fetch-then-run remedy"
 fi
 assert_not_has "the printed remedy is not the shape that binds the override to curl" "$SCRATCH/no-gpg.log" "GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl"
-assert_has "the printed remedy puts the override on the shell that reads the script" "$SCRATCH/no-gpg.log" "| GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash"
+assert_not_has "the printed remedy does not pipe the installer straight into bash" "$SCRATCH/no-gpg.log" "| bash"
+assert_has "the printed remedy puts the override on the shell that runs the file" "$SCRATCH/no-gpg.log" "GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash /tmp/glasspane-harness-install.sh"
 if [ -n "$REMEDY_NOGPG" ]; then
   RUN_PATH="$STUB:/usr/bin:/bin:/usr/sbin:/sbin" run_printed "$SCRATCH/no-gpg-remedy.log" "$REMEDY_NOGPG"
   REMEDY_RC=$?
   RUN_PATH=""
-  assert_code "running the printed remedy installs (the override reaches bash, not curl) — exit 3 names the unverified outcome" "$REMEDY_RC" "3"
+  assert_code "running the printed remedy installs (the override reaches the bash that runs the file) — exit 3 names the unverified outcome" "$REMEDY_RC" "3"
   assert_has "and it records the override as the reason provenance was skipped" "$SCRATCH/no-gpg-remedy.log" "GPG: skipped by GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 (gpg is not installed)"
   assert_has "and it still says the bytes were not fully verified" "$SCRATCH/no-gpg-remedy.log" "not fully verified"
   assert_not_has "the override path never claims GPG was verified" "$SCRATCH/no-gpg-remedy.log" "GPG: verified"
@@ -635,17 +642,24 @@ run_install "$SCRATCH/after-unlisted.log" --version 9.9.9
 assert_code "the same run is green again once the real manifest is back" "$?" "0"
 
 # ---------------------------------------------------------------- 20: every printed remedy runs
-# The three refusal sites (no gpg, no manifest, no signature sidecar) all pointed the user at
+# The three refusal sites (no gpg, no manifest, no signature sidecar) used to print
 #   GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl -fsSL <install.sh> | bash
-# which cannot work: a leading assignment binds to `curl` alone, the piped `bash` never sees the
-# variable, and the person following the advice verbatim is refused again by the same line. The
-# no-gpg site is covered in section 7; this covers the manifest site's own printed output, and
-# executes it, so the advice is judged as an observed command rather than as prose.
+# which cannot work twice over: a leading assignment binds to `curl` alone so the piped `bash` never
+# sees the override, AND `curl … | bash` verifies every byte it downloads except its own — the one
+# remedy built to get a user past an unverified asset ran an unverified installer. The remedy is now
+# two printed lines: fetch the installer (from the pinned ref) to a file, then run that file with the
+# override on the shell that executes it. The no-gpg site is covered in section 7; this covers the
+# manifest site and executes the printed lines, so the advice is judged as an observed command.
 assert_not_has "the no-manifest refusal does not bind the override to curl" "$SCRATCH/no-sums.log" "GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl"
-assert_has "the no-manifest refusal carries the override on bash" "$SCRATCH/no-sums.log" "| GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash"
-REMEDY_NOSUMS="$(sed -n 's/^[[:space:]]*\(curl -fsSL [^|]* | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash.*\)$/\1/p' "$SCRATCH/no-sums.log" | head -1)"
+assert_has "the no-manifest refusal lands the installer on disk before running it" "$SCRATCH/no-sums.log" "-o /tmp/glasspane-harness-install.sh"
+assert_has "the no-manifest refusal carries the override on the bash that runs the file" "$SCRATCH/no-sums.log" "GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash /tmp/glasspane-harness-install.sh"
+assert_not_has "the no-manifest refusal does not pipe the installer into bash" "$SCRATCH/no-sums.log" "| bash"
+REMEDY_NOSUMS="$(sed -n \
+  -e 's|^[[:space:]]*\(curl -fsSL .*\-o /tmp/glasspane-harness-install\.sh\)$|\1|p' \
+  -e 's|^[[:space:]]*\(GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash /tmp/glasspane-harness-install\.sh.*\)$|\1|p' \
+  "$SCRATCH/no-sums.log")"
 if [ -n "$REMEDY_NOSUMS" ]; then
-  pass "the no-manifest refusal prints one copy-pasteable remedy command"
+  pass "the no-manifest refusal prints a land-then-run remedy (fetch, then run the file with the override)"
   mv "$FIX/SHA256SUMS.txt" "$SCRATCH/sums.remedy-hold"
   run_printed "$SCRATCH/no-sums-remedy.log" "$REMEDY_NOSUMS"
   assert_code "the printed no-manifest remedy installs when it is run as printed, at exit 3" "$?" "3"
@@ -654,7 +668,7 @@ if [ -n "$REMEDY_NOSUMS" ]; then
   assert_not_has "the printed remedy never produced a skip that reads as a verification" "$SCRATCH/no-sums-remedy.log" "sha256: verified"
   mv "$SCRATCH/sums.remedy-hold" "$FIX/SHA256SUMS.txt"
 else
-  fail "the no-manifest refusal printed no 'curl … | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash' command"
+  fail "the no-manifest refusal printed no fetch-then-run remedy"
 fi
 
 # ---------------------------------------------------------------- 21: the npm lane's advice must be satisfiable
@@ -807,8 +821,9 @@ assert_has "the no-gpg refusal prints the tagged installer URL as well" "$SCRATC
 assert_no_main_url "the no-gpg refusal prints no /main/ installer URL" "$SCRATCH/no-gpg.log"
 
 # 22b — the site that sends the user to the release asset after the installed command fails to run.
-assert_has "the placeholder-binary remedy says which tag it pinned to" "$SCRATCH/stub-binary.log" "installer tagged at v9.9.9"
-assert_has "and prints the tagged installer URL there too" "$SCRATCH/stub-binary.log" "$PINNED_INSTALLER_URL"
+assert_has "the placeholder-binary remedy fetches the pinned installer to a file before running it" "$SCRATCH/stub-binary.log" "-o /tmp/glasspane-harness-install.sh"
+assert_has "and it names the version it is running that file for" "$SCRATCH/stub-binary.log" "bash /tmp/glasspane-harness-install.sh --version 9.9.9"
+assert_has "and prints the pinned installer URL there too" "$SCRATCH/stub-binary.log" "$PINNED_INSTALLER_URL"
 assert_no_main_url "the placeholder-binary remedy prints no /main/ installer URL" "$SCRATCH/stub-binary.log"
 
 # 22c — the install plan and `--help`, both with a version in hand. `--help` used to be answered
@@ -925,7 +940,134 @@ assert_has "with the reason naming what is not allowed" "$SCRATCH/bad-version-ch
 run_install "$SCRATCH/good-version.log" --dry-run --version 9.9.9
 assert_code "the screen does not reject the shape the product actually publishes" "$?" "0"
 
+# ---------------------------------------------------------------- 24: the re-run remedy names an immutable commit
+# A tag is a re-pointable ref: `git tag -f v9.9.9 <other-commit> && git push --force` swaps the
+# installer the user re-runs AND the signing key embedded in it, so pinning the re-run to the tag only
+# beats pinning it to `main` — it is still a moving object. Where the entry point (product.json's
+# `install.curl`) has to keep naming the tag (the `installer-curl-pinned` gate, and the three verbatim
+# doc lines, both owned outside this lane), every command THIS script prints to re-fetch ITSELF resolves
+# the 40-hex commit the tag names and points there, because a commit is content-addressed and cannot be
+# moved out from under the bytes the user inspects. The stub answers the ref API for `v9.9.9` with a
+# commit whose value differs from the tree/parent shas, so the assertion proves it took the *first*
+# (top-level commit) sha and preferred it over the tag — and, in the second run, that a ref the API
+# cannot resolve degrades to the tag rather than silently claiming an anchor it did not read.
+ANCHOR_COMMIT="abcdef0123456789abcdef0123456789abcdef01"
+cat > "$FIX/v9.9.9" <<EOF
+{
+  "sha": "$ANCHOR_COMMIT",
+  "commit": { "tree": { "sha": "0000000000000000000000000000000000000000" } },
+  "parents": [ { "sha": "1111111111111111111111111111111111111111" } ]
+}
+EOF
+SCENARIO_SUMS_HTTP=404 run_install "$SCRATCH/anchor-commit.log" --version 9.9.9
+REMEDY_CURL_COMMIT="$(grep -E 'curl -fsSL [^[:space:]]*scripts/install.sh -o /tmp/glasspane-harness-install.sh$' "$SCRATCH/anchor-commit.log" | head -1)"
+if printf '%s' "$REMEDY_CURL_COMMIT" | grep -q "/$ANCHOR_COMMIT/scripts/install.sh"; then
+  pass "the re-run remedy is pinned to the resolved 40-hex commit, not the moving tag"
+else
+  fail "the re-run remedy did not use the resolved commit — got: ${REMEDY_CURL_COMMIT:-<none printed>}"
+fi
+if printf '%s' "$REMEDY_CURL_COMMIT" | grep -q "/v9.9.9/scripts/install.sh"; then
+  fail "the re-run remedy fell back to the tag even though the commit resolved"
+else
+  pass "the re-run remedy dropped the tag ref once the commit resolved"
+fi
+assert_no_main_url "the commit-pinned remedy prints no /main/ installer URL" "$SCRATCH/anchor-commit.log"
+# The degradation branch has to be reachable too: with no ref the API can resolve, the remedy names the
+# tag and the run says so — a stub that always had a commit would endorse a capability that can fail.
+rm -f "$FIX/v9.9.9"
+SCENARIO_SUMS_HTTP=404 run_install "$SCRATCH/anchor-fallback.log" --version 9.9.9
+REMEDY_CURL_TAG="$(grep -E 'curl -fsSL [^[:space:]]*scripts/install.sh -o /tmp/glasspane-harness-install.sh$' "$SCRATCH/anchor-fallback.log" | head -1)"
+if printf '%s' "$REMEDY_CURL_TAG" | grep -q "/v9.9.9/scripts/install.sh"; then
+  pass "when the commit cannot be resolved the remedy degrades to the tag (fallback branch is reachable)"
+else
+  fail "the fallback printed neither the commit nor the tag — got: ${REMEDY_CURL_TAG:-<none>}"
+fi
+
+# ---------------------------------------------------------------- 25: verify_asset_gpg decides on its argument
+# The release-asset fallback verifies the downloaded archive with `verify_asset_gpg <file> <name>
+# <url>`. An earlier version of the function ignored the arguments it was handed and read the caller's
+# globals instead — so it silently verified whatever `$ASSET` happened to be set to, and a wrong path
+# passed by the caller was dropped on the floor. The stub gpg now answers only for the exact
+# (signature, file) pair it is handed, which is the fixture that makes that regression observable; this
+# section pins it directly. The positive call drives the real function with the real triple; the
+# negative call hands it a wrong file path while `name`/`url` and the globals still point at the ONE
+# signed asset — if the function judged the argument it must fail, and only a function that read a
+# global would "verify" its way to a false success. It runs the actual installer function (extracted
+# verbatim), against the actual stub gpg, with nothing mocked inside the function.
+VAG_NAME="glasspane-harness-darwin-arm64.zip"
+(
+  export PATH="$STUB:$PATH"
+  export FIX_DIR="$FIX"
+  export STUB_GPG_RESULT=good
+  export TMPDIR=/tmp
+  set -u
+  VAG_TMP="$SCRATCH/vag"
+  rm -rf "$VAG_TMP"; mkdir -p "$VAG_TMP"
+  cp "$FIX/$VAG_NAME" "$VAG_TMP/$VAG_NAME"
+  # Trust inputs the real function reads, read straight out of the installer so this test cannot drift
+  # from the shipped anchor: a fingerprint the stub does not emit would make the positive case a fiction.
+  GLASSPANE_HARNESS_SIGNING_FPR="$(sed -n 's/^GLASSPANE_HARNESS_SIGNING_FPR="\(.*\)"/\1/p' "$INSTALL_SH")"
+  GLASSPANE_HARNESS_SIGNING_PUBLIC_KEY="placeholder-armored-key (the stubbed gpg ignores its bytes)"
+  ALLOW_UNVERIFIED=""; GPG_STATE=""; SHA_STATE=""
+  TMP="$VAG_TMP"
+  info(){ echo "[INFO] $*"; }; success(){ echo "[OK] $*"; }; warn(){ echo "[WARN] $*"; }
+  error(){ echo "[ERROR] $*" >&2; }; remedy_unverified(){ echo "remedy"; }
+  eval "$(sed -n '/^verify_asset_gpg() {/,/^}/p' "$INSTALL_SH")"
+
+  VAG_URL="https://stub.invalid/releases/download/v9.9.9/$VAG_NAME"
+  POSOUT="$(verify_asset_gpg "$VAG_TMP/$VAG_NAME" "$VAG_NAME" "$VAG_URL" 2>&1)"; POS_RC=$?
+  # Wrong file path, but name/url and the `$ASSET`-shaped global all still point at the signed asset.
+  ASSET="$VAG_NAME"; URL="$VAG_URL"
+  NEGOUT="$(verify_asset_gpg "$VAG_TMP/nonexistent-asset.zip" "$VAG_NAME" "$VAG_URL" 2>&1)"; NEG_RC=$?
+
+  echo "POS_RC=$POS_RC POS_VERIFIED=$(printf '%s' "$POSOUT" | grep -c 'provenance verified')"
+  echo "NEG_RC=$NEG_RC NEG_VERIFYFAIL=$(printf '%s' "$NEGOUT" | grep -c 'signature did not verify')"
+) > "$SCRATCH/vag-verify.log" 2>&1
+assert_has "verify_asset_gpg returns 0 for the (file, name, url) triple it was passed" "$SCRATCH/vag-verify.log" "POS_RC=0 POS_VERIFIED=1"
+assert_has "a wrong file path makes verify_asset_gpg fail even with valid name/url and globals" "$SCRATCH/vag-verify.log" "NEG_RC=1 NEG_VERIFYFAIL=1"
+# The stub's rejection branch is what the negative case drives; prove it is live rather than a stub that
+# blesses any argv, which is the fixture honesty this repository keeps insisting on.
+if "$STUB/gpg" --verify "$FIX/$VAG_NAME.asc" "/nonexistent/path.zip" 2>/dev/null; then
+  fail "the stub gpg blessed a --verify with a missing data file — it is not an honest control"
+else
+  pass "the stub gpg refuses a missing (signature, file) pair, so the rejection branch is reachable"
+fi
+
 echo ""
+# ---------------------------------------------------------------- 26: the npm lane names the version it served
+# The channel that resolves nothing says nothing: with no `--version`, `$VERSION` stays empty, the
+# "asked for X, got Y" comparison is guarded away, and the run ended with `installed via npm` and exit 0
+# whatever the registry happened to serve. That is not hypothetical — on 2026-10-31 the product's two
+# publication channels disagreed out loud: `glasspane-harness-darwin-x64@0.13.0` was on npm, the
+# v0.13.0 GitHub Release did not exist, and the wrapper's `latest` was still 0.12.5. Nobody reading the
+# installer's output could have told that apart from a clean install.
+#
+# Three answers are pinned, because they are three different facts: both channels name one version;
+# the registry serves an older version than the newest release (with a remedy that names the version,
+# not a moving pointer); and the releases API cannot be asked, which must be said as "I cannot tell"
+# rather than read as agreement or as absence.
+# Section 15 removes this fixture to prove a true 404 refuses the asset lane, so the answer the npm
+# lane is about to read has to be written here rather than inherited.
+printf '{"tag_name":"v9.9.9","name":"glasspane-harness v9.9.9","draft":false,"prerelease":false}\n' > "$FIX/latest"
+SCENARIO_NPM=ok run_install "$SCRATCH/newest-agree.log"
+assert_code "the npm lane with no --version still installs and exits 0" "$?" "0"
+assert_has "and it says this version IS the newest published release" "$SCRATCH/newest-agree.log" "that is the newest published release (v9.9.9)"
+assert_not_has "no silent agreement claim when the two halves differ" "$SCRATCH/newest-agree.log" "npm served 9.9.9 while the newest published release"
+
+printf '{"tag_name":"v9.9.10","name":"glasspane-harness v9.9.10","draft":false,"prerelease":false}\n' > "$FIX/latest"
+SCENARIO_NPM=ok run_install "$SCRATCH/newest-lag.log"
+assert_code "an older install is a working install: exit 0, not a refusal" "$?" "0"
+assert_has "the run names both numbers instead of hiding the disagreement" "$SCRATCH/newest-lag.log" "npm served 9.9.9 while the newest published release is v9.9.10"
+assert_has "and hands out a remedy that names the version" "$SCRATCH/newest-lag.log" "npm install -g glasspane-harness@9.9.10"
+assert_not_has "the remedy is not a curl | bash of the script that is printing it" "$SCRATCH/newest-lag.log" "| bash"
+printf '{"tag_name":"v9.9.9","name":"glasspane-harness v9.9.9","draft":false,"prerelease":false}\n' > "$FIX/latest"
+
+mv "$FIX/latest" "$SCRATCH/latest.aside"
+SCENARIO_NPM=ok run_install "$SCRATCH/newest-unknown.log"
+assert_code "an unaskable releases API does not fail the install" "$?" "0"
+assert_has "and it is answered as cannot-tell, not as newest" "$SCRATCH/newest-unknown.log" "cannot say whether 9.9.9 is the newest published release"
+mv "$SCRATCH/latest.aside" "$FIX/latest"
+
 if [ "$FAILURES" -gt 0 ]; then
   echo "installer-selftest: $FAILURES of $CHECKS checks failed"
   exit 1

@@ -15,7 +15,9 @@
     "npm": "npm install -g glasspane-harness",
     "bun": "bun add -g glasspane-harness",
     "curl": "curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.13.0/scripts/install.sh | bash",
-    "curlRefNote": "安装通道钉在**本版 tag** 上，不钉 main：`install.sh` 是验二进制的那个东西，而钉在分支上意味着任何能 push split 仓 main 的人都能换掉校验器。这条命令是用户读到的那一行，所以它跟着版本走；`product-surface` 的 `installer-curl-pinned` 规则同时核三件事——`install.curl` 含 `v<本版>`、不含 `/main/`、以及两份 README 与 `docs/install.md` 里那一行与它逐字相同。漏改一处就红，不靠人记得。"
+    "curlPinnedCommit": "bb3c2f22e251ecc2eb29451e2558a1fcdf9352dd",
+    "curlPinnedCommitSource": "the 40-hex commit `v0.13.0` peels to, resolved on the split repo with `gh api repos/jingzhao-l/glasspane-harness/commits/v0.13.0 --jq .sha`; content-addressed, so `git tag -f` cannot move it the way it can move the tag the `curl` line names.",
+    "curlRefNote": "入口这一行钉在**本版 tag**（`v<本版>`）上而非 main：`install.sh` 是验二进制的那个东西，钉分支等于让任何能 push split 仓 main 的人换掉校验器。但 tag 本身也可 `git tag -f` 重指向、连同它内嵌的公钥/指纹一起被换，所以钉 tag 只是下限、不是不可变锚。两条真出路实测：① GitHub 的 org 级 tag protection——本 split 仓 `jingzhao-l/glasspane-harness` 是个人账户（`owner_type=User`），`gh api repos/jingzhao-l/glasspane-harness/tags/protection` 的 GET 与 POST 都回 HTTP 404，该功能对个人仓不可用；② 把入口锚改成 40 位 commit SHA——但 `installer-curl-pinned` 判据要求 `install.curl` 含 `/v<本版>/`、不含 `/main/`，且两份 README 与 `docs/install.md` 逐字带上这一行，改成纯 SHA 会同时撞红这三处，而 `harness/tools/*` 与 `docs/*` 不在本泳道可改范围。于是折中且如实：入口仍按判据钉 tag（与文档一致），本版 tag 解析出的**不可变 commit 锚**记在上面的 `curlPinnedCommit`，并由 `install.sh` 在打印任何\"重取自身\"的补救/重跑命令时用 `installer_remedy_url` 解析该 commit、把「落盘→先读→再执行」分两步，不再把未验字节直灌进 bash。`product-surface` 的 `installer-curl-pinned` 仍同时核三件事——`install.curl` 含 `v<本版>`、不含 `/main/`、以及两份 README 与 `docs/install.md` 里那一行与它逐字相同；漏改一处就红，不靠人记得。"
   },
   "product": {
     "ship": [
