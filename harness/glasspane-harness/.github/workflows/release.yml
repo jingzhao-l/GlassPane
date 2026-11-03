@@ -62,6 +62,25 @@ on:
 permissions:
   contents: read
 
+# One queue per ref, deliberately at the WORKFLOW level rather than per publishing job. The parent
+# gate handed four publishing jobs (create-release, checksums, publish-release, publish-platform)
+# over without a queue of their own: two runs on one ref — a retag-and-push, "Re-run failed jobs",
+# or a second dispatch of the same version — then write the same GitHub Release, `gh release upload
+# --clobber` makes the shipped bytes the LAST writer's, and the first writer still read back a pass
+# because what it read was true at that moment. This repository measured the half-release shape that
+# produces: `glasspane-harness-darwin-x64@0.13.0` on the registry while the wrapper, the arm64
+# package and the GitHub Release itself never existed. Job-level groups are the finer tool, but the
+# matrix legs of `publish-platform` are exactly where job-level concurrency has the disputed
+# behaviour (community discussions 26774 / 63579: groups ignored or applied per leg), and this file
+# has already died once from a workflow-wide syntax refusal — a whole-run queue is the form the
+# parent rule itself names as satisfying ("A workflow-level concurrency group satisfies it"), and it
+# serialises `binaries` and the npm legs too, which is the direction this lane wants: nothing
+# publishes while another run of the same version is mid-flight. `cancel-in-progress` is false on
+# purpose — cancelling an in-flight publish is the OTHER half of the half-release.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 # One definition for the npm that the three publish lanes install. It used to be the literal
 # `12.2.0` written three times in this file, which meant the lanes could disagree and nothing could
 # notice — and each step then printed `npm --version` as if printing were the same as checking,
@@ -107,7 +126,13 @@ jobs:
         # is a green badge somebody else may not have waited for, so the lane that builds, checksums
         # and GPG-signs the bytes now asks the question itself, at the only moment before anything is
         # public where a refusal costs nothing.
+        # The parent gate handed this line over (2026-11): the body is read by a shell before `node`
+        # ever runs, and a body with no header of its own runs under whatever `-e` the image happens
+        # to default to — nounset and pipefail were never declared anywhere. `node -e` exits 1 on a
+        # mismatch, so the verdict survives; it does not survive an `eval`-shaped accident in the
+        # quoting above it. Declare the gate the same way every other multi-line body here does.
         run: |
+          set -euo pipefail
           node -e '
             const fs = require("fs")
             const product = JSON.parse(fs.readFileSync("product.json", "utf8"))
@@ -149,58 +174,94 @@ jobs:
             --workflow ci.yml \
             --budget 1800000 --poll 30000
       - name: The released tree must equal trunk's fork subtree
-        # This release is published from the split repository, whose `main` is a
-        # `git subtree split` of trunk's `harness/glasspane-harness`. Until this step existed the
-        # only thing proving that relationship was a hand-typed line in `docs/release.md` that a
-        # human runs (or skips) at the keyboard — and skipping it is not hypothetical: measured on
-        # v0.7.10, two commits (a seven-dependency security bump and the CODEOWNERS file) lived
-        # ONLY in the split repo, shipped in that release, while trunk's `main` never received
-        # them. The next split would have silently reverted a security fix, and the artifact under
-        # a live version number would not be reproducible from trunk at all.
+        # The split repository's `main` is a `git subtree split` of trunk's `harness/glasspane-harness`,
+        # and until this step existed the only proof of that relationship was a hand-typed line in
+        # `docs/release.md`: measured on v0.7.10, two commits (a seven-dependency security bump and the
+        # CODEOWNERS file) lived ONLY in the split repo and shipped in that release while trunk's `main`
+        # never received them — the next split would have silently reverted a security fix.
         #
-        # `version-check` is the only moment the claim can be machine-checked: after the tag has
-        # been agreed to be this version, before `create-release` makes anything public. It stays a
-        # `needs:` prerequisite of both `create-release` and `binaries`, so nothing ships without it.
-        # The fetch is anonymous HTTPS against a public repository, so this job keeps the
-        # workflow-level `contents: read` and asks for no wider token.
+        # `version-check` is the only moment the claim can be machine-checked: after the tag has been
+        # agreed to be this version, before `create-release` makes anything public. It stays a `needs:`
+        # prerequisite of both `create-release` and `binaries`, so nothing ships without it. The fetch is
+        # anonymous HTTPS against a public repository, so this job keeps the workflow-level
+        # `contents: read` and asks for no wider token.
+        #
+        # The judgement moved into `script/tree-anchor.mjs` on 2026-11-03 because the inline version
+        # demanded byte-equal trees, and a published tag can never satisfy that again once trunk takes a
+        # ledger commit — which every release does, because the ledger cannot describe a release that
+        # has not shipped yet. That made `create-release`/`binaries`/`checksums` (push-only jobs, and a
+        # tag is never moved) unrerunnable, i.e. it turned "finish a stalled release" into "re-cut a
+        # signed tag". The script tolerates one measured shape and says so loudly; the battery is
+        # `packages/opencode/test/script/tree-anchor.test.ts`.
         env:
           TRUNK_URL: https://github.com/jingzhao-l/GlassPane.git
           TRUNK_REF: main
           TRUNK_PREFIX: harness/glasspane-harness
         run: |
           set -euo pipefail
-          own="$(git rev-parse 'HEAD^{tree}')"
-          echo "released tree (this tag's HEAD^{tree}):  $own"
-          if ! git fetch --no-tags --depth 1 "$TRUNK_URL" "$TRUNK_REF"; then
-            echo "::error::could not fetch trunk's $TRUNK_REF from $TRUNK_URL, so this tree cannot be" \
-              "anchored to trunk. Refusing on purpose: an unmeasured anchor is not a passing anchor." \
-              "Check network access from this runner and that trunk still exists at that URL."
+          node script/tree-anchor.mjs
+
+      - name: The tag itself must be a signed tag made by the key the installer names
+        # Everything this lane checks about a release is about CONTENT: the tag names this version, the
+        # tree equals trunk's subtree, CI went green for that commit, the assets hash and sign. None of
+        # it asks WHO raised the ref — and a tag is exactly a ref someone with write access can raise
+        # or re-point. `release.yml`'s own prose says a published tag is never moved; prose is not a
+        # judgement. This is the identity half, and it closes the loop the signing job opens: the same
+        # fingerprint the installer pins, the same armored block it carries, now also has to have signed
+        # the ref that triggered the publication.
+        #
+        # `git verify-tag` is not used because the runner's checkout does not guarantee the tag ref nor
+        # a key on the default keyring: the tag object is fetched by name, its armored signature and
+        # its canonical payload are split apart, and gpg is asked directly with `--status-fd`, the same
+        # three-condition judgement `scripts/install.sh` performs for assets (GOODSIG, VALIDSIG, and the
+        # fingerprint equal to the one the installer names). No best-effort: a tag this job cannot
+        # attribute stops the release.
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          OBJECT_TYPE="$(git for-each-ref --format='%(objecttype)' "refs/tags/${GITHUB_REF_NAME}")"
+          if [ "$OBJECT_TYPE" != "tag" ]; then
+            echo "::error::${GITHUB_REF_NAME} is not an annotated tag (objecttype=${OBJECT_TYPE:-the ref is not readable here}), so there is no signature to attribute. A pointer with no signature behind it is not provenance: it can be re-pointed by any actor with write access and nothing here would notice. Remedy: git tag -s ${GITHUB_REF_NAME} -m <message>."
             exit 1
           fi
-          trunk="$(git rev-parse "FETCH_HEAD:$TRUNK_PREFIX" 2>/dev/null || true)"
-          if [ -z "$trunk" ]; then
-            echo "::error::trunk's $TRUNK_REF ($(git rev-parse FETCH_HEAD)) has no $TRUNK_PREFIX subtree." \
-              "The fork no longer lives inside trunk's tree, so this lane's whole premise is gone;" \
-              "nothing is published until that is decided on purpose."
+          want_fpr="$(sed -n 's/^GLASSPANE_HARNESS_SIGNING_FPR="\(.*\)"/\1/p' "$GITHUB_WORKSPACE/scripts/install.sh")"
+          if [ -z "$want_fpr" ]; then
+            echo "::error::could not read GLASSPANE_HARNESS_SIGNING_FPR out of scripts/install.sh — the installer's trust anchor moved shape and this gate refuses to publish under a guessed one"
             exit 1
           fi
-          echo "trunk's subtree ($TRUNK_PREFIX):         $trunk"
-          if [ "$trunk" = "$own" ]; then
-            echo "anchor OK: the artifact being released IS trunk's fork subtree — $own"
-            exit 0
+          awk '/-----BEGIN PGP PUBLIC KEY BLOCK-----/{f=1} f{print} /-----END PGP PUBLIC KEY BLOCK-----/{exit}' "$GITHUB_WORKSPACE/scripts/install.sh" > signer.asc
+          if [ ! -s signer.asc ]; then
+            echo "::error::scripts/install.sh carries no armored PGP public key, so there is no key to attribute the tag to"
+            exit 1
           fi
-          echo "::error::the tree being released ($own) is NOT trunk's $TRUNK_PREFIX tree ($trunk)." \
-            "The tag carries bytes trunk lacks, or drops bytes trunk has: the artifact shipped under" \
-            "this version number cannot be reproduced from trunk, and the next subtree split would" \
-            "silently revert whatever differs — which is how v0.7.10 nearly shipped a reverted" \
-            "security dependency."
-          echo "::error::file-level delta, trunk -> released tree (first 50 lines):"
-          git diff --name-status "$trunk" "$own" | head -50 || true
-          echo "::error::remedy: make the two trees one tree, then re-cut this tag. Either merge the" \
-            "split-only commits into trunk under $TRUNK_PREFIX, or re-run" \
-            "\`git subtree split --prefix=$TRUNK_PREFIX\` from trunk's $TRUNK_REF and push that." \
-            "Do not move the tag to whatever is handy: that is the other half of the same defect."
-          exit 1
+          gnupg="$(mktemp -d)"
+          chmod 700 "$gnupg"
+          if ! GNUPGHOME="$gnupg" gpg --batch --quiet --import < signer.asc; then
+            echo "::error::gpg could not import the signing key embedded in scripts/install.sh — the tag cannot be attributed, so the release is not made"
+            exit 1
+          fi
+          git cat-file tag "refs/tags/${GITHUB_REF_NAME}" > tag.obj
+          awk '/-----BEGIN PGP SIGNATURE-----/{f=1} f{print}' tag.obj > tag.sig
+          awk '/-----BEGIN PGP SIGNATURE-----/{exit} {print}' tag.obj > tag.payload
+          if [ ! -s tag.sig ] || [ ! -s tag.payload ]; then
+            echo "::error::the tag object carries no armored signature block beside its payload — it is annotated but unsigned, which is the same refusal as a lightweight tag"
+            exit 1
+          fi
+          STATUS="$(GNUPGHOME="$gnupg" gpg --batch --status-fd 2 --verify tag.sig tag.payload 2>&1 || true)"
+          # here-string, not a pipe: `grep -q` leaves on its first match, and a piped producer dies of
+          # EPIPE once the bytes pass the pipe buffer — pipefail would turn the refusal into a 141 and
+          # the reader could not tell "no good signature" from "the check could not finish".
+          grep -q '^\[GNUPG:\] GOODSIG' <<<"$STATUS" || {
+            echo "::error::gpg does not call the signature on ${GITHUB_REF_NAME} a good signature. Refusing rather than publishing under an unverifiable ref."
+            exit 1; }
+          signer_fpr="$(printf '%s\n' "$STATUS" | sed -n 's/^\[GNUPG:\] VALIDSIG \([0-9A-F]*\) .*/\1/p' | tail -1)"
+          # `tr`, not `${var^^}`: the expansion form is bash 4+, and a gate whose comparison line dies of
+          # a shell-version difference is a gate that changes answer when the image moves.
+          if [ "$(printf '%s' "$signer_fpr" | tr 'a-z' 'A-Z')" != "$(printf '%s' "$want_fpr" | tr 'a-z' 'A-Z')" ]; then
+            echo "::error::${GITHUB_REF_NAME} was signed by ${signer_fpr:-nothing readable}, not by the fingerprint scripts/install.sh pins (${want_fpr}). A tag signed by another key is not this product's tag."
+            exit 1
+          fi
+          echo "tag identity held: ${GITHUB_REF_NAME} is a signed tag whose signature validates against the key scripts/install.sh embeds and names (${want_fpr})"
 
   create-release:
     name: create the GitHub release for this tag
@@ -627,14 +688,137 @@ jobs:
     # already be pointed at assets with nothing to check them against. Draft until the checksums
     # and every `.asc` have landed closes that window; a run that fails before this job leaves
     # the release invisible instead of leaving it public and unverifiable.
+    #
+    # "invisible until the signatures EXIST" was the whole promise until 2026-11, and it is half
+    # the promise: the signing job's proof was `[ -s x.asc ]` — "gpg exited 0 and a file is not
+    # empty" — never a `gpg --verify` round trip, and `installer-selftest.sh` scripts its gpg and
+    # curl as stubs, so nothing in the lane had ever asked whether the bytes the release serves
+    # actually verify under the key the installer names. A release is now public only behind this
+    # job's own verify step, which re-runs the installer's exact judgement (embedded public key →
+    # throwaway keyring → VALIDSIG fingerprint must equal GLASSPANE_HARNESS_SIGNING_FPR) against
+    # the served assets. Red here means the release STAYS A DRAFT — the cheapest moment a refusal
+    # still costs nothing.
     if: success() && github.event_name == 'push'
     needs: checksums
     runs-on: ubuntu-latest
-    # Ceiling, not ceremony: GitHub's default is 360 minutes, and this job runs on a runner from the hosted pool. One `gh release edit` plus a read-back. (15m.)
+    # Ceiling, not ceremony: GitHub's default is 360 minutes, and this job runs on a runner from the hosted pool. One `gh release download` of the assets, a gpg verify round trip per file, one `gh release edit` plus a read-back. (15m.)
     timeout-minutes: 15
     permissions:
       contents: write
     steps:
+      # The trust anchor lives in scripts/install.sh — this reads it, so it needs the checkout,
+      # and it reads it rather than copying it: a second copy is a second thing that can go stale.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Verify every signature the way the installer will, before the flag is cleared
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP:-/tmp}/publish-verify"
+          rm -rf "$work"
+          mkdir -p "$work"
+          cd "$work"
+          # The bytes the DRAFT release actually serves — not the ones still sitting on the
+          # signing runner's disk. This job verifies what a user would download.
+          gh release download "${GITHUB_REF_NAME}" --repo "$GH_REPO"
+          want_fpr="$(sed -n 's/^GLASSPANE_HARNESS_SIGNING_FPR="\(.*\)"/\1/p' "$GITHUB_WORKSPACE/scripts/install.sh")"
+          if [ -z "$want_fpr" ]; then
+            echo "::error::could not read GLASSPANE_HARNESS_SIGNING_FPR out of scripts/install.sh — the installer's trust anchor moved shape and this gate refuses to publish under a guessed one"
+            exit 1
+          fi
+          awk '/-----BEGIN PGP PUBLIC KEY BLOCK-----/{f=1} f{print} /-----END PGP PUBLIC KEY BLOCK-----/{exit}' "$GITHUB_WORKSPACE/scripts/install.sh" > signer.asc
+          if [ ! -s signer.asc ]; then
+            echo "::error::scripts/install.sh carries no armored PGP public key — there is no installer-side half to verify against, so 'verified the way the installer verifies' cannot be claimed"
+            exit 1
+          fi
+          gnupg="$(mktemp -d)"
+          chmod 700 "$gnupg"
+          if ! GNUPGHOME="$gnupg" gpg --batch --quiet --import < signer.asc; then
+            echo "::error::gpg could not import the signing key embedded in scripts/install.sh — provenance cannot be established and the release stays a draft"
+            exit 1
+          fi
+          # The block must carry the fingerprint the same file names. Two constants in one script
+          # that disagree is the rotation accident the signing job refuses; this refuses the
+          # mirror-image of it — an installer that would trust a key its own embedded block lacks.
+          ring_fpr="$(GNUPGHOME="$gnupg" gpg --batch --with-colons --list-keys | awk -F: '/^fpr/{print toupper($10)}' | tr '\n' ' ')"
+          case " $ring_fpr " in
+            *" $want_fpr "*) echo "installer keyring seeded: the embedded block carries the named fingerprint $want_fpr" ;;
+            *)
+              echo "::error::the armored public key in scripts/install.sh does not carry its own named GLASSPANE_HARNESS_SIGNING_FPR"
+              echo "::error::  installer names: $want_fpr"
+              echo "::error::  block carries: ${ring_fpr:-none readable}"
+              echo "::error::the two halves of the signing contract disagree inside one file — the release stays a draft"
+              exit 1
+              ;;
+          esac
+          # Both directions of set equality, mirroring the `checksums` job: an asset with no
+          # sidecar is an unsigned release going public, and a sidecar naming no served file is
+          # evidence the asset set was replaced after signing. Neither is a warning here.
+          verifiable=""
+          for f in ./*; do
+            b="${f#./}"
+            case "$b" in *.asc) continue ;; esac
+            verifiable="$verifiable $b"
+          done
+          if [ -z "$verifiable" ]; then
+            echo "::error::release ${GITHUB_REF_NAME} serves no assets at all — nothing to verify, so nothing goes public"
+            exit 1
+          fi
+          [ -f SHA256SUMS.txt ] || { echo "::error::SHA256SUMS.txt is not attached to release ${GITHUB_REF_NAME} — the lane promises a signed manifest before anything is public"; exit 1; }
+          missing=""
+          for b in $verifiable; do
+            [ -f "$b.asc" ] || missing="$missing $b"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::release ${GITHUB_REF_NAME} would go public with assets that carry no signature sidecar:$missing"
+            exit 1
+          fi
+          extra=""
+          for f in ./*.asc; do
+            b="$(basename "${f#./}" .asc)"
+            [ -f "$b" ] || extra="$extra $b"
+          done
+          if [ -n "$extra" ]; then
+            echo "::error::release ${GITHUB_REF_NAME} carries signature sidecars for files it does not serve:$extra"
+            exit 1
+          fi
+          # The integrity half of the installer's check first: the signed manifest must actually
+          # match the served bytes, or "verified SHA256SUMS.txt" would vouch for a list whose
+          # entries are somebody else's archives.
+          sha256sum --strict --check SHA256SUMS.txt
+          # Then the provenance half, per file, with install.sh's `verify_gpg` three conditions:
+          # exit 0 AND GOODSIG AND the VALIDSIG line's third field equal to $want_fpr. A good
+          # signature from a DIFFERENT key is the installer's explicit refusal case, and this
+          # lane must not publish what the product's own installer will not accept. Every failure
+          # path below exits 1 — nothing in this step is best-effort.
+          for b in $verifiable; do
+            out=""
+            if out="$(GNUPGHOME="$gnupg" gpg --batch --quiet --status-fd 2 --verify "$b.asc" "$b" 2>&1)"; then
+              rc=0
+            else
+              rc=1
+            fi
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::gpg could not verify $b.asc against $b — release stays a draft"
+              head -2 <<<"$out"
+              exit 1
+            fi
+            if ! grep -q GOODSIG <<<"$out"; then
+              echo "::error::$b.asc parsed but named no good signature — release stays a draft"
+              exit 1
+            fi
+            fpr="$(awk '/^\[GNUPG:\] VALIDSIG /{print toupper($3); exit}' <<<"$out")"
+            if [ "$fpr" != "$want_fpr" ]; then
+              echo "::error::$b was signed by ${fpr:-a key with no VALIDSIG line}, not the installer's key $want_fpr — a valid signature from a replaced key plus a replaced asset is exactly what a signature is for"
+              exit 1
+            fi
+            echo "verified: $b (VALIDSIG $fpr — the installer's own fingerprint)"
+          done
+          rm -rf "$gnupg"
+          echo "every served asset and SHA256SUMS.txt round-trips against the installer's own trust anchor"
+
       - name: Publish the draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -649,7 +833,7 @@ jobs:
             echo "::error::release ${GITHUB_REF_NAME} is still a draft (isDraft=$state) after the publish step"
             exit 1
           fi
-          echo "release ${GITHUB_REF_NAME} is live with its manifest and signatures attached"
+          echo "release ${GITHUB_REF_NAME} is live: every signature on it was gpg-verified in this job against the key scripts/install.sh names"
 
   publish-gate:
     name: Refuse to publish a tree no tag vouches for
@@ -680,8 +864,16 @@ jobs:
             echo "::error::packages/opencode/package.json says ${PKG} but product.json says ${VERSION} — the wrapper would be published under a version no tag names. Run the version bump in both places."
             exit 1; }
           LS="$(git ls-remote --tags origin)"
-          PEELED="$(printf '%s\n' "$LS" | awk -v r="refs/tags/${WANT}^{}" '$2==r{print $1; exit}')"
-          DIRECT="$(printf '%s\n' "$LS" | awk -v r="refs/tags/${WANT}" '$2==r{print $1; exit}')"
+          # Fed from a here-string, not a pipe. The consumer leaves on its first match (`exit`), so a
+          # piped producer is a coin flip on SIGPIPE: once `git ls-remote --tags` output passes the
+          # pipe buffer, printf dies mid-write with EPIPE, pipefail turns the pipeline's status into
+          # 141, and `set -e` aborts the step whose whole job is to print a NAMED refusal — the
+          # reader cannot tell "the tag is missing" from "the check could not finish". Measured by
+          # the parent lane (5000 tag lines, target on line 1, bash -euo pipefail → exit 141, zero
+          # output). A here-string is a redirect, not a pipe, so `exit` is safe and the judgement
+          # is byte-for-byte the same `$2==r` first-match read.
+          PEELED="$(awk -v r="refs/tags/${WANT}^{}" '$2==r{print $1; exit}' <<<"$LS")"
+          DIRECT="$(awk -v r="refs/tags/${WANT}" '$2==r{print $1; exit}' <<<"$LS")"
           TAG_SHA="${PEELED:-$DIRECT}"
           [ -n "$TAG_SHA" ] || {
             echo "::error::origin has no tag ${WANT}. A publish with no tag behind it is unreproducible: the installers and docs both point at a tag. Push the tag first, then dispatch with --ref ${WANT}."
@@ -694,6 +886,59 @@ jobs:
             echo "::error::the dispatched ref is ${DISPATCH_REF}, not refs/tags/${WANT}. Same bytes, different provenance: the attestation would name the former. Re-run with --ref ${WANT}."
             exit 1; }
           echo "publish target verified: ${WANT} = ${HEAD_SHA}, dispatched as ${DISPATCH_REF}"
+
+      - name: The tag must already have a public release with every asset it names
+        # The two halves of this lane are separate triggers on purpose (push = binaries + release,
+        # dispatch = npm), and that separation is exactly how v0.13.0 ended up half-shipped on
+        # 2026-10-31: the dispatch leg published `glasspane-harness-darwin-x64@0.13.0` while the push
+        # leg never created a GitHub Release at all. Nothing between those two facts was red. Every
+        # existing gate was self-consistent INSIDE its own chain — none of them ASKED ACROSS the
+        # chains, and a package that exists on npm with no release behind it is invisible to a
+        # `curl | bash` user and un-reinstallable by the installer's own version check.
+        #
+        # This is the last moment a refusal is free: the job precedes `publish-platform` in the `needs`
+        # graph, so nothing irreversible has happened, and it needs no new secret and no wider
+        # permission than the `contents: read` the job already declares.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./product.json').version")"
+          WANT="v${VERSION}"
+          API="repos/${GITHUB_REPOSITORY}/releases/tags/${WANT}"
+          # "cannot ask" and "asked, and it is not there" are different answers, and only one of them is
+          # a fact about this release. Probe the API first so an outage never reads as a missing tag.
+          if ! gh api "repos/${GITHUB_REPOSITORY}" --jq .id >/dev/null 2>&1; then
+            echo "::error::the Releases API could not be reached from this job (GH_TOKEN / actions / network), so this gate cannot know whether ${WANT} has a release. Refusing rather than publishing npm unverified — a gate that cannot ask must not answer."
+            exit 1
+          fi
+          BODY="$(gh api "$API" 2>/dev/null || true)"
+          if [ -z "$BODY" ]; then
+            echo "::error::${WANT} has no GitHub Release, so the ${VERSION} bytes about to go on npm are half a publication: no asset for the installer's fallback channel, no SHA256SUMS, no signature. Remedy: finish the push-side chain for THIS tag first (gh run rerun <the tag-push run> --repo ${GITHUB_REPOSITORY} --failed, or re-push the tag), see it green, then dispatch again."
+            exit 1
+          fi
+          DRAFT="$(printf '%s' "$BODY" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d);process.stdout.write(String(j.draft))})')"
+          if [ "$DRAFT" != "false" ]; then
+            echo "::error::${WANT} exists but is still a draft (draft=${DRAFT}); the publish-release job is what makes it public and it runs only on the tag push. Nothing goes on npm until the assets can be fetched."
+            exit 1
+          fi
+          # One naming rule for the whole file, the same expression `checksums` uses at its own anchor.
+          EXPECTED="$(node -e 'const p=require("./product.json");const n=(t)=>[p.name,t.os==="win32"?"windows":t.os,t.arch,t.avx2===false?"baseline":undefined,t.abi].filter(Boolean).join("-");for(const t of p.platformTargets)console.log(n(t))')"
+          HAVE="$(printf '%s' "$BODY" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{for(const a of JSON.parse(d).assets??[])console.log(a.name)})')"
+          missing=""
+          while IFS= read -r target; do
+            for suffix in ".zip" ".zip.asc"; do
+              grep -qxF "${target}${suffix}" <<<"$HAVE" || missing="${missing}${missing:+ }${target}${suffix}"
+            done
+          done <<<"$EXPECTED"
+          for suffix in "SHA256SUMS.txt" "SHA256SUMS.txt.asc"; do
+            grep -qxF "$suffix" <<<"$HAVE" || missing="${missing}${missing:+ }${suffix}"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::${WANT} is public but does not carry the asset set product.json names. Missing:${missing}. Present:$(printf '%s\n' "$HAVE" | tr '\n' ' '). Publishing npm now would leave a version number whose installer cannot verify a single byte."
+            exit 1
+          fi
+          echo "cross-chain anchor held: ${WANT} is public with $(printf '%s\n' "$HAVE" | grep -c .) asset(s), covering every target in product.json — npm and the release are the same version's bytes"
 
   publish-platform:
     name: npm ${{ matrix.target }}
@@ -768,7 +1013,24 @@ jobs:
         # here and publishes nothing; the not-all-targets line stays a note in dry-run, because
         # one runner builds one target by design.
         working-directory: packages/opencode
-        run: bun run script/publish.ts --dry-run
+        run: |
+          set -euo pipefail
+          bun run script/publish.ts --dry-run
+          # Anchor the exact bytes the pack gates just read. `publish.ts` packs with `bun pm pack`
+          # (script/publish.ts:96) and validates THAT `${name}-${version}.tgz` — exec bits, manifest,
+          # os/cpu. Recording every archive it left in dist/ means the publish step can name the file
+          # it judged and prove the file it ships is still those bytes, instead of re-packing the
+          # directory through a second packer minutes before an irreversible publish.
+          : > "$RUNNER_TEMP/validated-tarballs.sha256"
+          for t in dist/*/*.tgz; do
+            [ -f "$t" ] || continue
+            shasum -a 256 "$t" >> "$RUNNER_TEMP/validated-tarballs.sha256"
+          done
+          if [ ! -s "$RUNNER_TEMP/validated-tarballs.sha256" ]; then
+            echo "::error::publish.ts --dry-run left no .tgz under packages/opencode/dist — the pack gate validated no file this lane can name, so there is nothing to publish"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/validated-tarballs.sha256"
 
       - name: Publish the platform package with provenance (staged-only fallback)
         shell: bash
@@ -815,23 +1077,33 @@ jobs:
           ver="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).version" "$PRODUCT_JSON")"
           echo "publishing $pkg@$ver"
           cd "dist/$pkg"
-          # Publish the archive this job can name, not the directory. `script/publish.ts` — the gate
-          # that reads the pack shape, the bin exec bits, the `optionalDependencies` == target-matrix
-          # equality and the os/cpu gate — packs with `bun pm pack` and validates
-          # `${name}-${version}.tgz`. `npm publish .` re-packs the same directory through a different
-          # packer, so the bytes that were checked and the bytes that ship were never the same object.
-          # This file already documents that the two packings differ (the duplicate-version branch
-          # below prints two different sha512s for one version), which is exactly why the publish has
-          # to name the tarball it packed instead of pointing npm at a folder.
-          npm pack --silent
+          # Publish the archive the pack gate read — not a re-packing of the directory it read.
+          # This step used to run `npm pack --silent` here, which OVERWROTE the very
+          # `${pkg}-${ver}.tgz` the validate step had produced with `bun pm pack`
+          # (script/publish.ts:96) and then published the replacement: the exec-bit / manifest /
+          # os-cpu verdicts were read off bytes npm's packer had already swapped out, and the two
+          # packers genuinely differ — this file's own duplicate-version branch below prints two
+          # different sha512s for one version, which is measurement, not prose. The validate step
+          # now hashes every archive it judged into $RUNNER_TEMP/validated-tarballs.sha256; this
+          # step refuses anything that is not one of those named bytes. Verified file and shipped
+          # file: the same object, named twice, hash-equal.
           tarball="$pkg-$ver.tgz"
           if [ ! -f "$tarball" ]; then
-            echo "::error::npm pack produced no $tarball in dist/$pkg — refusing to publish a directory the pack gate never validated"
+            echo "::error::no $tarball in dist/$pkg — the pack gate validated a file this step cannot name, so nothing is published"
             ls -1
-            rm -f "$log"
             exit 1
           fi
-          echo "publishing from the packed archive: $tarball ($(shasum -a 256 "$tarball" | cut -c1-12)…)"
+          rec="$(awk -v n="$tarball" '{ split($2, p, "/"); if (p[length(p)] == n) { print $1; exit } }' "$RUNNER_TEMP/validated-tarballs.sha256")"
+          if [ -z "$rec" ]; then
+            echo "::error::$tarball carries no record in the validate step's anchor file — that is an archive the pack gates never read, and it does not get published"
+            exit 1
+          fi
+          now="$(shasum -a 256 "$tarball" | awk '{ print $1 }')"
+          if [ "$now" != "$rec" ]; then
+            echo "::error::$tarball changed between the pack gate and this publish (validated=$rec now=$now) — refusing to ship bytes that are not the bytes that were validated"
+            exit 1
+          fi
+          echo "publishing the validated archive itself: $tarball (sha256=$now — the same file script/publish.ts --dry-run ran the pack gates on)"
           # The fallback used to be an unconditional `||`: E401, E404, a registry 5xx,
           # a tarball problem and the E409 duplicate-version shape that burned 0.5.0 all
           # took the same branch and printed a notice naming a cause that was not true —
@@ -846,7 +1118,10 @@ jobs:
           if [ "$rc" -ne 0 ]; then
             if grep -qiE "staged publishing|only allowed through (the )?oidc|trusted publisher|publishing directly is not allowed" "$log"; then
               echo "::notice::the registry refused a direct publish for $pkg@$ver — staging instead"
-              npm stage publish . --provenance --registry "$reg"
+              # Stage the same named archive, not the directory. A stage is pre-publish bytes waiting
+              # on the owner's approval: staging `.` would let the approval publish a THIRD packer's
+              # output that no gate in this file ever read.
+              npm stage publish "$tarball" --provenance --registry "$reg"
               echo "::notice::owner approves with: npm stage approve <stage-id> (ids: npm stage list --registry $reg)"
               echo "STAGED, NOT PUBLISHED: $pkg@$ver is waiting for owner approval."
               # Fail the job. This run has not put the package on the registry, and a green

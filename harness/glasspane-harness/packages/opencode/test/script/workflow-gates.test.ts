@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { execFileSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { execFileSync, spawnSync } from "node:child_process"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
@@ -473,5 +473,317 @@ describe("the gate refuses to certify a scan that measured nothing", () => {
 
   test("a workflow with jobs but no action refs is exit 2 as well", () => {
     withFixture({ "a.yml": "name: no actions\njobs:\n  x:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:\n      - run: |\n          set -euo pipefail\n          echo a\n          echo b\n" }, (dir) => expect(run(dir).code).toBe(2))
+  })
+})
+
+/**
+ * The two release-gate repairs of the 2026-11 lane, and the three findings the parent
+ * `scripts/check-workflows.mjs` handed this file. Same posture as every case above: these are
+ * fixed points on the workflow text, because the object each rule judges is a byte set the lane
+ * either names or does not — "the verified archive is the published archive" and "the release goes
+ * public only behind a verify round trip" are properties of THIS file's step ordering, and a test
+ * that reads the real file is the only place they can be held after a sync.
+ */
+describe("the platform lane publishes the archive its pack gate read", () => {
+  // The defect this replaces: the validate step ran `publish.ts --dry-run`, which packs with
+  // `bun pm pack` (script/publish.ts:96) and validates THAT tarball, and the publish step then ran
+  // `npm pack --silent` — overwriting the same `${pkg}-${ver}.tgz` with a different packer's
+  // bytes — and published the replacement. Exec-bit / manifest / os-cpu then judged a file that no
+  // longer existed at publish time.
+  async function platformJob(): Promise<string> {
+    const text = await Bun.file(path.join(REAL_ROOT, ".github/workflows/release.yml")).text()
+    const start = text.indexOf("  publish-platform:")
+    const end = text.indexOf("\n  publish-wrapper:", start)
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    return text.slice(start, end)
+  }
+
+  test("no npm pack sits between the pack gate and npm publish", async () => {
+    const job = await platformJob()
+    // The needle these assertions read, grepped before any mutation: the publish line names
+    // "$tarball", and the only surviving `npm pack` in the job is the duplicate-version branch's
+    // integrity REPORT (`npm pack --json`), which publishes nothing. Line shape, not substring:
+    // the file's own prose names the dead command, and a gate that reddens on a comment gets
+    // its prose deleted — the trade the parent check-workflows refuses in its pipefail rule.
+    expect(job).toContain('npm publish "$tarball"')
+    expect(job).not.toMatch(/^\s*npm pack\b/m)
+    expect(job).toContain("publishing the validated archive itself")
+  })
+
+  test("the validate step anchors every archive it judged and the publish step refuses an unanchored or changed byte", async () => {
+    const job = await platformJob()
+    const gate = job.indexOf("publish.ts --dry-run")
+    const anchor = job.indexOf(': > "$RUNNER_TEMP/validated-tarballs.sha256"')
+    const publish = job.indexOf('npm publish "$tarball"')
+    expect(gate).toBeGreaterThan(-1)
+    expect(anchor).toBeGreaterThan(gate)
+    expect(publish).toBeGreaterThan(anchor)
+    // Both refusals are named: no record (an archive no gate read) and hash drift (bytes that
+    // changed after the gate) each stop the lane with its own message.
+    expect(job).toContain("carries no record in the validate step's anchor file")
+    expect(job).toContain("changed between the pack gate and this publish")
+  })
+
+  test("the staged fallback stages the named archive, never the directory", async () => {
+    // A stage is pre-publish bytes awaiting the owner's 2FA approval; approving a directory
+    // re-pack would publish a third packer's output no gate in this file ever read.
+    const job = await platformJob()
+    expect(job).toContain('npm stage publish "$tarball"')
+    expect(job).not.toContain("npm stage publish . ")
+  })
+})
+
+describe("the release goes public only behind an installer-shaped verification", () => {
+  // Before this repair, the strongest evidence between `checksums` and `gh release edit
+  // --draft=false` was `[ -s x.asc ]` — "a file landed", never a `gpg --verify` round trip — and
+  // `installer-selftest.sh` scripts gpg/curl as stubs, so no real verifier had ever been asked
+  // about the bytes a public release serves.
+  async function publishReleaseJob(): Promise<string> {
+    const text = await Bun.file(path.join(REAL_ROOT, ".github/workflows/release.yml")).text()
+    const start = text.indexOf("  publish-release:")
+    const end = text.indexOf("\n  publish-gate:", start)
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    return text.slice(start, end)
+  }
+
+  test("a per-file gpg --verify round trip precedes the draft→public flip", async () => {
+    const job = await publishReleaseJob()
+    const verify = job.indexOf("gpg --batch --quiet --status-fd 2 --verify")
+    const flip = job.indexOf("--draft=false")
+    expect(verify).toBeGreaterThan(-1)
+    expect(flip).toBeGreaterThan(verify)
+    // The anchor is READ from scripts/install.sh, so the job must have the checkout before it.
+    expect(job.indexOf("uses: actions/checkout")).toBeLessThan(verify)
+    expect(job).toContain("$GITHUB_WORKSPACE/scripts/install.sh")
+  })
+
+  test("the judgement is the installer's own three conditions against the installer's named key", async () => {
+    const job = await publishReleaseJob()
+    expect(job).toContain("GOODSIG")
+    expect(job).toContain("VALIDSIG")
+    expect(job).toContain("GLASSPANE_HARNESS_SIGNING_FPR")
+    expect(job).toContain("-----BEGIN PGP PUBLIC KEY BLOCK-----")
+    expect(job).toContain("embedded block carries the named fingerprint")
+  })
+
+  test("nothing is best-effort: sidecar gaps both ways and a verify escape each refuse", async () => {
+    const job = await publishReleaseJob()
+    expect(job).toContain("would go public with assets that carry no signature sidecar")
+    expect(job).toContain("signature sidecars for files it does not serve")
+    // The manifest is re-checked against the served bytes before its signature is trusted.
+    expect(job).toContain("sha256sum --strict --check SHA256SUMS.txt")
+    // The exact shape the task forbids: a `|| true` riding the verify call would turn a bad
+    // signature into a green step and a public release.
+    expect(job).not.toMatch(/gpg [^\n]*--verify[^\n]*\|\| true/)
+  })
+})
+
+describe("the three findings the parent gate handed this file are closed here", () => {
+  test("one queue per ref, and no in-flight publish is ever cancelled", async () => {
+    const text = await Bun.file(path.join(REAL_ROOT, ".github/workflows/release.yml")).text()
+    const top = text.slice(0, text.indexOf("jobs:"))
+    expect(top).toContain("concurrency:")
+    expect(top).toContain("group: release-${{ github.ref_name }}")
+    expect(top).toContain("cancel-in-progress: false")
+    // `true` on an irreversible lane is the half-release with the sign flipped.
+    expect(top).not.toContain("cancel-in-progress: true")
+  })
+
+  test("the tag-peel consumers read from a here-string, so their first-match exit cannot cost the step 141", async () => {
+    const text = await Bun.file(path.join(REAL_ROOT, ".github/workflows/release.yml")).text()
+    // Piping `git ls-remote` output into `awk … exit` dies of EPIPE once the bytes pass the pipe
+    // buffer; under pipefail the gate's status becomes 141 and the step aborts mid-judgement.
+    expect(text).not.toContain(`printf '%s\\n' "$LS" | awk`)
+    expect(text.match(/\$2==r\{print \$1; exit\}' <<<"\$LS"/g)?.length).toBe(2)
+  })
+
+  test("the manifests block declares its own shell gate before node runs", async () => {
+    const text = await Bun.file(path.join(REAL_ROOT, ".github/workflows/release.yml")).text()
+    const start = text.indexOf("The tag and BOTH version manifests must name the same version")
+    const body = text.slice(start, text.indexOf("node -e '", start))
+    expect(start).toBeGreaterThan(-1)
+    expect(body).toContain("set -euo pipefail")
+  })
+})
+
+describe("the tree anchor is a measured judgement, not an inline equality", () => {
+  test("the step delegates to script/tree-anchor.mjs instead of comparing two hashes", async () => {
+    const text = await Bun.file(path.join(REAL_ROOT, ".github/workflows/release.yml")).text()
+    const start = text.indexOf("      - name: The released tree must equal trunk's fork subtree")
+    expect(start).toBeGreaterThan(-1)
+    const body = text.slice(start, text.indexOf("\n      - ", start + 10))
+    expect(body).toContain("node script/tree-anchor.mjs")
+    // The shape that made a stalled release unfinishable: byte equality between the tag's tree and
+    // trunk's subtree, which every ledger commit after the tag breaks by construction.
+    expect(body).not.toContain('[ "$trunk" = "$own" ]')
+  })
+})
+
+/**
+ * The identity half of the tag. Everything else in this lane anchors CONTENT (version equals the tag,
+ * the tree equals trunk, CI went green for that commit); nothing asked who raised the ref, while the
+ * file's own prose claims a published tag is never moved.
+ *
+ * Verified against real bytes on 2026-11-03, not only against the text below: the same body was cut out
+ * of this file and run against three tags in a live repository — a lightweight one (`objecttype=commit`)
+ * refused, an annotated unsigned one refused for carrying no armored block, and one signed with the
+ * pinned key accepted. That last case also proves the comparison reads the PRIMARY fingerprint: the
+ * `VALIDSIG` status line's first field is what `scripts/install.sh` pins.
+ */
+describe("a tag this lane cannot attribute is not this product's tag", () => {
+  async function tagIdentityBody(): Promise<string> {
+    const text = await Bun.file(path.join(REAL_ROOT, ".github/workflows/release.yml")).text()
+    const start = text.indexOf("      - name: The tag itself must be a signed tag made by the key the installer names")
+    expect(start).toBeGreaterThan(-1)
+    // This is the last step of its job, so the slice has to stop at the next job header too — otherwise
+    // it swallows `create-release` and every count below measures somebody else's bytes.
+    const ends = [text.indexOf("\n      - name: ", start + 10), text.indexOf("\n  create-release:", start)].filter((i) => i > start)
+    return text.slice(start, Math.min(...ends))
+  }
+
+  test("the key and the fingerprint are read from the installer, never hardcoded here", async () => {
+    const body = await tagIdentityBody()
+    expect(body).toContain('sed -n \'s/^GLASSPANE_HARNESS_SIGNING_FPR="\\(.*\\)"/\\1/p\'')
+    expect(body).toContain("/-----BEGIN PGP PUBLIC KEY BLOCK-----/")
+    // A fingerprint typed into the workflow is a second truth that outlives the rotation.
+    expect(body).not.toMatch(/[0-9A-F]{40}/)
+  })
+
+  test("lightweight, unsigned and unverifiable each stop the lane, and only the pinned key passes", async () => {
+    const body = await tagIdentityBody()
+    expect(body).toContain('[ "$OBJECT_TYPE" != "tag" ]')
+    expect(body).toContain("[ ! -s tag.sig ]")
+    expect(body).toContain("GOODSIG")
+    expect(body).toContain("VALIDSIG")
+    // Each refusal is an exit, not a warning: a gate whose "refuse" branch falls through is a log line.
+    for (const refusal of ["is not an annotated tag", "no armored signature block", "does not call the signature", "not by the fingerprint scripts/install.sh pins"]) {
+      const at = body.indexOf(refusal)
+      expect(at).toBeGreaterThan(-1)
+      expect(body.slice(at, at + 700)).toContain("exit 1")
+    }
+  })
+
+  test("the judgement has no escape hatch", async () => {
+    const body = await tagIdentityBody()
+    // `|| true` is legitimate on the STATUS capture (gpg exits non-zero on a bad signature and the
+    // status lines are what is being read) — nowhere else.
+    expect(body.match(/\|\| true/g)?.length).toBe(1)
+    expect(body).not.toMatch(/grep .* \|\| echo/)
+    expect(body).not.toContain("continue")
+  })
+})
+
+/**
+ * The gate that the v0.13.0 half-shipping walked straight through.
+ *
+ * `publish-gate` proved the dispatched ref was the tag; nothing proved the tag had a release. Both
+ * publishing chains were internally consistent, and the inconsistency lived BETWEEN them — npm got
+ * `glasspane-harness-darwin-x64@0.13.0` while `gh release view v0.13.0` answered "release not found".
+ *
+ * So this is not a text-matching test: the step's own bash body is cut out of the real workflow and
+ * RUN, with a fake `gh` on PATH answering the Releases API. A refusal that cannot be made to happen is
+ * not a gate, whatever the file says.
+ */
+describe("the npm leg refuses a version whose release is not there", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "publish-gate-"))
+  afterAll(() => rmSync(root, { recursive: true, force: true }))
+
+  async function stepBody(): Promise<string> {
+    const text = await Bun.file(path.join(REAL_ROOT, ".github/workflows/release.yml")).text()
+    const marker = "      - name: The tag must already have a public release with every asset it names"
+    const start = text.indexOf(marker)
+    expect(start).toBeGreaterThan(-1)
+    const from = text.indexOf("        run: |\n", start)
+    expect(from).toBeGreaterThan(start)
+    // This step is the LAST one in its job, so the body ends either at the next `- name:` step or at
+    // the next job header — whichever comes first. Taking only the first pattern runs the slice past
+    // the end of the job and hands bash the next job's steps.
+    const ends = [text.indexOf("\n      - ", from), text.indexOf("\n  publish-platform:", from)].filter((i) => i > from)
+    const end = Math.min(...ends)
+    expect(end).toBeGreaterThan(from)
+    const lines = text.slice(from + "        run: |\n".length, end).split("\n")
+    return `${lines.map((l) => (l.startsWith("          ") ? l.slice(10) : l)).join("\n")}\n`
+  }
+
+  /**
+   * @param answers what the fake `gh` does per API path; `null` means "the call fails" (an outage, not
+   * a missing release), and a missing key means the endpoint was never answered.
+   */
+  async function ask(answers: Record<string, string | null>, name: string) {
+    const dir = path.join(root, name)
+    mkdirSync(path.join(dir, "bin"), { recursive: true })
+    writeFileSync(
+      path.join(dir, "product.json"),
+      JSON.stringify({ name: "glasspane-harness", version: "9.9.9", platformTargets: [{ os: "darwin", arch: "arm64" }, { os: "darwin", arch: "x64" }] }),
+    )
+    const script = await stepBody()
+    writeFileSync(path.join(dir, "step.sh"), script)
+    const lines = ["#!/bin/sh", 'path="$2"']
+    for (const [api, answer] of Object.entries(answers)) lines.push(`if [ "$path" = ${JSON.stringify(api)} ]; then`, answer === null ? "  exit 1" : `  printf '%s' ${JSON.stringify(answer)}`, "  exit 0", "fi")
+    lines.push("echo \"the fake gh was asked about an endpoint it has no answer for: $path\" >&2", "exit 4")
+    writeFileSync(path.join(dir, "bin", "gh"), `${lines.join("\n")}\n`)
+    chmodSync(path.join(dir, "bin", "gh"), 0o755)
+    const got = spawnSync("bash", [path.join(dir, "step.sh")], {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${path.join(dir, "bin")}:${process.env.PATH ?? ""}`, GH_TOKEN: "test-token", GITHUB_REPOSITORY: "o/r" },
+    })
+    return { code: got.status, text: `${got.stdout ?? ""}${got.stderr ?? ""}` }
+  }
+
+  const RELEASE = "repos/o/r/releases/tags/v9.9.9"
+  const complete = JSON.stringify({
+    draft: false,
+    assets: [
+      { name: "glasspane-harness-darwin-arm64.zip" },
+      { name: "glasspane-harness-darwin-arm64.zip.asc" },
+      { name: "glasspane-harness-darwin-x64.zip" },
+      { name: "glasspane-harness-darwin-x64.zip.asc" },
+      { name: "SHA256SUMS.txt" },
+      { name: "SHA256SUMS.txt.asc" },
+    ],
+  })
+
+  test("a public release carrying the whole matrix lets the lane through", async () => {
+    const got = await ask({ "repos/o/r": "42", [RELEASE]: complete }, "ok")
+    expect(got.code).toBe(0)
+    expect(got.text).toContain("cross-chain anchor held")
+  })
+
+  test("no release behind the tag is a refusal, which is what v0.13.0 needed", async () => {
+    const got = await ask({ "repos/o/r": "42", [RELEASE]: null }, "absent")
+    expect(got.code).toBe(1)
+    expect(got.text).toContain("has no GitHub Release")
+    expect(got.text).toContain("gh run rerun")
+  })
+
+  test("a draft release is a refusal: the assets exist but nobody can fetch them", async () => {
+    const got = await ask({ "repos/o/r": "42", [RELEASE]: JSON.stringify({ draft: true, assets: [] }) }, "draft")
+    expect(got.code).toBe(1)
+    expect(got.text).toContain("still a draft")
+  })
+
+  test("a public release missing one leg of the matrix is refused by name", async () => {
+    const partial = JSON.stringify({
+      draft: false,
+      assets: [
+        { name: "glasspane-harness-darwin-arm64.zip" },
+        { name: "glasspane-harness-darwin-arm64.zip.asc" },
+        { name: "SHA256SUMS.txt" },
+        { name: "SHA256SUMS.txt.asc" },
+      ],
+    })
+    const got = await ask({ "repos/o/r": "42", [RELEASE]: partial }, "partial")
+    expect(got.code).toBe(1)
+    expect(got.text).toContain("Missing:glasspane-harness-darwin-x64.zip glasspane-harness-darwin-x64.zip.asc")
+  })
+
+  test("an unreachable API is refused as unknowable, never read as a missing release", async () => {
+    const got = await ask({ "repos/o/r": null }, "outage")
+    expect(got.code).toBe(1)
+    expect(got.text).toContain("could not be reached")
+    expect(got.text).not.toContain("has no GitHub Release")
   })
 })

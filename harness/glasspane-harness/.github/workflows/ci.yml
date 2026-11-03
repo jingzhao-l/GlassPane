@@ -125,12 +125,12 @@ jobs:
               echo "$out"
               exit 1
             fi
-            if [ "$code" != "2" ] && ! printf '%s' "$out" | grep -qiE "refus|does not ship|not this product|does not publish"; then
+            if [ "$code" != "2" ] && ! grep -qiE "refus|does not ship|not this product|does not publish" <<<"$out"; then
               echo "::error::$rel exited $code without naming a refusal — that is a crash, not a gate"
               echo "$out"
               exit 1
             fi
-            if printf '%s' "$out" | grep -qE "npm notice|Publishing to|\+ @opencode"; then
+            if grep -qE "npm notice|Publishing to|\+ @opencode" <<<"$out"; then
               echo "::error::$rel looked like it published something"
               exit 1
             fi
@@ -175,6 +175,7 @@ jobs:
 
       - name: Product manifest agrees with the package it ships
         run: |
+          set -euo pipefail
           node -e '
             const fs = require("fs")
             const product = JSON.parse(fs.readFileSync("product.json", "utf8"))
