@@ -349,7 +349,7 @@ advance_existing_clone() { # $1=目录 $2=要装的 ref。回 0 = 这棵树可�
   _top=$(git -C "$_dir" rev-parse --show-toplevel 2>/dev/null || true)
   _here=$(cd "$_dir" 2>/dev/null && pwd -P || true)
   if [ -z "$_top" ] || [ -z "$_here" ] || [ "$_top" != "$_here" ]; then
-    say "  ${_dir} 自己不是一棵 git 仓库的根：git -C \"${_dir}\" rev-parse --show-toplevel 答的是 ${_top:-（没答话）}。"
+    say "  ${_dir} 自己不是一棵 git 仓库的根：git -C $(sh_quote "$_dir") rev-parse --show-toplevel 答的是 ${_top:-（没答话）}。"
     say "  本轮要是动手，动的就是 ${_top:-那一问没有答案} 那一棵，而不是你指的 ${_dir}——那是别人的仓库：不在它上面 fetch、不切它的分支、不碰它的工作树。"
     say "  下一步（两条都做得动，且不销毁任何东西）：a) GLASSPANE_INSTALL_DIR=<不属于任何仓库的目录> 重跑一键安装；"
     say "    b) 要装的那一棵在别处，就用 --repo <目录> 或 GLASSPANE_REPO=<目录> 指过去——指的目录自己必须就是仓库根。"
@@ -372,7 +372,7 @@ advance_existing_clone() { # $1=目录 $2=要装的 ref。回 0 = 这棵树可�
     # 路径必须加引号：HOME 里带空格时（/Users/John Smith）这一句照抄进去是**两个词**，
     # 于是 clone 落在 /Users/John 而 Smith/glasspane-… 变成一条没人请求的命令 —— 静默落错位置
     # 比拒掉更难发现。建议的目录也从被拒的这棵树推，不写死 ~。
-    say "    a) 换一处干净的家：GLASSPANE_INSTALL_DIR=\"${_dir}-$(printf '%s' "$_ref" | tr -c 'A-Za-z0-9._+-' '_')\" 重跑一键安装"
+    say "    a) 换一处干净的家：GLASSPANE_INSTALL_DIR=$(sh_quote "${_dir}-$(printf '%s' "$_ref" | tr -c 'A-Za-z0-9._+-' '_')") 重跑一键安装"
     say "    b) 自己收着这些改动：在 ${_dir} 里提交或转移到别处，再重跑本命令——这些文件去哪由你决定，不由安装器决定。"
     return 1
   fi
@@ -415,9 +415,9 @@ advance_existing_clone() { # $1=目录 $2=要装的 ref。回 0 = 这棵树可�
     # 那一形；判据对、句子漏一处，就是这道闸（install-sh 那条静态闸）现在扫的东西。
     # $_depth 保持不带引号：它要在打印出来的那一行里就是两个词（--depth 1），加引号反而合成一个
     # git 不认的参数。
-    say "    先 fetch 它——git -C \"${_dir}\" fetch --tags ${_depth:+$_depth }\"${_remote}\" \"${_ref}\"，只补对象、不动工作树。"
+    say "    先 fetch 它——git -C $(sh_quote "$_dir") fetch --tags${_depth:+ $(sh_quote "$_depth")} $(sh_quote "$_remote") $(sh_quote "$_ref")，只补对象、不动工作树。"
     if ! git -C "$_dir" fetch --tags $_depth "$_remote" "$_ref" >/dev/null 2>&1; then
-      say "    git fetch 非零退出：确认网络与该引用存在（git ls-remote \"${_remote}\" \"${_ref}\"），"
+      say "    git fetch 非零退出：确认网络与该引用存在（git ls-remote $(sh_quote "$_remote") $(sh_quote "$_ref")），"
       say "    或 GLASSPANE_INSTALL_DIR=<空目录> 换一处全新的 clone。本轮没有 clone、没有切分支。"
       return 1
     fi
@@ -437,7 +437,7 @@ advance_existing_clone() { # $1=目录 $2=要装的 ref。回 0 = 这棵树可�
       # 只许是读到的 commit，空串不行（旧写法在这里也只说"不动它"，同样的形状，不额外发明原因）。
       say "    fetch 之后仍读不出 ${_ref} 指向的 commit（${_ref}^{commit} 与 FETCH_HEAD 都答不出）：不动它。"
       say "    ${_dir} 原地不动，没有切分支、没有构建任何东西。"
-      say "    下一步：git clone --branch ${_ref} ${REPO_URL} 建一棵带分支的树，或 GLASSPANE_INSTALL_DIR=<空目录> 换一处全新的 clone。"
+      say "    下一步：git clone --branch $(sh_quote "$_ref") -- $(sh_quote "$REPO_URL") 建一棵带分支的树，或 GLASSPANE_INSTALL_DIR=<空目录> 换一处全新的 clone。"
       return 1
     fi
   fi
@@ -449,7 +449,7 @@ advance_existing_clone() { # $1=目录 $2=要装的 ref。回 0 = 这棵树可�
   # 切的是那个 commit 的 sha，不是名字：名字在按 tag 建的 clone 里不是一个 ref，git 会拒
   # `--detach <path>`；sha 才是这一句本来的意思。
   if ! git -C "$_dir" checkout --detach "$_tag" >/dev/null 2>&1; then
-    say "    git checkout --detach ${_tag} 失败：${_dir} 仍在 $(printf '%.7s' "$_head")，本轮没有构建任何东西。"
+    say "    git checkout --detach $(sh_quote "$_tag") 失败：${_dir} 仍在 $(printf '%.7s' "$_head")，本轮没有构建任何东西。"
     return 1
   fi
   # 切完再读一次：判据要落在切换之后的事实上，不是落在命令的退出码上。

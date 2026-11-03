@@ -291,7 +291,8 @@ test('缺陷2：gpg 不在 → 验签 unavailable → 拒装，且拒装文案�
     assert.equal(verdict.action, 'refuse', '"这道检查没跑成"不许塌进"tag 没签名"那支放行')
     assert.match(verdict.text, /没有跑 npm install/, verdict.text)
     assert.match(verdict.text, /--accept-unverified-signature/, '拒绝必须给出可执行的下一步')
-    assert.match(verdict.text, /git -C "\/Users\/dev\/glasspane" tag -v v1\.24\.1/, verdict.text)
+    assert.match(verdict.text, /git -C \/Users\/dev\/glasspane tag -v v1\.24\.1/, verdict.text)
+    assert.doesNotMatch(verdict.text, /git -C "/, '核对步骤不许再用双引号：它包不住 $( ) 与反引号（2026-11-03 本轮改走 quoteShellArg）')
     assert.ok(!verdict.text.includes('继续安装'), '拒装文案里不许出现放行：' + verdict.text)
   } finally {
     fs.rmSync(home, { recursive: true, force: true })

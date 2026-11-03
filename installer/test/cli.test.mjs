@@ -639,7 +639,11 @@ test('tagVerifyDecision: 只有 tag 真没签名才继续，签不上与没跑�
   assert.match(refusal.text, /没有跑 npm install/)
   assert.match(refusal.text, /没有注册 launchd/)
   assert.ok(!/继续安装/.test(refusal.text), '拒签的报文里不许出现"继续安装"')
-  assert.match(refusal.text, /git -C "\/repo" tag -v v1\.2\.3/, '拒绝必须给得出可执行的核对步骤')
+  // 惰性值原样印（`/repo` 不含 shell 元字符），这既是要照抄的命令也是 `quoteShellArg` 的表；
+  // 非惰性的那一半由 mcp-shell/test/daily-20261103-shell-printed-operand-inertness.test.mjs
+  // 与 remedy-shell-quoting.test.mjs 用真载荷钉，这里不重复一遍。
+  assert.match(refusal.text, /git -C \/repo tag -v v1\.2\.3/, '拒绝必须给得出可执行的核对步骤（惰性词，不是双引号）')
+  assert.doesNotMatch(refusal.text, /git -C "\/repo"/, '双引号包不住 $( ) 与反引号：核对步骤不许再用它')
   assert.match(refusal.text, /GLASSPANE_REF=/, '拒绝必须给得出下一步怎么继续安装')
 
   // 负例的另一半：安装器不认识的新判据不许被当成"没签名"放过。

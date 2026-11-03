@@ -465,10 +465,12 @@ test('S7-4 install.sh 静态闸：照抄句里不许出现裸的 git -C ${…}',
     INSTALL_SH_SRC.split('\n').filter((line) => /git ls-remote \$\{/.test(line)).map((l) => l.trim()),
     [],
     '同一族：远端名与 ref 也是照抄进 shell 的参数')
-  // 正面：那两句必须真以带引号的形式存在（只删裸形、不给带引号的形式，句子会整个消失）。
-  // 带引号在 shell 源码里是 `\"${_dir}\"`（say 的那一整行本身在双引号里），两种写法都算带引号。
-  assert.match(INSTALL_SH_SRC, /git -C \\?"\$\{_dir\}\\?" fetch --tags/, 'fetch 那一句的带引号形式')
-  assert.match(INSTALL_SH_SRC, /git ls-remote \\?"\$\{_remote\}\\?" \\?"\$\{_ref\}\\?"/, 'ls-remote 那一句的带引号形式')
+  // 正面：那两句必须真以**惰性词**的形式存在。2026-10-29 那一版给的是双引号
+  // （`git -C \"${_dir}\"`），而双引号照样展开 `$( )` 与反引号——带空格是一个词了，
+  // 带载荷仍是一段代码。本轮改成 `sh_quote`（与脚本 675 行那条 dry-run 委托行同一把尺子），
+  // 惰性字符组成的值原样印，非惰性的一律单引号包住。
+  assert.match(INSTALL_SH_SRC, /git -C \$\(sh_quote "\$_dir"\) fetch --tags/, 'fetch 那一句的惰性形式')
+  assert.match(INSTALL_SH_SRC, /git ls-remote \$\(sh_quote "\$_remote"\) \$\(sh_quote "\$_ref"\)/, 'ls-remote 那一句的惰性形式')
 })
 
 test('S7-4 install.sh 行为半：clone 目录带空格时，打印的两句照抄进去仍是一个词', () => {
@@ -489,8 +491,10 @@ test('S7-4 install.sh 行为半：clone 目录带空格时，打印的两句照�
     })
     const text = `${result.stdout}\n${result.stderr}`
     assert.match(text, /没有 nosuchtag 这个引用|fetch/, `前提：这一趟要走到 fetch 那一支：${text}`)
-    assert.ok(text.includes(`git -C "${spaced}" fetch --tags`), `打印的 fetch 句必须把路径包在引号里：${text}`)
-    assert.ok(text.includes('git ls-remote "origin" "nosuchtag"'), `打印的 ls-remote 句同理：${text}`)
+    assert.ok(text.includes(`git -C '${spaced}' fetch --tags`), `打印的 fetch 句必须把路径包成惰性词：${text}`)
+    // 惰性值原样印（`origin`、`nosuchtag` 不含任何 shell 元字符），这是 sh_quote 与
+    // installer 的 quoteShellArg 同一份表的行为半边（见 mcp-shell 的同名测试）。
+    assert.ok(text.includes('git ls-remote origin nosuchtag'), `打印的 ls-remote 句同理：${text}`)
     // 未加引号的那一形就是本条要红的地方（也是 S7-4 的反向变异会回来的地方）。
     assert.doesNotMatch(text, new RegExp(`git -C ${spaced.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} fetch`), '裸形又回来了')
   } finally {

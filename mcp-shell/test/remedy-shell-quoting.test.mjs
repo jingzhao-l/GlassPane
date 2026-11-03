@@ -447,10 +447,17 @@ const COMMAND_PREFIX = new RegExp(
   // `…补救（不需要手敲 launchctl）：node "${cliPath}" --restore-launchd` — a command operand behind
   // a full-width colon, wrapped in the very double quotes this rule exists to refuse — was
   // invisible to it. Measured: reverting that site to the double-quoted shape left the gate green.
+  //
+  // 2026-11-03, the same shape a fourth time in this repo: the verb **list** was the blind spot.
+  // `installer/cli.js` printed `git -C "${repoDir}" tag -v …` at eight sites while the same
+  // function quoted that very variable 24 lines below — and the gate could not see it, because
+  // `git` was never added to the hand-copied alternation. A list is always missing the next verb.
+  // So the verb is now a **shape**: a lowercase word (2-16 chars) in command position. Which
+  // operand needs quoting stays decided by position plus PATH_TYPED, exactly as before — only the
+  // verb half stopped being a list.
   "(?:^|[^A-Za-z0-9_$])(?:/?(?:usr/)?(?:bin|s?bin)/)?"
-  + "(?:chmod|chown|chgrp|mv|cp|cat|ls|df|plutil|python3|node|npx|launchctl|diskutil|"
-  + "kill|rm|mkdir|touch|open|curl|security|defaults|export|gzip|tar|sqlite3|grep|stat|find|sh|"
-  + "glasspaned|updater|installer)(?:\\s+(?:-[A-Za-z0-9_-]+|\\d{3,4}))*[\"'\\s]+$"
+  + "[a-z][a-z0-9_.+-]{1,15}"
+  + "(?:\\s+(?:-[A-Za-z0-9_-]+|\\d{3,4}))*[\"'\\s]+$"
 );
 const ANY_HOLE = /\$\{([^{}]*)\}/g;
 /** An interpolation whose name says it carries a filesystem location. */
@@ -508,4 +515,10 @@ test("every interpolated value inside a command-shaped literal in src and update
     `扫描集里 installer 那半边一处命令位都没看见（其余 ${inspected.length - installerInspected.length} 处）——扩集只是装饰：${inspected.join(" | ")}`);
   assert.ok(installerInspected.some((entry) => entry.includes("--restore-launchd")),
     "installer 的 `--restore-launchd` 补救命令不在扫描结果里");
+  // 2026-11-03：动词表改成形状之后，`git` 那一批必须**看得见**——否则"改成形状"这句话没有读数。
+  // 这八处是本轮修掉的（`git -C "${repoDir}" tag -v …` 一类），旧名单一条都不报。
+  assert.ok(installerInspected.filter((entry) => entry.includes("tag -v")).length >= 2,
+    `installer 的 git tag -v 出路不在扫描结果里（动词形状没生效）：${installerInspected.join(" | ")}`);
+  assert.ok(installerInspected.some((entry) => entry.includes("rev-parse --show-toplevel")),
+    "targetDir 的 `git -C … rev-parse --show-toplevel` 不在扫描结果里");
 });

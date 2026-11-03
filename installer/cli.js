@@ -1613,7 +1613,7 @@ export function tagVerifyDecision({ sig, pinRef, repoDir, acceptUnverified = fal
         + '安装到此为止：没有跑 npm install，没有 swift build，没有注册 launchd 作业。\n'
         + `内置公钥：key ${GLASSPANE_SIGNING_KEY_ID}（uid ${GLASSPANE_SIGNING_KEY_UID}），`
         + '就是本文件里那份 GLASSPANE_SIGNING_PUBLIC_KEY——要比对的是这一把，不是随便哪把签过名的。\n'
-        + `下一步：核对远端与这个 tag（git -C "${repoDir}" remote -v；git -C "${repoDir}" tag -v ${pinRef}）；`
+        + `下一步：核对远端与这个 tag（git -C ${quoteShellArg(repoDir)} remote -v；git -C ${quoteShellArg(repoDir)} tag -v ${quoteShellArg(pinRef)}）；`
         + '确认仓库与发布者公钥都无误后改用更新的发布 tag（GLASSPANE_REF=v<版本> 重跑）。'
         + '要装开发主线用 GLASSPANE_REF=main（那条路不做 tag 验签，会如实告警）。\n'
         + '该看的地方：SECURITY.md 的 "What the checks prove, and what they do not"——'
@@ -1633,8 +1633,8 @@ export function tagVerifyDecision({ sig, pinRef, repoDir, acceptUnverified = fal
           + `内置公钥：key ${GLASSPANE_SIGNING_KEY_ID}（uid ${GLASSPANE_SIGNING_KEY_UID}），`
           + '就是本文件里那份 GLASSPANE_SIGNING_PUBLIC_KEY。\n'
           + `下一步（先自己把这道检查跑一遍，看清缺的是哪一样）：`
-          + `gpg --version；git -C "${repoDir}" rev-parse --verify refs/tags/${pinRef}；`
-          + `git -C "${repoDir}" tag -v ${pinRef}\n`
+          + `gpg --version；git -C ${quoteShellArg(repoDir)} rev-parse --verify ${quoteShellArg(`refs/tags/${pinRef}`)}；`
+          + `git -C ${quoteShellArg(repoDir)} tag -v ${quoteShellArg(pinRef)}\n`
           + '确实在没有 gpg 的机器上要装，就修好工具链再重跑（`brew install gnupg` 或 `xcode-select --install`）；'
           + '理解风险、决定就在这一档缺结论的情况下继续，才显式带上放行旗标重跑：\n'
           + `  node installer/cli.js --repo ${quoteShellArg(repoDir)} --accept-unverified-signature\n`
@@ -1663,7 +1663,7 @@ export function tagVerifyDecision({ sig, pinRef, repoDir, acceptUnverified = fal
     action: 'refuse',
     text: `发布 tag ${pinRef} 的验签回了一个安装器不认识的判据（${sig.status}：${sig.detail}）。`
       + '安装到此为止：不认识的判据不许当成"没签名"放过。\n'
-      + `下一步：手动核对（git -C "${repoDir}" tag -v ${pinRef}），确认无误后重新安装。`,
+      + `下一步：手动核对（git -C ${quoteShellArg(repoDir)} tag -v ${quoteShellArg(pinRef)}），确认无误后重新安装。`,
   }
 }
 
@@ -1707,7 +1707,7 @@ export function tagVerifyAgainstTree({ verdict, tree, pinRef, repoDir }) {
     action: 'warn',
     text: `发布 tag ${pinRef} 的 GPG 签名有效，但它签的不是本次要装的这棵树：${why}。\n`
       + '安装继续，装出来的是这棵树的内容，不是那个已签名发布的内容——这句不说清楚，屏幕上那行绿字就是替没验过的字节作保。\n'
-      + `下一步（要装被签的那一版）：git -C "${repoDir}" checkout ${pinRef} 后重跑，或用一键安装脚本从发布 tag 另起一份：`
+      + `下一步（要装被签的那一版）：git -C ${quoteShellArg(repoDir)} checkout ${quoteShellArg(pinRef)} 后重跑，或用一键安装脚本从发布 tag 另起一份：`
       + `curl -fsSL ${INSTALL_SH_URL} | sh`,
   }
 }
@@ -2824,7 +2824,7 @@ export function toplevelRefuseText({ targetDir, problem }) {
   }
   return `${targetDir} 答不出 git 仓库根（这一带它不是 git 仓库，或 git 本身没答话）：`
     + '连"要动的是哪一棵"都判不出来，就不动它，也不装它。'
-    + `\n下一步：确认 ${targetDir} 是一棵 git 仓库（git -C "${targetDir}" rev-parse --show-toplevel 能不能答话）；`
+    + `\n下一步：确认 ${targetDir} 是一棵 git 仓库（git -C ${quoteShellArg(targetDir)} rev-parse --show-toplevel 能不能答话）；`
     + '要一份全新的 clone 就 GLASSPANE_INSTALL_DIR=<空目录> 重跑一键安装。'
 }
 
@@ -2892,7 +2892,7 @@ export function existingCloneDecision({ targetDir, ref, head = null, tagCommit =
       blocking: [],
       text: `${targetDir} 读不出 HEAD（不是 git 仓库、那目录没有一次提交，或 git 本身答不了）：`
         + '连"这棵树在哪"都判不出来，就不动它，也不装它。'
-        + `\n下一步：确认 ${targetDir} 是一棵 git 仓库（git -C "${targetDir}" rev-parse HEAD 能不能答话）；`
+        + `\n下一步：确认 ${targetDir} 是一棵 git 仓库（git -C ${quoteShellArg(targetDir)} rev-parse HEAD 能不能答话）；`
         + '要一份全新的 clone 就 GLASSPANE_INSTALL_DIR=<空目录> 重跑一键安装。',
     }
   }
@@ -3056,7 +3056,7 @@ export function advanceExistingClone({ repoDir, ref, spawn = spawnSync } = {}) {
         fetchArgs,
         remote: remote.remote,
         text: `${repoDir} 里没有 ${ref} 这个引用，而 `
-          + `git -C "${repoDir}" ${fetchArgs.join(' ')} 退出 ${String(fetched.status ?? 'null')}：`
+          + `git -C ${quoteShellArg(repoDir)} ${fetchArgs.map((a) => quoteShellArg(a)).join(' ')} 退出 ${String(fetched.status ?? 'null')}：`
           + `${String(fetched.stderr ?? '').trim().split('\n')[0] || '（git 没有留下 stderr）'}。\n`
           + '没有 clone、没有切分支、没有写入任何东西。下一步：确认网络与该引用存在（'
           + `git ls-remote ${remote.remote} ${ref}），或 GLASSPANE_INSTALL_DIR=<空目录> 换一处全新的 clone。`,
