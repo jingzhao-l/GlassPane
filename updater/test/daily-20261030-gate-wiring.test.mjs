@@ -64,8 +64,30 @@ test("the workflow gate's no-receiver advisories say so, and do not promise a re
   const { rc, out } = run(["scripts/check-workflows.mjs"]);
   assert.equal(rc, 0, `check-workflows failed:\n${out}`);
   const advisories = out.split("\n").filter((line) => line.trim().startsWith("△"));
-  assert.ok(advisories.length > 0, "the subtree advisories disappeared — re-read this control rather than deleting it");
   const unguarded = advisories.filter((line) => /first-match-consumer|without a queue of their own/.test(line));
+  if (advisories.length === 0) {
+    // 2026-11-03: the harness line implemented both judgements for its own two workflows (a
+    // workflow-level concurrency queue with cancel-in-progress: false, here-strings instead of
+    // piped first-match consumers, and a shell gate declared by every multi-statement body), so
+    // there is nothing left to hand over and the subtree prints no △ at all.
+    //
+    // The control therefore MOVES rather than disappearing — its whole point is that a hand-off
+    // must name a real receiver, and a tree with no hand-offs cannot demonstrate that. It asks the
+    // gate's own battery instead: each advisory class must still be listed among the cases proven
+    // able to fire. Deleting an advisory producer would take its case row with it, and this fails.
+    const { rc: batteryRc, out: batteryOut } = run(["scripts/check-workflows.mjs", "--self-test"]);
+    assert.equal(batteryRc, 0, `the gate's own battery does not pass anymore:\n${batteryOut}`);
+    for (const [rule, caseId] of [
+      ["the 141 / first-match-consumer advisory", "a producer piped into an awk that exits on the first match, under pipefail (S10-1)"],
+      ["the no-queue advisory", "a publishing job with no concurrency of its own (S10-6)"],
+      ["the shell-gate advisory", "a run body that leans on the runner's default shell (D6-b)"],
+    ]) {
+      assert.ok(batteryOut.includes(caseId), `${rule} is no longer proven able to fire anywhere — with no live advisory and no case row, this control reads nothing and must not be deleted silently`);
+    }
+    const summary = /check-workflows --self-test: (\d+) case\(s\) each verified to fail — (\d+) mutation\(s\) that had to be caught, (\d+) legal shape\(s\) that had to stay silent/.exec(batteryOut.trim());
+    assert.ok(summary, `the contract line this file pins is gone from the battery output:\n${batteryOut}`);
+    return;
+  }
   assert.ok(unguarded.length > 0, `the 141 / concurrency hand-offs are not in the output — this control now reads nothing:\n${out}`);
   for (const line of unguarded) {
     assert.match(line, /blocked by nobody/,
