@@ -61,11 +61,23 @@ OUT_DIR="$BUILD_DIR"
 SKIP_DAEMON=0
 SKIP_SETTINGS=0
 
+# 取值的三个旗标共用量子：`${2:?}` 只管"后面有没有东西"，不管"那是不是另一枚旗标"。
+# `--settings-bin --skip-daemon` 从前把 `--skip-daemon` 当成路径收下并 shift 2，于是那一枚
+# 旗标**消失了**——产物照常建，只是该跳过的没跳过（同一形状在 installer/cli.js 与 install.sh
+# 的 `--repo` 上都修过，判据也同一句：以 `-` 开头的不是值）。
+takes_value() { # $1=旗标名 $2=取到的值；非零 = 这个值不合法
+  case "$2" in
+    '') echo "make-app: $1 需要取值（后面没有东西）" >&2; return 2 ;;
+    -*) echo "make-app: $1 收到的是另一枚旗标（$2），不是路径——两个旗标之间缺取值" >&2; return 2 ;;
+  esac
+  return 0
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    --settings-bin) SETTINGS_BIN="${2:?make-app: --settings-bin 需要路径}"; shift 2 ;;
-    --daemon-bin) DAEMON_BIN="${2:?make-app: --daemon-bin 需要路径}"; shift 2 ;;
-    --out) OUT_DIR="${2:?make-app: --out 需要目录}"; shift 2 ;;
+    --settings-bin) takes_value "$1" "${2-}" || exit 2; SETTINGS_BIN="$2"; shift 2 ;;
+    --daemon-bin) takes_value "$1" "${2-}" || exit 2; DAEMON_BIN="$2"; shift 2 ;;
+    --out) takes_value "$1" "${2-}" || exit 2; OUT_DIR="$2"; shift 2 ;;
     --skip-daemon) SKIP_DAEMON=1; shift ;;
     --skip-settings) SKIP_SETTINGS=1; shift ;;
     --help|-h)
@@ -74,7 +86,9 @@ while [ $# -gt 0 ]; do
       awk 'NR>1 { if (/^#/) print; else exit }' "$0"
       exit 0 ;;
     -*)
-      echo "make-app: 未知选项 $1" >&2; exit 64 ;;
+      # 退码与两处入口同价：install.sh 与 installer/cli.js 对"不认识的旗标"回的都是 2，
+      # 而这一支从前回 64。同一个脚本族里两种退码，调用方就得写两个分支才能说完"参数错"。
+      echo "make-app: 未知选项 $1" >&2; exit 2 ;;
     *)
       # 旧用法：第一个位置参数 = 设置面板产物
       SETTINGS_BIN="$1"; shift ;;
@@ -89,7 +103,10 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 PYTHON_BIN="${GLASSPANE_PYTHON:-}"
 if [ -z "$PYTHON_BIN" ]; then
-  for candidate in python3 python /usr/bin/python3 /opt/miniconda3/bin/python3; do
+  # 只问 PATH 与系统那一条：`/opt/miniconda3/bin/python3` 是**开发机上的解释器**，
+  # 把它写进产品脚本，等于让"产物有图标"这件事在别的机器上依赖某一个人装过什么。
+  # 要指定就显式给 GLASSPANE_PYTHON（上面那一档就是为它留的）。
+  for candidate in python3 python /usr/bin/python3; do
     if command -v "$candidate" >/dev/null 2>&1 || [ -x "$candidate" ]; then
       PYTHON_BIN="$candidate"
       break
@@ -170,7 +187,15 @@ PY
                 "icon_512x512@2x.png:1024"; do
       name="${spec%%:*}"
       px="${spec##*:}"
-      sips -z "$px" "$px" "$TMP_DIR/master.png" --out "$ICONSET/$name" >/dev/null
+      # `set -eu` 之下这一行从前没有守卫：一枚尺寸失败（`sips` 对奇形 master.png、对不支持的
+      # 深度、对只读临时卷都会非零）就把整个 bundle 构建判死，而下面的 iconutil 是有守卫的、
+      # 降级文案都写好了——"图标这一格失败就跳过图标"是本脚本自己立的规矩，sips 那一半没跟上。
+      # 更糟的是更新器那条 staged build 走的就是这个脚本（apply.js 的构建步），于是图标问题
+      # 会变成"这台机器永远更新不了"。
+      if ! sips -z "$px" "$px" "$TMP_DIR/master.png" --out "$ICONSET/$name" >/dev/null 2>&1; then
+        echo "make-app: sips 生成 $name 失败，跳过图标（.app 无图标，诚实降级）" >&2
+        break
+      fi
     done
     if iconutil -c icns "$ICONSET" -o "$ICNS_PATH" >/dev/null 2>&1; then
       ICON_OK=1
@@ -261,6 +286,13 @@ fi
 if [ "$SKIP_DAEMON" = "0" ]; then
   make_bundle "$OUT_DIR/GlassPane Daemon.app" "GlassPane Daemon" "com.glasspane.daemon" \
     "glasspaned" "$DAEMON_BIN" 1
+fi
+
+if [ "$SKIP_SETTINGS" = "1" ] && [ "$SKIP_DAEMON" = "1" ]; then
+  # 两个 bundle 都被点名跳过 ⇒ 这一趟一个产物都没造。从前它照样打印"输出目录"并退 0，
+  # 而调用方（含 installer 的构建步）读到的是一句成功。"什么都没做"必须是一种失败。
+  echo "make-app: --skip-settings 与 --skip-daemon 同时给出，本次不产出任何 bundle——拒绝以成功收口" >&2
+  exit 2
 fi
 
 if [ "$ICON_OK" != "1" ]; then

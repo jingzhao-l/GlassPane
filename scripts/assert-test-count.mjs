@@ -30,7 +30,13 @@ import fs from 'node:fs'
 // 线（2026-10-20 实测：`Test run with 2 tests in 1 suite`）在复数写法下一行都匹配不上，
 // 于是"这一半 runner 没出声"——把一个真跑了的套件读成零。
 const XCUITEST = /Executed (\d+) tests?, with(?: (\d+) tests? skipped and)? (\d+) failures?/g
-const SWIFT_TESTING = /Test run with (\d+) tests? in (\d+) suites?/
+// Swift Testing 的总计行**自带失败数**，形状是
+// `Test run with 76 tests in 8 suites failed after 1.586 seconds with 3 issues.`
+// （实测于 2026-11-03 那一趟：同一份日志里 XCTest 报 1577/1 failure，Swift Testing 报 3 issues）。
+// 从前这一行只取了 tests/suites 两个数，failures 永远从 XCTest 那一侧来——于是"只有
+// Swift Testing 那一半红"的运行在这道闸上读起来是绿的（缺陷 #31，P3）。它有自己的退出码，
+// 但这条闸的职责恰恰是"退出码之外再数一遍"。
+const SWIFT_TESTING = /Test run with (\d+) tests? in (\d+) suites? (?:passed|failed) after [\d.]+ seconds(?: with (\d+) issues?)?/
 
 function usage(message) {
   if (message) process.stderr.write(`error: ${message}\n`)
@@ -84,6 +90,8 @@ for (const file of files) {
     swiftTestingSeen += 1
     swiftTestingSum = Math.max(swiftTestingSum, Number(testing[1]))
     fileTests = Math.max(fileTests, Number(testing[1]))
+    // 与 XCTest 那一侧同一条规矩：这里只需要"> 0 就是红"。
+    failures += Number(testing[3] ?? 0)
   }
   if (fileTests === 0) silent.push(file)
 }

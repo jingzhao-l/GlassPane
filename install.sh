@@ -512,6 +512,16 @@ for _arg in "$@"; do
   fi
   case "$_arg" in
     --repo) _want_repo_arg=1 ;;
+    --repo=*)
+      # 缺陷 #13（P2，两入口副作用不同）：`--repo=<目录>` 这个连写形这里从前不认识，于是它
+      # 被当成"没给定位位"往下走——先付一次 depth-1 网络 clone，再在委托时由 installer/cli.js
+      # 以"未知参数"退 2。两条一键入口对同一串 argv 退码相同（2），但只有这一条**写了盘**，
+      # 而那枚旗标存在的理由恰恰是"别 clone"。判据与 cli.js 的 `case '--repo':` 一致（它也只收
+      # 两枚的形式），所以这里不收连写、不新增一条参数语义，只是**在付代价之前**给同一个答案。
+      say "这面旗标收的是两枚的形式：--repo <目录>（连写 --repo=<目录> 这里和 installer/cli.js 都不收）。"
+      say "  收到的那一枚是：$_arg"
+      say "  本轮没有 clone、没有委托、没有写任何东西。"
+      exit 2 ;;
     --no-bootstrap) _no_bootstrap=1 ;;
     # --help 排在这里而不是另起一轮扫描：`--repo --help` 在 installer/cli.js 里是"值被 --repo 吃掉"
     # （parseArgs 的 case '--repo' 直接吞下一枚），这里跟着同一个形状走。跟着**吞**，不跟着**答**：
@@ -625,6 +635,18 @@ elif looks_like_repo "$CLONE_DIR"; then
   # 两处的**过程**由 install-sh.test.mjs 用同一把假 git 各跑一遍来钉，不在这里发明第二种说法。
   if [ "$DRY_RUN" = "1" ]; then
     say "[dry-run] 将检查 ${CLONE_DIR} 能否前进到 ${REF}（干净就 fetch + checkout --detach，脏就拒绝并点名挡路的文件）"
+  elif [ "$(uname -s)" != "Darwin" ]; then
+    # 缺陷 #12（P2，假主张）：下面那道平台闸的职责写在它自己的注释里——"源码已经在手边时也要停，
+    # 且一个字节都不写"。而 `advance_existing_clone` 就在它上面几行：那一步真的跑 `git fetch`
+    # （往 .git 里写对象）与 `git checkout --detach`（重写工作树）。在 Linux 上用一棵干净的
+    # 既有 clone 跑这一支，报"一个字节都不写"的同一趟已经改过工作树了。
+    # 修法不是把平台闸往前挪——它排在源码定位之后是 2026-10-22 那条决定（`installer/test/
+    # daily-20261022-install-isolation.test.mjs` 里"平台闸必须排在源码定位之后、委托之前"就是它），
+    # 而是让**这一步自己**在动树之前问一次平台：非 Darwin 就在这儿停，一个字节的写都没有。
+    say "本安装器只支持 macOS（uname -s = $(uname -s)）：到这里就停，且没有动过那棵树。"
+    say "  ${CLONE_DIR} 原地不动：没有 fetch、没有 checkout、没有构建、没有委托。"
+    say "  这一道与委托前那一道是同一句判据的两个位置——后者管『已经定位到源码之后不再委托』，这一道管『更早就别写你的树』。"
+    exit 1
   else
     advance_existing_clone "$CLONE_DIR" "$REF" || fail "既有 clone 没有被前进：上面就是原因，本轮没有构建、没有覆盖 ~/Applications。"
     REPO="$CLONE_DIR"
@@ -746,7 +768,9 @@ fi
 # 而 main 在 parseArgs 之后、install 之前真的调用 platformRefusal() 并据此置 exit 1。行号会漂，
 # 所以这里只给复测命令，不给坐标。
 # 真实的两闸形状是这一句：install.sh 在委托之前拒，cli.js 也拒，且 cli.js 那一拒才是桩不掉的那一道。
-# 这一道的职责是"源码已经在手边时也要停，且一个字节都不写"——上面那一支只管"要 clone 的那一趟"，
+# 这一道的职责是"源码已经在手边时也要停，且不 delegate"——上面那一支只管"要 clone 的那一趟"，
+# 而"动既有 clone 之前先问平台"那一半在 2026-11-03 交给了上面那支（缺陷 #12：那句"一个字节都不写"
+# 当时是被 advance_existing_clone 的 fetch/checkout 否证的，现在这句话与代码对得上了）。
 # GLASSPANE_REPO 指的仓库、当前目录、既有 clone 这三条路都不经过它。那一道的职责是"把 PATH 换掉也
 # 绕不过去"：`uname` 是 PATH 上一个可以被换掉的程序，`process.platform` 是 node 向主机问来的。
 # 历史事实照旧记着（2026-10-22 实测）：那时本脚本还没有这一道，在一个 GlassPane checkout 里把

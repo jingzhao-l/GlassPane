@@ -1347,7 +1347,12 @@ function jobPolicyProblems(lines) {
     // release — the attack this rule exists for — has nothing to reach. Enforcing the 40-hex shape
     // here would demand a syntax GitHub does not accept for local actions and make the fork's
     // release lane unfixable rather than safe.
-    if (used && current.environment && !/^\.{1,2}\//.test(used[1]) && !/@[0-9a-f]{40}/.test(used[1])) {
+    // 本轮（2026-11-03）把这一条从"只问声明了 environment: 的 job"扩到**每个 job**。旧注释说
+    // "扩到只读 lane 是另一次改动"——这次就是那一次：一次 retag 的 `@v4` 在任何一条 lane 上跑的
+    // 都是别人改过的代码，而 runner 手里那枚默认 token 读得到的东西足够伪造一次"我们自己的 CI
+    // 绿了"的证据（`assert-tag-ready` 认的就是 GitHub 的 runs 记录）。钉 SHA 的成本本仓是零：
+    // 三条可变引用都已由 `gh api repos/<action>/commits/<tag>` 量到确切 commit（见 workflows）。
+    if (used && !/^\.{1,2}\//.test(used[1]) && !/@[0-9a-f]{40}/.test(used[1])) {
       current.unpinned.push({ ref: used[1], line: i + 1 })
     }
     // Shape, not provenance. A `uses:` value GitHub cannot resolve makes the whole workflow
@@ -1376,9 +1381,12 @@ function jobPolicyProblems(lines) {
           `Add "contents: read" (or write) to the block at line ${job.line}.`,
       )
     }
-    if (job.environment && job.unpinned.length) {
+    if (job.unpinned.length) {
+      const why = job.environment
+        ? `declares "environment: ${job.environment}" (so it can read that environment's secrets) but runs`
+        : 'runs'
       out.push(
-        `job "${job.name}" declares "environment: ${job.environment}" (so it can read that environment's secrets) but runs ${job.unpinned
+        `job "${job.name}" ${why} ${job.unpinned
           .map((u) => `${u.ref} at line ${u.line}`)
           .join(", ")} by mutable tag — pin every "uses:" in this job to a 40-hex commit SHA.`,
       )
@@ -1539,7 +1547,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: run the real script
         run: node scripts/check-version.mjs
       - name: gated on a secret
@@ -1711,15 +1719,35 @@ jobs:
     },
     {
       id: "environment job running a mutable action tag",
-      // `environment:` is what makes the job interesting: it is the job that can read the
-      // signing key. Turn on an environment in BASE (whose steps run `actions/checkout@v4`)
-      // and the pin rule must fire on that ref.
+      // `environment:` 仍是这条判据最要紧的那一档（它能读签名钥匙）。BASE 现在自己钉住了 SHA，
+      // 所以这里必须把可变引用**放进来**，否则这条案例测的是别的规则。
       apply: (t) =>
         t.replace(
           "  build:\n    name: build the thing\n    runs-on: ubuntu-latest\n",
           "  build:\n    name: build the thing\n    runs-on: ubuntu-latest\n    environment: release\n",
+        ).replace(
+          "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n",
+          "      - uses: actions/checkout@v4\n",
         ),
       expect: /pin every "uses:"/,
+    },
+    {
+      id: "只读 lane（没有 environment）里的可变 action tag 也必须抓 — 判据扩面的那一半",
+      apply: (t) =>
+        t.replace(
+          "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n",
+          "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n      - uses: actions/setup-python@v5\n",
+        ),
+      expect: /pin every "uses:"/,
+    },
+    {
+      id: "没有 environment 而每一步都钉住或本地的 job 不许红（扩面之后的对照）",
+      apply: (t) =>
+        t.replace(
+          "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n",
+          "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n      - uses: ./.github/actions/setup-bun\n      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4\n",
+        ),
+      absent: /pin every "uses:"/,
     },
     {
       id: "a repo-local action in an environment job is not an unpinned ref",
@@ -1736,8 +1764,8 @@ jobs:
             "  build:\n    name: build the thing\n    runs-on: ubuntu-latest\n    environment: release\n",
           )
           .replace(
-            "- uses: actions/checkout@v4",
-            "- uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n      - uses: ./.github/actions/setup-bun",
+            "- uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n",
+            "- uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n      - uses: ./.github/actions/setup-bun\n",
           ),
       absent: /pin every "uses:"/,
     },
@@ -1751,7 +1779,7 @@ jobs:
       // The shape GitHub itself rejects. Written the way the defect actually shipped: a
       // 40-hex SHA standing alone where `actions/upload-artifact@<sha>` belongs — a pin the
       // pin rule is happy with, and a workflow file GitHub cannot register at all.
-      apply: (t) => t.replace("- uses: actions/checkout@v4", "- uses: cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2"),
+      apply: (t) => t.replace("- uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4", "- uses: cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2"),
       expect: /must be "\.\/some\/local\/action" or "owner\/repo@ref"/,
     },
     {

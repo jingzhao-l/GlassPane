@@ -1651,10 +1651,32 @@ export function tagVerifyDecision({ sig, pinRef, repoDir, acceptUnverified = fal
     }
   }
   if (sig.status === 'unsigned') {
+    // 缺陷 #11（P1 信任倒置）：这一支从前只 warn 就继续，而上面 `unavailable`（这道检查压根
+    // 没跑成）是硬拒——同一件事（"这台机器现在证明不了这一版是谁发布的"）弱结论那一档反而
+    // 走容易的路。`SECURITY.md` 写的不是这样："no .asc published … authorship is unknown,
+    // not proven"，那一节要求的是**人来批准**（updater 那侧就是 `--consent unsigned-release`）。
+    // 两条入口对同一个风险不能一个要同意一个不要，而其中这条恰好是每天新装用户走的那一条。
+    // 用的旗标与上面那一档同一个（它自己就写着"只批'缺证明'"），不新增对外参数。
+    if (!acceptUnverified) {
+      return {
+        action: 'refuse',
+        text: `发布 tag ${pinRef} 没有可核验的 GPG 签名（${sig.status}：${sig.detail}）。\n`
+          + '这一档与上面"验签没有跑成"是同一件事的两面：这台机器现在无法证明这一版是谁发布的。'
+          + '安装到此为止：没有跑 npm install，没有 swift build，没有注册 launchd 作业。\n'
+          + '签名**存在而验不过**（invalid）是另一档，任何同意都不覆盖它；这里缺的是来源证明的增量。\n'
+          + `内置公钥：key ${GLASSPANE_SIGNING_KEY_ID}（uid ${GLASSPANE_SIGNING_KEY_UID}）。\n`
+          + `下一步：先问这一版到底有没有发布签名（git -C ${quoteShellArg(repoDir)} tag -v ${quoteShellArg(pinRef)}；`
+          + '发布物那一侧看 SHA256SUMS-<版本>.txt.asc 在不在），确认你是在没有作者身份证明的情况下有意安装，'
+          + '才显式带上放行旗标重跑：\n'
+          + `  node installer/cli.js --repo ${quoteShellArg(repoDir)} --accept-unverified-signature\n`
+          + '它与 updater 的 `--consent unsigned-release` 同一形态；`--no-prompt` 不是这里说的同意。',
+      }
+    }
     return {
       action: 'warn',
-      text: `发布 tag ${pinRef} 没有可核验的 GPG 签名（${sig.status}：${sig.detail}）`
-        + '——继续安装：缺的是来源证明的增量，不是篡改迹象',
+      text: `发布 tag ${pinRef} 没有可核验的 GPG 签名（${sig.status}：${sig.detail}），`
+        + '本轮由 --accept-unverified-signature 显式放行：这一版是在**没有作者身份证明**的情况下装上的，'
+        + '不是"验签通过"，也不是"确认它没签名"。',
     }
   }
   // 没见过的新判据一律停下：把"不认识"当成"没签名"放过，等于每加一种失败模式
