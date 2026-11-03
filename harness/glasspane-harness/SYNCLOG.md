@@ -2,6 +2,149 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-11-03（第二十七次会话）· 取号 0.14.0：发布链的三条"看不见"、tag 的身份那一格、以及上一轮 31 条待办的清算
+
+开工时树上没有别人的未提交批次（整树 `git status --porcelain` 空，HEAD `b9fa40b8`），
+`df -k /Volumes/Eng-Dev` = 15379576 KB 可用（≈14.7 GiB，够 `bun install` 与一次单目标构建）；
+`bun` = 1.3.14（`packageManager` 钉的那一个），`.external/opencode` 的 `describe` == `upstream.json`
+的 pin `v1.18.32`、`fsck` 无错、工作树干净。父仓 `check-workflows --self-test` 48 例各验能红、
+`check-doc-links` 32 份文档 / 270 条仓内链接 / 0 问题。
+
+### 一、上一轮没收口的两件事：一件是真待办，一件是半程发布物
+
+1. **`gp-harness-orphan-20261010` / `gp-harness-sc5-fork-20261020`**：`git fetch origin --prune` 后
+   两条远端分支都已不存在，`git branch -r` 只剩 `main` 与 dependabot。按内容重验（不用分支名也不用
+   提交信息）：`verify-published.ts:363` 现在判的是**已安装清单**的 os/cpu/version gate，
+   `grep -n "platform block" -A3` 复査没有"拿 product.json 跟自己比"的自回显断言；
+   `script/registry-readiness.ts` 与 `src/tool/glasspane/providers.ts` 都在主干上。
+   结论与上一轮 §一 一致：**两笔都已收**，本轮只是把判据从提交信息换成文件字节。
+2. **v0.13.0 的发布三格只齐一格半**（本轮开工第一件事）。实测读数：tag 在且签名可验
+   （peel `bb3c2f22`），`gh release view v0.13.0` → **release not found**，
+   registry 三个包里 `darwin-x64@0.13.0` **已在**（`npm view … time` 给的是 2026-10-31T16:38:25Z），
+   wrapper 与 arm64 没有。上一轮台账写的是"三个 0.13.0 都查不到"——那一格是 npm 读副本延迟，
+   x64 其实上架了，所以形态比台账记的更糟：**一次半程发布，而且没人拦得住**。
+   本轮补法与结果：`gh workflow run release.yml --ref v0.13.0 -f publish_npm=true -f confirm=true`
+   → run `41567080762` **success**，npm 三条 job（arm64 / x64 / wrapper）+ `install the published
+   bytes and run them` 全绿，registry 三包 `--prefer-online` 逐个点名都等于 0.13.0。
+   GitHub Release 那一格**补不了**，原因写在最后"未观测"那一节。
+
+### 二、本轮量到的数字（每条都写明量法，不沿用上一轮读数）
+
+- `fork-diff --check`：开工 4637/6746 byte-identical, 288 edited, 114 added, 1707 deleted（绿）；
+  收口重记后 **4634/6754, 291 edited, 122 added, 1707 deleted**。added +8 全是本轮我们这侧的新文件
+  （`script/tree-anchor.mjs` + 7 个新测试文件），edited +3 是被判据动过的既有文件，
+  deleted 1707 未动。（量法：`node harness/tools/fork-diff.mjs --check`，需参照克隆。）
+- `tool-surface --check`：面 A **12948 LOC / 21.89%**（16 文件覆盖不变，本轮没动 `mcp-shell/src`）；
+  面 B 12080 → **13008 LOC（+928）**，覆盖 229 → **232 文件**；被排除在面 B 之外的测试
+  **57 文件 / 9141 行**。两面仍在文档 10% 上限之上（既成超量，棘轮只挡进一步增长）。
+  增长归属写在金样提交正文里；`surface-semantics --check` 仍 **0 命中 / 23 文件**、
+  三条正对照 3/3 发射——所以这不是把判定挪进呈现面。
+- `brand-surface --check`：**26 product + 2 doc、1323 shipped-code 文件、0 命中、血缘 9632 → 9638
+  （+6 / 覆盖 3330 → 3338 文件）**。`--record` 必须带 `--lineage-note`（本轮就按这条纪律记了归属：
+  增量全落在新增的拒绝型夹具与注释里，它们点名上游名是为了证明判据能拒；产品字节未变）。
+  新加的**正对照 4/4 发射**（旧代码把某条形正则换成永不匹配式、保留规则 id，`--check` 照样绿）。
+- `product-surface --check`：开工 **6587 条一致 / 0 问题** → 本轮加两条规则并跟着版本线走完后
+  **6608 条一致 / 0 问题**，`glasspane-harness@0.14.0`。它无基线、**永不 `--record`**（`--record` 退 2）。
+  本轮新增的两条：`release-target-matrix`（workflow 里两份写死的 `{target, runner}` 字面量矩阵 ⇄
+  `product.json` 的 `platformTargets` 双向集比 + 两矩阵互比 + os-arch 唯一性）、
+  `signing-fingerprint`（同一把主指纹在三处活字面量：fork `scripts/install.sh`、父仓
+  `updater/lib/signature.js`、父仓 `installer/cli.js`，两两相等；父仓那侧**只读**）。
+- `hook-liveness --check`：21 钩子 no drift，bound hooks 2/2。
+- `kernel-pin --check`：`iterate-kernel@0.1.10` + lock integrity + 26 个契约文件逐条 sha256（绿；
+  本轮没动内核语义，所以没有 pin 升级这个决定要做）。
+- `kernel-conformance.mjs`：**16 个 fixture 全部按记录答复**（1 implementation，oracle+golden 混合）。
+- 固定点测试：`bun test --timeout 30000` 工具面六文件 **224 pass / 0 fail**（开工基线 174 pass /
+  4 文件）；`test/script/` 侧 `workflow-gates` **54 / 0**（开工 35）、新 `tree-anchor` **12 / 0**、
+  新 `assert-ci-green` **10 / 0**、`postinstall-resolution-anchored` **8 / 0**、
+  `upstream-dev-mutators` **5 / 0**、`build-native-install-locked` **4 / 0**、
+  `models-and-keys-share-claim` **7 / 0**；`packages/tui` 快照 **36 pass / 0 fail**（8 snapshots）。
+- `installer-selftest.sh`：**all 208 checks held**（开工 188 → 安装器泳道 199 → 主代理补 npm 腿 208）。
+- `publish.ts --dry-run`：`ok glasspane-harness@0.14.0 packs cleanly`（pack 形状、bins 可执行、
+  wrapper 的 optionalDependencies == `product.json` 矩阵、os/cpu gate 全过）。
+- 四个发布包 `bun run typecheck`：opencode / tui / sdk / plugin 各 **0 错**。
+
+### 三、本轮我替你做了哪些决定 → 依据 → 回滚
+
+1. **取号 0.14.0（minor）而不是 0.13.1（patch）**。依据：本版有两处产品面**形状**变动——`gp_*` 的
+   拒绝帧带上 `dimension`，以及"引擎树里声明了却读不到的 project plan"从 `{ok:true, plan:null}`
+   翻成具名拒绝 `GP_E_RUN_PLAN_PATH`（一个原本回 `ok` 的调用现在回拒绝）。判据的反面也写在
+   CHANGELOG：其余全是修复，只有它们的话这一笔就是 patch。回滚：revert `860bfb31`。
+2. **split 仓的 `main` 用带显式 SHA 的 `--force-with-lease` 覆盖**（`c440e7b8 → 97bc2d70`）。
+   为什么要覆盖：上一轮收口清理按纪律删掉了本地 `split/*` 搬运分支，本轮 `git subtree split`
+   因此新建了一条**无共同祖先**的历史（merge-base 为空），普通 push 必被拒。
+   被覆盖内容不丢的逐条证明：① 远端 tip 的 tree `53d5e8fb…` 与主干 `67e1c23e:harness/glasspane-harness`
+   **逐字相等**，即远端 main 上没有任何主干没有的内容（不存在 split-only）；
+   ② `git diff --name-status refs/tmp/splitmain2 split/glasspane-harness` = **8 A / 32 M / 0 D**，
+   一个文件都没掉；③ 掉的那批 SHA 的 subject 全是历轮 `[gp]` 提交，其内容以文件字节形式在主干里。
+   另外 tag（含 v0.13.0）指向旧线，覆盖 main 不影响其可达性——而且现在有 ruleset 挡着（见决定 3）。
+   回滚：`git push --force-with-lease=refs/heads/main:97bc2d70… git@github.com:jingzhao-l/glasspane-harness.git c440e7b8:refs/heads/main`。
+3. **给 split 仓加了仓库级 tag ruleset** `published-tags-immutable`（id 26423927，target tag，
+   include `refs/tags/v*`，rules update + deletion + non_fast_forward，enforcement active，
+   bypass 空，`current_user_can_bypass: never`）。依据：上一轮安装器泳道实测 GitHub 的 **ORG 级**
+   tag protection 端点对本仓 404（`owner_type=User`）并据此留下"两条出路都不可用"的结论；本轮把
+   那条结论否证了——仓库级 ruleset 可用，且实测有效：把 v0.12.5 强制推到它自己已指向的 commit
+   （零损害的判据形状）被服务端拒为 `Cannot update this protected ref`，事后 peel 一字未动；
+   新建 tag 仍然允许（发布要做的事，本轮 v0.14.0 就是这么打上去的）。代价：将来要动一个已发布 tag
+   必须先删这条 ruleset，而这正是我们不想做的事。
+   回滚：`gh api -X DELETE repos/jingzhao-l/glasspane-harness/rulesets/26423927`。
+4. **`tree-anchor` 的豁免从"路径叫 SYNCLOG"改成"按字节量方向"**。依据：`release.yml` 原步骤要求
+   tag 的 tree 与主干子树**逐字节相等**，而台账只能在发布之后写、tag 又永不移动——于是任何 tag
+   在主干收过一笔台账之后就永远补不完（本轮补 v0.13.0 正是撞在这上面）。新判据只容忍
+   `SYNCLOG.md`/`CHANGELOG.md` 两侧都在、且主干那份＝tag 那份＋纯新增行（`carriedByTag==0`、
+   `addedToTrunk>0`），命中时大声打 `△` 并报行数。写这条时我自己先错过一次：先按"字节前缀"实现，
+   实测 v0.13.0 是 `49 0 SYNCLOG.md` 且新增插在**第 237 行**（台账倒序，新条目在顶部），前缀判据误拒——
+   改成按 numstat 量方向。回滚：revert `fa027fd0` 与 `000499f5`。
+5. **`publish-gate` 新增跨链闸**（npm 腿开跑前必须证明这个 tag 有一个公开 Release 且资产集与
+   `product.json` 矩阵双向相等）。依据：v0.13.0 的半程发布就是这么发生的——两条链各自自洽、
+   链与链之间没有一道闸。选位：`publish-platform` 之前，拒绝还免费的最后一刻，不新增 secret、
+   不扩权限。代价：将来"先发 npm 后补 Release"这条路被彻底堵死（我认为这本就该堵）。
+   回滚：revert `000499f5`。
+6. **`assert-ci-green` 去掉 `event=push` 过滤**。依据：问题问的是"这个 commit 的 CI 绿了吗"，
+   而带过滤时同一 commit 上 dispatch 跑绿的那条不可见、一条早已被取消的 push 记录替它答"cancelled"
+   ——本轮第一次重跑就是这么被顶住的。保留的严格性：仍要求**最新一条**是 success（"最绿不等于最新"
+   不改）、没有记录就拒、问不到就拒。回滚：revert `fa027fd0`。
+7. **`postinstall` 从"能解析到就算装好"改成三条独立判定**（本次安装的树内 + manifest 版本等于
+   wrapper 封存的版本 + 有安装记录时记录必须点名这个目录/版本/`sha512-` integrity/tarball 名）。
+   依据：回执说"唯一的完整性陈述是 `--version` 字符串相等"，实测成立。代价：`npm install -g`／pnpm／
+   bun 不写 `.package-lock.json`（本轮实测），所以第三条对它们只可能是"没有记录"，此时按前两条判
+   并有具名用例钉住——不把"读不到记录"偷换成"什么都不验"。回滚：revert `bf81bc07`。
+8. **分享通道按"宣称跟上事实"收口，没动产品边界**。依据：`build.ts` 的 `web = !flag("no-web")` 默认
+   把上游 app 打进二进制，而 `docs/models-and-keys.md` 说这条通道被摘干净了——两条出路里我选了改
+   宣称那一条，因为把内嵌默认关掉会改二进制内容形状（那是另一个决定，要连 brand/product 闸与
+   构建通道一起改）。回滚：revert `bf81bc07`。
+9. **面 B 棘轮重记（+928 LOC / +3 文件）与血缘 +6 重记**。依据：都是本轮修复自己的增长，
+   且 `surface-semantics` 0 命中证明不是把判定挪进呈现面；血缘增量由 `--lineage-note` 承担归属。
+   回滚：revert `01410aee`。
+10. **两处提交正文被我自己写坏**（`000499f5`、`01410aee`）：我在 `bash -c` 里用了**非引号 heredoc**，
+    正文里的反引号被当成命令替换执行，标签（`fork-diff`、`tool-surface` 这类名字）从消息里消失了。
+    数字与论述未受影响。修法选了非破坏性的 `git notes`（正文全文挂在 commit 上，已随
+    `refs/notes/commits` 推送）+ 本节记录，而不是改写已推送的历史。纪律回写：本仓后续所有提交正文
+    一律用文件写入工具产出的 `-F` 文件，不在 shell 里现写 heredoc。
+
+### 四、上一轮 31 条待办的清算（发现 N 条就要有 N 条处置）
+
+工具面 10 条：8 条修完（含 `dimension`、capability 列表、plan 拒绝、DAEMON_ORIGIN 的理由错位、
+evidence 归属、remedy 扫描名单、`SUMMARY_MAX_LENGTH` 单源、大小写折叠），2 条**否证**
+（`GP_E_SCHEMA` 与 `!resp.ok`：`git log --all -S` 与两棵树 grep 均零命中，锚点从未存在）。
+尺子层 10 条：5 条修完（brand 正对照、`packages/opencode\b` 掩码、fork-diff 四桶计数被校验、
+`totalToolSurfaceLoc` 有读者、zod-bundle 改文档那侧），4 条**否证**（`hook-liveness` 的 `--offline`
+退出码早已分码、`fork-diff --record` 无参照时实测退 2 且不写金样、`product-surface` 的两个锚不存在、
+`release-artifact` 的豁免已按方向与行数判），1 条改文档（`harness/README.md` 的旧数字换成当场读数）。
+发布与供应链 8 条：8 条全部修完（被验字节≠被发字节、转公开前未按安装器方式验签、信任锚的强制机制、
+remedy 自身的 `curl|bash`、`verify_asset_gpg` 传参〔**否证**：`198f6c53b` 起就按参判，本轮补的是钉住它的
+测试〕、postinstall 解析劫持、`--os="*" --cpu="*"` 的二次解析、上游 dev 脚本旁路）。
+用户面 3 条：2 条**否证为幻影**（`docs/features-and-commands.md`、`docs/verification.md` 在全树与全部
+git 历史里不存在，`docs/troubleshooting.md` 只有 29 行、没有 :119），1 条否证为"按 fork root 基准
+全部解析得到"（`docs/release.md`），并给缺基准声明的提交块补了一行基准说明。
+本轮新审查又交回 **17 条**（bugbot 型 8 条 + security 型 9 条），**逐条修完、无一条判为不成立**：
+R1 的八条是"上一批修复自己留下的洞"（`validateSelector` 的拒绝没带 dimension、选择器守卫排在 capability
+门之后白耗一次握手、compaction 夹具造出生产不存在的形状、超时扫描看不见带嵌套括号的调用点、
+`readRunPlan` 的实例目录无测、decision-log 夹具键集与真产出不对齐、`insideStateRoot` 在 node 下对大小写
+失明、`reply.result as object` 的形状断言），R2 的九条是"链与链之间没人问"（跨链 Release 存在性、矩阵两处
+真相、concurrency、公开步骤不在 release 环境、安装器看不见半程、tag 无身份锚、dev 脚本旁路、指纹三处
+字面量、`set -u` 下引用未赋值的 `$log`）。最后一条本轮是**复验为已清**：按 step 体扫过
+`rm -f "$log"` 与 `log="$(mktemp)"` 的先后，7 次释放全部在 2 次赋值之后，无一步越序。
+
 ## 2026-10-31（第二十六次会话）· 跨到 11-01 收尾· 取号 0.13.0：注册表给不存在的能力作背书、两条命令把拒绝化妆成成功、以及上一轮本线拒绝签字的那笔面 A
 
 本轮开工就撞上一个新形态：**四条修复泳道全部在"写代码的中途"被平台额度上限打断**，
