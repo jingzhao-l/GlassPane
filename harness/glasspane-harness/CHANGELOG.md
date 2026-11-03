@@ -12,6 +12,103 @@ contract does not).
 
 （空。本轮收口后没有未归号的条目。）
 
+## [0.14.0] — 2026-11-03
+
+**版本判断：minor。** pre-1.0 的口径是"产品面/CLI 形状变动 = minor，纯修复 = patch"。本版有两处是**形状**，
+不是纯字节修复：`gp_*` 的拒绝帧现在带 `dimension`（此前只有 `gp_diagnose` 的一支带，同文件下一条拒绝就破了
+自己刚立的规矩），而"引擎树里声明了却读不到的 project plan"从 `{ok:true, plan:null}`（＝这会话没计划）
+翻成具名拒绝（`GP_E_RUN_PLAN_PATH`）——一个原本回 `ok` 的调用现在会回拒绝，消费方看得见的差别。
+证据契约照旧一字未动：`{code, message, remedy}` 三键、台账哈希链、`iterate-kernel@0.1.10` 的 pin 与
+26 个契约文件字节（`kernel-pin --check` 与 `kernel-conformance` 16 个 fixture 都重测量过）。
+
+修掉的（每条都有固定点测试与"破坏被修的点必须让具名用例变红"的反向控制，变异一律 cp 备份 + sha 核回）：
+
+- **发布链的三条"看不见"。** ①`script/assert-ci-green.mjs` 的查询带 `&event=push`，于是同一 commit 上由
+  `workflow_dispatch` 跑绿的 CI 对它不可见——这就是 10-31 那条"ci.yml is cancelled"读数把 v0.13.0 钉住的
+  原因，而它自己给的补救（dispatch 一条 CI）恰好是它看不见的那种触发。现在问的是 commit 而不是按钮，判决
+  点名是哪个 event 作的保，取消那一支给出可执行的 `gh run rerun <id> --repo <repo>`。
+  ②`script/tree-anchor.mjs`（新）取代 workflow 里的字节相等比较：一个**已发布 tag 永远不可能**再满足它
+  （台账只能在发布之后写，主干必然多几行），于是 `create-release`/`binaries`/`checksums` 这些只在 tag push
+  上跑的 job 一被重跑就死——等于把"补一次发布"变成"重切一个签名 tag"。新判据按字节量：只容忍
+  `SYNCLOG.md`/`CHANGELOG.md` 两侧都在、且 tag 那份是主干那份的**真前缀减去整行**（`carriedByTag == 0` 且
+  `addedToTrunk > 0`），命中时大声打 `△` 并报行数；本轮实测 v0.13.0 就是 `49 0 SYNCLOG.md`，且因为台账倒序
+  写在第 237 行而不是文件尾，纯前缀判据会误拒——量出来的方向感就在这条里。
+  ③`publish-gate` 新增"tag 必须已有一个公开且资产齐整的 Release"：实测现场是
+  `glasspane-harness-darwin-x64@0.13.0` 上了 registry、v0.13.0 的 GitHub Release 不存在、wrapper 的 `latest`
+  还是 0.12.5——两条链各自自洽、链与链之间一道闸都没有。这一步排在 `publish-platform` 之前（拒绝还免费的
+  最后一刻），判据是 `product.json` 的 target 矩阵 ⇄ Release 资产集双向相等，并把"问不到"与"问了且没有"
+  分开答。
+- **tag 的身份这一格此前是空的。** `version-check` 新增一步：tag 必须是**注释且签名**的 tag，且签名验在
+  `scripts/install.sh` 内嵌的那块公钥上、指纹等于该文件自己点名的 `GLASSPANE_HARNESS_SIGNING_FPR`
+  （不在 workflow 里再抄一份指纹）。三种 tag 真机跑过：轻量（`objecttype=commit`）拒、注释但未签（无装甲块）
+  拒、本仓主钥签的过；顺带证明比较读的是 `VALIDSIG` 首字段＝主指纹。
+- **"验的字节"与"发的字节"此前不是同一个对象。** `publish-platform` 用 `npm pack` 覆盖 `bun pm pack` 产出并被
+  pack gate 判过的同名 tgz 再发布它；现在 pack gate 把它判过的每个 tarball 的哈希锚进 `$RUNNER_TEMP`，
+  发布步骤按文件名词令"验的是哪个、发的是哪个"，无锚 / 漂移 / 无文件三种情形各自拒绝，发出去的就是被验的归档
+  （staged 兜底同规则）。
+- **把 release 转公开之前真的按安装器的方式验了签。** 此前最强的证据是 `[ -s x.asc ]`（文件非空），
+  `installer-selftest.sh` 用的是桩 gpg/curl。新步从 draft 下载**实际被服的字节**，读出 `scripts/install.sh`
+  内嵌的公钥块与它点名的指纹、先核两者互指，再逐文件复刻安装器的三条判决（`--status-fd` 的 GOODSIG +
+  VALIDSIG + 指纹相等）与 `sha256sum --strict` 往返；任何一条不过就停在 draft，没有 best-effort 跳过。
+- **安装器的信任锚从散文变成强制机制。** 入口那行仍钉本版 tag（`product-surface` 的 `installer-curl-pinned`
+  同时核 `install.curl` 与两份 README、`docs/install.md` 逐字相同），而"已发布的 tag 绝不移动"这句本轮
+  变成了 split 仓的仓库级 ruleset `published-tags-immutable`（target tag，include `refs/tags/v*`，rules
+  update + deletion + non_fast_forward，enforcement active，bypass 空）：实测把 v0.12.5 强制推到它自己已
+  指向的 commit 被服务端拒为 `Cannot update this protected ref`，peel 事后一字未动。
+  GitHub 的 ORG 级 tag protection 端点对本仓回 404（`owner_type=User`）——这条是量出来的，不是猜的。
+- **安装器不再对自己要求的一切例外。** 三处打印的补救原本是 `curl -fsSL … | bash`（它校验自己下载的每个字节，
+  除了自己），改成"落盘 → 先读 → 再执行"两步，锚由 `installer_remedy_url` 在运行时把 tag 解析成 40 位
+  commit；`product.json` 故意**不**存那个 commit 字面量（存进去的每一版都会在下一个 release 变成第二条会腐烂
+  的真相，而运行时解析那条由 selftest section 24 钉着）。
+- **npm 腿必须说自己装的是哪一版。** 没有 `--version` 时 `$VERSION` 恒空、"要的与装的不一致"那句比较被守卫掉，
+  于是打印 `installed via npm` 退 0——两个发布通道各说各话时没人看得出来。现在问 `releases/latest` 并把三种
+  事实分开说：两通道同版 → 明说；注册表给旧版 → 点名两个版本号并给 `npm install -g <pkg>@<newest>`（不拒绝，
+  装上旧版是能用的安装，错的是沉默）；API 问不到 → 答"不知道"。这条自己踩过一次坑并被 selftest 抓住：
+  `x="$(curl -f … | sed … | head -1)"` 在 `set -e` 下会让安装器因一次问不到的 API 直接退出（实测 exit 22），
+  改成先落变量再解析。
+- **工具面九条。** ①`daemon.ts` 不再用"我的解码丢了"替引擎作否定陈述：`capabilities` 里出现非字符串项时整条
+  probe 判 `ok:false`，既不肯定也不否定。②台账真的带上 `dimension`（内核 `decision-log.d.ts:55` 收这个字段，
+  我们此前不传 ⇒ 审计产物记 0 个维度），畸形 id 在写盘前拒。③每条本面自己写的拒绝都带 `dimension`
+  （含 `validateSelector` 那一支），且本地拒绝排在 `hello` 之前——一条注定本地拒绝的调用不再花掉 daemon
+  单连接槽上的一次握手。④decision-log 的 skip 理由不再把"真引擎的拒绝"套成"不是这个面的回复"
+  （失败检查前置，provenance 只守 `ok:true` 的记录路径），旧测试那条以错误原因通过的用例被改判。
+  ⑤`gp_last_evidence` 的归属由真正回答的那个 provider 解析，不再交 `null`。⑥remedy 扫描名单补上
+  `src/plugin/glasspane-decision-log.ts`（它手写 remedy 却整体不可见）。⑦`SUMMARY_MAX_LENGTH` 从内核导入，
+  不再是本面手抄的第三处真相。⑧`insideStateRoot` 在大小写不敏感卷上归一比较（实测 node 与 bun 对
+  `realpath("~/.GlassPane")` 答案不同，台账能静默落进引擎树）。⑨`result: reply.result as object` 的形状断言
+  去掉，`null` 结果原样递上去、不再被化妆成 `{}`。
+- **上游 dev 脚本不再是发布闸的旁路。** `script/release` 指向树里不存在的 `publish.yml`、`script/beta.ts` 带
+  `--force --no-verify` 推分支、`script/version.ts` 直接 `gh release create`——`no-foreign-publish` 那条判据
+  此前只看 `*/script/publish.ts`。现在这三个都改名拒（`test/script/upstream-dev-mutators.test.ts`），判据
+  覆盖到它们。
+- **两条"同一个事实两处真相"进了 `product-surface`。** `release-target-matrix`：workflow 里两份写死的
+  `{target, runner}` 字面量矩阵与 `product.json` 的 `platformTargets` 双向互比（此前分叉会绿着造成"npm 有包、
+  Release 无资产"）；`signing-fingerprint`：安装器、父仓 `updater/lib/signature.js` 与 `installer/cli.js`
+  三处指纹字面量两两相等（轮转钥匙只改一边过去不会被拦）。它没有基线，**永不 `--record`**；本轮读数
+  6608 条一致 / 0 条问题。
+- **六把尺子自己的四处。** `brand-surface` 补了正对照 CONTROLS（把某条形正则换成永不匹配的式子、保留规则 id，
+  过去 `--check` 照样打印 "no unrecorded brand drift"），并给 `upstream-in-user-text` 补上
+  `prompts.(intro|outro|note|warn|error)(` 这一形；`packages/opencode\b` 的掩码改成 `(?!-)`
+  （旧掩码把 `packages/opencode-ai/…` 一起遮掉，全树血缘对这一形失明）；`fork-diff` 的四桶计数从"只打印"
+  变成"金样自己说谎就红"（离线腿与有参照腿各判一次）；`tool-surface` 记的 `totalToolSurfaceLoc` 现在有读者。
+  `harness/README.md` 的旧数字按当场量到的读数重写并标了量法。
+
+否证的（给了量法，不是"我觉得不对"）：`hook-liveness` 的 `--offline` 退出码（实测无参照时 `--check` 退 2 并
+点名"上游未在此观测"，降级与缺陷早已分码）、`fork-diff --record` 不要求参照克隆（实测退 2 且不写金样）、
+`product-surface` 的 `engine-branch-pinned` 与 `126 !== 1`（那两个锚在当前文件里根本不存在，未知旗标退 2）、
+`release-artifact` 的台账豁免"只看路径"（selftest 的 `split-ahead` 用例正是 SYNCLOG 多一行就红）、
+`install.sh` 的 `verify_asset_gpg` 忽略参数（`198f6c53b` 起就按 `$1` 判决，缺的测试补在 section 25）、
+`docs/features-and-commands.md` / `docs/verification.md` / `docs/troubleshooting.md:119`（前两个文件在全树与
+全部 git 历史里都不存在，第三个只有 29 行——上一轮台账把这三条写成"核到了行号"，本轮按字节否证）、
+`docs/release.md` 的相对路径"错了一层"（那些命令块声明的工作基准是 fork root，按该基准逐条实测全部解析得到；
+改成按文档目录解会把可执行命令改成死命令）、`index.ts` 的 `GP_E_SCHEMA` 与 `!resp.ok`（两棵树与全部 git 历史
+零命中）。
+
+未观测（物理边界，各附补它的确切一条命令）：v0.13.0 的 GitHub Release 与二进制资产不可补——那条链的
+`create-release`/`binaries`/`checksums` 只在 tag push 上跑，而**被执行的是被 tag 的那棵树里的 workflow**，
+它带的正是本轮被替换掉的字节相等判据；主干已经收过台账，等式永不成立，而签名 tag 不许移动（本轮新加的
+ruleset 也会拒绝移动它）。npm 那一侧的 0.13.0 三个包都已上架并由 `verify-published` 在发布物上跑绿。
+
 ## [0.13.0] — 2026-10-30
 
 **版本判断：minor。** pre-1.0 的口径是"产品面/CLI 形状变动 = minor，纯修复 = patch"。本版有三处是**形状**：
