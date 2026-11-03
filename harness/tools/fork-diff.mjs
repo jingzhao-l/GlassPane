@@ -198,6 +198,23 @@ if (!ref) {
   if (golden.baseTag !== pin.tag) die(1, `golden recorded at ${golden.baseTag}, pin says ${pin.tag} — refusing to compare across bases`)
   console.log(`fork-diff: reference clone absent (${refRel}) — upstream bytes NOT re-measured in this run.`)
   console.log(`  recorded divergence against ${golden.baseTag}: ${golden.counts.edited} edited, ${golden.counts.added} added, ${golden.counts.deleted} deleted, ${golden.counts.identical} identical`)
+  // The counts block is printed above, and until 2026-11-03 nothing in either lane compared it
+  // against anything: forging `counts.identical: 4637 → 1` (measured in place; `--check` printed
+  // the lie and exited 0) turned the golden into a document that could say whatever it liked
+  // about the divergence. What the offline lane CAN check is the golden's own internal agreement —
+  // each list count must equal the length of the name list beside it; `identical` has no list to
+  // check against here and is stated as not re-derivable, not silently blessed.
+  for (const key of ["edited", "added", "deleted"]) {
+    const recorded = golden.counts?.[key]
+    const want = (golden[key] ?? []).length
+    if (!Number.isFinite(recorded) || recorded !== want) {
+      die(1, `golden counts disagree: counts.${key} records ${JSON.stringify(recorded)} but the golden's own ${key} list holds ${want} — the counts block is printed every run and compared against nothing unless this check runs; a golden that lies about its own lists must not read as a clean baseline. Re-run --record with the reference clone present.`)
+    }
+  }
+  if (!Number.isFinite(golden.counts?.identical)) {
+    die(1, `golden counts disagree: counts.identical records ${JSON.stringify(golden.counts?.identical)}, not a number — the four-bucket declaration is incomplete; re-run --record with the reference clone present.`)
+  }
+  console.log(`  counts cross-check: edited/added/deleted equal their own name lists; identical (${golden.counts.identical}) is carried from the record — upstream bytes NOT observed here, so it cannot be re-derived in this lane.`)
 
   // What a clone-free lane CAN still check is **our** side of the divergence:
   // every edited vendored file carries the fork-side hash recorded when the
@@ -360,6 +377,26 @@ if (golden.baseTag !== observed.baseTag) die(1, `golden recorded at ${golden.bas
 
 const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i])
 let drift = 0
+
+// The four-bucket `counts` block travels with the golden and was printed by the offline lane and
+// read by NOTHING in either lane (measured 2026-11-03: `counts.identical` forged 4637 → 1 in the
+// golden, clone-present `--check` exited 0 and printed "divergence matches the recorded surface").
+// The name lists constrain edited/added/deleted, but `identical` — the largest bucket, the one
+// that says how much of the fork is still upstream's — lives ONLY in this block. Compare the
+// recorded numbers against what this run measures; a golden that disagrees with the tree is a
+// golden that was hand-edited or never re-recorded, and both are drift.
+for (const key of ["identical", "edited", "added", "deleted"]) {
+  const recorded = golden.counts?.[key]
+  if (!Number.isFinite(recorded)) {
+    console.error(`  ✗ golden counts disagree: the golden records counts.${key} as ${JSON.stringify(recorded)}, not a number — the four-bucket declaration is incomplete and nothing downstream can anchor to it; re-run --record with the reference clone present.`)
+    drift++
+    continue
+  }
+  if (recorded !== observed.counts[key]) {
+    console.error(`  ✗ golden counts disagree: counts.${key} says ${recorded} but this run measures ${observed.counts[key]} against ${pin.tag} — the counts block was a printed claim with no reader; a hand-forged or stale number is drift, not a cleaner tree. Re-record with the clone present so the divergence is reviewed.`)
+    drift++
+  }
+}
 for (const key of ["edited", "added", "deleted"]) {
   const now = observed[key]
   const was = golden[key]

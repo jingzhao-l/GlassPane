@@ -23,6 +23,12 @@
  *   state-root / config-names                            XDG root + config file names (product first, legacy kept)
  *   installer-urls / installer-syntax / installer-dry-run the one-click scripts point at the product and actually parse/plan
  *   workflows / notice-license                            our own pipelines only; attribution on disk
+ *   release-target-matrix                                 the workflow's literal target matrices (binaries,
+ *                                                         publish-platform) equal product.json's platformTargets,
+ *                                                         both directions, and the two copies agree with each other
+ *   signing-fingerprint                                   every live GLASSPANE_HARNESS_SIGNING_FPR /
+ *                                                         PINNED_PRIMARY_FINGERPRINT / GLASSPANE_SIGNING_KEY_ID
+ *                                                         literal names the same key (test goldens excluded)
  *   release-anchor                                        the release lane proves the released tree IS trunk's
  *                                                         `harness/glasspane-harness` subtree (fetched from trunk,
  *                                                         compared as a tree hash, and depended on by the jobs
@@ -797,32 +803,56 @@ check("notice-license", notice.includes("MIT"), "NOTICE does not record the upst
   )
   if (anchor) {
     const body = executable(anchor)
-    check("release-anchor", /git\s+fetch\b/.test(body), `"${ANCHOR_STEP}" does not run \`git fetch\` — it cannot observe trunk's tree, so it cannot compare against it`)
-    check(
-      "release-anchor",
-      body.includes(trunkRepo),
-      `"${ANCHOR_STEP}" never names the trunk repository (${trunkRepo}, from product.json -> glasspane.engineRepo) — an anchor that fetches nothing, or fetches somewhere else, proves the agreement of two unrelated things`,
-    )
-    check(
-      "release-anchor",
-      !body.includes(`github.com/${product.repo}`) && !body.includes(product.repoUrl),
-      `"${ANCHOR_STEP}" names the SPLIT repository (${product.repo}) as an operand — fetching the split repo and comparing it to the split checkout is a tautology: it is true even when trunk never received the commits being shipped`,
-    )
-    check(
-      "release-anchor",
-      /FETCH_HEAD\s*:\s*["'`]?\$?\{?TRUNK_PREFIX|FETCH_HEAD:[^"'`\s]*harness\/glasspane-harness/.test(body),
-      `"${ANCHOR_STEP}" does not read a \`harness/glasspane-harness\` tree hash out of FETCH_HEAD — the thing it must compare is the subtree at ${subtreePath}, not the trunk commit itself`,
-    )
-    check(
-      "release-anchor",
-      /rev-parse[^\n]*(\^\{tree\}|:\S+)/.test(body) && /\[\s*"?\$\w+"?\s*=\s*"?\$\w+"?\s*\]/.test(body),
-      `"${ANCHOR_STEP}" does not compare two tree hashes (it must \`git rev-parse\` both the released tree and trunk's subtree, then test them for equality) — echoing a hash is not asserting agreement`,
-    )
-    check(
-      "release-anchor",
-      /exit\s+1/.test(body),
-      `"${ANCHOR_STEP}" cannot fail: with no \`exit 1\` on the mismatch branch a divergent artifact still passes the step, which is the whole defect this step exists to close`,
-    )
+    // Two legal shapes for the judgement (measured 2026-11-03 on the current trunk): inline bash in
+    // the step, OR a delegation to `script/tree-anchor.mjs` — the split lane moved the comparison out
+    // of bash because a byte-equal inline check made a stalled release unrerunnable once trunk took a
+    // ledger commit. Delegation is NOT relaxation: the same properties (fetches trunk, reads the
+    // subtree tree out of FETCH_HEAD, compares two tree hashes, refuses non-zero) must hold, they are
+    // just asserted in the script the step invokes. An `echo`-style call to a missing script, or a
+    // script that lost one property, goes red by the same named check.
+    const anchorScriptRel = "script/tree-anchor.mjs"
+    const delegated = new RegExp(`node\\s+${anchorScriptRel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w.\\-])`).test(body)
+    check("release-anchor", body.includes(trunkRepo), `"${ANCHOR_STEP}" never names the trunk repository (${trunkRepo}, from product.json -> glasspane.engineRepo) — an anchor that fetches nothing, or fetches somewhere else, proves the agreement of two unrelated things`)
+    check("release-anchor", !body.includes(`github.com/${product.repo}`) && !body.includes(product.repoUrl), `"${ANCHOR_STEP}" names the SPLIT repository (${product.repo}) as an operand — fetching the split repo and comparing it to the split checkout is a tautology: it is true even when trunk never received the commits being shipped`)
+    if (!delegated) {
+      check("release-anchor", /git\s+fetch\b/.test(body), `"${ANCHOR_STEP}" does not run \`git fetch\` — it cannot observe trunk's tree, so it cannot compare against it`)
+      check(
+        "release-anchor",
+        /FETCH_HEAD\s*:\s*["'`]?\$?\{?TRUNK_PREFIX|FETCH_HEAD:[^"'`\s]*harness\/glasspane-harness/.test(body),
+        `"${ANCHOR_STEP}" does not read a \`harness/glasspane-harness\` tree hash out of FETCH_HEAD — the thing it must compare is the subtree at ${subtreePath}, not the trunk commit itself`,
+      )
+      check(
+        "release-anchor",
+        /rev-parse[^\n]*(\^\{tree\}|:\S+)/.test(body) && /\[\s*"?\$\w+"?\s*=\s*"?\$\w+"?\s*\]/.test(body),
+        `"${ANCHOR_STEP}" does not compare two tree hashes (it must \`git rev-parse\` both the released tree and trunk's subtree, then test them for equality) — echoing a hash is not asserting agreement`,
+      )
+      check(
+        "release-anchor",
+        /exit\s+1/.test(body),
+        `"${ANCHOR_STEP}" cannot fail: with no \`exit 1\` on the mismatch branch a divergent artifact still passes the step, which is the whole defect this step exists to close`,
+      )
+    } else {
+      const anchorScriptAbs = path.join(forkRoot, anchorScriptRel)
+      check("release-anchor", existsSync(anchorScriptAbs), `"${ANCHOR_STEP}" delegates its judgement to ${anchorScriptRel}, which is not in the tree — an invocation of a missing script is the anchor this gate cannot run, and "cannot run" is not "passed"`)
+      check("release-anchor", body.includes(subtreePath), `"${ANCHOR_STEP}" delegates to ${anchorScriptRel} without passing the subtree path (${subtreePath}) — a delegated anchor whose operands live only inside the script's own default is one edit away from anchoring to a different path than product.json's lane claims`)
+      const judge = existsSync(anchorScriptAbs) ? stripComments(read(anchorScriptRel)) : ""
+      check("release-anchor", /spawnSync\(\s*["']git["']/.test(judge) && /\[\s*["']fetch["']/.test(judge), `${anchorScriptRel} does not spawn \`git fetch\` — the delegated step cannot observe trunk's tree, so it cannot compare against it`)
+      check(
+        "release-anchor",
+        /FETCH_HEAD:\$\{prefix\}/.test(judge) && new RegExp(`TRUNK_PREFIX\\s*\\?\\?\\s*["'\`]${subtreePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["'\`]`).test(judge),
+        `${anchorScriptRel} does not read a \`${subtreePath}\` tree hash out of FETCH_HEAD (it must resolve \`FETCH_HEAD:\${prefix}\` with the prefix defaulting to the subtree path) — comparing against trunk's commit itself is not anchoring the subtree`,
+      )
+      check(
+        "release-anchor",
+        /HEAD\^\{tree\}/.test(judge) && /trunk === own/.test(judge),
+        `${anchorScriptRel} does not read both tree hashes (\`HEAD^{tree}\` and trunk's subtree) and test them for equality — echoing or returning hashes is not asserting agreement`,
+      )
+      check(
+        "release-anchor",
+        /process\.exit\(result\.code\)/.test(judge) && /code:\s*1/.test(judge),
+        `${anchorScriptRel} cannot fail: without a \`code: 1\` refusal exiting via \`process.exit(result.code)\`, a divergent artifact still passes the delegated step — which is the whole defect this step exists to close`,
+      )
+    }
   }
   // An anchor nobody depends on is decoration: `version-check` has to gate both the job that
   // creates/publishes the release and the job that builds the binaries.
@@ -833,6 +863,104 @@ check("notice-license", notice.includes("MIT"), "NOTICE does not record the upst
       "release-anchor",
       job !== null && needsOf(job).includes("version-check"),
       `\`${gatee}\` does not list \`version-check\` in its \`needs:\` (it says ${JSON.stringify(needsOf(job))}) — the tree anchor is orphaned: the release can be created and the binaries built without ever proving the artifact equals trunk's ${subtreePath} subtree`,
+    )
+  }
+}
+
+// ---- the platform matrix: the workflow's literal copies vs product.json's declaration
+// WHY. The target/runner matrix exists TWICE as literals in release.yml — `binaries` (builds the
+// GitHub Release assets) and `publish-platform` (npm-publishes the per-target packages) — while the
+// same file derives from product.json's `platformTargets` everywhere else (`checksums` names every
+// asset from the matrix, the publish-platform step resolves one pkg name per target through
+// platformTargets, `publish-wrapper` computes optionalDependencies from it). product-surface read
+// release.yml before (workflow existence, gates, anomalyco, the tree anchor) but NEVER compared a
+// matrix literal: measured 2026-11-03, this file's `platformTargets` reads are all product-side
+// template/uniqueness/platform checks with zero workflow literals in the comparison. A fork between
+// the two copies then reads "npm has a package for a target while GitHub Release has no asset" (or
+// the reverse) and every lane stays green, because each half is only ever checked against itself.
+// Both directions are asserted per job, the two jobs are asserted against each other, and an
+// os-arch keying to more than one platformTargets entry is refused — the exact ambiguity
+// release.yml's own publish-platform step refuses at runtime, asserted statically here.
+{
+  const keyOf = (t) => `${t.os === "win32" ? "windows" : t.os}-${t.arch}`
+  const declaredKeys = (product.platformTargets ?? []).map(keyOf)
+  /** One job's header → its `steps:` (the matrix lives there); comment lines are prose, not matrix. */
+  const jobRegion = (id) => {
+    const lines = release.split("\n")
+    const start = lines.findIndex((l) => new RegExp(`^  ${id}:\\s*(#.*)?$`).test(l))
+    if (start < 0) return null
+    const out = []
+    for (let i = start + 1; i < lines.length; i++) {
+      if (/^  [A-Za-z][\w-]*:\s*(#.*)?$/.test(lines[i]) || /^    steps:/.test(lines[i])) break
+      out.push(lines[i])
+    }
+    return out.filter((l) => !/^\s*#/.test(l)).join("\n")
+  }
+  const literalTargets = (region) => [...region.matchAll(/(?:[{,\s])target:\s*([A-Za-z0-9_-]+)/g)].map((m) => m[1])
+  const literalSets = []
+  for (const id of ["binaries", "publish-platform"]) {
+    const region = jobRegion(id)
+    check("release-target-matrix", region !== null, `release.yml has no \`${id}\` job — the literal platform matrix this rule compares moved or was renamed, so nothing can be compared against product.json's platformTargets`)
+    if (region === null) continue
+    const literals = literalTargets(region)
+    if (literals.length === 0) {
+      // The scan finding no literal is itself the signal: either the job now derives its matrix
+      // (`fromJSON` over product.json — the state this rule retires into, argued in review), or the
+      // include-block moved shape and the comparison quietly stopped happening.
+      check("release-target-matrix", /fromJSON/.test(region), `\`${id}\` names no literal target and carries no \`fromJSON\` — either the matrix moved shape (this scan stopped reading it, which is a scan set shrinking) or it should now derive from product.json; say which in review`)
+      continue
+    }
+    literalSets.push(literals)
+    const extra = [...new Set(literals.filter((t) => !declaredKeys.includes(t)))]
+    const missing = [...new Set(declaredKeys.filter((k) => !literals.includes(k)))]
+    check(
+      "release-target-matrix",
+      extra.length === 0 && missing.length === 0,
+      `\`${id}\`'s literal target matrix [${[...new Set(literals)].sort().join(", ")}] is not product.json's platformTargets [${[...new Set(declaredKeys)].sort().join(", ")}] — ${extra.length ? `the workflow builds/publishes ${extra.join(", ")} for a target the product no longer declares (an asset/package nobody owns); ` : ""}${missing.length ? `the product declares ${missing.join(", ")} with no lane producing its asset/package; ` : ""}one fact, two places: fix the workflow and product.json in the same commit, never one side to chase this line`,
+    )
+  }
+  if (literalSets.length === 2) {
+    const sorted = literalSets.map((l) => [...new Set(l)].sort().join(","))
+    check("release-target-matrix", sorted[0] === sorted[1], `the two literal matrices in release.yml disagree with EACH OTHER — \`binaries\` builds [${sorted[0]}] while \`publish-platform\` publishes [${sorted[1]}]: npm would carry a package with no GitHub Release asset (or the reverse) for every target in the difference, which is the receipt's exact failure and is invisible to any per-job check`)
+  }
+  for (const key of new Set(declaredKeys)) {
+    const count = declaredKeys.filter((k) => k === key).length
+    check("release-target-matrix", count === 1, `product.json platformTargets has ${count} entries keying to "${key}" — release.yml's publish-platform refuses to name one asset from an ambiguous matrix at runtime (its own comment names glibc/musl, avx2/baseline), and the literal target lists above key one name per target; resolve the ambiguity or the two copies cannot be compared`)
+  }
+}
+
+// ---- the signing fingerprint: one key, every live trust anchor must name the same bytes
+// WHY. The receipt counted two copies; the grep counts THREE that are live code:
+// `harness/glasspane-harness/scripts/install.sh:314` (`GLASSPANE_HARNESS_SIGNING_FPR=`, consumed at
+// :506 to gate every release asset and read by release.yml's signing/tag jobs via sed), trunk
+// `updater/lib/signature.js:119` (`PINNED_PRIMARY_FINGERPRINT`, the auto-updater's pin), and trunk
+// `installer/cli.js:117` (`GLASSPANE_SIGNING_KEY_ID`, interpolated into the installer's verdict
+// lines). release.yml compares install.sh's constant against the GPG keyring it imports — nobody
+// ever compares the files' literals against each other, so rotating the key on one side ships green
+// while half the product still trusts the old key. Test goldens (`installer-selftest.sh` GNUPG
+// echoes, `updater/test/helpers.mjs FAKE_SIGNER_FPR`, `updater/test/signature.test.mjs`) and SYNCLOG
+// prose quote the same hex to PROVE the refusal — they are not trust anchors and stay out of this
+// rule, per this file's comment-vs-code doctrine (everything below reads through stripComments).
+// The trunk-side files are read ONLY; this ruler never writes them (same stance as `engine-methods`).
+{
+  const trunkAnchors = [
+    ["updater/lib/signature.js", /PINNED_PRIMARY_FINGERPRINT\s*=\s*["']([0-9A-Fa-f]{40})["']/],
+    ["installer/cli.js", /GLASSPANE_SIGNING_KEY_ID\s*=\s*["']([0-9A-Fa-f]{40})["']/],
+  ]
+  for (const [rel] of trunkAnchors) {
+    if (!existsSync(path.join(repoRoot, rel))) {
+      die(2, `${rel} is absent from this checkout, so the signing fingerprint cannot be cross-read between the installer and the ${rel.split("/")[0]} — that is CANNOT OBSERVE, not agreement. Run this ruler from the trunk repository root (it already reads engine/ and harness/upstream.json from here).`)
+    }
+  }
+  const installerFpr = sh.match(/GLASSPANE_HARNESS_SIGNING_FPR="([0-9A-Fa-f]{40})"/)?.[1] ?? null
+  check("signing-fingerprint", installerFpr !== null, `scripts/install.sh no longer carries a 40-hex GLASSPANE_HARNESS_SIGNING_FPR="…" in executable text — the installer's trust anchor moved shape, and release.yml's signing jobs read this exact shape via sed; both readers would compare nothing while printing agreement`)
+  for (const [rel, re] of trunkAnchors) {
+    const value = stripComments(readFileSync(path.join(repoRoot, rel), "utf8")).match(re)?.[1] ?? null
+    check("signing-fingerprint", value !== null, `${rel} no longer exports its pinned fingerprint as a 40-hex literal (expected a line matching ${re}) — a reader cannot compare a constant that moved shape, which is how a silent rotation would look like a formatting change`)
+    check(
+      "signing-fingerprint",
+      value !== null && installerFpr !== null && value.toUpperCase() === installerFpr.toUpperCase(),
+      `${rel} and scripts/install.sh name DIFFERENT signing fingerprints (${rel}: ${value ?? "unreadable"}; install.sh: ${installerFpr ?? "unreadable"}) — one key, several trust anchors: a rotation that landed on one side only would go green everywhere while the other half still trusts the old key. Fix the lagging anchor in the SAME change as the rotation; do not edit either value to chase this line without rotating the key deliberately.`,
     )
   }
 }

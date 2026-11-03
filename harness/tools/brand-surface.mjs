@@ -154,14 +154,46 @@ const RULES = [
     // read, with the golden recording zero hits. Every quote shape now, case-insensitive, and
     // `(?<![@\w])…(?![\w-])` so the deliberately-kept `@opencode-ai/*` workspace scopes are
     // still bloodline rather than a product claim.
+    //
+    // The `prompts.intro|outro|note|warn|error` family joined on 2026-11-03 because the shape was
+    // measured blind: planting `prompts.intro("Uninstall OpenCode")` into uninstall.ts — the exact
+    // string that shipped there — produced **zero** hits from this rule; only the tree-wide lineage
+    // backstop reddened the run. A user-facing intro/outro line is precisely a product claim, and
+    // the enumeration that named `describe:`/`console.log`/`prompts.log.*` and no other `prompts.*`
+    // entry point was a rule with a hole shaped like the accident that motivated it.
     count: (text) =>
       occ(
         text,
-        /(?:describe\s*:\s*["'`]|console\.(?:log|error|warn)\(\s*["'`]|prompts\.log\.\w+\(\s*["'`]|clientInfo\s*:\s*\{\s*name\s*:\s*["'`]|active\s*:\s*["'`]|withDefault\(\s*["'`]|const name = ["'`])[^\n]*(?<![@\w])opencode(?![\w-])/gi,
+        /(?:describe\s*:\s*["'`]|console\.(?:log|error|warn)\(\s*["'`]|prompts\.(?:log\.\w+|intro|outro|note|warn|error)\(\s*["'`]|clientInfo\s*:\s*\{\s*name\s*:\s*["'`]|active\s*:\s*["'`]|withDefault\(\s*["'`]|const name = ["'`])[^\n]*(?<![@\w])opencode(?![\w-])/gi,
       ),
     why: "a user-facing string that says opencode is a product claim; internal identifiers are bloodline, strings are identity",
   },
 ]
+/**
+ * A positive control, per rule, inside the ruler — the same guard `surface-semantics.mjs:182-186`
+ * carries and this file did not. Without it, replacing a `count()` pattern with one that never
+ * matches keeps the rule id, keeps the recorded `rules[]` agreement, and keeps `observed.hits` at
+ * `[]`: measured 2026-11-03 by neutering `upstream-npm-name` to `/(?!never)x/` in place, which
+ * left `--check` printing "no unrecorded brand drift" with exit 0. A golden whose `hits: []` was
+ * produced by a pattern that cannot fire is indistinguishable from a clean tree — so the ruler
+ * proves, on every run, that each of these rules fires on a known brand string and stays silent
+ * on that same string commented out (production reads `stripComments` output, so a rule that only
+ * fires on comments would flag the `[gp]` notes that *explain* a removal).
+ */
+const CONTROLS = [
+  { id: "upstream-npm-name", sample: "npm install -g opencode-ai" },
+  { id: "upstream-platform-package", sample: 'const tgz = "opencode-darwin-arm64.tgz"' },
+  { id: "upstream-registry", sample: "curl -fsSL https://opencode.ai/install | bash" },
+  { id: "upstream-in-user-text", sample: 'console.log("opencode is great")' },
+  { id: "upstream-in-user-text", sample: 'prompts.intro("Uninstall OpenCode")' },
+]
+
+function stripComments(text) {
+  return text
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1")
+    .replace(/^\s*#(?!\!)/gm, "")
+}
 // A doc line may say "opencode" when it is doing lineage work: naming the fork,
 // the upstream, the license, or a *path* inside the fork (the CLI package still
 // lives at packages/opencode — a path is not a product claim). Everything else on
@@ -173,13 +205,6 @@ const occ = (text, re) => (text.match(re) ?? []).length
 // decorative second copy that applied no pattern and hard-coded `count: 1`, so it accused
 // documents of strings they did not contain and could never go red.
 const FIRST_PARTY_GATEWAY = /["'`](?:opencode|opencode-go|opencodeZen|opencode\.ai\/zen)["'`]|dialog\.provider\.opencode|provider\.connect\.opencodeZen/g
-
-function stripComments(text) {
-  return text
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(^|[^:])\/\/[^\n]*/g, "$1")
-    .replace(/^\s*#(?!\!)/gm, "")
-}
 
 /** The fork's own lineage documents. They are where the bloodline story lives
  *  (FORK.md, SYNCLOG.md, the READMEs, NOTICE, upstream's AGENTS/CONTEXT/
@@ -248,6 +273,35 @@ function forkTextFiles() {
     out.push(path.join(forkRoot, rel))
   }
   return out
+}
+
+/**
+ * Drive every `RULES` pattern against its `CONTROLS` sample, in the same view of the bytes the
+ * production scan hands it (`stripComments`). A rule with no sample, a rule that does not fire on
+ * its sample, or a rule that fires on the sample only in *comment* form is this ruler losing a
+ * mark — "cannot measure", exit 2, named, exactly like `surface-semantics.mjs`'s
+ * `assertRulesCanFire`. Silent non-firing is the worst failure a pattern can have: the golden's
+ * `hits: []` then certifies an answer no rule produced.
+ */
+function assertRulesCanFire() {
+  for (const rule of RULES) {
+    const controls = CONTROLS.filter((c) => c.id === rule.id)
+    if (controls.length === 0) {
+      console.error(`brand-surface: CANNOT MEASURE — positive control: rule "${rule.id}" carries no known-hit sample; nothing has shown this rule can fire, so its zero hits certify nothing`)
+      process.exit(2)
+    }
+    for (const c of controls) {
+      if (rule.count(stripComments(`${c.sample}\n`)) === 0) {
+        console.error(`brand-surface: CANNOT MEASURE — positive control: rule "${rule.id}" does not fire on ${JSON.stringify(c.sample)} — a rule that cannot go red cannot clear anything; the pattern is broken, not the tree clean`)
+        process.exit(2)
+      }
+      if (rule.count(stripComments(`// ${c.sample}\n`)) > 0) {
+        console.error(`brand-surface: CANNOT MEASURE — positive control: rule "${rule.id}" fires on the commented-out form of ${JSON.stringify(c.sample)} — production strips comments before any rule reads the bytes, so this rule would flag a [gp] note that only *explains* a removal`)
+        process.exit(2)
+      }
+    }
+  }
+  console.log(`brand-surface — positive controls: ${RULES.length}/${RULES.length} rule(s) fired on a known brand string and stayed silent on its commented-out form`)
 }
 
 function scan() {
@@ -458,7 +512,14 @@ function scan() {
   let occurrences = 0
   for (const abs of files) {
     const text = readFileSync(abs, "utf8")
-    occurrences += (text.replace(/packages\/opencode\b/gi, "packages/<fork>").match(/opencode/gi) ?? []).length
+    // The mask exempts the *directory path* `packages/opencode` — a path is not a product claim
+    // (see the comment above the lineage counter). It used to be `packages/opencode\b`, and `\b`
+    // holds before a `-` too, which also masked `packages/opencode-ai/…` — the npm-package-name
+    // shape dressed as a path, i.e. exactly the string class `upstream-npm-name` exists to bite.
+    // `(?!-)` keeps the path exemption and un-masks the `-ai` form (measured 2026-11-03: today no
+    // tracked corpus file carries `packages/opencode-`, so this fix moves the number by 0 — the
+    // blindness is what it closes, not a debt).
+    occurrences += (text.replace(/packages\/opencode\b(?!-)/gi, "packages/<fork>").match(/opencode/gi) ?? []).length
   }
   return {
     hits,
@@ -538,6 +599,8 @@ function reportSkillDocs(golden) {
   const added = observed.skillDocs.filter((doc) => !golden?.skillDocs?.includes(doc))
   console.log(`  skill-doc coverage: recorded [${was}] → now [${now}]${added.length ? ` (grew ${added.length} doc(s), stated so the caliber change is visible)` : ""}`)
 }
+
+assertRulesCanFire()
 
 const observed = {
   observedAt: new Date().toISOString().slice(0, 10),

@@ -485,6 +485,53 @@ mustGoRed(
   ["the golden records", "absolute path(s)"],
 )
 
+// 17-20. the four controls for the 2026-11-03 ruler-layer fixes. They exist because the fixes
+// close "printed-but-never-validated" shapes: brand-surface's four bar-shape regexes had NO
+// positive control (measured: neutering `upstream-npm-name` to a never-matching pattern left
+// `--check` printing "no unrecorded brand drift" with exit 0, and planting
+// `prompts.intro("Uninstall OpenCode")` — the literal that actually shipped in uninstall.ts —
+// produced zero rule hits); fork-diff's four-bucket `counts` block was printed by the offline
+// lane and read by nothing in either lane (forging `counts.identical → 1` exited 0);
+// tool-surface's `totalToolSurfaceLoc` was recorded since the golden's first shape and read back
+// by nothing. Each control attacks the guard's own input and demands the named diagnosis.
+mustGoRed(
+  "harness/glasspane-harness/packages/opencode/src/cli/cmd/uninstall.ts",
+  "brand-surface: a planted prompts.intro leak is hit ×1 and red",
+  (text) => `${text}\nprompts.intro("Uninstall OpenCode")\n`,
+  "harness/tools/brand-surface.mjs",
+  ["--check"],
+  1,
+  ["upstream-in-user-text ×1"],
+  ["no unrecorded brand drift"],
+)
+mustGoRed(
+  "harness/tools/brand-surface.mjs",
+  "brand-surface: a neutered pattern is refused by the in-ruler positive control",
+  (text) => text.replace("occ(text, /(^|[^@\\w-])opencode-ai/g)", "occ(text, /NEVERMATCHESNEVER/g)"),
+  "harness/tools/brand-surface.mjs",
+  ["--check"],
+  2,
+  ['positive control: rule "upstream-npm-name" does not fire'],
+)
+mustGoRed(
+  "harness/contracts/fork-diff.json",
+  "fork-diff: a forged counts block is red in whichever lane this machine runs",
+  (text) => json(text, (g) => (g.counts.edited = g.counts.edited + 1)),
+  "harness/tools/fork-diff.mjs",
+  ["--check"],
+  1,
+  ["golden counts disagree"],
+)
+mustGoRed(
+  "harness/contracts/tool-surface.json",
+  "tool-surface: totalToolSurfaceLoc now has a reader — the golden's own arithmetic",
+  (text) => json(text, (g) => (g.totalToolSurfaceLoc = g.totalToolSurfaceLoc + 1)),
+  "harness/tools/tool-surface.mjs",
+  ["--check"],
+  1,
+  ["totalToolSurfaceLoc"],
+)
+
 if (git("status", "--porcelain").split("\n").filter((l) => l && !l.startsWith("??")).length > 0) {
   bad("closure: the battery left tracked files modified in the worktree:\n" + git("status", "--porcelain"))
 } else ok("closure: no tracked file left modified")

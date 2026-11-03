@@ -810,6 +810,27 @@ if (JSON.stringify(wasKernel) !== JSON.stringify(nowKernel) || golden?.surfaces?
   red++
 }
 
+// `totalToolSurfaceLoc` is written by `build()` on every record, and until 2026-11-03 no line of
+// code read it back: an instrumented number with no wire. It is the sum of the two surface LOCs
+// the ratchet judges, so the honest reader is the golden's own arithmetic — a baseline whose total
+// disagrees with the two surface numbers next to it was hand-edited (or recorded from a different
+// tree than its surfaces), and the number the reports quote would be anchoring nothing.
+{
+  const recordedTotal = golden.totalToolSurfaceLoc
+  const recordedA = golden.surfaces?.mcpShell?.loc
+  const recordedB = golden.surfaces?.fork?.loc
+  if (!Number.isFinite(recordedTotal)) {
+    console.error(`  ✗ totalToolSurfaceLoc: the golden carries ${JSON.stringify(recordedTotal)}, not a number — the figure every "tool surface" summary quotes has no baseline to agree with; re-record.`)
+    red++
+  } else if (!Number.isFinite(recordedA) || !Number.isFinite(recordedB)) {
+    console.error(`  ✗ totalToolSurfaceLoc: the golden records a total (${recordedTotal}) but its surface LOCs are ${JSON.stringify(recordedA)} / ${JSON.stringify(recordedB)} — the total cannot be checked against the parts it sums; re-record.`)
+    red++
+  } else if (recordedTotal !== recordedA + recordedB) {
+    console.error(`  ✗ totalToolSurfaceLoc: the golden's own numbers disagree — total ${recordedTotal} vs surface A ${recordedA} + surface B ${recordedB} = ${recordedA + recordedB}. The recorded surfaces are what the ratchet compares; a total that is not their sum is a hand-edited or stale baseline, and the sum no longer describes the measured surface. Re-record with the code.`)
+    red++
+  }
+}
+
 if (red > 0) {
   console.error("tool-surface: the tool surface moved since the last record.")
   console.error("  This is a ratchet, not a ban. If the growth is intended, run")

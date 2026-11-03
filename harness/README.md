@@ -43,7 +43,7 @@ git clone --branch v1.18.32 --depth 1 https://github.com/anomalyco/opencode.git 
 | `contracts/fork-diff.json` | 金样：声明过的分叉面（2026-10-08 记 **`4668 identical / 259 edited / 81 added / 1705 deleted`**；2026-10-16 复记 `4645 identical / 282 edited / 92 added / 1705 deleted`，全树 6,724 个条目——多出来的 5 个 edited 与 4 个 added 是本轮把升级链/安装链的判决与四把尺子改回能红时留下的字节，全树 6,713 个条目；上一记是 2026-10-07 的 `4669 / 258 / 114 / 1705`，6,746 个条目——差的 33 个 added 就是退役掉的 vendored 内核树与它的旧尺子，加回 3 个新文件。再往前本行写过 `6539 / 36 / 43 / 57`，那是批次 A 之前的形状，早就没人对着树核过——正是这把尺子存在的理由。added 里**不再有** vendored 内核（内核是依赖，不在树里），deleted 是上游 26 个工作流 + locale README 等，批次 A/B 的 SYNCLOG 逐类记了账） |
 | `glasspane-harness/contracts/kernel-pin.json` | 出处清单（**在 fork 树里，不在本目录**——subtree split 之后独立仓必须自带溯源清单；`kernel-pin.mjs` 靠"向上找到 `product.json` 那一层"定位它，`tool-surface.mjs` 则在 `harness/glasspane-harness/contracts/` 与 `harness/contracts/` 两处里找第一个存在的）：`package`/`version` + registry 解析坐标（`lockKey` / `specifier` / `integrity`）+ canonical 的 repo/path/branch + 随包 **26** 个契约文件（16 fixtures + 8 schemas）的 sha256。此前这行写的是 `kernel-vendor.json`：25 个 vendored 文件的 sha256 + 9 份镜像 fixture——镜像已删（本仓 9 个 vs 随包发布的 11 个，早就漂移了），语料现在只从包内部取 |
 | `contracts/tool-surface.json` | 基线（2026-10-09 复算）：engine 23,295 / 面 A 8,658（**22.84%**，已知越限、只挡再长）/ 面 B **5,953**（**15.70%**；内核改依赖那批记的是 5,376 / 14.50%，其间并入的并行批次与本批 conformance 脚本各自的行都进了面 B），并逐文件记着被排除的测试行数（本轮实测：测试 27 文件 1,544 行；**2026-10-16 复记**：engine 26,476 / 63 文件、面 A 9,609 = 21.41%、面 B 8,793 = 19.59%、测试排除项 36 文件 3,656 行）；**vendored 内核排除项现在是 0 文件 / 0 行**（上一记 11 文件 / 1,464 行）——内核改依赖后树里没有它的字节可剔，金样因此另记 `kernel: iterate-kernel@0.1.3`，让这次口径变化在尺子上可读 |
-| `contracts/surface-semantics.json` | 基线（2026-09-26 首记，2026-10-06 复跑）：**0 命中 / 20 个文件（mcpShell 14 + fork 6）；上一记 18 个（13 + 5）**（mcpShell 13 + fork 5；金样里那份 `filesScanned 15` 是 mcp-shell 长出新文件之前的值，`--check` 现按**名单身份**比对扫描集（2026-10-29 起金样逐面带 `files` 相对路径名单，同长度替换、名单缺失、名单里出现绝对路径三形各一条红），见下文「闸自己被验过吗」）——两个工具面今天都不判证据语义；规则说明逐条进金样 |
+| `contracts/surface-semantics.json` | 基线（2026-09-26 首记，2026-10-06 复跑）：**0 命中 / 23 个文件（mcpShell 16 + fork 7；2026-11-03 实测量法：`node harness/tools/surface-semantics.mjs --check` 打印 `0 hit(s) across 23 file(s)`，金样两面 `files` 名单分别 16 与 7；本行此前写的 `20 个（14 + 6）` 与 `上一记 18（13 + 5）` 均与金样不符，已按当场读数更正）**（金样里那份 `filesScanned 15` 是 mcp-shell 长出新文件之前的值，`--check` 现按**名单身份**比对扫描集（2026-10-29 起金样逐面带 `files` 相对路径名单，同长度替换、名单缺失、名单里出现绝对路径三形各一条红），见下文「闸自己被验过吗」）——两个工具面今天都不判证据语义；规则说明逐条进金样 |
 | `glasspane-harness/script/check-workflows.mjs` | **搬运仓自己的工作流闸（2026-10-26 新增，在 fork 树里）**：四条判据——每个 `uses:` 必须是 40-hex SHA 或 `./` 本地复合动作、每个 job 必须声明 `timeout-minutes`（GitHub 默认 360）、每个多语句 `run:` 必须自声明 `-e/-u/pipefail`（单语句 body 与 `node/bun/python` 打头的豁免）、发布三步装的 npm 必须来自本文件里唯一那个 workflow 级 pin。存在的理由是**一条一直没有收件人的移交**：父仓 `scripts/check-workflows.mjs` 对非主 root 的 D5/D6-b 只打 `△` 并写"交给该 root 自己的闸"，而那个 root 没有闸，于是真正持有发布凭据的搬运仓发出过 12 个无上限 job 与 4 个未自声明门的 run 体。三码退出（0/1/2），"没扫到"必须 exit 2 而不是绿，且每条都打计数（`jobs / refs / bodies / multi / npm`）。固定点测试 `packages/opencode/test/script/workflow-gates.test.ts`（2026-10-29 实测 35 条 / 75 断言；本轮给它加了复合动作与旗标拒绝两组用例，并且**修掉一条只在父仓布局下成立的用例**——它跑 `git -C <fork 根>/../.. diff`，在搬运仓里那不是一个 git 仓库，父仓 CI 与搬运仓 CI 跑的是同一个文件）全走它自己的 `--dir` 接缝读合成工作流，不改真树；真树那条用**下限**而不是等值（新增合法 job 不该红，扫描静默停止必须红）。 |
 | `packages/opencode/test/script/workflow-gates.test.ts` | 上面那条的电池：既验"能红"（未钉 SHA 的动作、无上限的 job、`timeout-minutes: 0`、缺门的 body、字面量 npm 版本、两个候选 pin、空 `workflows` 目录、无 job 的文件），也验**不过度反应**（折叠形式 `set -euo pipefail`、`set -e` 与 `set -o pipefail` 分行、单语句 body、`node`/`bun` 打头的 body、本地 `./.github/actions/*` 都必须绿）。第 1 节还驱动真树的两个工作流并断言 rc=0——工具若在真树上红，测试就红，不靠人记得跑 |
 | `glasspane-harness/script/patched-deps.mjs` | 补丁完整性闸（**在 fork 树里**，因为 split 出的独立仓必须自证）：三方核对——`package.json` 的 `patchedDependencies` 声明 / `bun.lock` 里是否还带这个 key / 补丁新增的字节是否真在**安装产物**里。它存在的理由是 `bun install` 对版本对不上的条目**不报错**：删锁里的条目、装一份没打补丁的产物，而类型检查与套件都不会红。`--artifact` 把同一判据用在发布负载上，判据窄到"补丁新增的字符串字面量与新增方法名"——窄是三次误报筛出来的 |
@@ -112,6 +112,52 @@ KERNEL_SRC=/path/to/iterate-skill tools/sync-kernel.sh --target=repo            
 ## 闸自己被验过吗
 
 验过，每次都是"反向破坏 → 必须变红"的因果验证，而不是"跑过了"。破坏脚本不落仓（本次跑在 `/var/tmp/glasspane-harness/`，日志同名目录）：
+
+- **2026-11-03（本轮 = 尺子层修复泳道：简报的 10 条逐条复测，5 条修、4 条否证、1 条改文档）**：
+  - **修复 1（brand-surface 四条 bar-shape 正则没有正对照）——成立并实测复现**：把 `upstream-npm-name` 的
+    正则原地换成永不匹配式、保留规则 id，`--check` 退 **0** 打印 "no unrecorded brand drift"；种
+    `prompts.intro("Uninstall OpenCode")`（真在 uninstall.ts 里 shipped 过的那句）进产品文件，`upstream-in-user-text`
+    规则 **0 命中**，只有全树 lineage 兜底把运行判红。修法：照 `surface-semantics` 的 `CONTROLS` 补内嵌正对照
+    （每条规则一个已知命中文样 + 注释形态必须不发射，失败 exit 2 具名），并把 `prompts.(intro|outro|note|warn|error)(`
+    补进 `upstream-in-user-text` 的形状枚举。**修复后同两发复测**：neutered 正则 → exit 2 点名
+    `positive control: rule "upstream-npm-name" does not fire`；种 prompts.intro → exit 1 打
+    `upstream-in-user-text ×1  packages/opencode/src/cli/cmd/uninstall.ts`。落仓电池新增控制 17/18。
+  - **修复 4（fork-diff 的 `counts` 块没有读者）——成立并实测复现**：`counts.identical` 伪写 4637→1，有参照
+    `--check` 退 **0**；离线 lane 伪写 `counts.edited→9999` 照打印照退 0。修法：两条 lane 都验——离线 lane 要求
+    counts.edited/added/deleted 等于金样自己名单的长度（`identical` 声明为不可复测而非静默放行），有参照 lane 把
+    四个数对着本次实测比。**修复后两发各退 1 点名 `golden counts disagree`**。落仓电池新增控制 19（钉两条 lane
+    共有的连续串，任何机器都真）。
+  - **修复 6（tool-surface `totalToolSurfaceLoc` 装了仪表没接线）——成立**：`--record` 写它（金样 25028），全仓
+    0 个读者。修法：`--check` 读回它 = 金样两面 loc 之和；缺字段/不等和各退 1 点名。**实测**：伪写 +1 →
+    `✗ totalToolSurfaceLoc: the golden's own numbers disagree — total 25029 vs … 25028`；删字段 → 具名红。控制 20 落仓。
+  - **修复 7（zod-bundle 文档与判据不符）——成立**：头注释把"stale account"列进 exit 1，实际记账条目离开 bundle
+    只打 `△` 退 0，而 `zod-bundle-selftest` 恰断言这种情形必须绿（判据对、文档错）。**只改文档侧**；实测主闸
+    rc=0（3 拷贝全记账，0 个 `△` 本轮）、selftest 22 条全绿。
+  - **修复 10（血缘掩码 `packages/opencode\b` 连 `-ai` 一起遮）——成立**：合成串上旧掩码 0 计数 / 新掩码 1。
+    修法：掩码改 `packages/opencode\b(?!-)`。实测真树探针 `packages/opencode-ai/x` 落进语料文件 → lineage
+    9632→9633 具名红（旧代码这一形**移动 0**）；当前 tracked 语料没有这一形，本轮修复对基线增量 **0**，无需重记。
+  - **否证 2（hook-liveness 降级与缺陷共用退出码）**：实测 `--check` 无参照 → **exit 2** 点名 "upstream was NOT
+    observed" 并指向 `--offline`；`--offline` → **exit 0** 且大声声明未观测上游。2026-10-10 那批已把
+    TypeError-退-1 修成分码；`ci.yml` 的 `harness-rulers` job 先跑克隆步骤再 `--check`，离线上游的 lane 走
+    `--offline`/`harness-contract.yml`。判据本身没动，只补测量读数。
+  - **否证 3（product-surface 布局等式/`126 !== 1`/未知旗标吞成产物名）**：`engine-branch-pinned` 与
+    `126 !== 1` 在当前文件里**不存在**（grep 0 命中；`HEAD:harness/glasspane-harness` 只出现在注释里）；未知旗标
+    （含 `bin` 名位置参数）实测 → **exit 2** `unknown argument(s)`，`--record` → exit 2。
+  - **否证 5（fork-diff `--record` 不要求参照）**：把 `upstream.json.fork.referenceClone` 指向不存在目录后
+    `--record` → **exit 2** `--record needs the reference clone…`，金样字节未动。与 `tool-surface:905` 的纪律一致。
+  - **否证 8（release-artifact 台账豁免只看路径不看内容 / fetch 失败静默回退）**：豁免看的是**方向**——
+    selftest 的 `split-ahead` 用例即"SYNCLOG.md 多 1 行发布侧独有字节"→ `✗ artifact` + `⚠ RE-SPLIT RISK` 退 1
+    （"改一个字母"正会产生这样一行 remote-only，不会躲进 lag 格）；纯 lag 退 0 但 `△` 点名文件与行数。
+    ls-remote 不可达 → exit 2 具名 `git ls-remote … failed`；"ref 取到了但不存在" → `publishes no refs/heads/main` /
+    `has no tag vX` 各为具名红，代码里不存在退回本地读的路径。selftest 18 条全绿。
+  - **修复 9（README 旧数字）**：本行上方目录表里 surface-semantics 已按当堂读数改 23（16+7）并标注量法；
+    电池条数现为 **29 ok**（24 条既有控制 + 本轮新增 17-20 + 收尾 closure；量法
+    `node harness/tools/rulers-selftest.mjs | grep -c '^ok'`——此前"25 条"里含 closure 那行，无参照的机器上
+    控制 9-10 会各少一条 ok、换成一行 note）。
+  - 纪律：本轮金样一份未改、一次 `--record` 未跑；变异全部 cp 备份 + `shasum -a 256 -c` 核回，不落 `git checkout`；
+    全套（六闸 `--check` + 电池 29 ok + closure）在一次性克隆（HEAD 加本轮尺子修复一笔提交、`.external/opencode`
+    符号链接回真参照）里实测 rc=0；主工作树收口提交落地后电池才可能绿闭（closure 要求 tracked 零改动，本轮尺子
+    修复未提交期间它会如实把这点报成 MISS）。
 
 - **2026-10-29（本轮给四把尺子补了八条"写了却没读者"的守卫；改完重新验"它能红"，不沿用旧结论）**：
   - 电池实测条数：`tools/rulers-selftest.mjs` **25 条 ok**、`tools/provider-surface-selftest.mjs` **7 条 ok**，

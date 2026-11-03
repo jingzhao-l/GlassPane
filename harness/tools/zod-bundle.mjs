@@ -21,8 +21,12 @@
  *   · a copy leaving the bundle is NOT red (that is the fix landing) but is reported, because an
  *     out-of-date account is how the next person misreads the graph.
  *
- * Exit codes: 0 accounted for, 1 an unattributed copy (or a stale account the run flags),
- * 2 cannot measure — no bun, the probe refused, or no contract to compare against.
+ * Exit codes: 0 accounted for — a copy that left the bundle or a module count that moved is
+ * flagged with `△` and stays 0 (that is the fix landing / the graph moving, not a regression;
+ * `zod-bundle-selftest.mjs` asserts this green-with-a-flag behaviour, so the judge, not the doc,
+ * owns it), 1 an unattributed copy, a recorded `vulnerable` that disagrees with the arithmetic,
+ * or a version this gate cannot order, 2 cannot measure — no bun, the probe refused, or no
+ * contract to compare against.
  */
 import { spawnSync } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
