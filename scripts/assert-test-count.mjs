@@ -36,7 +36,11 @@ const XCUITEST = /Executed (\d+) tests?, with(?: (\d+) tests? skipped and)? (\d+
 // 从前这一行只取了 tests/suites 两个数，failures 永远从 XCTest 那一侧来——于是"只有
 // Swift Testing 那一半红"的运行在这道闸上读起来是绿的（缺陷 #31，P3）。它有自己的退出码，
 // 但这条闸的职责恰恰是"退出码之外再数一遍"。
-const SWIFT_TESTING = /Test run with (\d+) tests? in (\d+) suites?(?: with (\d+) issues?)?/
+// 失败数**单独一支**：真行里 `with 3 issues` 在时长后面，不贴着 `suites`。把它写成同一条正则的
+// 可选组会静默不匹配——贪婪的 `\D+` 停在 `after 1.586` 的数字之前，那里读不到 `with`，于是
+// failures 又是 0；本轮第一版就栽在这里，是它自己的那条对照测试把它抓出来的。整行扫，不相邻也认。
+const SWIFT_TESTING = /Test run with (\d+) tests? in (\d+) suites?/
+const SWIFT_ISSUES = /Test run with \d+ tests? in \d+ suites?[^\n]*?\bwith (\d+) issues?\b/
 
 function usage(message) {
   if (message) process.stderr.write(`error: ${message}\n`)
@@ -91,7 +95,8 @@ for (const file of files) {
     swiftTestingSum = Math.max(swiftTestingSum, Number(testing[1]))
     fileTests = Math.max(fileTests, Number(testing[1]))
     // 与 XCTest 那一侧同一条规矩：这里只需要"> 0 就是红"。
-    failures += Number(testing[3] ?? 0)
+    const issues = SWIFT_ISSUES.exec(text)
+    if (issues) failures += Number(issues[1])
   }
   if (fileTests === 0) silent.push(file)
 }

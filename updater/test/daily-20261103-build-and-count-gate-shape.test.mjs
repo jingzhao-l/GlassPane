@@ -117,30 +117,36 @@ Test Suite 'All tests' started at 2026-11-03.
 test('assert-test-count：Swift Testing 的 "with N issues" 计入失败（只有它红的一趟不许读成绿）', () => {
   const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-count-'))
   try {
-    const log = path.join(dir, 'swift-test.log')
-    fs.writeFileSync(log, REAL_LOG)
-    // 反例（缺陷形状）：把 XCTest 那一行拿掉，只剩 Swift Testing 报 3 issues —— 旧版读成 0 失败。
-    const onlyTesting = path.join(dir, 'only-testing.log')
-    fs.writeFileSync(onlyTesting, REAL_LOG.split('\n')
-      .filter((l) => !l.includes('Executed 1577'))
-      .join('\n'))
-    const r = spawnSync(process.execPath, [COUNT, 'engine', '1', onlyTesting], {
-      cwd: REPO, encoding: 'utf8',
-    })
-    assert.notEqual(r.status, 0, `只有 Swift Testing 报失败，这道闸却绿了：${r.stdout}${r.stderr}`)
-    assert.match(`${r.stdout}${r.stderr}`, /fail|失败|red/i, `非零之外还要说清为什么非零：${r.stdout}${r.stderr}`)
+    // 夹具是"两半都出声"的一份真日志，只有 Swift Testing 那一半带失败——这才隔离出本轮改的那一条。
+    // 前一版这里把 XCTest 行删掉去造反例，结果红是红了，红的理由却是"那条线没跑用例"
+    // （`日志里没有一行 XCTest 的 Executed N tests`），本条要问的 failures 会计根本没被碰到。
+    const onlyTesting = path.join(dir, 'testing-failures.log')
+    fs.writeFileSync(onlyTesting, REAL_LOG.replace(
+      'Executed 1577 tests, with 5 tests skipped and 1 failure',
+      'Executed 1577 tests, with 5 tests skipped and 0 failure',
+    ))
+    const r = spawnSync(process.execPath, [COUNT, 'engine', '1', onlyTesting], { cwd: REPO, encoding: 'utf8' })
+    assert.notEqual(r.status, 0, `只有 Swift Testing 报 3 issues，这道闸却绿了：${r.stdout}${r.stderr}`)
+    assert.match(`${r.stdout}${r.stderr}`, /日志里报了 3 条失败/,
+      `必须因为 failures 计数非零而红，不是别的理由：${r.stdout}${r.stderr}`)
 
-    // 两面：把 issues 那一行改成 passed/0 issues，同一份日志就该绿（否则这条判据恒红）。
+    // 反面对照：同一份日志把两半都改成通过 ⇒ 必须零。少了这一半，"恒红"也算通过。
     const passed = path.join(dir, 'passed.log')
-    // 合法形状要**两半都合法**：这道闸另有"每条线都得有行数"的判据（见 remedy 那句
-    // "不要用 --skip 让它闭嘴"），所以这里保留 XCTest 的通过行，只把 Swift Testing 那一行改成 passed。
     fs.writeFileSync(passed, REAL_LOG
-      .split('\n')
-      .filter((l) => !l.includes('Suite "每日'))
-      .join('\n')
       .replace('Executed 1577 tests, with 5 tests skipped and 1 failure', 'Executed 1577 tests, with 5 tests skipped and 0 failure')
-      .replace('failed after 1.586 seconds with 3 issues.', 'passed after 1.586 seconds.'))
+      .replace('Suite "每日 2026-11-03：引擎侧的四条" failed after 0.036 seconds with 1 issue.', 'Suite "每日 2026-11-03：引擎侧的四条" passed after 0.036 seconds.')
+      .replace('Test run with 76 tests in 8 suites failed after 1.586 seconds with 3 issues.', 'Test run with 76 tests in 8 suites passed after 1.586 seconds.'))
     const g = spawnSync(process.execPath, [COUNT, 'engine', '1', passed], { cwd: REPO, encoding: 'utf8' })
     assert.equal(g.status, 0, `合法形状被误红：${g.stdout}${g.stderr}`)
+
+    // 第三面：XCTest 那一侧报 1 failure 时必须照样红（本轮没把它改坏）。
+    const xcui = path.join(dir, 'xcuitest-failure.log')
+    fs.writeFileSync(xcui, REAL_LOG.replace(
+      'Test run with 76 tests in 8 suites failed after 1.586 seconds with 3 issues.',
+      'Test run with 76 tests in 8 suites passed after 1.586 seconds.',
+    ))
+    const x = spawnSync(process.execPath, [COUNT, 'engine', '1', xcui], { cwd: REPO, encoding: 'utf8' })
+    assert.notEqual(x.status, 0, 'XCTest 那一半报 1 failure 也要红')
+    assert.match(`${x.stdout}${x.stderr}`, /日志里报了 1 条失败/, `${x.stdout}${x.stderr}`)
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })
