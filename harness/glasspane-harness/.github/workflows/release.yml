@@ -229,14 +229,19 @@ jobs:
             echo "::error::could not read GLASSPANE_HARNESS_SIGNING_FPR out of scripts/install.sh — the installer's trust anchor moved shape and this gate refuses to publish under a guessed one"
             exit 1
           fi
-          awk '/-----BEGIN PGP PUBLIC KEY BLOCK-----/{f=1} f{print} /-----END PGP PUBLIC KEY BLOCK-----/{exit}' "$GITHUB_WORKSPACE/scripts/install.sh" > signer.asc
-          if [ ! -s signer.asc ]; then
+          # Key material lives in its own directory, never in the scanned checkout: writing
+          # `signer.asc` next to the served assets is what made v0.14.0's flip step read its OWN key as
+          # an orphan sidecar and refuse (correctly) to publish. Measured, not theorised.
+          keys="$(mktemp -d)"
+          chmod 700 "$keys"
+          awk '/-----BEGIN PGP PUBLIC KEY BLOCK-----/{f=1} f{print} /-----END PGP PUBLIC KEY BLOCK-----/{exit}' "$GITHUB_WORKSPACE/scripts/install.sh" > "$keys/signer.asc"
+          if [ ! -s "$keys/signer.asc" ]; then
             echo "::error::scripts/install.sh carries no armored PGP public key, so there is no key to attribute the tag to"
             exit 1
           fi
           gnupg="$(mktemp -d)"
           chmod 700 "$gnupg"
-          if ! GNUPGHOME="$gnupg" gpg --batch --quiet --import < signer.asc; then
+          if ! GNUPGHOME="$gnupg" gpg --batch --quiet --import < "$keys/signer.asc"; then
             echo "::error::gpg could not import the signing key embedded in scripts/install.sh — the tag cannot be attributed, so the release is not made"
             exit 1
           fi
@@ -734,14 +739,16 @@ jobs:
             echo "::error::could not read GLASSPANE_HARNESS_SIGNING_FPR out of scripts/install.sh — the installer's trust anchor moved shape and this gate refuses to publish under a guessed one"
             exit 1
           fi
-          awk '/-----BEGIN PGP PUBLIC KEY BLOCK-----/{f=1} f{print} /-----END PGP PUBLIC KEY BLOCK-----/{exit}' "$GITHUB_WORKSPACE/scripts/install.sh" > signer.asc
-          if [ ! -s signer.asc ]; then
+          keys="$(mktemp -d)"
+          chmod 700 "$keys"
+          awk '/-----BEGIN PGP PUBLIC KEY BLOCK-----/{f=1} f{print} /-----END PGP PUBLIC KEY BLOCK-----/{exit}' "$GITHUB_WORKSPACE/scripts/install.sh" > "$keys/signer.asc"
+          if [ ! -s "$keys/signer.asc" ]; then
             echo "::error::scripts/install.sh carries no armored PGP public key — there is no installer-side half to verify against, so 'verified the way the installer verifies' cannot be claimed"
             exit 1
           fi
           gnupg="$(mktemp -d)"
           chmod 700 "$gnupg"
-          if ! GNUPGHOME="$gnupg" gpg --batch --quiet --import < signer.asc; then
+          if ! GNUPGHOME="$gnupg" gpg --batch --quiet --import < "$keys/signer.asc"; then
             echo "::error::gpg could not import the signing key embedded in scripts/install.sh — provenance cannot be established and the release stays a draft"
             exit 1
           fi

@@ -12,6 +12,31 @@ contract does not).
 
 （空。本轮收口后没有未归号的条目。）
 
+## [0.14.1] — 2026-11-03
+
+**版本判断：patch。** 本版只有一处代码变动，且它是修一个把发布按住的自伤：产品面、CLI 形状、
+`product.json` 的目标矩阵、`gp_*` 的方法表一字未动。
+
+- **发布链：`publish-release` 把它自己的公钥写进了它要扫的目录。** 上一条版本刚打出去就在 CI 里
+  实测到这一发：那一步先 `gh release download` 把 draft 的资产取到 `$RUNNER_TEMP/publish-verify`，
+  再用 `awk … > signer.asc` 把 `scripts/install.sh` 内嵌的公钥解到**同一个目录**，随后它那两条
+  双向集比（"每个资产必须有 `.asc`"与"每个 `.asc` 必须点名一个被服的资产"）把自己的 `signer.asc`
+  读成了一个没有对应资产的 sidecar，于是具名拒绝：
+  `release v0.14.0 carries signature sidecars for files it does not serve: signer`。
+  **闸是对的**——它拒绝把没人验过的东西转公开，发布停在 draft；错的是这一步在闸的扫描集里留下了
+  自己的工具。修法：公钥与钥匙环都放进各自的 `mktemp -d`，扫描集一个字节不变；同一条纪律一并落到
+  `version-check` 里那个验 tag 签名的步骤（它同样曾往被检的检出树里写 `signer.asc`，今天这个形状
+  还在我的仓库根上留过一次 `?? signer.asc`）。
+  固定点：`the job's own key material never lands in the directory it scans for orphan sidecars`
+  （55 pass / 0 fail / 180 断言）。反向控制：把其中一次 `import < "$keys/signer.asc"` 还原成
+  `import < signer.asc` → 该具名用例红，sha 核回。
+- **v0.14.0 这个号为什么留在原地不发。** 它的 tag 是被 tag 的那棵树在跑发布，而那棵树里的工作流就是
+  会自伤的这一份——GitHub 执行的是触发 commit 自带的 workflow 文件，改主干改不到它；重跑同一条
+  `gh run rerun --failed` 只会再自伤一次（本轮实测：`41582686243` 十格中九格成功，只有 flip 那格红）。
+  已发布的 tag 绝不移动，且本仓现在有一条仓库级 ruleset 从服务端拒绝移动它。所以这个号不补、不撤、
+  不发 npm，draft release 直接删掉（不留悬挂 draft），0.14.1 是它的替代品。npm 上没有 0.14.0 的字节，
+  `latest` 会直接落到 0.14.1。
+
 ## [0.14.0] — 2026-11-03
 
 **版本判断：minor。** pre-1.0 的口径是"产品面/CLI 形状变动 = minor，纯修复 = patch"。本版有两处是**形状**，

@@ -563,6 +563,22 @@ describe("the release goes public only behind an installer-shaped verification",
     expect(header).toMatch(/^ {4}environment: release$/m)
   })
 
+  test("the job's own key material never lands in the directory it scans for orphan sidecars", async () => {
+    // v0.14.0 died here, and died correctly: the flip step wrote `signer.asc` next to the downloaded
+    // assets, then its own two-directional check ("every `*.asc` must name a served file") read the key
+    // it had just imported as evidence the release served a file called `signer`. The gate did its job;
+    // the job shot itself, and the release stayed a draft. Key material now lives in a `mktemp -d` of
+    // its own, and the scan set is untouched — this test pins both halves.
+    const text = await Bun.file(path.join(REAL_ROOT, ".github/workflows/release.yml")).text()
+    expect(text.match(/> "\$keys\/signer\.asc"/g)?.length).toBe(2)
+    expect(text).not.toMatch(/> signer\.asc$/)
+    expect(text.match(/import < "\$keys\/signer\.asc"/g)?.length).toBe(2)
+    // The orphan scan itself must stay two-directional — a fix that quiets the scan is worse than the bug.
+    const job = await publishReleaseJob()
+    expect(job).toContain('for f in ./*.asc; do')
+    expect(job).toContain("carries signature sidecars for files it does not serve")
+  })
+
   test("a per-file gpg --verify round trip precedes the draft→public flip", async () => {
     const job = await publishReleaseJob()
     const verify = job.indexOf("gpg --batch --quiet --status-fd 2 --verify")
