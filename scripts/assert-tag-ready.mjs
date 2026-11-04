@@ -147,7 +147,25 @@ function git(args, cwd) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
 }
 
-export function main(argv, { cwd = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..') } = {}) {
+/**
+ * `origin/main` 的 tip — 问**远端**，不问本地那一枚跟踪引用。
+ *
+ * 从前这一格读的是 `git rev-parse refs/remotes/origin/main`：那是本地上一次 `git fetch` 留下的快照。
+ * 另一条线在我们上一次 fetch 之后推了 Y，本地仍旧写着 X ⇒ tip 判据把 X 当成 main 的 tip 放过，
+ * 于是一枚签名 tag、一份 Release 与 npm 上的两个包全部钉在 X，而 main 已经在 Y —— 与文件顶部
+ * 那句"HEAD 必须就是 origin/main 的 tip"直接冲突。fetch 与否不是这条判据能假设的前置条件。
+ *
+ * `--repository` 没给时这里也**不许**退回本地快照：tip 判据宁可答"读不出来"（judge 那一侧回 2）。
+ * 读不到不是绿。
+ */
+export function remoteMainSha(cwd) {
+  const out = execFileSync('git', ['ls-remote', 'origin', 'refs/heads/main'], { cwd, encoding: 'utf8' })
+  const sha = out.split('\n').map((line) => line.split('\t')[0] ?? '').find((s) => /^[0-9a-f]{40}$/.test(s))
+  if (!sha) throw new Error('git ls-remote origin refs/heads/main 没答出一枚 commit id')
+  return sha
+}
+
+export function main(argv, { cwd = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'), readTip = remoteMainSha } = {}) {
   const version = argv[0]
   if (!version) {
     process.stderr.write('usage: node scripts/assert-tag-ready.mjs <X.Y.Z> [--repository owner/name] [--workflow ci.yml]\n')
@@ -162,7 +180,8 @@ export function main(argv, { cwd = path.resolve(path.dirname(fileURLToPath(impor
     const headSha = git(['rev-parse', 'HEAD'], cwd)
     let originMainSha = ''
     try {
-      originMainSha = git(['rev-parse', 'refs/remotes/origin/main'], cwd)
+      // 问远端（`remoteMainSha`），不问本地跟踪引用：见上面那段注释里的失效模式。
+      originMainSha = readTip(cwd)
     } catch {
       originMainSha = ''
     }
