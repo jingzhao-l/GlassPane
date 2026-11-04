@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { execFileSync, spawnSync } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
@@ -342,8 +342,18 @@ runs:
   test("the real tree is read through both roots", () => {
     const stdout = execFileSync("node", [GATE, "--json"], { cwd: REAL_ROOT, encoding: "utf8" })
     const read = JSON.parse(stdout) as { totals: Record<string, number> }
-    // 2 workflows + 2 composite actions, and the action refs are now part of the pinned count.
-    expect(read.totals.files).toBeGreaterThanOrEqual(4)
+    // Counted from the tree instead of remembered from a past run. The old form was
+    // `files >= 4` with the comment "2 workflows + 2 composite actions", and it went red the day an
+    // unreferenced action was deleted — a rule about scan coverage reddening for a reason that had
+    // nothing to do with coverage. Equality against what the directory actually holds still reddens if
+    // the gate stops opening either root, and it says so in the numbers rather than in a stale total.
+    const workflows = readdirSync(path.join(REAL_ROOT, ".github/workflows")).filter((name) => /\.(ya?ml)$/.test(name)).length
+    const actionsRoot = path.join(REAL_ROOT, ".github/actions")
+    const actions = existsSync(actionsRoot)
+      ? readdirSync(actionsRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory()).length
+      : 0
+    expect(actions).toBeGreaterThan(0)
+    expect(read.totals.files).toBe(workflows + actions)
     expect(read.totals.refs).toBeGreaterThanOrEqual(23)
   })
 })
