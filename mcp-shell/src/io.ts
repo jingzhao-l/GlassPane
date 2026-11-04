@@ -112,10 +112,21 @@ export interface LineSink {
  * cannot grow this buffer without bound.
  */
 export class LineReader {
-  private buffer = "";
-  /** Wire bytes of the line in progress; emptied the moment the line is discarded. */
-  private rawChunks: Buffer[] = [];
-  /** UTF-8 bytes seen for the line in progress (counted, not all retained). */
+  /**
+   * Bytes of the line in progress, in arrival order. Decoding happens ONCE, at delivery.
+   *
+   * The previous version decoded every segment on its own (`segment.toString("utf8")`) and
+   * concatenated the results into a string. A chunk boundary that lands inside a multi-byte
+   * UTF-8 sequence is normal for frames larger than a socket read: the left half ends the
+   * segment, the right half starts the next one, and `toString` replaces both with U+FFFD.
+   * `JSON.parse` still succeeded, so a daemon reply carrying screen text (`observe`,
+   * `last_evidence`) reached the agent and the report renderer with that text silently
+   * rewritten, while `bytes`/`raw` stayed correct — the shape looked fine, only the content
+   * had been edited. Measured 2026-11-04: feeding `{"title":"数据"}\n` (19 bytes) split at
+   * each of its 18 positions corrupts the title at 4 of them.
+   */
+  private chunks: Buffer[] = [];
+  /** UTF-8 bytes seen for the line in progress (counted past the cap, never all retained). */
   private bytes = 0;
   /** The line in progress already blew the cap; only the head is retained. */
   private discarding = false;
@@ -124,8 +135,8 @@ export class LineReader {
 
   /**
    * @param chunk a fragment from the stream. A `Buffer` keeps the wire bytes for
-   *        {@link LineSink.onLine}; a string is decoded as UTF-8 first, so the byte
-   *        count stays a byte count either way.
+   *        {@link LineSink.onLine}; a string is encoded to UTF-8 first, so the byte count
+   *        stays a byte count either way.
    */
   push(chunk: string | Buffer): void {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
@@ -143,7 +154,7 @@ export class LineReader {
 
   /** Partial line so far; only the retained head while a line is discarded. */
   pendingText(): string {
-    return this.buffer;
+    return this.chunks.length === 0 ? "" : Buffer.concat(this.chunks).toString("utf8");
   }
 
   private consume(segment: Buffer): void {
@@ -151,32 +162,32 @@ export class LineReader {
     if (segmentBytes === 0 && !this.discarding) {
       return;
     }
-    const text = segment.toString("utf8");
     if (this.discarding) {
       this.bytes += segmentBytes;
       return;
     }
     if (this.bytes + segmentBytes > MAX_FRAME_BYTES) {
+      // Freeze the head as BYTES. A character slice here would put the boundary back in the
+      // middle of a sequence, and the attribution preview is the last place that may invent a
+      // replacement character and call it the daemon's own text.
       this.discarding = true;
-      this.buffer = this.buffer.length >= OVERSIZE_PREFIX_BYTES
-        ? this.buffer.slice(0, OVERSIZE_PREFIX_BYTES)
-        : (this.buffer + text).slice(0, OVERSIZE_PREFIX_BYTES);
-      this.rawChunks = [];
+      const head = Buffer.concat(this.chunks).subarray(0, OVERSIZE_PREFIX_BYTES);
+      this.chunks = [head];
+      // 这一段的字节照样计入：报出去的是**这条帧的线字节**，从超限那一段起少算就把一个测量
+      // 改小了（本轮实测：步长 7 时恒少 6 个字节）。
       this.bytes += segmentBytes;
       return;
     }
-    this.buffer += text;
-    this.rawChunks.push(Buffer.from(segment));
+    this.chunks.push(Buffer.from(segment));
     this.bytes += segmentBytes;
   }
 
   private deliver(): void {
-    const line = this.buffer;
+    const raw = this.chunks.length === 0 ? undefined : Buffer.concat(this.chunks);
+    const line = raw === undefined ? "" : raw.toString("utf8");
     const bytes = this.bytes;
     const oversize = this.discarding;
-    const raw = this.rawChunks.length === 0 ? undefined : Buffer.concat(this.rawChunks);
-    this.buffer = "";
-    this.rawChunks = [];
+    this.chunks = [];
     this.bytes = 0;
     this.discarding = false;
     if (oversize) {
