@@ -414,8 +414,11 @@ advance_existing_clone() { # $1=目录 $2=要装的 ref。回 0 = 这棵树可�
     # 的本意是"照着跑就对了"。同一个函数上面 40 行的 GLASSPANE_INSTALL_DIR=\"…\" 已经是带引号的
     # 那一形；判据对、句子漏一处，就是这道闸（install-sh 那条静态闸）现在扫的东西。
     # $_depth 保持不带引号：它要在打印出来的那一行里就是两个词（--depth 1），加引号反而合成一个
-    # git 不认的参数。
-    say "    先 fetch 它——git -C $(sh_quote "$_dir") fetch --tags${_depth:+ $(sh_quote "$_depth")} $(sh_quote "$_remote") $(sh_quote "$_ref")，只补对象、不动工作树。"
+    # git 不认的参数。本机实测（2026-11-04）：从前这一枚走了 sh_quote，打出来的是
+    # `fetch --tags '--depth 1' …`，照抄即 `error: unknown option `depth 1'`——这一行的本意是
+    # "照着跑就对了"，而判据写在上头、句子漏在这一处，正是上面那条注释自己描述的那个形状。
+    # 值本身仍一律带引号（目录/远端/引用都是外来的）；只有这一枚是 388-391 行自己写的字面量。
+    say "    先 fetch 它——git -C $(sh_quote "$_dir") fetch --tags${_depth:+ ${_depth}} $(sh_quote "$_remote") $(sh_quote "$_ref")，只补对象、不动工作树。"
     if ! git -C "$_dir" fetch --tags $_depth "$_remote" "$_ref" >/dev/null 2>&1; then
       say "    git fetch 非零退出：确认网络与该引用存在（git ls-remote $(sh_quote "$_remote") $(sh_quote "$_ref")），"
       say "    或 GLASSPANE_INSTALL_DIR=<空目录> 换一处全新的 clone。本轮没有 clone、没有切分支。"

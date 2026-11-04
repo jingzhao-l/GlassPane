@@ -2891,6 +2891,11 @@ export function existingCloneDecision({ targetDir, ref, head = null, tagCommit =
   const dirty = blocking.map((line) => String(line).trim()).filter((line) => line !== '')
   if (dirty.length > 0) {
     const shown = dirty.slice(0, 10)
+    // 建议目录先算成一个值再插进出路句子：**不能**在这条模板串里嵌另一条模板串——本仓那道
+    // 静态引号闸用朴素正则按"反引号区间"取字面量，嵌套反引号会把区间从中间截断，
+    // 于是这一处从扫描集里消失，而"看不见"正是它反复出事的那一类（2026-11-04 实测：嵌了之后
+    // 赋值位那一半扫不到这条一键安装命令）。
+    const cleanDirHint = `${String(targetDir)}-${String(ref).replace(/[^A-Za-z0-9._+-]/g, '_')}`
     return {
       action: 'refuse',
       blocking: dirty,
@@ -2902,7 +2907,7 @@ export function existingCloneDecision({ targetDir, ref, head = null, tagCommit =
         // 指到 /Volumes/src/gp 时被拒的是那棵树，而句子里给的是家目录里另一条从没存在过的路径——
         // 两条一键入口同源的那条规矩（判据不许指向一个与本次无关的位置）。路径带空格时必须加引号，
         // 否则这句照抄进去的是两个词，clone 落在 `/Users/John` 而 `Smith/…` 变成一条命令。
-        + `\n  a) 换一处干净的家再跑一键安装：GLASSPANE_INSTALL_DIR="${String(targetDir)}-${String(ref).replace(/[^A-Za-z0-9._+-]/g, '_')}" `
+        + `\n  a) 换一处干净的家再跑一键安装：GLASSPANE_INSTALL_DIR=${quoteShellArg(cleanDirHint)} `
         + `sh install.sh（或 npx glasspane-install）；`
         + `\n  b) 自己收着这些改动：在 ${targetDir} 里把它们提交或转移到别处，再重跑本命令——`
         + '安装器不替你决定这些文件去哪。',
@@ -3081,7 +3086,7 @@ export function advanceExistingClone({ repoDir, ref, spawn = spawnSync } = {}) {
           + `git -C ${quoteShellArg(repoDir)} ${fetchArgs.map((a) => quoteShellArg(a)).join(' ')} 退出 ${String(fetched.status ?? 'null')}：`
           + `${String(fetched.stderr ?? '').trim().split('\n')[0] || '（git 没有留下 stderr）'}。\n`
           + '没有 clone、没有切分支、没有写入任何东西。下一步：确认网络与该引用存在（'
-          + `git ls-remote ${remote.remote} ${ref}），或 GLASSPANE_INSTALL_DIR=<空目录> 换一处全新的 clone。`,
+          + `git ls-remote ${quoteShellArg(remote.remote)} ${quoteShellArg(ref)}），或 GLASSPANE_INSTALL_DIR=<空目录> 换一处全新的 clone。`,
       }
     }
     facts = readCloneFacts({ targetDir: repoDir, ref, spawn, fetchHead: true })
