@@ -63,6 +63,62 @@ import"的脚本 × 4 种宿主 argv，每条判的是"SURVIVED 那一行有没�
 15 份"有导出且被别处 import"的模块——0 份接管（产品入口那三枚早就各自带 realpath 守卫）。这一族的
 写域只在开发期闸脚本，实测过才把范围这么写，不靠推断。
 
+### 本版还带上 2026-11-04 这一轮（确认并修复 24 条；另有 14 条候选本轮未修，见 `specs/GlassPane_每日2026-11-04_发现台账.md` 第 5 节）
+
+`v1.29.1` 从上一轮起就没打过 tag、没进 registry（实测：`git tag --sort=-v:refname` 最新仍是
+`v1.29.0`，`npm view glasspane-mcp version` = 1.29.0），因此不另起一号：新内容并进本版，
+上面那段"本版动的是两枚开发期闸脚本"只描述了当时已写入的内容，以本节为准（旧文字保留不改写）。
+patch 判据逐条重测仍成立：状态文件字段没动、退出码集合没动、CLI 参数没动、npm 包 `bin` 声明没动。
+
+**上一轮留下的半修（有测试没实现 / 修法本身错）**
+- 桥：超时臂把已经到手的采丢弃、无载荷臂不唤醒被 SIGSTOP 停住的目标、载荷是 JSON 数组时以
+  traceback 离场、`cmd_capture` 等四个会话内命令没有兄弟那层守卫——四条测试本轮从红转绿；
+  上一轮实现了却没测的 `cap_retained_output` 补了 9 条测试。
+- 引擎：`DaemonInvocation` 用 `Bundle.main.executablePath` 自报，而 `EngineCore` 是被设置面板
+  当库链接的——在面板里它给出面板二进制、在 `swift test` 里给出 `xctest`，三条 XCTest 因此变红；
+  改成"只有进程自身真是 daemon 才自报，其余调用方用在册安装位"。
+
+**向真绑定要名字（本机 `xcrun lldb` 实测）**
+- `WatchAddress` 只有 int 重载：交 `SBAddress` 得 `TypeError: argument 2 of type 'lldb::addr_t'`，
+  被 `_arm_watchpoint` 的 except 咽成一句失败 ⇒ **生产上每一次武装都失败**，而账本答 "queued"；
+  四条相关用例把这一整条 patch 掉，所以测试面看不见。
+- `SBWatchpoint` 没有 `Disable`（有 `SetEnabled`/`Clear`）⇒ 硬件槽位永远让不出来；桩供
+  `Disable()` 是给不存在的能力作背书，桩改成真机形状。
+- 进程状态名闭集缺 `eStateStepping`（本机 =7）⇒ 单步停的那一次采集在 int→名字 反查处落空；
+  新测试向真绑定要名单，不向手抄表要。
+
+**传输与出路的可执行性**
+- `LineReader` 逐段 `toString("utf8")`：读边界落在多字节序列中间时两半各成一个 U+FFFD，
+  `JSON.parse` 仍成功 ⇒ daemon 回包里的**屏幕文本**被静默改写给 agent 与报告，而 `bytes`/`raw`
+  看着都对。改成一条帧只解码一次；18 个切点逐一实测（改前 4 个污染）。
+- 出路里指裸名/指相对路径/指不存在的开关的一族：`npx glasspane-install --restore-launchd` 取代
+  `node installer/cli.js …`（代理 cwd 里那两条不存在）；HTTP 面两条 501 与 `--help` 第三档不再印
+  裸 `glasspaned`；新增类级闸 `mcp-shell/test/daily-20261104-bare-daemon-name.test.mjs`（按位置判、
+  含"必须抓到合成裸名"与"带位置的写法与散文都不许误报"三条对照），因为这条路名清单已第五次少下一枚。
+- 安装器两条待照抄命令（脏树拒绝的建议目录、`git ls-remote` 的远端名）走 `quoteShellArg`；
+  `install.sh` 浅仓那一行打出的 `'--depth 1'` 是 git 不认的一枚参数（真 git 实测
+  `error: unknown option 'depth 1'`），按它自己注释的口径改回两个词。
+
+**"闸看不见东西"这一类（三处）**
+- 注释剥离器用两条正则：`installer/cli.js` 文档里的 `installer/*.js` 那个 `/*` 开了个假块注释，
+  从那里起 ~4.5 KB 真代码退出扫描集（含本轮要修的 `git ls-remote`）。改成词法走读 + 4 条自测。
+- 引号判据的两处盲区：赋值位 `NAME=<洞>` 因"两侧含汉字即视作散文"被整条洗掉；`git` 不在动词名单、
+  `remote` 不在"路径类"判据里。补上，并各带一条非空转对照（`inspected` 必须真含这两处）。
+  把"动词与参数位之间允许任意裸词"改开成形状判据时实测造出 4 处英文说明误报，故只留精确那一枚。
+- 跨层对照 `tools.test.mjs` 与 `HumanInterventionAuditTests` 的扫描器在新拼写下一度读到 0 枚开关
+  （＝空跑），两处的扫描形状跟着改成两种拼写都认。
+
+**文档诚实性四条**：`README`「数据会离开本机吗？不会」与自己后半句矛盾（`gp_observe` 的树进转录、
+`gp_capture_view` 交回图像字节）；`SECURITY`「daemon 从不 spawn lldb」为假（`DebugCapabilityProbe`
+由 glasspaned 起 `xcrun lldb --batch`）且引的 `glasspane_bridge.py:725-726` 早已漂走；
+`UpdateModel` 注释写"七道校验"而 `check.js` 自己是 eight gates；`release.yml` 与
+`check-workflows.mjs` 的注释把"每个 job 都钉 SHA"写成仍只管 environment job（反向破坏实测：
+`swift` job 改回 `@v4` → 闸点名该 job 并 rc=1）。
+
+**门禁实际计数（收口态复跑，见下面第 3 节那一段的读数）**：mcp-shell 749/749、installer 325/325、
+updater 802/802、`pytest -q bridge` 223 passed / 1 skipped、`swift test --package-path engine`
+1577 executed / 5 skipped / 0 failures 且 Swift Testing 76 tests in 8 suites passed。
+
 ## [1.29.0] — 2026-11-03
 
 **版本判断：minor。** 判据沿用 1.6.2 写下、此后每一号各自复述过的那一条（patch 要求「状态文件的
