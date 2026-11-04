@@ -171,7 +171,7 @@ export class LineReader {
       // middle of a sequence, and the attribution preview is the last place that may invent a
       // replacement character and call it the daemon's own text.
       this.discarding = true;
-      const head = Buffer.concat(this.chunks).subarray(0, OVERSIZE_PREFIX_BYTES);
+      const head = Buffer.concat([...this.chunks, segment]).subarray(0, OVERSIZE_PREFIX_BYTES);
       this.chunks = [head];
       // 这一段的字节照样计入：报出去的是**这条帧的线字节**，从超限那一段起少算就把一个测量
       // 改小了（本轮实测：步长 7 时恒少 6 个字节）。

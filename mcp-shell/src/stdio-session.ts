@@ -70,8 +70,8 @@ Socket, in the order this shell resolves it:
   2. GLASSPANE_ENGINE_SOCK=<path>
   3. $HOME/.glasspane/engine.sock — a guess read from this process's HOME, not
      the daemon's rule: glasspaned's own default is the home folder the system
-     reports, which a HOME you export does not move, and glasspaned --state-dir
-     <dir> serves <dir>/daemon.sock instead.
+     reports, which a HOME you export does not move, and a daemon started with
+     --state-dir <dir> serves <dir>/daemon.sock instead.
 
 So "nothing is listening on the default path" means this shell guessed a
 different directory, not that the daemon is dead. Connect to the socket the

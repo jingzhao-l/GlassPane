@@ -1,6 +1,8 @@
 import http, { type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
+import os from "node:os";
+import path from "node:path";
 import { URL } from "node:url";
 
 import {
@@ -26,6 +28,7 @@ import {
   GP_E_STATE_ROOT_REFUSED,
   GP_E_UNKNOWN,
   GP_E_SOCKET_TRUST,
+  quoteShellArg,
 } from "./errors.js";
 import { dimensionAttributionLine, engineBody, validateDimension } from "./dimension.js";
 import { SERVER_INFO } from "./dispatch.js";
@@ -1156,13 +1159,32 @@ async function handleToolForward(
  * validate here, and never mints a fake success (honesty red line).
  * ------------------------------------------------------------------ */
 
+/**
+ * The daemon CLI, spelled the way a caller on THIS machine can actually run it.
+ *
+ * `glasspaned` is not on PATH (measured 2026-11-04: `command -v glasspaned` answers nothing, and
+ * no npm package declares that bin), so a remedy printing the bare name promises a repair and
+ * delivers `command not found` (127). The installed bundle is where `installer/cli.js` puts the
+ * daemon, and it is the same location `project-registry.ts` names. The directory contains a space,
+ * so the path must be ONE shell word — otherwise the copy-paste lands on `.../GlassPane` and hands
+ * `Daemon.app/...` to the next argv slot. Swift's half of this rule is
+ * `engine/Sources/GlassPaneEngine/DaemonInvocation.swift`; the gate that keeps both honest is
+ * `test/daily-20261104-bare-daemon-name.test.mjs`, because this list has been short of the next
+ * site five times running.
+ */
+export function daemonCliCommand(...flags: string[]): string {
+  const installed = path.join(os.homedir(), "Applications",
+    "GlassPane Daemon.app", "Contents", "MacOS", "glasspaned");
+  return [quoteShellArg(installed), ...flags].join(" ");
+}
+
 /** GET /v1/stats: evidence stats are the daemon CLI `--evidence-stats`, not a
  * socket method on this build. The gateway reports "not provided" rather than
  * inventing count/totalBytes/listFailure/dir. */
 function handleEvidenceStats(res: ServerResponse): void {
   fail(res, 501, HTTP_NOT_PROVIDED,
     "evidence statistics are not exposed over this daemon's socket protocol in this build",
-    "run `glasspaned --evidence-stats` against the same --state-dir this socket serves to get count/totalBytes/listFailure/dir");
+    `run \`${daemonCliCommand("--evidence-stats")}\` against the same --state-dir this socket serves to get count/totalBytes/listFailure/dir`);
 }
 
 /** POST /v1/recipes/validate: recipe validation (`glasspaned --recipe-validate`)
@@ -1195,7 +1217,7 @@ async function handleRecipeValidate(
   }
   fail(res, 501, HTTP_NOT_PROVIDED,
     "recipe validation is not exposed over this daemon's socket protocol in this build",
-    "run `glasspaned --recipe-validate <recipe.json-path>`; this build provides no socket method for it");
+    `run \`${daemonCliCommand("--recipe-validate", "<recipe.json-path>")}\`; this build provides no socket method for it`);
 }
 
 /* ------------------------------------------------------------------ *
