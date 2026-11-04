@@ -239,7 +239,8 @@ final class UpdateModel: ObservableObject {
         perform(.status, extraArguments: [], timeoutSeconds: 20)
     }
 
-    /// 问一次源：拉最新版本、跑七道校验、通过就暂存。
+    /// 问一次源：拉最新版本、跑 `updater/lib/check.js` 的八道校验门（门的数目与次序以那一侧的
+    /// 表头为准，不在这里抄一遍——本文件从前写"七道"而 `check.js` 自己是 eight gates），通过就暂存。
     func checkNow() {
         perform(.check, extraArguments: [], timeoutSeconds: 240)
     }

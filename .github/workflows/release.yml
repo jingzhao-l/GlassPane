@@ -80,8 +80,10 @@ jobs:
     # something worth stealing — it reads `secrets.GPG_PRIVATE_KEY` and holds `contents: write`.
     # A retagged `@v4` would run attacker code there, sign an attacker archive with the real
     # key, and the updater's 8th gate (authorship) would accept it, because that gate checks
-    # the fingerprint, not the bytes' provenance. `ci.yml`'s read-only lanes are not pinned
-    # yet; they hold no secrets, so the rule is scoped to jobs that declare an environment.
+    # the fingerprint, not the bytes' provenance. The rule is not scoped to environment jobs:
+    # `scripts/check-workflows.mjs` pins every `uses:` in every job of all three workflows
+    # (measured 2026-11-04 by reverse mutation — reverting one `swift`-lane action to `@v4` reddens
+    # that check and names the job), so the read-only lanes are covered too.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4

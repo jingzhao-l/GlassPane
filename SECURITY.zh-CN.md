@@ -226,10 +226,14 @@ GlassPane 不是普通工具库：它**持有** macOS 的高危权限（辅助�
 - `bridge/glasspane_bridge.py` 以 `xcrun lldb` 的 SB API **启动新进程或 attach 到既有 pid**，读取回溯、寄存器、
   局部变量并可挂硬件观察点；attach 现成进程需手工勾选「隐私与安全性 → 开发者工具」，且该席位无查询接口。
 - 这是本项目里最强的能力：**任何能驱动桥的输入，等价于能在目标进程里读内存——而 `--setup` 比这更强**。
-  那个 flag 会被逐字插进一条 lldb `-o` 命令（`bridge/glasspane_bridge.py:725-726`），其文本作为 lldb 命令
+  那个 flag 会被逐字插进一条 lldb `-o` 命令（`glasspane_bridge.py` 的 `build_lldb_argv`：
+  `argv += ["-o", "command script import …"]` 那一处；按函数名引用，因为行号会漂——本文件从前引的
+  `725-726` 早就不是那句了），其文本作为 lldb 命令
   执行（含 `script <python>`）：能设 `--setup` 者即能以**运行桥的这个用户**的身份执行任意代码——上面那句
-  "在目标进程里读内存"恰恰说轻了。因此桥只作为独立 CLI/脚本资产交付，daemon 不自动 spawn lldb，socket
-  命令面也没有转发到桥的路径。二次开发时请勿把桥接到 `gp_*` 工具或任何远程可影响的输入上——`--setup` 也算
+  "在目标进程里读内存"恰恰说轻了。因此桥只作为独立 CLI/脚本资产交付；daemon 会为自己那次有界的
+  开发者工具能力探针 spawn 一次 `xcrun lldb --batch`（`DebugCapabilityProbe.swift`，由
+  `glasspaned/main.swift` 起），但 socket 命令面没有转发到桥的路径，远程可影响的输入到不了 `--setup`。
+  二次开发时请勿把桥接到 `gp_*` 工具或任何远程可影响的输入上——`--setup` 也算
   ——那会把「本机同权限」边界扩大成远程代码调试。
 
 ### 2.7 ad-hoc 签名、无公证，防什么不防什么

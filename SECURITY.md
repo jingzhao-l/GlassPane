@@ -303,11 +303,15 @@ permission rather than by a secret.
   and that seat has no query API.
 - This is the strongest capability in the project: **any input that can drive the bridge is equivalent
   to being able to read memory inside the target process — and `--setup` is stronger still.** That flag
-  is interpolated verbatim into an lldb `-o` command (`bridge/glasspane_bridge.py:725-726`), so its text
+  is interpolated verbatim into an lldb `-o` command (`glasspane_bridge.py`'s `build_lldb_argv`,
+  `argv += ["-o", "command script import %" % lldb_command_quote(bridge_path)]` — referenced by name
+  because line numbers rot and this document was citing a pair that had already moved), so its text
   runs as an lldb command (`script <python>` included): anything that can set `--setup` executes
   arbitrary code **as the user running the bridge** — not merely reading the target's memory, which is
   what the phrasing above understates. The bridge therefore ships only as a standalone CLI/script asset
-  — the daemon never spawns lldb, and there is no socket command that forwards to the bridge. When
+  — the daemon does spawn `xcrun lldb --batch` for its own bounded developer-tools capability
+  probe (`DebugCapabilityProbe.swift`, started from `glasspaned/main.swift`), but no socket
+  method forwards to the bridge: nothing a remote party can influence reaches `--setup`. When
   extending this project, do not wire the bridge into a `gp_*` tool or into any input a remote party
   can influence — `--setup` included: that widens the "same-user code on this machine" boundary into
   remote code debugging.

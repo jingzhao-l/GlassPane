@@ -506,7 +506,7 @@ The daily check is a launchd job; its time and consent level are the updater's, 
 
 ### Security
 
-**Does anything leave my machine?** No. Local unix socket, local stdio process, evidence under `~/.glasspane/`. But `gp_observe` returns accessibility trees *into the agent conversation*, so whatever your model provider logs, it logs that tree — treat transcripts as sensitive.
+**Does anything leave my machine?** The *tooling* stays: local unix socket, local stdio process, evidence written under `~/.glasspane/`, and no pixel diff is uploaded to compute it. What leaves is whatever a tool **returns**: `gp_observe` hands accessibility trees (element names, titles, values) into the agent conversation, `gp_capture_view` hands back image bytes, and `gp_last_evidence`/reports quote screen-derived text. So whatever your model provider logs, it logs that — treat transcripts as sensitive, and read [SECURITY.md](SECURITY.md) §2 for the same-user boundary.
 
 **Which version am I running?** The daemon prints its own version on `glasspaned --version` — `--permissions` does **not** carry a version key, it only measures the TCC seats — the panel shows the same value, the MCP `initialize` response echoes it, and `node scripts/check-version.mjs` prints every place the version appears. All of it comes from one number ([CHANGELOG.md](CHANGELOG.md)).
 

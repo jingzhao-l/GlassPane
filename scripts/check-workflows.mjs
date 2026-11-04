@@ -667,9 +667,11 @@ function inspect(target) {
  * that can read secrets, so every action it runs must be addressed by commit SHA. A retagged
  * `@v4` inside such a job is arbitrary code with the signing key in its `env:` — and the
  * product's own trust chain cannot detect the consequence, because the updater's 8th gate
- * checks the fingerprint on the signature, which a stolen key satisfies. Jobs with no
- * environment are out of scope for that rule on purpose: the pin is cheap exactly where the
- * payload is irreversible, and widening it to the read-only CI lanes is a separate change.
+ * checks the fingerprint on the signature, which a stolen key satisfies. The scope is NOT limited to
+ * environment jobs: every `uses:` in every job of all three workflows must be a 40-hex commit
+ * (measured 2026-11-04 by reverse mutation — reverting one read-only `swift`-lane action to `@v4`
+ * reddens this check and names that job). A mutable tag is attacker-authored code wherever it runs;
+ * the pin costs nothing, so leaving a lane uncovered would be a choice, not a saving.
  * Local `uses: ./path` actions are exempt by construction: their bytes are the commit already
  * checked out, so there is no mutable upstream ref to retag.
  *

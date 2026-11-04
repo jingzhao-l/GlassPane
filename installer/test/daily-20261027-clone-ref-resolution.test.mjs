@@ -34,7 +34,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { advanceExistingClone, existingCloneDecision, readCloneFacts, resolveRemoteName } from '../cli.js'
+import { advanceExistingClone, existingCloneDecision, readCloneFacts, resolveRemoteName, quoteShellArg } from '../cli.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const INSTALL_SH = path.resolve(HERE, '..', '..', 'install.sh')
@@ -278,10 +278,16 @@ test('既有 clone 被拒时，建议的目录从**被拒的那棵树**推出来
   const dirty = [' M engine/Package.swift']
   const out = existingCloneDecision({ targetDir: '/Volumes/src/gp', ref: 'v9.9.9-new', head: 'a'.repeat(40), tagCommit: 'a'.repeat(40), blocking: dirty })
   assert.equal(out.action, 'refuse')
-  assert.match(out.text, /GLASSPANE_INSTALL_DIR="\/Volumes\/src\/gp-v9\.9\.9-new"/, out.text)
+  // 引号那一半的期望形状在 2026-11-04 改过一次：从前这一条钉的是**双**引号
+  // （`GLASSPANE_INSTALL_DIR="/Volumes/src/gp-…"`），而双引号不是惰性引号——目录名里的 `$( )` 与
+  // 反引号在双引号里照样展开，照抄就是把"换一个干净目录再装"这句出路变成一条执行通道。
+  // 本仓唯一的引号出口 `quoteShellArg` 用的是单引号，这一条跟着它走（同形状的行为半边在
+  // `test/daily-20261104-copy-command-quoting.test.mjs`，它拿带 `$( )` 的目录名喂真函数）。
+  assert.match(out.text, new RegExp(`GLASSPANE_INSTALL_DIR=${quoteShellArg("/Volumes/src/gp-v9.9.9-new")}`), out.text)
+  assert.doesNotMatch(out.text, /GLASSPANE_INSTALL_DIR="[^"]*\$\(/, '双引号里的值仍会展开，那条出路就成了执行面')
   assert.doesNotMatch(out.text, /GLASSPANE_INSTALL_DIR=~\/glasspane-/, '写死在家目录里的那条路和本轮被拒的树毫无关系')
   const spaced = existingCloneDecision({ targetDir: '/Users/John Smith/glasspane', ref: 'main', head: 'b'.repeat(40), tagCommit: 'b'.repeat(40), blocking: dirty })
-  assert.match(spaced.text, /GLASSPANE_INSTALL_DIR="\/Users\/John Smith\/glasspane-main"/,
+  assert.match(spaced.text, /GLASSPANE_INSTALL_DIR='\/Users\/John Smith\/glasspane-main'/,
     '带空格的路径不加引号，照抄就变成两个词，clone 静默落错位置')
 })
 
