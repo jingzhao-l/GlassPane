@@ -14,7 +14,7 @@
     "mcpShell": {
       "loc": 12981,
       "files": 16,
-      "ratio": 0.2192,
+      "ratio": 0.2181,
       "byFile": {
         "mcp-shell/src/tools.ts": 3167,
         "mcp-shell/src/engine-client.ts": 2269,
@@ -35,8 +35,13 @@
       }
     },
     "fork": {
-      "loc": 13008,
+      "loc": 13314,
       "files": [
+        {
+          "file": "packages/opencode/script/dependency-floors.ts",
+          "kind": "added",
+          "lines": 286
+        },
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
           "kind": "added",
@@ -60,7 +65,7 @@
         {
           "file": "packages/opencode/script/provenance-verdict.ts",
           "kind": "added",
-          "lines": 80
+          "lines": 78
         },
         {
           "file": "packages/opencode/script/publish-shape.ts",
@@ -75,7 +80,7 @@
         {
           "file": "packages/opencode/script/registry-readiness.ts",
           "kind": "added",
-          "lines": 184
+          "lines": 202
         },
         {
           "file": "packages/opencode/script/release-assets.ts",
@@ -705,7 +710,7 @@
         {
           "file": "packages/opencode/script/build.ts",
           "kind": "edited",
-          "lines": 130
+          "lines": 134
         },
         {
           "file": "packages/opencode/script/generate.ts",
@@ -1198,14 +1203,14 @@
           "lines": 36
         }
       ],
-      "ratio": 0.2196,
+      "ratio": 0.2237,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
       },
       "testsExcluded": {
-        "files": 57,
-        "lines": 9157
+        "files": 59,
+        "lines": 9613
       },
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {
@@ -1214,7 +1219,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 25989,
+  "totalToolSurfaceLoc": 26295,
   "note": null,
   "carried": null
 }
