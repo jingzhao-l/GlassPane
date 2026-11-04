@@ -1585,3 +1585,31 @@ helper 沿用 `/var/tmp/glasspane-main-check-20261030/gp-ax-walk.swift`（本机
    一条如实的观察：这台机器上那枚已安装 daemon 的 pid 在本轮之内从 39150 变成 36748，
    且 36748 的命令行不带 `--socket-path`——它起于 08:15:43（早于本 run 任何一次 kill），
    归属判据是"启动方式与路径都不是本 run 起的 ⇒ 一律不动"，本节只记录现象，不解释它为什么换。
+
+## 每日真机核对 2026-11-04（本轮 07:30 那条线；被测产物＝收口前工作树的 debug 构建 `engine/.build/debug/glasspaned`）
+
+1. **权限自报，隔离状态根**：`glasspaned --state-dir <mktemp 根> --permissions` → rc=0，
+   `verdict:"granted"`、`permissions` 四席位读数
+   `accessibility=granted / input-monitoring=granted / screen-recording=granted / developer-tools=unverifiable`，
+   `seatsNotGranted:[]`；`subject` 自报 `binaryPath` 与被 exec 的那枚一致
+   （`.gp-daily-20261104/engine/.build/debug/glasspaned`，`entryName:"glasspaned"`，
+   `hasBundleIdentity:false` —— debug 产物没有 bundle 身份，这一条如实带着）。
+   本轮改动在这条读数里的证据：`next` 与 `verdictExcludes[].next` 交出的都是
+   `'<绝对路径>/glasspaned' --check-developer-tools` 这种**一个词**的形态，不再是裸名
+   （裸名不在 PATH 上，照抄得 127；见 `DaemonInvocation.swift`）。
+   stderr 另有一句如实的：`--permissions` 不读状态，所以这一趟点名的 `--state-dir` 根**没有被查询**，
+   没有在那个根下读/写任何东西——它是一句诚实的告警，不是缺陷。
+2. **两条入口的 `--help` 退码**：`glasspaned --help` rc=0、`node mcp-shell/dist/index.js --help` rc=0
+   （v1.23.0 修的那格没有回归：那时 `glasspane --help` 退 2 而 cli.js 退 0）。
+3. **未观测（这一格只写本机做不到的，不写"没做"）**：
+   **面板六页 AX `kAXPressAction` 走查本轮没有跑**。原因不是权限也不是硬件——这台机器有登录 GUI
+   会话、四张席位如上都在；是本轮把预算花在了桥/传输/闸三条修复线上，走查需要 release 构建 +
+   自建 AX helper 的完整一轮，我没在半途塞进去。**补上它的那条命令**（与 11-03 那一节同形）：
+   `swift build --package-path engine -c release && engine/.build/release/glasspane-settings`
+   起来后用 `kAXPressAction` 按 `gp-nav-*`、`gp-refresh-daemon-stats`、`gp-evidence-reveal`
+   逐枚点，读数写回本节。本轮对面板**只做了源码级核对**（控件↔daemon 命令对账无差集），
+   没有把那句核对写成走查结论。
+4. **进程归属**：本 run 只 exec 了一次 `--permissions`（rc=0 后自行退出），未起 daemon、未起面板，
+   因此没有本 run 的遗留进程；`pgrep -fl "state-dir /tmp/gp-state"` 空命中。在册那枚已安装 daemon
+   （`/Users/ethanlin/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned --socket-path
+   /Users/ethanlin/.glasspane/engine.sock`）**没碰**——它不是本 run 起的，归属判据是不动。
