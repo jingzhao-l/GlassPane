@@ -2,6 +2,197 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-11-03（第二十八次会话）· 取号 0.14.2：两条公开告警活在生产依赖里，一条被取消的 npm 腿把一个号永远留在半发布，以及一个挂起三十小时的会话怎么收
+
+**本会话的形状要先记，因为它决定了下面每一条的可信度。** 这一轮是 11-02 10:30 那条定时任务开的一个会话，
+它在开工后不久被平台挂起，**三十小时后才恢复**；恢复时它自己建的隔离工作树
+`.worktrees/harness-daily-20261102` 已经被下一轮收口收走，树上四个泳道（尺子层 / 工具面 / 发布与供应链 /
+只读审查）有三条在恢复时已不存在，`TaskStop` 报 `No task found`。它们的产物没有进 main，也没有留下半个文件
+在主树里——除了第四条：`lane-supplychain` 恢复后发现自己的目录不在，**把活写进了共享主树**（一条
+`release.yml` 的 103 行新增与一个 `test/script/registry-half-publish.test.ts`）。处置：`TaskStop
+lane-supplychain` 停掉，逐条判它的产物——主仓 `grep` 证明那条 pre-flight 在 HEAD 里不存在（是新的、不是重复），
+所以**收下并修两处**（`all(v: unknown)` 的三条 TS 错、命名式里多出的 `win32→windows` 分支与
+`publish.ts:platformPackageName` 不一致），其余泳道的活不在本笔里出现。本会话在 main 上的贡献只有下面
+§三与§四列的那些，其余归 11-03 那次会话（第二十七次会话）的十笔提交。
+
+### 一、开工就撞上的两格：先量再判，不用上一笔的读数
+
+- **v0.13.0 的 npm 三格是齐的**，与第二十七次会话的读数一致，本会话独立复测：
+  `npm view glasspane-harness@0.13.0` / `-darwin-arm64@0.13.0` / `-darwin-x64@0.13.0` 逐个点名都答
+  `0.13.0`。而 10-31 那笔台账写的"npm 那两条 job 全程 skipped，没有任何一个字节上架"当时就是**假的**：
+  run `41219619435` 的 `npm darwin-x64` 成功上架了 199,557,257 字节、带 SLSA v1 provenance
+  （`npm view … --json` 读到 `dist.attestations.provenance`），`npm darwin-arm64` 被取消，wrapper 整条
+  `needs:` 跳过。本会话在 §四把这条形状做成了闸（事前问，不是事后发现）。
+- **v0.13.0 / v0.14.0 的 GitHub Release 结构性补不了**，判据与本仓的规矩同源，写在这里而不是再试一次：
+  `create-release`/`binaries`/`checksums` 只在 **tag push** 事件上跑，而 tag push 那一次用的是它自己那棵树
+  的字节相等判据；主干此后收过台账（v0.13.0 落后 49 行 SYNCLOG，`release-artifact --check` 打 `△`），
+  等式不再成立。签名 tag 不可移动（现在有服务端 ruleset 拒绝移动），`gh run rerun` 只会拿触发 commit
+  自带的那份 workflow 再自伤一次。所以这两个号停在"tag 在、Release 缺席"，由本会话实测确认后如实记下。
+- **`macos-14 执行位拿不到`不是事实**。10-31 那笔把它写成发布卡住的原因；本会话量到 run
+  `41284361291`（11-01 07:20Z，dispatch on `v0.13.0`）两条 job 全 success，`installer-selftest` 那格
+  19 秒过。真正的机制是并发与取消：`ci.yml` 有 `concurrency: ci-${{ github.ref }}` +
+  `cancel-in-progress: true`，同一 ref 上连续 push/dispatch 会杀掉还在排队的 macOS job（那六个
+  "cancelled 且没有日志步"就是它），而 `release.yml` **没有** `concurrency` 块——一条正在发不可逆版本的
+  run 可以被随便取消。后者是本笔§四那条 pre-flight 存在的理由。
+
+### 二、本轮量到的数字（每条写明量法；`--record` 前与后的对账写在括号里）
+
+- `fork-diff`：**`4633/6758 byte-identical, 291 edited, 126 added, 1708 deleted`**（上一记
+  `4634/… , 291 edited, 122 added, 1707 deleted`，全树 6754）。四处 delta 逐条对得上：
+  `added +4` 是本笔新增的四个子树文件（`contracts/dependency-floors.json`、
+  `packages/opencode/script/dependency-floors.ts` 与它的测试、`test/script/registry-half-publish.test.ts`）；
+  `identical −1 / deleted +1` 是**同一个文件**——`.github/actions/setup-git-committer/action.yml` 此前与上游
+  逐字节相同，删除它就把它从"同意"格搬到"上游有我们没有"格；`edited` 不动而内容哈希重钉（本笔改过 12 个
+  已在名单里的文件，正是这把尺子钉双侧哈希要抓的那一形）。量法：
+  `node harness/tools/fork-diff.mjs --check` → `--record`，参照克隆 `describe == v1.18.32`、`fsck` 无错、工作树干净。
+- `tool-surface`：engine **33183 LOC / 66 文件**；面 A **12981 LOC / 21.81%**（LOC 一字未动，百分比从
+  21.92% 降下来是因为分母里的面 B 长了）；面 B **13008 → 13314 LOC / 21.96% → 22.37%**（覆盖 232 → 233 文件，
+  新增的那一个是 `script/dependency-floors.ts`）；被排除在面 B 之外的测试 **57 → 59 文件**。两面的 10% 文档
+  上限仍是既成超量，本笔是**有意增长 +306 行**（新守卫的判定代码 + `publish-gate` 那条 103 行 pre-flight +
+  readiness/build/actions 的小改），按纪律同批 `--record` 并写在这里，不是拿 `--record` 掩盖语义外移。
+- `brand-surface`：**26 product + 2 doc，1323 shipped-code 文件，0 hit，血缘 9637 处 / 3341 文件**
+  （上一记 9638 处 / 3338 文件）。处数 **−1** 走的是"只减不增"那一侧：删掉的 action 里带着上游 App 的
+  输入名，比本笔新增的血缘陈述多一处；文件数 +3 是新守卫与它的两个测试进被扫集合。因此**不需要**
+  `--lineage-note`（`--record` 实测未拒绝，rc=0）。
+- `surface-semantics`：**0 命中 / 23 文件**（mcpShell 16、fork 7），三条规则正对照 3/3；本笔没有把任何判定
+  搬进工具面，所以金样未动。
+- `product-surface`：**6615 条一致 / 0 问题**，`glasspane-harness@0.14.2`。无基线、无 `--record`。
+  本笔把 `project-dir` 那组改成按声明逐条走，条数随 `compatReadDirs` 的条目数动——今天只有一个兼容名，
+  所以仍是 3 条（1 条"根目录必须是产品名" + 1 条"上游名不许回到根目录" + 1 条"`paths.ts` 仍要探它"）；
+  6615 这个数由 `node harness/tools/product-surface.mjs --check` 当场打印，不取自任何旧台账。**版本线 9 处**：
+  `product.json` 两处（`version` 与 `install.curl` 的 tag 钉）、
+  `packages/opencode/package.json`、两份 README 各一处、`docs/install.md` 两处、`scripts/install.sh` 两处
+  （头一行与那句"重指向 `v0.14.1`"的举例）。
+- `hook-liveness`：**21 钩子 no drift，bound hooks 2/2**（`tool.execute.after` → decision-log、
+  `experimental.session.compacting` → compaction）。
+- `kernel-pin`：**iterate-kernel@0.1.10** 未动；lock integrity + **26** 个契约文件逐条 sha256 通过。
+  `kernel-conformance`：**16 条 driven fixture == 16 条钉住的 drivable fixture**。
+- `patched-deps --check`：rc=0，仍带两条 `△`（一条不在当前安装图里的陈旧声明；`@ai-sdk/google` 与
+  `@ai-sdk/openai-compatible` 各有未被补丁键覆盖的额外拷贝）。glob/minimatch 不在
+  `patchedDependencies` 的 19 条里，所以这次换版不触碰补丁面——这一条是本会话查过的，不是假设。
+- `zod-bundle`：**3 份 zod 进 bundle（4.6.7 / 3.25.76 / 4.4.3），2 份在 GHSA-mrhx-c7xc-m3w5 的 `< 4.6.6` 里**，
+  读数照旧是"有记账，不干净"。维持现状，理由仍写在 `contracts/zod-bundle.json` 的 `why` 里。
+- `mcp-redirect-policy`：rc=0（装有单一拷贝的树——正是本会话的隔离工作树；主树那几份死拷贝会让它 exit 2，
+  那是正确行为）。
+- `release-artifact --check`：脏树上 rc=2 并点名"锚比的是已提交字节"（守卫说对了），本笔提交后重跑见收尾读数。
+- **依赖地板**（本笔新守卫）：`bun script/dependency-floors.ts` 实测
+  **2 条地板 / 21 份清单 / 484 个 dependency|directive 对，4 条声明全部达标**，并如实报出
+  `packages/sdk` 没有可读的 `package.json`（1 个目录跳过，出声）。
+- 固定点测试：**459 条 / 30 文件**（`bun test --timeout 30000` 走 ci.yml 那份名单）——第一次整跑
+  **458 pass / 1 fail**，那一条正是本笔第二笔提交修掉的 `workflow-gates` 覆盖断言（它把"扫描有没有覆盖
+  actions 这一族"钉在"树里有两个 action"这个数字上，删掉一个没人引用的 action 就因错因红）；
+  修后单独复跑该文件 **55 pass / 0 fail / 31.12s**，整批 459 条的复跑读数写在收尾那节。
+  本笔新增两个测试文件：`dependency-floors.test.ts` **17 条 / 0 失败**、
+  `registry-half-publish.test.ts`（把真 step 正文对着 PATH 上的假 `npm` 真跑）。
+  `test/util/glob.test.ts`（换 glob/minimatch 两个 major 最先该断的地方）**17 条 / 0 失败 / 4.86s**，
+  它此前不在任何名单里，本笔把它一并跑过；是否长期进 CI 名单留给下一轮判断（理由与代价见§五决定 6）。
+  TUI `inline-tool-wrap-snapshot`：**36 条 / 0 失败 / 8 snapshots / 239 次 `expect()`**。
+  `installer-selftest.sh`（bash，非 sh）：**all 208 checks held**——包含本笔新加的"`verify_asset_gpg` 传错
+  路径必须红"那一条，以及那两条真拒绝分支。
+- typecheck 四个发布包：**opencode 0 / tui 0 / sdk/js 0 / plugin 0**（`bun run typecheck` 各自 rc，不经管道）；
+  `packages/core` 也单独跑过（它是 `src/util/glob.ts` 的宿主），rc=0。
+- `publish.ts --dry-run`：rc=0（pack 形状、bins 可执行、wrapper 的 optionalDependencies == `product.json`
+  目标矩阵、os/cpu 三道闸）。
+- 父仓公共闸：`scripts/check-workflows.mjs --self-test` rc=0（**48 条案例各自验红：28 处必须抓到的变异 +
+  20 处必须沉默的合法形状**）、`scripts/check-workflows.mjs` rc=0（**5 份 workflow clean**；
+  fork 侧 `node script/check-workflows.mjs --json` 实测 files 3 / jobs 12 / refs 23 / bodies 45 / multi 33 / npm 3）、
+  `scripts/check-doc-links.mjs` rc=0（**文档 32 份 / 仓库内链接 272 条 / 外链 44 条不请求 / markdown 表格 466 张，
+  扫 124 份 markdown**——本笔新增的 README 入口与三处文档改写都由这条判过）。
+- 两把尺子电池：`rulers-selftest` 与 `provider-surface-selftest` 都在金样落笔后重跑 rc=0；
+  `provider-surface` 的具名对照 5 条 `ok` 逐条打名（`asymmetry-ledger`、`cannot-measure-is-not-a-pass`、
+  `counts-missing-is-red`、`overlap-count-moved`、`per-method-contract-moved`）。
+
+### 三、本轮修掉的（11 条，全部带固定点或"必须能红"的对照）
+
+1. **`glob@13.0.5` 与 `minimatch@10.2.x` 带着两条公开告警活在 `dependencies` 里**——
+   `GHSA-3g3m-2fjr-6pw4`/CVE-2026-118773（AbortSignal 取消被绕过 ⇒ 超时后的遍历继续走文件系统）与
+   `GHSA-g3hv-75wg-m249`/CVE-2026-118764（globparts 放大 DoS）。父仓 open alert #67–#70、搬运仓 #99–#102，
+   两处都是本会话当场 `gh api` 问出来的。消费路径不是构建期：`packages/core/src/util/glob.ts` 把两个匹配器
+   交给 `config/plugin.ts`（项目插件信任）、`config/agent.ts`、`config/command.ts`、`tool/registry.ts`、
+   `skill/index.ts`、`filesystem/ignore.ts`、`fs-util.ts`、`util/filesystem.ts` 共 8 条产品路径，模式来自
+   被打开的陌生仓库。升到 `14.0.2` / `11.0.1`，`bun.lock` 重解析 56 行且逐条归属只在这一族。
+2. **把"地板"写成 CI 读得回的契约**（`contracts/dependency-floors.json` + `script/dependency-floors.ts` +
+   17 条固定点）。它防的是下一次 fork 同步把上游旧 pin 当 merge 结果盖回来——本仓已经有一次"安全修复只在
+   搬运仓活了一份，下一次 split 会静默回退"的事故。三态分开：低于地板 / 读不出（`catalog:`、`*`、`latest`、
+   `workspace:` 都不算通过）/ 量不到（契约缺失、地板为空、一份清单都没交进来、某份 `package.json` 解析不了
+   → exit 2）。两条数值控制钉住"不许用字符串比版本"。
+3. **发布链：`publish-gate` 在任何不可逆步骤之前问整包集合**——全空=干净发布、全有=可重发（下游 E409
+   存在性分支吸收，本闸不重复裁决）、**部分在场=拒绝**并点名 present/absent 与唯一补救"取新号"。固定点
+   切真 step 正文跑假 `npm`；分类沿用 `npmAnswer`（"问不出来"绝不并入"没发布"）。
+4. **`registry-readiness` 的 `ok:true` 此前不检查答的是不是被问的版本**。文件头写着"the registry served
+   exactly this version"，比较只存在于注释与一个调用方。现在不匹配继续等待，预算耗尽时带出
+   `answeredInstead`，失败句子从"它一直说还没有"改成"它每次答的都是另一个东西"。
+5. **`script/build.ts` 读 `product.homepage`，而 `product.json` 没有这个键**（实测枚举 23 个顶层键）⇒
+   两个平台包发布时静默地没有 homepage，同一行注释却声称与 wrapper 同真源。改由已声明的 `repoUrl` 推出。
+6. **`product.json` 的 `repoLayout.enforcedBy` 是一句自称的散文**：它说 `product-surface :: project-dir`
+   读它，而那条规则把两个目录名硬写在尺子里。改成规则读 `repoLayout.projectDir` 与新的结构化
+   `compatReadDirs`，缺任一 exit 2。同批删掉全树无读者的 `tagline`（等价句子已在 README 的 banner alt 文本里）。
+7. **三处文档指向一个两边都不存在的命令** `scripts/diff_kernel_implementations.py`，其中
+   `docs/kernel-integration.md` 还写着"exists, is an operator command, and measured rc=2"。
+   实测 2026-11-03：本 fork 的 `scripts/` 只有 `install.sh`，`/Volumes/Eng-Dev/iterate-skill/scripts/`
+   也没有它。改成明写真实边界，缺口不再用不存在的脚本盖住。
+8. **`docs/index.md` 连着其余 8 页却没有一个入口链接**，而它自己写着"That is every page in this directory"。
+   两份 README 各补一条（`grep -o "](x.md)"` 去重后正好 8 页，那句主张是成立的，缺的只是入口）。
+9. **`setup-bun` 的缓存目录那步在替换失败时仍退 0**（`echo "dir=$(bun pm cache)"` 的退出码属于 `echo`），
+   下一步 `actions/cache/restore` 拿到空路径、在日志里长得像一次普通冷启动。改成自声明 `set -euo pipefail`
+   并拒绝空值。
+10. **删除 `.github/actions/setup-git-committer`**：两个仓 `grep -rn setup-git-committer .github` 都零命中，
+    而它铸一个 GitHub App token 并把 token 拼进 `git remote set-url`，输入名要的是本产品没有的上游凭据。
+    这条同时教了一件事：本笔第二笔提交把 `workflow-gates` 那条覆盖断言从"树里有两个 action"改成
+    "按目录反推再等值"，因为一个关于扫描覆盖的规则不该因删掉一个死文件而红。
+11. **`provenance-verdict.ts` 的 `KNOWN_ATTESTATION_KEYS` 是一条没有读者的导出**（全树 `grep` 只有定义），
+    删掉。
+
+### 四、上一轮与本会话共同留下的那条纪律：发布不可逆，所以要在它之前问
+
+`release.yml` 里没有 `concurrency` 块（实测 `grep -n "^concurrency"` 零命中）。10-31 那次取消 arm64 腿
+留下了一个永远补不齐的形状：`glasspane-harness-darwin-x64@0.13.0` 单独活着。本笔加的是**事前**那道问句
+（§三第 3 条）；`cancel-in-progress` 一类的机制没有在本笔里改——把不可逆步骤改成"要么整批发、要么不发"
+是做不到的（三个包三条 job，npm 又不许覆盖），能做且做得起的就是在第一条腿落地之前把集合问一遍。
+这一条判据留在 `SYNCLOG` 与 CHANGELOG 里，是因为它同时是"为什么 v0.13.0 的 Release 那一格永远补不了"的
+因果说明。
+
+### 五、本轮我替你做了哪些决定 → 依据 → 回滚
+
+1. **取号 0.14.2（patch）**。依据：产品面、CLI 形状、`product.json` 目标矩阵、`gp_*` 方法表一字未动；
+   本笔全是依赖地板与"说的和做的不一致"的修复。回滚：`git revert dc05ec3e 49ee831a <金样那笔> <本台账那笔>`，
+   或只把 `product.json`/`packages/opencode/package.json` 的版本改回 `0.14.1`——但 0.14.1 已经发过，
+   npm 不许覆盖，所以真回滚只能靠下一号。
+2. **收下 `lane-supplychain` 的 pre-flight 并修两处**，而不是丢掉重写。依据：`git diff main --
+   .github/workflows/release.yml` 证明这条判据在 HEAD 里不存在（不是重复劳动），而它防的正是本会话
+   §一量到的那个半发布；两处缺陷都是我自己指给它的纪律（跨真相互比、不许把"问不出来"当"没发布"）在它
+   产物里的违反。回滚：`git revert` 承载它的那一笔。
+3. **删掉 `setup-git-committer` 而不是给它补 shell 闸**。依据：两个仓零引用＋它需要本产品没有的上游凭据＋
+   它把 token 写进 remote URL。回滚：`git checkout dc05ec3e^ -- harness/glasspane-harness/.github/actions/setup-git-committer`
+   之后 fork-diff 再跟一笔（它是与上游逐字节相同的文件，恢复后 `identical +1 / deleted −1`）。
+4. **`workflow-gates` 的覆盖断言改成按目录反推**。依据：原断言把覆盖规则和"今天树里有几个 action"绑死；
+   新形式仍能在尺子不再打开 actions 时红（等式成立不了），并额外断言 actions 数 > 0 免得等式在"两边都空"时假绿。
+   回滚：`git revert 49ee831a`。
+5. **`tagline` 与 `repoLayout.compatRead` 这两处产品清单形状改了**（前者删除，后者从散文数组改成
+   `compatReadDirs` 目录名数组）。依据：`product.json` 是机器可读契约，字段要么有读者要么被读者读；
+   `enforcedBy` 那句此前是假的。回滚：把两处改回原样并让 `product-surface` 的 `project-dir` 回到硬写名字——
+   那会把"两份真相"这个缺陷一并放回来。
+6. **`test/util/glob.test.ts` 本笔跑了但暂不写进 CI 名单**。依据：它是上游文件、且上游在全量跑里有 51 条
+   已知不稳定的时序用例，把单个文件塞进固定点名单要先证明它不携带那类不稳定；本笔用"换 major 之前后各跑一次
+   都 17 pass"作为行为证据。下一轮如果要长期接进名单，判据是先在 CI 的 ubuntu lane 上实跑一次并记下用时。
+7. **v0.13.0 与 v0.14.0 两格维持"tag 在、Release 缺席"，不删 tag、不改号、不手工造资产**。依据：§一那
+   三条实测（结构性不可补 + 已发布 tag 绝不移动 + 手工造出来的二进制不是 CI 造、CI 验的那一份）。
+   回滚不需要；要改变它只有"由下一个号覆盖"这一条路，那就是 0.14.2。
+
+### 六、未观测（只限物理边界，各附补它的确切一条命令）
+
+1. **`npm deprecate` 那个动作本会话做不了**：本机 `npm whoami` = 401，仓里没有 NPM_TOKEN（这是设计，
+   发布只走 OIDC）。如果要把 0.13.0/0.14.0 这类半发布号在 registry 上标出来，需要 owner 本机凭据：
+   `npm deprecate glasspane-harness-darwin-x64@0.13.0 "superseded; the wrapper for this version was never published" --registry https://registry.npmjs.org`
+2. **真模型轮次 / 真 TUI 会话观感**：本机没有可用的真 provider 轮次。补它的一条：
+   `cd harness/glasspane-harness/packages/opencode && GLASSPANE_STATE_DIR=$(mktemp -d) bun dev`，
+   跑一轮 `gp_observe` + `gp_diagnose`，再 `grep -c '"dimension"' "$GLASSPANE_STATE_DIR"/*.jsonl` 应非零。
+3. **`gh` 那侧的 macOS 排队时长**：本会话只测到"能过"（19 秒那次），没有测排队上限；如果下一条发布线
+   卡在 macOS，判据是 `gh run view <id> --json jobs` 看那一格是 `queued` 还是 `cancelled`，而不是加超时。
+4. **musl / baseline 目标**：维持第二十七次会话的否证——`product.json.platformTargets` 只有 darwin
+   arm64/x64，没有目标就没有 lane。
+
+
 ## 2026-11-03（第二十七次会话）· 取号 0.14.0：发布链的三条"看不见"、tag 的身份那一格、以及上一轮 31 条待办的清算
 
 开工时树上没有别人的未提交批次（整树 `git status --porcelain` 空，HEAD `b9fa40b8`），
