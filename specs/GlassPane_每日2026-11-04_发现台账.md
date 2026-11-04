@@ -115,3 +115,87 @@
 
 补做它们的入口命令逐条同形：先在 `engine/`、`mcp-shell/`、`updater/`、`installer/` 里复现该形状
 （写一条会红的测试），再决定改代码还是改文档。
+
+---
+
+## 本线第二条会话（11-03 17:20 起，11-04 收口）· 发现 7 / 修复 7 / 未修 0
+
+这一节记的是**同一天里第二条跑这条提示词的会话**。它开工时读到的是 `main == origin/main == f751572b`、
+版本线 1.29.0、整树 0 行 dirty（`git status --porcelain`），随后与第一条会话（以及 harness 那条线）
+在**同一个检出**上并发跑了两天。它的 7 条发现全部已经落在 main 上——但不是由它自己推上去的：
+它每发现一条，先去 main 里指一遍；指得到的，就**删掉自己那笔重复提交**，不留两份结论（下面有 SHA）。
+
+| # | 档 | 缺陷（发现时指得到的行） | 现在 main 上的落地证据（我逐条读过的行） |
+|---|---|---|---|
+| 33 | P1 | 超时臂把手里已有的采丢弃掉：`run_child_captured` 留字节，`run_outer` 从不读 | `bridge/glasspane_bridge.py:1482` `delivered, _delivered_raw = extract_sentinel(completed.stdout, nonce=nonce)` |
+| 34 | P1 | `_async_mode` 只问 `GetAsyncMode`，真 binding 只有 `GetAsync`（本机实测 `HAS_GetAsync=True HAS_GetAsyncMode=False`），恒答 `False` | `bridge/glasspane_bridge.py:2821` `for name in ("GetAsync", "GetAsyncMode"):` |
+| 35 | P1 | `cmd_trace` 的 `finally` 把没读到的值 `SetAsync(False)` 写回——一次新写入冒充恢复 | `bridge/glasspane_bridge.py:2837`（`neither SBDebugger.GetAsync() nor GetAsyncMode(), so its value …` 进 `errors[]`）与 `:2910` 注释 |
+| 36 | P1 | 无载荷臂不唤醒被 attach 停在 SIGSTOP 的目标，兄弟两臂都醒 | `bridge/glasspane_bridge.py:1536` `woke, wake_detail = resume_frozen_target(args.pid)`（同臂另有 `About the target:` 一句） |
+| 37 | P2 | 哨兵对里是 JSON 而非对象时 `payload.setdefault` 以 traceback 离场（§6.2 被破） | `bridge/glasspane_bridge.py:1354`、`:1724`、`:1868` 三处 `if not isinstance(payload, dict):` |
+| 38 | P1 | `cmd_capture` 没有兄弟 `run_capture_cli_b64` 那层守卫；一抛就留 traceback，外层读成"没有载荷"并把病因写成"去勾 Developer Tools" | `bridge/glasspane_bridge.py:2495` 起：`cmd_capture/cmd_trace/cmd_watch` 三臂统一走 `guarded_command(…)` |
+| 39 | P2 | CLI 的 `interactive` 永远交付不了（batch 从不 surface `gp-queue` 写的命令结果），却交回 `not-determinable` 并把人支去 `GLASSPANE_REAL_LLDB=1` | `bridge/glasspane_bridge.py:3165` `'interactive' is not a CLI mode: … Do it inside the session instead: … command script import …` |
+
+外加一条开发期闸的缺陷（本会话自己提交并被并行 lane 收进 main）：**闸脚本被 import 时接管宿主进程**
+——`scripts/check-doc-links.mjs` / `scripts/check-workflows.mjs` 的 `--self-test`、`--help`、不认识参数
+三条出口写在模块顶层，宿主 argv 带这些形状时那份 import 它的测试文件**一条用例都不登记就报绿**
+（带不认识参数时退 2 把宿主带走）。守卫 `isEntrypoint` 现在 main 上：`scripts/check-workflows.mjs`
+7 处、`scripts/check-doc-links.mjs` 4 处命中；测试 `updater/test/daily-20261103-gate-import-safety.test.mjs`
+在 main 上存在（本机 `git cat-file -e origin/main:…` 答 PRESENT）。
+
+### 我自己丢弃的两笔提交（重复，未推）
+
+`9ab8ed27`（fix(bridge)：上面 #33–#39 的实现）与 `c50d39c6`（docs(release)：1.29.1 条目补桥那六条）
+留在本机 detached HEAD 上、**没有推**。判据不是分支名也不是提交信息，是逐行内容：上表右列那七处
+在 `origin/main:bridge/glasspane_bridge.py` 里逐条读到过，且他们的 `guarded_command` 抽象比我那一版
+写得好（三臂共用一层，我那时候只补了两臂）。留着就是两份结论指同一件事，而两份会漂。
+复查这两笔：`git -C /Volumes/Eng-Dev/GlassPane show 9ab8ed27 --stat`（worktree 收掉后按 SHA 仍可取，
+直到 `git gc` 回收）。
+
+### 一次作废的本地复跑，和它换成 CI 读数的地方
+
+这一轮我在 bench（`.gp-daily-20261103`，detached 在 `98cd514b`）上逐字复跑 16 条门禁，跑到第 09 条起
+被并发清理把 bench 的文件删掉：第 11 条 rc=4、第 12 与第 16 条 rc=127（`sh -n install.sh` 找不到文件）、
+第 09/10 条是 clang module cache 与 `swift-syntax` 克隆失败的**基建红**，而不是用例红。
+所以本会话不对那一批本地数字下结论；同一棵树（= `v1.29.1` 指的那一笔）的**实际计数取自 CI
+run `41760813134`（completed / success）**：XCTest `Executed 1577 tests, with 6 tests skipped and 0 failures`、
+Swift Testing `Test run with 76 tests in 8 suites`、probe 侧 `Executed 2 tests, with 2 tests skipped`、
+pytest bridge `218 passed, 6 skipped`、`check-workflows: 5 workflow file(s) clean`、
+`--self-test` 两侧各 `48 case(s)` / `11 case(s) each verified`、`OK：版本线一致（1.29.1）`、
+`文档 32 份 | 仓库内链接 272 条`、`iterate-kernel@0.1.10，与 pin 同号`、`no growth past the recorded baseline`、
+`SIGNAL SMOKE OK`。补测这条本地复跑的确切命令：
+`cd /Volumes/Eng-Dev/GlassPane && for c in "npm ci" "npm run build" "npm test --workspaces --if-present"; do echo "== $c"; /bin/bash -c "$c" || exit 1; done && swift test --package-path engine`。
+
+发布物这一头是本机自己量的，没有借 CI：`gh release view v1.29.1` → `isDraft=false`、
+`targetCommitish=98cd514b…`、4 件资产；`SHA256SUMS-1.29.1.txt` 里那枚 sha256
+`a223547cf885c63d631197182f02e48915620aadc14cebdb384837bb0438ec98` 与本机下载的归档**逐字相等**；
+`node scripts/make-release-archive.mjs --verify` rc=0（807 entries、4946685 字节、
+30 条声明命令与 schema 全在、`harness/` 与 `.iterate_decisions.md` 下 0 条）；
+`tar -tzf | grep -cE "(^|/)harness/"` = 0；gpg `完好的签名`、密钥
+`0929EA31DF4F7429F63FC53189D88B1D043A1298`，与 `updater/lib/signature.js:119`
+`PINNED_PRIMARY_FINGERPRINT` 逐字相等。registry 两包 `--prefer-online` 都回 **1.29.1**。
+
+### 本轮我替你做的决定（依据 / 回滚）
+
+1. **不推我的 bridge 实现**（依据＝上表右列那七行；回滚＝`git cherry-pick 9ab8ed27 c50d39c6` 若你
+   认为我那版更合适——我不建议，`guarded_command` 的覆盖面更大）。
+2. **不取新号**：`v1.29.1` 已被并行 lane 取号、tag、发 GitHub Release、发 npm（registry 实测 1.29.1），
+   而 `main` 之后的字节是它正在写的下一版，不属于本会话的发现（依据：`git tag --sort=-v:refname` 与
+   `npm view … version --prefer-online` 当场读数；回滚：无需，我没有动版本线）。
+3. **不重记棘轮**：`node harness/tools/tool-surface.mjs --check` 在我机器上那次红，红的是
+   **别人未提交**的 `harness/glasspane-harness/packages/opencode/**`（+18 `registry-readiness.ts`、
+   +4 `build.ts`），`--record` 会把不属于本轮的字节洗进金样；CI 在同一 tag 上读的是
+   `no growth past the recorded baseline`（依据：`/var/tmp/glasspane-main-check/closing/14-…log` 与
+   CI 日志；回滚：无需，我没写 harness）。
+4. **不关 dependabot PR #25、不碰 `harness/`**：它改的是 `harness/glasspane-harness/packages/core`
+   与 `packages/opencode` 的 glob/minimatch，属 10:30 那条线；那条线此刻仍在同一棵树上写
+   `dependency-floors` 那把尺子（文件 mtime 17:28/17:33 为证）。
+
+### 未观测（只限物理边界，附补它的那一条命令）
+
+- **面板 AX 走查**：本会话没有任何面板字节落地（我的实现被丢弃、#33–#39 都在 `bridge/`），
+  所以这一格不是"我该验而没验的东西"，但它仍是"1.29.1 的面板没被本会话量过"。补：
+  `engine/.build/debug/glasspane-settings --state-dir <临时根>` 起来后按 `gp-*` 标识走
+  `kAXPressAction`（本机无 pyobjc，需自写 Swift AX helper；口径见 `engine/smoke.md` 11-03 那一节）。
+- 桥的 #33/#35/#38 三条在真 lldb 的**活会话**路径上仍未端到端量过（本机只有 `--batch` 可用，
+  `GetAsync` 的名字是拿真 lldb 量的，而采样那一臂需要真 attach）。补：
+  `GLASSPANE_REAL_LLDB=1 python3 -m pytest -q bridge -k trace`。
