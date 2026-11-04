@@ -450,7 +450,7 @@ const COMMAND_VERB_PREFIX = new RegExp(
   "(?:^|[^A-Za-z0-9_$])(?:/?(?:usr/)?(?:bin|s?bin)/)?"
   + "(?:chmod|chown|chgrp|mv|cp|cat|ls|df|plutil|python3|node|npx|launchctl|diskutil|"
   + "kill|rm|mkdir|touch|open|curl|security|defaults|export|gzip|tar|sqlite3|grep|stat|find|sh|"
-  + "glasspaned|updater|installer)(?:\\s+(?:-[A-Za-z0-9_-]+|\\d{3,4}))*[\"'\\s]+$"
+  + "glasspaned|updater|installer|git|git ls-remote)(?:\\s+(?:-[A-Za-z0-9_-]+|\\d{3,4}))*[\"'\\s]+$"
 );
 /** 参数位紧邻一枚选项：`git -C <洞>`、`node <洞> --restore-launchd`。 */
 const OPTION_BEFORE = /(?:^|[\s"'([{])-{1,2}[A-Za-z][\w-]*(?:[ \t]+[\w-]+)*[ \t]*["']?$/;
@@ -460,7 +460,10 @@ const COMMAND_PREFIX = (before, after) =>
 
 const ANY_HOLE = /\$\{([^{}]*)\}/g;
 /** An interpolation whose name says it carries a filesystem location. */
-const PATH_TYPED = /(?:path|Path|dir|Dir|file|File|root|Root|target|Target|cli|Script|directory)/;
+// "路径"之外还有一类：坐在命令位上的**名字**（在册远端名）。本机实测 `git remote` 会原样
+// 列出一枚含空格与 `$( )` 的名字（`git config 'remote.up stream.url' …` 就能造出来），所以
+// 它和目录名一样是 shell 文本，不是参数值。2026-11-04 那两处注入之一就是从这里漏的。
+const PATH_TYPED = /(?:path|Path|dir|Dir|file|File|root|Root|target|Target|cli|Script|directory|remote|Remote)/;
 
 test("every interpolated value inside a command-shaped literal in src and updater goes through the quoting helper", () => {
   const offenders = [];
@@ -486,8 +489,18 @@ test("every interpolated value inside a command-shaped literal in src and update
   // 这一半是形状判据必需的：`两个都跑不通就是 ${path.dirname(target)} 的权限问题，看 \`ls -ld …\``
   // 与 `daemon 在 ${socketPath} 应答了 hello…` 都是中文说明，形状里的"选项"来自句中最深处的一个
   // markdown 代码段，而不是一个待照抄的参数位。本轮实测：少了这一刀，三处中文说明被误报。
-  if (/[\p{Script=Han}]/u.test(before) || /[\p{Script=Han}]/u.test(after)) continue;
-  if (!COMMAND_PREFIX(before, after)) continue;
+  // 赋值位单独认：`VAR=<洞>` 后面接的一定是一个 shell 词，语言环境不参与这个判断。
+  // 但"整条字面量只剩一次赋值"不是命令位，是在**展示一个环境变量的值**——`updater/lib/binaries.js`
+  // 与 `signature.js` 那句 `PATH=${pathValue}` 是 "this process runs with PATH=…" 的一半，给它的
+  // 值加 shell 引号是要求一件没有意义的事（本轮实测：不加这一刀，两处说明被误报）。
+  // 边界用 `\W` 而不是 ASCII 空白表：本仓的出路句子是双语的，`…：GLASSPANE_INSTALL_DIR=<洞>` 里
+  // 赋值位前面是**全角冒号**，只认 ASCII 边界的话这一处又被语言环境短路了（本轮实测）。
+  const ASSIGN_HOLE = /(?:^|\W)[A-Za-z_][A-Za-z0-9_]*=(?:"|')?$/;
+  const assignmentShaped = ASSIGN_HOLE.test(before)
+    && !(/^[A-Za-z_][A-Za-z0-9_]*=(?:"|')?$/.test(body.slice(0, hole.index).trim())
+         && body.slice(hole.index + hole[0].length).trim() === "");
+  if (!assignmentShaped && /[\p{Script=Han}]/u.test(before)) continue;
+  if (!assignmentShaped && !COMMAND_PREFIX(before, after)) continue;
           // 选项必须**紧挨着这一枚参数位**——在它前面那一段里，或者紧跟其后（`node "${cli}"
           // --restore-launchd` 就是后者）。整条字面量里"出现过一根横杠"不算：
           // `nothing installed at ${appsDir} reports a version (no .app bundle …)` 那句是散文，
@@ -514,6 +527,17 @@ test("every interpolated value inside a command-shaped literal in src and update
   assert.ok(inspected.length >= 4,
     `命令样式的字面量只扫到 ${inspected.length} 处，这条闸已经看不见东西：${inspected.join(" | ")}`);
   assert.ok(inspected.some((entry) => entry.includes("plutil")), "registryReaders 的那两条读者命令不在扫描结果里");
+  // 2026-11-04 新加的那一半判据不许是装饰：一键安装那句 `GLASSPANE_INSTALL_DIR=<洞>` 必须在扫描结果里
+  //（它从前被"汉字存在即跳过"整条洗掉，两处注入面因此看不见）。
+  assert.ok(inspected.some((entry) => entry.includes("GLASSPANE_INSTALL_DIR")),
+    "赋值位那一半没扫到一键安装命令，说明它又被语言环境短路了");
+  // `git ls-remote <洞>`：动词名单里从前没有 `git`，而参数位上坐的是"在册远端名"（不是路径），
+  // 两处合起来让这条待照抄的命令整条在闸外（2026-11-04 的一处真注入面）。试过把"动词与参数位之间
+  // 允许一枚裸词"改成形状判据——本机实测造出 4 处误报（`the new updater script ${cliPath} could
+  // not be started`、`installer pointer ${pointerFile} could not be parsed` 一类的英文说明），
+  // 所以留下这一枚精确条目，并由下面这条非空转对照证明它真的在扫这一处。
+  assert.ok(inspected.some((entry) => entry.includes("git ls-remote")),
+    "git 的 ls-remote 命令位不在扫描结果里，那条出路仍然看不见");
   assert.ok(inspected.some((entry) => entry.includes("chmod")), "chmod 的出路不在扫描结果里");
   // The widened half must not be decoration: the updater's own sites have to be *in* the scan
   // (2026-10-22, `lib/check.js`'s `ls -lO` repair line), or "we now also read updater/" is a
