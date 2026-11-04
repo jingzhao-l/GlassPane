@@ -45,6 +45,7 @@ import {
 } from '../../scripts/make-release-archive.mjs'
 import { extractTarGz, packTarGz, readTarGz } from '../lib/tar.js'
 import { VERSION_SITES } from '../lib/selfcheck.js'
+import { LOCKFILES, SITES as CHECK_VERSION_SITES } from '../../scripts/version-sites.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.resolve(HERE, '..', '..')
@@ -117,6 +118,37 @@ function makeReleaseTree({ withDist = true, commitBuildOutputs = false } = {}) {
     files: ['dist', 'schemas', 'LICENSE', 'README.md'],
   }) + '\n')
   write('mcp-shell/src/index.ts', 'export {}\n')
+  // 下面这些不是装饰：`REQUIRED_IN_ARCHIVE` 现在是从 `scripts/version-sites.mjs` 的 `SITES` +
+  // `LOCKFILES` 推出来的，而那份文件表正是 `runTreeGuard` 在暂存树里跑 `check-version.mjs` 时逐条
+  // 打开的集合。夹具缺哪一枚，这条链子就测不到那一枚——`install.sh`/`README.md` 从前就是这么漏的
+  // （闸照着 selfcheck 的三行表抄，抄件本身少十枚，2026-11-03 记账）。
+  write('mcp-shell/src/dispatch.ts',
+    'export const SERVER_INFO = { name: "glasspane-mcp", version: "1.6.0" }\n')
+  write('updater/package.json', JSON.stringify({
+    name: 'glasspane-update',
+    version: '1.6.0',
+    private: true,
+  }) + '\n')
+  write('README.zh-CN.md', '# GlassPane\n')
+  write('SECURITY.md', '# Security\n')
+  write('SECURITY.zh-CN.md', '# 安全\n')
+  write('package-lock.json', JSON.stringify({
+    name: '@glasspane/monorepo',
+    version: '1.6.0',
+    lockfileVersion: 3,
+    packages: {
+      '': { version: '1.6.0' },
+      'mcp-shell': { version: '1.6.0' },
+      installer: { version: '1.6.0' },
+      updater: { version: '1.6.0' },
+    },
+  }) + '\n')
+  write('mcp-shell/package-lock.json', JSON.stringify({
+    name: 'glasspane-mcp',
+    version: '1.6.0',
+    lockfileVersion: 3,
+    packages: { '': { version: '1.6.0' } },
+  }) + '\n')
   write('installer/package.json', JSON.stringify({
     name: 'glasspane-install',
     version: '1.6.0',
@@ -265,6 +297,30 @@ test('an exclusion that would remove an install input is refused, not published'
     // requirement without anyone remembering to edit a second list.
     for (const site of VERSION_SITES) {
       assert.ok(REQUIRED_IN_ARCHIVE.includes(site.file.split(path.sep).join('/')), `${site.file} 是 selfcheck 要读的`)
+    }
+    // …and the *other* reader is the guard selfcheck spawns from the staged tree. It opens every file in
+    // `scripts/version-sites.mjs`'s `SITES` plus both lockfiles — that table, not a transcription of it.
+    // Missing here is what let an exclusion of `install.sh` / `README.md` / a lockfile publish green and
+    // then refuse the swap on every machine (2026-11-03 记账).
+    const guardFiles = [...CHECK_VERSION_SITES.map((site) => site.file), ...LOCKFILES.map((lock) => lock.file)]
+    const notRequired = guardFiles.filter((file) => !REQUIRED_IN_ARCHIVE.includes(file))
+    assert.deepEqual(notRequired, [], `这些是 check-version 在暂存树里要打开的，却不在发布必需集里：${notRequired.join(', ')}`)
+    assert.ok(guardFiles.length >= 15,
+      `推导出来的文件表只剩 ${guardFiles.length} 枚——表一旦被读空，这条断言就变成空转（非空转对照）`)
+    // 会咬人：把其中一枚从树上拿走，发布必须**拒绝**——不是安静少一个文件。
+    const stolen = makeReleaseTree()
+    try {
+      const victim = 'README.md'
+      fs.rmSync(path.join(stolen.root, victim))
+      stolen.git('add', '-A')
+      stolen.git('-c', 'user.email=test@example.test', '-c', 'user.name=test', 'commit', '-q', '-m', `drop ${victim}`)
+      assert.throws(
+        () => archiveBytes({ root: stolen.root, version: '1.6.0' }),
+        (error) => /install-critical/.test(error.message) && error.message.includes(victim),
+        `少了 ${victim} 的树必须让发布停下来`,
+      )
+    } finally {
+      stolen.cleanup()
     }
     // A prefix that matches nothing is not a refusal — it is reported as an empty exclusion, so the number
     // the job prints stays the thing a reviewer checks.

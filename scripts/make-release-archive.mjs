@@ -35,6 +35,7 @@ import { fileURLToPath } from 'node:url'
 
 import { packTarGz, readTarGz } from '../updater/lib/tar.js'
 import { VERSION_SITES } from '../updater/lib/selfcheck.js'
+import { LOCKFILES, SITES as CHECK_VERSION_SITES } from './version-sites.mjs'
 
 /** Directories that must exist and are not tracked: the JS build outputs the target machine cannot make. */
 export const REQUIRED_BUILD_OUTPUTS = ['mcp-shell/dist', 'mcp-shell/schemas']
@@ -73,16 +74,22 @@ export const PACKAGE_DIRS = ['mcp-shell', 'installer']
 /**
  * What the update path reads out of the unpacked archive.
  *
- * Transcribed from the readers, not guessed at: `VERSION_SITES` is the list `updater/lib/selfcheck.js`
- * refuses a tree without, `scripts/check-version.mjs` is the guard that same step runs *from the staged
- * tree*, and the rest are the paths `apply.js`'s `buildStagedTree`, `installNpmPackages` and §11's
- * `runtimeCliPath` open by name. The value of checking this at publish time is that an archive which cannot
- * install stops here instead of failing on every machine that downloads it — every one of these absences is
- * loud at the consumer, and "loud at the consumer" is exactly what a release guard exists to prevent.
+ * **Derived from both readers, not transcribed from one.** `updater/lib/selfcheck.js` refuses a tree
+ * without its own three `VERSION_SITES`, and the same step then spawns `scripts/check-version.mjs`
+ * *from the staged tree* — and that guard opens every file in `scripts/version-sites.mjs`'s `SITES`
+ * plus both `LOCKFILES`. Reading only selfcheck's table is what left this list short by ten files: an
+ * exclusion (or a deletion) that took `install.sh`, `README.md`, `SECURITY.zh-CN.md`,
+ * `mcp-shell/src/dispatch.ts`, `installer/cli.js`, `updater/package.json` or a lockfile built,
+ * verified, signed and published green, and then every machine's `runTreeGuard` read
+ * 「位点未命中/文件缺失」 and refused the swap. The point of checking this at publish time is that an
+ * archive which cannot install stops *here* instead of failing on every machine that downloads it —
+ * and "loud at the consumer" is exactly what a release guard exists to prevent.
  */
 const posix = (rel) => rel.split(path.sep).join('/')
 export const REQUIRED_IN_ARCHIVE = [...new Set([
   ...VERSION_SITES.map((site) => posix(site.file)), // selfcheck.js: "the staged tree has no <file>"
+  ...CHECK_VERSION_SITES.map((site) => posix(site.file)), // the guard's own file set
+  ...LOCKFILES.map((lock) => posix(lock.file)), // …including the two lockfiles it parses
   'scripts/check-version.mjs', // runTreeGuard spawns node against this, inside the staged tree
   'scripts/version-sites.mjs', // the guard above imports its site table from here
   'engine/Package.swift', // swift build --package-path <staged>/engine
