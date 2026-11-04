@@ -1721,14 +1721,18 @@ class StubProcess(object):
 
 
 class StubWatchpoint(object):
-    """SBWatchpoint: the two reads the ledger seam makes. `Disable()` hands back a plain
-    bool — one of the shapes `_outcome_ok` has to normalise. `disable_results` (added for
-    D4) makes the **failure** arm reachable: a queue of outcomes is consumed per call and
-    the last one repeats, so `disable_results=[False]` is "always refuses to disable"."""
+    """SBWatchpoint 的形状照**本机真 lldb** 的 `dir()` 来：有 `SetEnabled(bool)`，**没有**
+    `Disable`（2026-11-04 实测）。从前这一支供着 `Disable()`，于是 `_disarm_watchpoint` 在生产
+    上每一次都走到 "this lldb binding has no SBWatchpoint.Disable()"，桩却答"成功了"——那是给一门
+    不存在的能力作背书，释槽那条环从此没人量过。
+
+    `SetEnabled()` 交回一个裸 bool——正是 `_outcome_ok` 要归一的形状之一。`disable_results`（D4 加的）
+    仍让**失败**那一支可达：队列逐次消费、最后一枚重复，`disable_results=[False]` 就是"永远不肯放"。
+    """
 
     def __init__(self, wp_id, disable_results=None):
         self._id = wp_id
-        self.disable_calls = 0
+        self.set_enabled_calls = 0
         self._disable_results = list(disable_results or [])
 
     def IsValid(self):
@@ -1737,8 +1741,26 @@ class StubWatchpoint(object):
     def GetID(self):
         return self._id
 
+    def SetEnabled(self, enabled):
+        self.set_enabled_calls += 1
+        if self._disable_results:
+            return self._disable_results.pop(0) if len(self._disable_results) > 1 \
+                else self._disable_results[0]
+        return True
+
+
+class StubLegacyWatchpoint(StubWatchpoint):
+    """只有 `Disable()` 的旧绑定。本机实测**不是**这一形；它是 `_disarm_watchpoint` 的第二问，
+    所以这里必须把继承来的 `SetEnabled` 真的拿掉——`getattr(x, "SetEnabled", None)` 要读到 None，
+    桩对任何名字都答话就等于替"两个名字都问一遍"这条判据作空白担保。"""
+
+    SetEnabled = None
+
+    def __init__(self, wp_id, disable_results=None):
+        StubWatchpoint.__init__(self, wp_id, disable_results)
+
     def Disable(self):
-        self.disable_calls += 1
+        self.set_enabled_calls += 1
         if self._disable_results:
             return self._disable_results.pop(0) if len(self._disable_results) > 1 \
                 else self._disable_results[0]
@@ -1844,7 +1866,8 @@ class OuterDeliveryFromSbStubs(unittest.TestCase):
         self.assertEqual(["0x2000"], report["rearmed"], report)
         self.assertEqual([], report["notes"], report["notes"])
         # the debugger side really gave the slot up: hit → Disable() → ledger release
-        self.assertEqual(1, hit.disable_calls, "the hit watchpoint must be disabled")
+        self.assertEqual(1, hit.set_enabled_calls,
+                         "the hit watchpoint must be disabled through the name this binding has")
         self.assertNotIn("0x1001", self.live)
         self.assertEqual([], self.queue.queued, "the queued head must have taken the slot")
         promoted = self.queue.entry_for_addr("0x2000")
@@ -2567,11 +2590,11 @@ class DisarmFailureKeepsTheWatchpointHandle(unittest.TestCase):
         self.assertFalse(ok, detail)
         self.assertIn("0x1001", self.live,
                       "Disable 没成功就把句柄摘掉，下一次 reconcile 再也认不出这条监视点")
-        self.assertEqual(1, stuck.disable_calls)
+        self.assertEqual(1, stuck.set_enabled_calls)
         # 第二次调用（"下一次 reconcile"）必须还能试，并且成功之后才摘。
         ok2, _detail = gb._disarm_watchpoint("0x1001")
         self.assertTrue(ok2, ok2)
-        self.assertEqual(2, stuck.disable_calls)
+        self.assertEqual(2, stuck.set_enabled_calls)
         self.assertNotIn("0x1001", self.live, "成功之后句柄才该走")
 
     def test_reconcile_notes_the_unconfirmed_disable_and_still_records_the_hit(self):
@@ -2980,7 +3003,8 @@ class DisarmFailureIsItsOwnLedgerBoundary(unittest.TestCase):
         self.live["0x3002"] = NoDisable()
         ok, detail = gb._disarm_watchpoint("0x3002")
         self.assertFalse(ok, detail)
-        self.assertIn("no SBWatchpoint.Disable()", detail)
+        for name in ("SetEnabled", "Disable"):
+            self.assertIn(name, detail, "the refusal has to say which two names it asked for")
         self.assertIn("0x3002", self.live, "连 Disable 都没有的绑定，句柄同样不许消失")
 
 

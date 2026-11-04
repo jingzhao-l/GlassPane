@@ -13,7 +13,9 @@ Three modes (§6.3):
   trace      main-thread samples for a hung process, taken at *separate* stops
              (the target is resumed and re-stopped between samples) — T2 pipeline
   interactive  register gp-capture / gp-trace / gp-watch / gp-queue inside a
-             live lldb session (no REPL takeover)
+             live lldb session (no REPL takeover) — reached by
+             `command script import <this file>` *inside* lldb; the CLI refuses it,
+             because `xcrun lldb --batch` cannot give a live session (§6.3, `main`)
 
 Z4 watchpoints (§6.5): hardware slots capped at 4 (arm64 debug registers);
 over-cap requests FIFO-queue (depth ≤64); exhaustion is reported honestly —
@@ -92,14 +94,39 @@ WATCH_QUEUE_LIMIT = 64
 WATCHPOINT_NOTE_LIMIT = 24
 TRACE_SAMPLES = 5
 TRACE_INTERVAL_S = 1.0
-#: R30回传 socket 的 connect/send 上限：对端不读取时宁可报错，不可挂住桥。
-SEND_SOCK_TIMEOUT_S = 10.0
 MAX_TRACE_SAMPLES = 32
 EMIT_TIMEOUT_S = 5.0
 #: 杀掉整组之后**再抽干一次管道**的上限。到期就带着已经读到的字节离场：管道写端
 #: 可能被一个逃出了进程组的继承者握着，无限等下去会兑现不了「永不静默挂起」。
 #: 命名它而不是写死 5：它同时是收尾 `wait()` 的上限，测试要用一个小值跑这条分支。
 CHILD_DRAIN_TIMEOUT_S = 5.0
+#: 桥**留在内存里**的孩子输出上界（字节）。载荷的每一个字段都有上界
+#: （`MAX_VALUE_BYTES`/`MAX_LOCALS`/`MAX_THREADS`/`MAX_FRAMES`），从前只有这两条管道
+#: 没有：`--exe <target that prints gigabytes>` 时 `communicate()` 读回来的整条流都
+#: 被留在字符串里跟着载荷走完 `run_outer`，报出来的永远是"完整 stdout"的样子，
+#: 而不是"这里钳掉了 N 字节"。
+#: 钳的是**留存**，不是读侧峰值——这条界限要说清，别把它说成 OOM 已经解决：
+#: 本机 2026-11-03 实测（孩子写 41,943,040 字节 ASCII 到 stdout，父进程
+#: `run_child_captured` 一次）留存 33,554,420 字节、钳掉 8,388,689 字节，而父进程
+#: peak RSS 从 17.7 MiB 涨到 **241.3 MiB** ——`communicate()` 自己怎么攒字节不由
+#: 这里决定（要封那一层就得弃 `communicate()` 的整条超时/收尸语义，本桥的超时判决
+#: 正建在它上面）。这里的收益是：GB 级的流不再随载荷活到进程结束，且丢掉多少有数字。
+#: 上界为什么是 32 MiB 而不是 1 MiB：tail 窗口必须**装得下最坏情形的载荷**，否则
+#: "丢掉中段"会把哨兵对切碎。按 §6.4 各道上界（64 threads × 64 frames × 16 locals
+#: × 256 B value + 400 registers + 64 watchpoint 记录 + errors[]）造出的最大载荷，
+#: 本机 2026-11-03 实测 `render_json` = 22,140,892 字节、`wrap_sentinel` 后
+#: 22,140,945 字节 < tail 25,165,824。
+MAX_CHILD_OUTPUT_BYTES = 32 * 1024 * 1024
+#: 哨兵对**永远在最右**（`extract_sentinel` 的 last-not-first 规则），所以尾部窗口
+#: 给足 24 MiB；剩下的 8 MiB 给 head，因为 lldb 自己的开头诊断（`error: module
+#: importing failed …`）住在流的最前面，`no_payload_cause` 要读它。
+CHILD_OUTPUT_TAIL_BYTES = 24 * 1024 * 1024
+CHILD_OUTPUT_HEAD_BYTES = MAX_CHILD_OUTPUT_BYTES - CHILD_OUTPUT_TAIL_BYTES
+#: 两窗之间那句"中段被丢"的说明也计入上界：预留取实测最大长度 81 字节
+#: （`len(marker % 10**18)` = 81，常见长度 63），所以 kept 的字节数恒 ≤ MAX。
+CHILD_OUTPUT_MARKER_RESERVE = 81
+CHILD_OUTPUT_MARKER = ("\n...[middle dropped: %d byte(s) of lldb output not "
+                       "retained]...\n")
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +444,52 @@ def keep_capped(items, limit):
     if len(items) <= limit:
         return items, 0
     return items[:limit], len(items) - limit
+
+
+def cap_retained_output(text, limit=MAX_CHILD_OUTPUT_BYTES, tail=CHILD_OUTPUT_TAIL_BYTES):
+    """`keep_capped` 的字节版：(retained, dropped_bytes) —— 钳了就要说清钳掉多少。
+
+    保的是 head+tail 窗口，不是"只留 tail"：
+      * tail ≥ 本桥能发出的最大载荷（见 `MAX_CHILD_OUTPUT_BYTES` 上的实测），而
+        `extract_sentinel` 取的是**最右**那对哨兵，所以"中段被丢"永远切不碎载荷——
+        这是这个窗口形状存在的理由，不是风格选择；
+      * head 留着，因为 lldb 的开头诊断（import 失败、`error:` 行）在流的最前面，
+        `no_payload_cause` 读的是它。
+    字节按 utf-8 计（与 `truncate` 同一口径）；窗口边界把一个多字节字符切成半个时，
+    解码走 `errors="replace"` 换成 U+FFFD，与 B-28 那条"坏字节不许把桥打崩在
+    communicate() 里"的契约同形。marker 自占的字节算进 head 预算，因此
+    `len(retained.encode("utf-8")) <= limit` 恒成立。
+    """
+    raw = text if isinstance(text, str) else _decoded_partial(text)
+    data = raw.encode("utf-8", errors="replace")
+    if len(data) <= limit:
+        return raw, 0
+    marker_reserve = min(CHILD_OUTPUT_MARKER_RESERVE, max(0, limit - tail))
+    head = max(0, limit - tail - marker_reserve)
+    dropped = len(data) - head - tail
+    marker = CHILD_OUTPUT_MARKER % dropped
+    kept = (data[:head] + marker.encode("utf-8") + data[-tail:])
+    return kept.decode("utf-8", errors="replace"), dropped
+
+
+def child_output_truncation_errors(completed):
+    """孩子输出的钳留多少字节 → errors[] 条目（`assemble_result` 那几条同口径）。"""
+    notes = []
+    for name in ("stdout", "stderr"):
+        dropped = getattr(completed, "%s_dropped" % name, 0) or 0
+        if not dropped:
+            continue
+        notes.append(
+            "child %s truncated: %d byte(s) dropped, %d byte(s) retained as a head+tail "
+            "window (MAX_CHILD_OUTPUT_BYTES=%d, head=%d tail=%d); this payload is NOT the "
+            "whole %s stream. The sentinel pair is read from the tail window, which is "
+            "larger than the biggest payload this bridge can emit (measured 22,140,945 "
+            "bytes at the §6.4 caps), so the dropped middle cannot hide a capture that "
+            "was taken — it can only hide lldb's own output from that stretch."
+            % (name, dropped, len(getattr(completed, name, "") or ""),
+               MAX_CHILD_OUTPUT_BYTES, CHILD_OUTPUT_HEAD_BYTES, CHILD_OUTPUT_TAIL_BYTES,
+               name))
+    return notes
 
 
 def render_json(payload):
@@ -1043,7 +1116,13 @@ def emit(payload, out_path=None, send_sock=None, timeout_s=None):
         except socket.timeout:
             raise OSError("send-sock %s did not take the frame within %ss: the peer is "
                           "not draining (it is not accepting, or its receive buffer is "
-                          "full); the payload went to stdout only" % (send_sock, budget))
+                          "full). sendall() only raises *after* the budget expires, and by "
+                          "then some of the frame may already have reached the peer, so "
+                          "that socket can be holding half an NDJSON line: what is measured "
+                          "here is 'not confirmed fully delivered', NOT 'the payload went "
+                          "to stdout only' — a reader on --send-sock must treat the frame as "
+                          "possibly partial, and the stdout sentinel stays the complete copy"
+                          % (send_sock, budget))
         finally:
             client.close()
 
@@ -1142,6 +1221,13 @@ def run_child_captured(argv, timeout, env=None):
     lldb 明明已经吐出了载荷）、漏掉那一对 fd、并且从不 `wait()` 收尸。现在两次
     抽干之间的字节都留下，收尾一律走 `_release_pipes_and_reap`，超时判决不变。
 
+    留多少字节由 `cap_retained_output` 决定（A2）：两条管道从前一路攒到 EOF，载荷
+    的每个字段却各有上界——`--exe` 的目标吐 GB 级输出时父进程是被 OOM 杀的那个，
+    而不是报截断的那个。现在 stdout/stderr 各留 `MAX_CHILD_OUTPUT_BYTES` 的
+    head+tail 窗口，丢掉的字节数落在 `completed.stdout_dropped` /
+    `stderr_dropped` 上，由 `run_outer` 写进 errors[]。钳的是**留存**：
+    `communicate()` 读侧自己怎么攒字节不由这里决定，本函数不声称钳住了那个峰值。
+
     Returns (completed, timed_out). `OSError` 原样上抛，由调用方决定报什么形状。
     """
     proc = subprocess.Popen(
@@ -1152,7 +1238,9 @@ def run_child_captured(argv, timeout, env=None):
     try:
         out, err = proc.communicate(timeout=timeout)
         delivered = True
-        return _Completed(proc.returncode, out, err), False
+        out, out_dropped = cap_retained_output(out)
+        err, err_dropped = cap_retained_output(err)
+        return _Completed(proc.returncode, out, err, out_dropped, err_dropped), False
     except subprocess.TimeoutExpired as first:
         out = _keep_widest("", first.output)
         err = _keep_widest("", first.stderr)
@@ -1165,7 +1253,11 @@ def run_child_captured(argv, timeout, env=None):
         else:
             out = _keep_widest(out, drained_out)
             err = _keep_widest(err, drained_err)
-        return _Completed(proc.returncode, out, err), True
+        # 钳在**两次抽干合并之后**做一次：中途钳会让第二次（CPython 交回的是包含
+        # 第一次的超集）把同一批字节再计一遍，dropped 就成了凭空的数。
+        out, out_dropped = cap_retained_output(out)
+        err, err_dropped = cap_retained_output(err)
+        return _Completed(proc.returncode, out, err, out_dropped, err_dropped), True
     finally:
         # `not delivered` is the whole judgement: a run whose bytes came back has nothing
         # left to kill, and killing a group that may still hold the user's launched target
@@ -1223,6 +1315,80 @@ def resume_frozen_target(pid):
                    "whether it woke was NOT measured" % numeric)
 
 
+#: 唤醒判决在载荷里的两种说法。写成常量而不是在各臂各抄一遍：本仓为"一条事实两种
+#: 拼写"记过多次账（`EvidenceStore.ageRetention`、`updater <裸动词>`），而这句是要被
+#: 读者据此决定"要不要手动 kill -CONT"的话，两份拼写迟早分叉。
+WAKE_RESUMED = "it was resumed"
+WAKE_NOT_CONFIRMED = "IT IS NOT CONFIRMED RESUMED — check the pid"
+
+
+def wake_phrase(woke):
+    """唤醒判决 → 载荷里的那半句话。"""
+    return WAKE_RESUMED if woke else WAKE_NOT_CONFIRMED
+
+
+def wake_remedy(pid, woke):
+    """没唤醒 → 当场可执行的一步；唤醒了、或这根本不是一趟 attach，回 None。
+
+    `None` 不是"少了一条信息"：给一份已经自由的目标再挂一句 kill -CONT，读者就分不清
+    这条载荷到底有没有欠他一个动作。
+    """
+    if woke or pid is None:
+        return None
+    return ("remedy for a target left stopped by an attach: kill -CONT %s; "
+            "if that is refused the process belongs to another debugger session "
+            "and only that session can release it." % pid)
+
+
+def merge_payload_notes(payload, notes):
+    """把附注挂进载荷的 `errors[]`，回 `(payload, 没挂上的附注)`。
+
+    §6.2 要求附注（钳了多少字节、预算被钳过、超时收尾）随载荷离场，所以这里不许
+    静默丢。三种接不住的情形都回非空第二项，由调用方**出声**（写 stderr），而不是
+    让一条判决只活在内存里过了一遍：
+      * 载荷不是 dict（目标自己打印了 JSON 数组/标量）——它没有 errors[] 可挂；
+      * 载荷有 `errors` 但不是 list（目标写下的字段，覆盖它＝销毁证据）；
+      * 没有 notes（第二项恒空，不是失败）。
+    """
+    notes = list(notes)
+    if not isinstance(payload, dict):
+        return payload, notes
+    if "errors" not in payload:
+        if notes:
+            payload["errors"] = notes
+        return payload, []
+    if isinstance(payload["errors"], list):
+        payload["errors"] = payload["errors"] + notes
+        return payload, []
+    return payload, notes
+
+
+def deliverable_payload(payload, mode, target, notes):
+    """把哨兵里读出来的东西变成一段**接得住附注**的载荷，回 `(payload, 没挂上的附注)`。
+
+    桥自己的发射恒是 §6.1 那个 JSON 对象。解析成功却不是对象时（目标自己 print 出
+    `GPBRIDGE<<[1,2,3]>>`），从前那一支 `payload.setdefault("errors", [])` 直接在 list 上抛
+    AttributeError：§6.2「失败也要有形状」在这里破的是桥以 traceback 离场——外层读者一个字段
+    都拿不到，还要把病因读成"没有载荷"。现在换成一段自己组装的失败载荷，并把**读到的类型**
+    写进 errors[]：说清读到的是什么形状，而不是含糊成"没采到"。
+    """
+    if isinstance(payload, dict):
+        return merge_payload_notes(payload, notes)
+    refusal = assemble_result(
+        mode=mode,
+        target=target,
+        status="failed",
+        threads=[],
+        errors=[
+            "lldb's sentinel pair parsed to JSON of type %s, not the JSON object this "
+            "bridge emits (§6.1 keys). A capture cannot be read out of that shape, so this "
+            "run delivers a structured failure instead; the type named here is the whole "
+            "measurement available from the stream." % type(payload).__name__,
+        ] + list(notes),
+    )
+    return refusal, []
+
+
 def run_outer(args):
     """Parent-process path: exec lldb, extract payload, re-emit per §6.2."""
     bridge_path = os.path.abspath(__file__)
@@ -1277,16 +1443,14 @@ def run_outer(args):
         woke, wake_detail = resume_frozen_target(args.pid)
         kind = ("cannot spawn lldb" if isinstance(error, OSError)
                 else "the lldb child run raised a non-timeout error")
+        woke_phrase = wake_phrase(woke)
         errors = [
             "%s (%r): no payload was drained. About the target: %s (%s)"
-            % (kind, error,
-               "it was resumed" if woke else "IT IS NOT CONFIRMED RESUMED — check the pid",
-               wake_detail),
+            % (kind, error, woke_phrase, wake_detail),
         ]
-        if not woke and args.pid is not None:
-            errors.append("remedy for a target left stopped by an attach: kill -CONT %s; "
-                          "if that is refused the process belongs to another debugger session "
-                          "and only that session can release it." % args.pid)
+        remedy = wake_remedy(args.pid, woke)
+        if remedy:
+            errors.append(remedy)
         if budget_note:
             errors.append(budget_note)
         failure = assemble_result(
@@ -1312,64 +1476,91 @@ def run_outer(args):
         # SIGSTOP 上。先唤醒，再把"唤没唤醒"照实写进载荷，而不是沿用那句没人验过的
         # "no longer held by this bridge"。
         woke, wake_detail = resume_frozen_target(args.pid)
-        errors = [
-            "lldb did not produce a capture within %ss. On this machine "
-            "debugger attach/launch is permission-gated (P6 §0 F1/F2/F5): "
-            "grant System Settings > Privacy & Security > Developer Tools to the "
-            "calling process, or run inside an already-authorized Terminal session. "
-            "The whole lldb process group was SIGKILLed on timeout; about the target: %s "
-            "(%s)" % (args.timeout,
-                      "it was resumed" if woke else "IT IS NOT CONFIRMED RESUMED — check the pid",
-                      wake_detail),
-        ]
-        if not woke and args.pid is not None:
-            errors.append("remedy for a target left stopped by an attach: kill -CONT %s; "
-                          "if that is refused the process belongs to another debugger session "
-                          "and only that session can release it." % args.pid)
+        notes = list(child_output_truncation_errors(completed))
         if budget_note:
-            errors.append(budget_note)
-        payload = assemble_result(
-            mode=args.mode,
-            target={"pid": args.pid, "exe": args.exe},
-            status="failed",
-            threads=[],
-            errors=errors,
-        )
-        try:
-            emit(payload, out_path=args.out, send_sock=args.send_sock)
-        except OSError as error:
-            # emit already left the JSON-shaped failure on stdout (§6.2); this is
-            # the operator-facing note only. Covers both a refused --out target and
-            # a --send-sock that stopped draining, so it must not name just one.
-            sys.stderr.write("payload delivery failed (--out / --send-sock): %s\n" % error)
-            return 2
-        return 1
-    payload, _raw = extract_sentinel(completed.stdout, nonce=nonce)
-    if payload is None:
-        stderr_tail = completed.stderr[-2000:] if completed.stderr else ""
-        # 成因先分诊再落文案：桥没被导入（路径形态）与调试席位被拒（权限）补救
-        # 完全不同，而从前这里无论哪种都写"去勾 Developer Tools"——路径里一个空格
-        # 就让人去勾一张永远不会起效的席位。
-        _cause, remedy = no_payload_cause(stderr_tail, completed.stdout, bridge_path)
-        payload = assemble_result(
-            mode=args.mode,
-            target={"pid": args.pid, "exe": args.exe},
-            status="failed",
-            threads=[],
-            errors=[
+            notes.append(budget_note)
+        delivered, _delivered_raw = extract_sentinel(completed.stdout, nonce=nonce)
+        if delivered is None:
+            errors = [
+                "lldb did not produce a capture within %ss. On this machine "
+                "debugger attach/launch is permission-gated (P6 §0 F1/F2/F5): "
+                "grant System Settings > Privacy & Security > Developer Tools to the "
+                "calling process, or run inside an already-authorized Terminal session. "
+                "The whole lldb process group was SIGKILLed on timeout; about the target: %s "
+                "(%s)" % (args.timeout, wake_phrase(woke), wake_detail),
+            ]
+            wake_note = wake_remedy(args.pid, woke)
+            if wake_note:
+                errors.append(wake_note)
+            payload = assemble_result(
+                mode=args.mode,
+                target={"pid": args.pid, "exe": args.exe},
+                status="failed",
+                threads=[],
+                errors=errors + notes,
+            )
+        else:
+            # A2（2026-11-04 收上一轮的半修）：`timed_out` 说的是**这一趟怎么结束的**，
+            # 不是"有没有采到"。lldb 完全可能把整份崩溃采打完（哨兵对完整住在被特意留存的
+            # 字节里）之后才卡在 `-o detach` 上；从前这一臂只看 timed_out 就把那份现场换成
+            # 一句 "lldb did not produce a capture"——手里有采却说没采到，读者据此重跑、
+            # 换目标，而那次失败已经被写成事实。现在交回那份采，超时只作为同船的附注。
+            timeout_note = (
+                "the capture in this payload was read out of lldb's retained bytes even "
+                "though the run was ended by the --timeout budget (%ss): the sentinel pair "
+                "had already completed before the process group was SIGKILLed, so the "
+                "timeout describes how the run ended and is NOT a verdict that no capture "
+                "was taken. About the target: %s (%s)"
+                % (args.timeout, wake_phrase(woke), wake_detail))
+            wake_note = wake_remedy(args.pid, woke)
+            payload, undelivered = deliverable_payload(
+                delivered, args.mode, {"pid": args.pid, "exe": args.exe},
+                [timeout_note] + notes + ([wake_note] if wake_note else []))
+            if undelivered:
+                sys.stderr.write("timeout notes could not be attached to the payload: %s\n"
+                                 % " | ".join(undelivered))
+    else:
+        payload, _raw = extract_sentinel(completed.stdout, nonce=nonce)
+        notes = list(child_output_truncation_errors(completed))
+        if budget_note:
+            notes.append(budget_note)
+        if payload is None:
+            stderr_tail = completed.stderr[-2000:] if completed.stderr else ""
+            # 成因先分诊再落文案：桥没被导入（路径形态）与调试席位被拒（权限）补救
+            # 完全不同，而从前这里无论哪种都写"去勾 Developer Tools"——路径里一个空格
+            # 就让人去勾一张永远不会起效的席位。
+            _cause, cause_remedy = no_payload_cause(stderr_tail, completed.stdout, bridge_path)
+            # 2026-11-04（同一批半修的另一半）：兄弟两臂（超时臂、BaseException 臂）都唤醒
+            # 被 SIGSTOP 停住的目标，这一臂从前不醒——attach 走到一半 lldb 退了，用户的应用
+            # 就冻在那里，而载荷只说"没有采到"，一个字没提那台停住的进程。
+            woke, wake_detail = resume_frozen_target(args.pid)
+            errors = [
                 "lldb produced no capture payload (exit %d). %s. Cause read from "
                 "lldb's own output (%s): %s lldb stderr tail: %s"
                 % (completed.returncode,
-                   sentinel_absence_clue(completed.stdout, nonce), _cause, remedy,
+                   sentinel_absence_clue(completed.stdout, nonce), _cause, cause_remedy,
                    stderr_tail),
-            ] + ([budget_note] if budget_note else []),
-        )
-    elif budget_note:
-        # 采到了载荷也不能把"预算被钳过/退回默认值"这件事丢掉：载荷里的 errors[] 就是
-        # §6.2 让读者看判决的地方，而这条判决是关于**这一趟跑了多久**的。
-        payload.setdefault("errors", [])
-        if isinstance(payload["errors"], list):
-            payload["errors"].append(budget_note)
+            ]
+            if args.pid is not None:
+                errors.append("About the target: %s (%s)" % (wake_phrase(woke), wake_detail))
+            wake_note = wake_remedy(args.pid, woke)
+            if wake_note:
+                errors.append(wake_note)
+            payload = assemble_result(
+                mode=args.mode,
+                target={"pid": args.pid, "exe": args.exe},
+                status="failed",
+                threads=[],
+                errors=errors + notes,
+            )
+        else:
+            # 采到了载荷也不许把"钳掉了多少字节""预算被钳过"留在暗处，也不许在载荷不是
+            # JSON 对象时以 traceback 离场——两件事都由 `deliverable_payload` 收口（§6.2）。
+            payload, undelivered = deliverable_payload(
+                payload, args.mode, {"pid": args.pid, "exe": args.exe}, notes)
+            if undelivered:
+                sys.stderr.write("payload notes could not be attached: %s\n"
+                                 % " | ".join(undelivered))
     try:
         emit(payload, out_path=args.out, send_sock=args.send_sock)
     except OSError as error:
@@ -1379,18 +1570,27 @@ def run_outer(args):
         return 2
     # 0/1/3：崩溃现场交付出去仍然给非零（3），调用方只看退出码也不会把一次 SIGSEGV
     # 读成一次干净的通过。判据在 `outer_exit_code()`，纯函数、单测直接钉住。
+    # 超时与两段拒绝臂交回的载荷都是 `status="failed"`，这里因此落回 1——与超时臂此前
+    # 手写的 `return 1` 同一个数，只是判据不再有第二个出处。
     return outer_exit_code(payload)
 
 
 class _Completed:
-    """Popen 结果的最小封装，保持与 subprocess.CompletedProcess 同样的读法。"""
+    """Popen 结果的最小封装，保持与 subprocess.CompletedProcess 同样的读法。
 
-    __slots__ = ("returncode", "stdout", "stderr")
+    `stdout_dropped`/`stderr_dropped` 是 `cap_retained_output` 钳掉的中段字节数，
+    0 = 没钳过。它们不是 `subprocess.CompletedProcess` 的字段，所以一律给默认值：
+    造夹具的调用方（测试与 `run_outer` 之外的路径）不必假装知道管道被钳过。
+    """
 
-    def __init__(self, returncode, stdout, stderr):
+    __slots__ = ("returncode", "stdout", "stderr", "stdout_dropped", "stderr_dropped")
+
+    def __init__(self, returncode, stdout, stderr, stdout_dropped=0, stderr_dropped=0):
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+        self.stdout_dropped = stdout_dropped
+        self.stderr_dropped = stderr_dropped
 
 
 #: 只有"确实停住并采到线程"才算一次成功的现场采集。
@@ -1414,13 +1614,21 @@ class _Completed:
 _OK_STATE_NAMES = ("eStateStopped", "eStateAttached")
 
 #: LLDB `ProcessState` 的状态名全集（判定与归一只认这些名字——闭集）。
-#: `eStateAttached` 必须在列：白名单认它，而 producer 是把 lldb 返回的 int 反查
-#: 成名字传给父进程的。漏一个名字不是少一条记录，而是**真机上每一次以 attached
-#: 停住的采集都判成失败**（int 反查不到 → status 无名 → 判定表落空）。
+#: 这张表是**闭集**：判定与归一只认列出的名字。漏一个名字不是少一条记录，而是真机上
+#: 每一次以那一档停住的采集都判成失败（int 反查不到 → status 无名 → 判定表落空）。
+#: `eStateAttached` 保留是给暴露它的绑定的：本机绑定**没有**这一枚（2026-11-04 实测
+#: `hasattr(lldb, "eStateAttached") == False`，有的是 eStateAttaching/eStateConnected），
+#: 所以在本机上它不参与任何判决——这一句从前写成"必须在列，否则真机每次 attached 采集
+#: 都会失败"，那是替一台量不出来的机器背书，现已按实测改口。
 PROCESS_STATE_NAMES = (
     "eStateInvalid", "eStateUnloaded", "eStateConnected", "eStateAttaching",
     "eStateLaunching", "eStateStopped", "eStateRunning", "eStateCrashed",
     "eStateExited", "eStateSuspended", "eStateDetached", "eStateAttached",
+    # 2026-11-04 实测本机 `dir(lldb)` 的 eState* 全集里有 `eStateStepping`（=7），而这张闭集表
+    # 从前没有它：单步停的那一次采集 int→名字 反查落空，status 无名，判定表整条走空。
+    # 放在末尾是有意的——`_FALLBACK_STATE_INT` 由声明次序派生，插在中间会把镜像里每一个
+    # 既有数值整体挪一格。
+    "eStateStepping",
 )
 
 #: name -> int 的**权威来源是运行时可导入的 `lldb` 模块常量**（真机走这条：
@@ -2073,9 +2281,16 @@ def _arm_watchpoint(debugger, entry):
                        "slot for a watchpoint that can never fire"
                 % (mode, "/".join(WATCH_MODES)))
     error = lldb.SBError()
+    # 地址交给绑定的是**裸整数**，不是 `lldb.SBAddress(...)`：本机真 lldb 实测
+    # （2026-11-04，`xcrun lldb --batch -o "script exec(open(...).read())"`）这条绑定只暴露
+    # `SBTarget.WatchAddress(SBTarget, lldb::addr_t, size_t, bool, bool, SBError)` 一个重载，
+    # 交 SBAddress 直接 `TypeError: in method 'SBTarget_WatchAddress', argument 2 of type
+    # 'lldb::addr_t'`。从前那个 TypeError 被下面那层 except 咽成一句 "WatchAddress raised"，
+    # 于是**生产上每一次武装都失败**，而账本照旧说 "queued"——测试面看不见它，因为四用例全把
+    # `_arm_watchpoint` 整条 patch 掉了，桩里的 `StubTarget` 根本没有 `WatchAddress`。
     try:
         watchpoint = target.WatchAddress(
-            lldb.SBAddress(int(entry["addr"], 16), target),
+            int(entry["addr"], 16),
             int(entry.get("size") or 8), "r" in mode, "w" in mode, error)
     except Exception as exc:
         return (False, "WatchAddress raised %r" % (exc,))
@@ -2102,9 +2317,25 @@ def _disarm_watchpoint(addr):
     watchpoint = _LIVE_WATCHPOINTS.get(addr)
     if watchpoint is None:
         return (False, "no live watchpoint was tracked for %s" % addr)
+    # 名字要**量**出来，不能猜：本机真 lldb 的 `dir(lldb.SBWatchpoint)` 里有 `SetEnabled` 与
+    # `Clear`，**没有 `Disable`**（2026-11-04 实测）。所以从前这一支在生产上恒回
+    # "this lldb binding has no SBWatchpoint.Disable()"——硬件槽位永远让不出来，Z4 的
+    # "超额请求排队等空槽"那条环就此断在最后一格，而 `test_bridge.py` 的
+    # `StubWatchpoint.Disable()` 给一门不存在的能力作了背书。两个名字都问，先问真机有的那个。
+    enabler = getattr(watchpoint, "SetEnabled", None)
+    if enabler is not None:
+        ok, detail = _outcome_ok(enabler(False))
+        if ok:
+            _LIVE_WATCHPOINTS.pop(addr, None)
+        return (ok, detail if ok else
+                "SetEnabled(False) failed: %s — the slot stays occupied and this handle is "
+                "kept so the next reconcile can try again" % detail)
     disable = getattr(watchpoint, "Disable", None)
     if disable is None:
-        return (False, "this lldb binding has no SBWatchpoint.Disable()")
+        return (False, "this lldb binding exposes neither SBWatchpoint.SetEnabled(bool) nor "
+                       "SBWatchpoint.Disable() (measured on this machine's lldb: SetEnabled and "
+                       "Clear exist, Disable does not), so the hardware slot could not be "
+                       "released and this watchpoint handle stays tracked")
     ok, detail = _outcome_ok(disable())
     if ok:
         _LIVE_WATCHPOINTS.pop(addr, None)
@@ -2503,15 +2734,116 @@ def _now():
     return time.monotonic()
 
 
+def emit_to_session(result, text):
+    """把一段文本交给 lldb 会话的**那一个**输出通道。
+
+    两条都发是错的：外层桥按 `extract_sentinel` 读 stdout，两对带同一 nonce 的可解析载荷
+    会被判成 `stdoutAmbiguous`（那是为"被调试目标伪造载荷"设的判决，不该被桥自己的双写
+    触发）。所以失败载荷只走 `result.AppendMessage`——那是 lldb 给"这条命令自己说的话"的
+    通道；拿不到它（调用方没传 result）才退回 stdout。
+    """
+    appender = getattr(result, "AppendMessage", None)
+    if appender is not None:
+        appender(text)
+        return
+    print(text)
+
+
+def guarded_command(name, body, debugger, command, result, internal_dict):
+    """§6.2「失败也要有形状」的会话内版：gp-* 命令抛异常时也必须以哨兵载荷离场。
+
+    这一层为什么非有不可（2026-11-04 收上一轮的半修：那轮写了测试，实现没写）：四个
+    `cmd_*` 都没有兄弟 `run_capture_cli_b64` 那层守卫，一抛就把 traceback 留在 lldb 里，
+    外层桥在 stdout 上读不到哨兵对，于是宣布 "lldb produced no capture payload" 并把病因
+    写成一句与它无关的"去勾 Developer Tools"。失败被翻译成了另一件没发生过的坏事，而读者
+    照那句去勾一张永远不会起效的席位。
+
+    载荷按 §6.1 组装、`status="failed"`、errors[] 里带异常本身的 `repr`——不替它编成因。
+    """
+    try:
+        body(debugger, command, result, internal_dict)
+    except Exception as error:
+        payload = assemble_result(
+            mode=name,
+            target={},
+            status="failed",
+            threads=[],
+            errors=["gp-%s raised %r before it could emit a payload. This is the "
+                    "command's own failure and says nothing about the debugged target: "
+                    "the cause is the exception repr above, unedited. Nothing was "
+                    "collected and no state was changed by this command." % (name, error)],
+        )
+        emit_to_session(result, _sentinel(payload))
+
+
 def cmd_capture(debugger, command, result, internal_dict):
+    guarded_command("capture", _cmd_capture_body, debugger, command, result, internal_dict)
+
+
+def cmd_trace(debugger, command, result, internal_dict):
+    guarded_command("trace", _cmd_trace_body, debugger, command, result, internal_dict)
+
+
+def cmd_watch(debugger, command, result, internal_dict):
+    guarded_command("watch", _cmd_watch_body, debugger, command, result, internal_dict)
+
+
+def cmd_queue(debugger, command, result, internal_dict):
+    guarded_command("queue", _cmd_queue_body, debugger, command, result, internal_dict)
+
+
+def _cmd_capture_body(debugger, command, result, internal_dict):
     payload = _payload_via_debugger(debugger, mode="capture")
     print(_sentinel(payload))
 
 
 def _async_mode(debugger):
-    """Best effort read of the debugger's async flag (restored after sampling)."""
-    getter = getattr(debugger, "GetAsyncMode", None)
-    return bool(getter()) if getter is not None else False
+    """Read the debugger's async flag — or say, truthfully, that it cannot be read.
+
+    `None` means **"never measured"**, and it is not the same fact as `False`:
+    the getter-less arm of this function used to answer `False`, and `cmd_trace`'s
+    `finally` then wrote that invented value back with `SetAsync(False)` — on a
+    binding whose getter the bridge could not find, the bridge therefore *asserted*
+    the session had been synchronous and set the user's live debugger to a state it
+    had never read. The old docstring's "restored after sampling" was the second
+    half of the lie: nothing can be restored that was not taken.
+
+    Which name to ask is itself a measurement, not a guess: this machine's
+    `xcrun lldb` binding (2026-11-03, `xcrun lldb --batch -o "script print(hasattr(
+    lldb.SBDebugger(), 'GetAsync'), …)"`) answers `HAS_GetAsync=True
+    HAS_GetAsyncMode=False HAS_SetAsync=True`, so `GetAsync` is the name production
+    actually has and asking only `GetAsyncMode` made the read permanently "not
+    measured" there. `GetAsyncMode` stays as the second name because
+    `test_bridge.py`'s `StubDebugger` answers under it — dropping that arm would
+    quietly change what the existing read-then-restore test measures. Neither name
+    present → None: callers skip the restore and put the gap in errors[].
+    """
+    for name in ("GetAsync", "GetAsyncMode"):
+        getter = getattr(debugger, name, None)
+        if getter is not None:
+            return bool(getter())
+    return None
+
+
+def async_restore_note(async_before):
+    """纯函数（与 `capture_teardown_note` 同一口径）：跳过还原时要交代的那句话。
+
+    还原成功（读到了原值）返回 None——不给一份干净的重跑制造噪声。非 None 的那条
+    必须同时说清三件事：值**没读到**、所以**没有还原**、以及用户怎么自己核对。
+    """
+    if async_before is not None:
+        return None
+    return ("the debugger's async flag was NOT restored: this lldb binding exposes "
+            "neither SBDebugger.GetAsync() nor SBDebugger.GetAsyncMode(), so its value "
+            "before sampling was never measured and there was nothing truthful to write "
+            "back after SetAsync(True). This session's debugger may therefore still be "
+            "in async mode; the bridge cannot report what it replaced (checked on this "
+            "machine, 2026-11-03: `xcrun lldb --batch -o 'settings show "
+            "target.async-mode'` prints nothing for that setting and nothing for a "
+            "made-up one, so lldb's command line offers no read to substitute). If the "
+            "session must run synchronous again, set it yourself with "
+            "SBDebugger.SetAsync(False) — that is a new write, not this payload handing "
+            "back a value it never read.")
 
 
 def _main_thread_sample(process):
@@ -2564,7 +2896,7 @@ def _resume_for_next_sample(process, interval):
     return (False, "the target did not re-stop within %.1fs of the interrupt" % budget)
 
 
-def cmd_trace(debugger, command, result, internal_dict):
+def _cmd_trace_body(debugger, command, result, internal_dict):
     """T2 hang pipeline: main-thread samples taken at *separate* stops.
 
     The target is resumed and re-stopped between samples, and build_timeline
@@ -2573,6 +2905,11 @@ def cmd_trace(debugger, command, result, internal_dict):
     5-sample timeline (that shape reads as the T2 verdict "the stack did not
     move for 5 s"). When the target cannot be resumed, exactly one sample goes
     out with `measured: false` and the reason.
+
+    The async flag is only *restored* when it was *read*: on a binding with no
+    async getter (`GetAsync` / `GetAsyncMode`, see `_async_mode`) the restore is
+    skipped and errors[] carries `async_restore_note` instead of a written-back
+    invented value.
     """
     requested, usage = parse_trace_request(command)
     if usage is not None:
@@ -2580,6 +2917,7 @@ def cmd_trace(debugger, command, result, internal_dict):
         return
     observations = []
     shortfall = None
+    async_note = None
     process = _process_of(debugger)
     if process is None or not process.IsValid():
         shortfall = "no live process: the trace sampled 0 stops"
@@ -2588,6 +2926,10 @@ def cmd_trace(debugger, command, result, internal_dict):
         # A synchronous Continue() never returns for a hung target, so sampling
         # has to flip the debugger async for the duration of the loop.
         debugger.SetAsync(True)
+        # `async_before is None` = the binding never let us read the flag, so the
+        # `finally` below has no truthful value to write back. Restore-skip is the
+        # only honest option; `async_restore_note` puts the gap on the payload.
+        async_note = async_restore_note(async_before)
         try:
             for attempt in range(requested):
                 sample = _main_thread_sample(process)
@@ -2605,17 +2947,21 @@ def cmd_trace(debugger, command, result, internal_dict):
                                  % (len(observations), detail))
                     break
         finally:
-            debugger.SetAsync(async_before)
+            if async_before is not None:
+                debugger.SetAsync(async_before)
     timeline = build_timeline(observations, requested, stop_note=shortfall)
+    errors = [] if timeline["measured"] else ["trace timeline not measured: %s" % timeline["reason"]]
+    if async_note:
+        errors.append(async_note)
     payload = _payload_via_debugger(
         debugger, mode="trace", samples=timeline["observations"],
-        errors=[] if timeline["measured"] else ["trace timeline not measured: %s" % timeline["reason"]],
+        errors=errors,
     )
     payload["timeline"] = timeline
     print(_sentinel(payload))
 
 
-def cmd_watch(debugger, command, result, internal_dict):
+def _cmd_watch_body(debugger, command, result, internal_dict):
     """Z4: gp-watch add <addr> [size] [rw] — hardware slots only (§6.5)."""
     argv, refusal = split_command_words(command)
     if refusal:
@@ -2688,7 +3034,7 @@ def cmd_watch(debugger, command, result, internal_dict):
     result.AppendMessage(render_json(_WATCH_QUEUE.snapshot()))
 
 
-def cmd_queue(debugger, command, result, internal_dict):
+def _cmd_queue_body(debugger, command, result, internal_dict):
     """Z4 ledger surface (§6.5). A bare `gp-queue` means `list` — interactive
     mode invokes the command with no argument (see build_lldb_argv)."""
     argv, refusal = split_command_words(command)
@@ -2806,6 +3152,25 @@ def main(argv=None):
     parser.add_argument("--out", help="also write the payload JSON to this file")
     parser.add_argument("--send-sock", help="also send one NDJSON frame to this unix socket (R30回传)")
     args = parser.parse_args(argv)
+    if args.mode == "interactive":
+        # 模块支持 interactive（§6.3：在**活的 lldb 会话**里注册 gp-* 命令），但 CLI
+        # 永远给不了它：`build_lldb_argv` 只会组 `xcrun lldb --batch`，而 interactive
+        # 那条 `-o gp-queue` 写进的是 lldb 的命令结果——batch 从不把它 surface 出来。
+        # 本机实测（2026-11-03，`python3 -c … gb.main(["interactive", "--timeout",
+        # "20"])`，真 lldb）：rc=1、stdout 1114 字节、载荷那一条 errors[] 落
+        # `not-determinable` 并把读者支去 `GLASSPANE_REAL_LLDB=1` 的真机采集——与病因
+        # （没有活的 REPL 会话）无关。所以这里在 parse 处拒，并交**真正能用它的那条
+        # 指令**；choices 保留 interactive 不说谎（它确实是模块的一种模式），拒而不删。
+        parser.error(
+            "'interactive' is not a CLI mode: it registers gp-capture / gp-trace / "
+            "gp-watch / gp-queue inside a LIVE lldb session, and this CLI can only spawn "
+            "`xcrun lldb --batch`, which never surfaces the command result that `gp-queue` "
+            "writes into (measured: rc 1, an unmeasured-cause 'not-determinable' payload). "
+            "Do it inside the session instead: start `xcrun lldb` (or `lldb`) and run "
+            "`command script import %s` — __lldb_init_module adds the four gp-* commands "
+            "and the stop hook, and you then call them at the (lldb) prompt. For a "
+            "scripted run from this CLI use `capture --exe <path>` or `trace --pid <pid>`."
+            % lldb_command_quote(os.path.abspath(__file__)))
     if args.pid is not None and args.pid < 1:
         # 与 `--samples` 越界同一口径：能在 parse 处量出来的边界，不许转发给 lldb
         # 再替它编成因。实测（2026-10-31）：`capture --pid -5` 会真的起一趟
@@ -2829,6 +3194,8 @@ def main(argv=None):
     if args.mode == "trace" and args.samples is None:
         args.samples = TRACE_SAMPLES
     if not args.pid and not args.exe and args.mode != "interactive":
+        # interactive 在上面就已在 parse 处拒掉，所以这里的豁免只是把"该模式不需要
+        # 目标"这件事留在形状上，不是给 CLI 留一条能走通的 interactive 路径。
         parser.error("capture/trace need --pid or --exe")
     if args.mode == "trace" and args.exe and args.pid is None:
         parser.error("trace --exe is not supported: the bridge never launches a target in "
