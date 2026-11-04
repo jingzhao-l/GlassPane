@@ -834,7 +834,7 @@ private func runGrantAccessibilityFlow() {
         // 个进程"有没有席位，而 `--help` 与 `--permissions` 都写明了它不是 daemon 的席位
         // （daemon 的读数由 daemon 自己答）。从前这里替 daemon 宣布"ready to attach"，
         // 于是量到的一件事被写成另一件事的结论。
-        print("accessibility permission is granted to **this process** — the daemon's own seat is a separate measurement: read it with `glasspaned --permissions` (or the `hello` identity of a running daemon).")
+        print("accessibility permission is granted to **this process** — the daemon's own seat is a separate measurement: read it with `\(DaemonInvocation.command) --permissions` (or the `hello` identity of a running daemon).")
         return
     }
     // Show the system prompt anchored to this process, and open the pane.
@@ -848,20 +848,20 @@ private func runGrantAccessibilityFlow() {
     let selfPath = Bundle.main.executablePath ?? CommandLine.arguments[0]
     print("Enable the entry for the **daemon binary itself** — \(selfPath)")
     print("(do NOT enable the terminal instead: that seat is borrowed from the launcher and breaks under launchd and at boot;")
-    print(" if the entry is absent, run: glasspaned --request-permission accessibility, which lands the grant on the daemon identity)")
+    print(" if the entry is absent, run: \(DaemonInvocation.command) --request-permission accessibility, which lands the grant on the daemon identity)")
     let pollIntervalSeconds: UInt32 = 1
     let timeoutSeconds = 300
     var waited = 0
     while waited < timeoutSeconds {
         if AXIsProcessTrusted() {
-            print("Accessibility permission granted to **this process** — the daemon's own seat stays a separate measurement: `glasspaned --permissions`.")
+            print("Accessibility permission granted to **this process** — the daemon's own seat stays a separate measurement: `\(DaemonInvocation.command) --permissions`.")
             return
         }
         sleep(pollIntervalSeconds)
         waited += Int(pollIntervalSeconds)
     }
     print("Timed out after \(timeoutSeconds)s waiting for accessibility permission.")
-    print("Re-run: glasspaned --grant-accessibility  (the daemon requires this permission to observe and drive apps.)")
+    print("Re-run: \(DaemonInvocation.command) --grant-accessibility  (the daemon requires this permission to observe and drive apps.)")
     exit(1)
 }
 
@@ -920,7 +920,7 @@ private func runGuideScreenPermission(_ probe: ScreenCapturePermissionProbe) -> 
         if outcome == .granted {
             print("Screen recording permission granted.")
         } else {
-            print("Screen recording is still not granted after the request — this run measured no decision, so it is not reported as a denial. Enable the entry for this app under System Settings > Privacy & Security > Screen Recording, then re-run: glasspaned --check-screen-permission")
+            print("Screen recording is still not granted after the request — this run measured no decision, so it is not reported as a denial. Enable the entry for this app under System Settings > Privacy & Security > Screen Recording, then re-run: \(DaemonInvocation.command) --check-screen-permission")
         }
         return probe.state
     }
@@ -1259,8 +1259,8 @@ if let kind = options.requestPermission {
         // 没批下来的那一位要说得出下一步：开哪一扇系统面板、用什么命令再问一次。
         payload["pane"] = PermissionGuide.systemPaneURL(for: kind)
         payload["next"] = kind == .developerTools
-            ? "glasspaned --check-developer-tools — this seat has no public query API, so the ask itself answers nothing; the probe is the measurement"
-            : "re-read with `glasspaned --permissions`; until the seat reads granted this command keeps exiting 1, which is the reading, not a failure of the ask"
+            ? "\(DaemonInvocation.command) --check-developer-tools — this seat has no public query API, so the ask itself answers nothing; the probe is the measurement"
+            : "re-read with `\(DaemonInvocation.command) --permissions`; until the seat reads granted this command keeps exiting 1, which is the reading, not a failure of the ask"
     }
     writeJSON(payload)
     // 退出码说的是**这个席位读成了什么**，不是"这条命令跑完了"：脚本按 rc 分叉，
@@ -1358,7 +1358,7 @@ if let activeId = options.activeProjectId {
             "projectId": activeId,
             "registryPath": registry.filePath,
             "error": "no project \(activeId) is registered",
-            "next": "glasspaned --list-projects"
+            "next": "\(DaemonInvocation.command) --list-projects"
         ], to: .standardError)
         exit(1)
     }
@@ -1497,7 +1497,7 @@ private func runProjectRemove(projectId: String, options: Options) -> Never {
             "found": false, "removed": false, "remaining": before.count,
             "projectId": projectId, "registryPath": registry.filePath,
             "error": "no project \(projectId) is registered",
-            "next": "glasspaned --list-projects"
+            "next": "\(DaemonInvocation.command) --list-projects"
         ], to: .standardError)
         exit(3)   // §12.3.1：未知 id → 3
     }
@@ -1758,7 +1758,7 @@ if options.pruneEvidence || options.evidenceStats {
                     "error": "unknown project \(projectId)",
                     "project": projectId,
                     "stateChanged": false,
-                    "next": "glasspaned --list-projects"
+                    "next": "\(DaemonInvocation.command) --list-projects"
                 ],
                 to: .standardError
             )
@@ -1784,7 +1784,7 @@ if options.pruneEvidence || options.evidenceStats {
                     "registryPath": registry.filePath,
                     "stateRoot": stateRoot.path,
                     "sharedArchiveOfThisRun": stateRoot.evidenceDirectory,
-                    "next": "glasspaned --prune-evidence --older-than \(options.pruneOlderThanDays) --state-dir \(RemedyCommand.quote(stateRoot.path)) — with no --project, because that command is the surface that owns \(stateRoot.evidenceDirectory); look first with --evidence-stats and count without deleting via --dry-run",
+                    "next": "\(DaemonInvocation.command) --prune-evidence --older-than \(options.pruneOlderThanDays) --state-dir \(RemedyCommand.quote(stateRoot.path)) — with no --project, because that command is the surface that owns \(stateRoot.evidenceDirectory); look first with --evidence-stats and count without deleting via --dry-run",
                     "stateChanged": false
                 ],
                 to: .standardError

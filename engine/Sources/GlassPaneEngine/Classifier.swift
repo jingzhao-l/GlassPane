@@ -33,7 +33,7 @@ public enum Classifier {
                 // the phantom remedy the corrected GP_E_AX_UNAVAILABLE remedy
                 // now explicitly forbids. Names only the daemon-scoped, verified
                 // commands (same set the remedy table gates).
-                next: "the missing Accessibility seat is the daemon's, not the caller's: run `node installer/cli.js --restore-launchd` (it reads the seat the daemon itself reports and kickstarts the job so a fresh process re-reads TCC); if the daemon has no entry under System Settings > Privacy & Security > Accessibility yet, register it with launchctl submit running the daemon binary itself with --request-permission accessibility. Never try `glasspaned --grant-accessibility` on a running daemon — it only grants the terminal that runs it. Check the daemon log (stderr), then retry the operation")
+                next: "the missing Accessibility seat is the daemon's, not the caller's: run `npx glasspane-install --restore-launchd` (it reads the seat the daemon itself reports and kickstarts the job so a fresh process re-reads TCC); if the daemon has no entry under System Settings > Privacy & Security > Accessibility yet, register it with launchctl submit running the daemon binary itself with --request-permission accessibility. Never try `\(DaemonInvocation.command) --grant-accessibility` on a running daemon — it only grants the terminal that runs it. Check the daemon log (stderr), then retry the operation")
         }
 
         if pack.signals.responsiveness?.responsive == false {

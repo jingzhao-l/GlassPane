@@ -551,7 +551,7 @@ public final class EngineCore {
 
     /// The one answer every surface gives for a registry-less engine, so the
     /// lookup refusal and the list note cannot drift apart.
-    static let noRegistryRemedy = "call the daemon started by `glasspaned` (it always configures a registry) and check what it sees with `glasspaned --list-projects`; attaching without projectId also works — that path needs no registry at all"
+    static let noRegistryRemedy = "call the daemon started by `glasspaned` (it always configures a registry) and check what it sees with `\(DaemonInvocation.command) --list-projects`; attaching without projectId also works — that path needs no registry at all"
 
     // MARK: - Evidence archive location (A-14: the daemon is the last line)
 
@@ -790,7 +790,7 @@ public final class EngineCore {
         GPError(
             code: .badParams,
             message: "project \(projectId) has no evidenceStoragePath, so it owns no evidence archive of its own; the shared default directory (\(EvidenceStore.defaultDirectory)) is not its substitute and nothing was deleted",
-            remedy: "name the archive you mean instead of leaving the target implicit. This project's own: gp_project_set with \"evidenceStoragePath\": \"\(evidenceStorageExample)\" and then restart the background service (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`) so it reloads projects.json. The shared archive: `glasspaned --prune-evidence --older-than <days>` with no `--project` — that is the process which owns it; an engine instance built without one has no shared archive to fall back to and says so, and leaving projectId out of a call on such an instance deletes nothing."
+            remedy: "name the archive you mean instead of leaving the target implicit. This project's own: gp_project_set with \"evidenceStoragePath\": \"\(evidenceStorageExample)\" and then restart the background service (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`) so it reloads projects.json. The shared archive: `\(DaemonInvocation.command) --prune-evidence --older-than <days>` with no `--project` — that is the process which owns it; an engine instance built without one has no shared archive to fall back to and says so, and leaving projectId out of a call on such an instance deletes nothing."
         )
     }
 
@@ -811,7 +811,7 @@ public final class EngineCore {
         GPError(
             code: .badParams,
             message: "this engine instance has no evidence archive injected, so it has no directory to prune or measure: the shared default directory (\(EvidenceStore.defaultDirectory)) is not its substitute and nothing was deleted",
-            remedy: "name the archive you mean. Either give this instance one where it is built — EngineCore(evidenceStore:) with a store over a directory, the way the background service injects EvidenceStore.at(stateRoot:) with the root --state-dir named (or the home default when nothing was named) — or scope the call to a project that owns one: gp_project_set {\"projectId\": \"<that prj_…>\", \"displayName\": …, \"bundleId\" or \"pid\": …, \"evidenceStoragePath\": \"\(evidenceStorageExample)\"} (repeat the project's other fields — the update replaces them), restart the background service so it reloads projects.json (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`), then call again with that projectId. To prune the shared archive itself use the process that owns it: `glasspaned --prune-evidence --older-than <days>`, after looking at what is there with `glasspaned --evidence-stats` and counting without deleting via `--dry-run`"
+            remedy: "name the archive you mean. Either give this instance one where it is built — EngineCore(evidenceStore:) with a store over a directory, the way the background service injects EvidenceStore.at(stateRoot:) with the root --state-dir named (or the home default when nothing was named) — or scope the call to a project that owns one: gp_project_set {\"projectId\": \"<that prj_…>\", \"displayName\": …, \"bundleId\" or \"pid\": …, \"evidenceStoragePath\": \"\(evidenceStorageExample)\"} (repeat the project's other fields — the update replaces them), restart the background service so it reloads projects.json (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`), then call again with that projectId. To prune the shared archive itself use the process that owns it: `\(DaemonInvocation.command) --prune-evidence --older-than <days>`, after looking at what is there with `\(DaemonInvocation.command) --evidence-stats` and counting without deleting via `--dry-run`"
         )
     }
 
@@ -1871,7 +1871,7 @@ public final class EngineCore {
                     ?? (archiveFallbackRefusal.map { "no operation of this attachment to diagnose: \($0)" }
                         ?? "no operation to diagnose"),
                 remedy: operationId != nil
-                    ? "the operationId you named is not in this daemon's in-memory history or in the archive, so nothing was diagnosed. Check it against what is actually stored — `glasspaned --evidence-stats` counts and lists the entries in the archive this daemon writes — and re-issue diagnose with one of those ids. Do not 'fix' this by dropping the operationId: with no id diagnose answers the NEWEST recorded operation, which is a different operation than the one you asked about"
+                    ? "the operationId you named is not in this daemon's in-memory history or in the archive, so nothing was diagnosed. Check it against what is actually stored — `\(DaemonInvocation.command) --evidence-stats` counts and lists the entries in the archive this daemon writes — and re-issue diagnose with one of those ids. Do not 'fix' this by dropping the operationId: with no id diagnose answers the NEWEST recorded operation, which is a different operation than the one you asked about"
                     : (refusal != nil
                         ? "run act against the app that is attached now — diagnose reads a recorded operation, and the newest pack in the archive belongs to a different attachment, so it is not this app's evidence to diagnose"
                         : "run act first — diagnose classifies a recorded operation, and no operation has been recorded in this process or archive yet. Of the methods this daemon answers, only `act` records one from nothing: assert_element and diagnose both need a pack to exist, so neither can be this step")
@@ -2088,7 +2088,7 @@ public final class EngineCore {
             throw GPError(
                 code: .noEvidence,
                 message: "unknown operationId \(id)",
-                remedy: "this id is not in the daemon's in-memory history nor in the archive it writes, so nothing was returned. Compare it against what is stored — `glasspaned --evidence-stats` counts and lists the entries of that archive (add --state-dir if this daemon was started with one) — then re-issue last_evidence with an id from that list, or with no operationId at all to read the newest pack this attachment has. An id that came from another machine or another state root is genuinely not here; do not copy bytes until the id you were given is the id you read back"
+                remedy: "this id is not in the daemon's in-memory history nor in the archive it writes, so nothing was returned. Compare it against what is stored — `\(DaemonInvocation.command) --evidence-stats` counts and lists the entries of that archive (add --state-dir if this daemon was started with one) — then re-issue last_evidence with an id from that list, or with no operationId at all to read the newest pack this attachment has. An id that came from another machine or another state root is genuinely not here; do not copy bytes until the id you were given is the id you read back"
             )
         case .none:
             // Defect 6: "no evidence recorded yet" is only true when the archive
@@ -2969,12 +2969,12 @@ public final class EngineCore {
             // wait on an app that may never have been asked to click.
             return (
                 "action not performed: an accessibility call did not answer within its budget (per-call timeout anywhere between \(AXChannel.minMessagingTimeoutSeconds)s and \(AXChannel.messagingTimeoutSeconds)s, inside a search bounded by \(AXChannel.treeTimeoutSeconds)s)",
-                "the app did not answer an accessibility call, and this engine cannot tell whether the selector search had already finished: a pingTimeout is also what a search aborted mid-tree reports, so treat the element as never located rather than as clicked-or-ruled-out. Sample the app to see whether its main thread is blocked (`sample <pid>`), and confirm the seat with `glasspaned --check-accessibility` before changing anything. If the app answers, repeat the act; narrow the selector (title/identifier) or lower maxDepth only when the reason names the accessibility time budget running out, which is the search itself. Until an answer arrives the outcome is unmeasured, so report diagnose's T2 rather than a dead click"
+                "the app did not answer an accessibility call, and this engine cannot tell whether the selector search had already finished: a pingTimeout is also what a search aborted mid-tree reports, so treat the element as never located rather than as clicked-or-ruled-out. Sample the app to see whether its main thread is blocked (`sample <pid>`), and confirm the seat with `\(DaemonInvocation.command) --check-accessibility` before changing anything. If the app answers, repeat the act; narrow the selector (title/identifier) or lower maxDepth only when the reason names the accessibility time budget running out, which is the search itself. Until an answer arrives the outcome is unmeasured, so report diagnose's T2 rather than a dead click"
             )
         case .treeCaptureFailed(let reason):
             return (
                 "action not attempted: \(reason)",
-                "the selector search ran out of the accessibility time budget, so nothing was clicked and no element was ruled out: retry with a narrower selector (title/identifier) or a shallower tree. The AX channel is alive — verify the seat with `glasspaned --check-accessibility` and do not re-grant it on this error alone"
+                "the selector search ran out of the accessibility time budget, so nothing was clicked and no element was ruled out: retry with a narrower selector (title/identifier) or a shallower tree. The AX channel is alive — verify the seat with `\(DaemonInvocation.command) --check-accessibility` and do not re-grant it on this error alone"
             )
         default:
             return ("action failed: \(error)", nil)
@@ -3086,7 +3086,7 @@ public final class EngineCore {
             return GPError(
                 code: .axUnavailable,
                 message: "the attribute could not be read: \(reason) — this is NOT evidence that the element is missing",
-                remedy: "the element may be exactly where you expect it; the accessibility channel gave no answer for this one attribute. Run gp_observe to see the node and its role, then repeat gp_assert_element — a busy main thread or a view rebuilt under the selector both read as 'no answer'. Change the asserted `property` only when the app genuinely does not expose it, and do not re-grant Accessibility on this error alone: verify the seat with `glasspaned --check-accessibility`"
+                remedy: "the element may be exactly where you expect it; the accessibility channel gave no answer for this one attribute. Run gp_observe to see the node and its role, then repeat gp_assert_element — a busy main thread or a view rebuilt under the selector both read as 'no answer'. Change the asserted `property` only when the app genuinely does not expose it, and do not re-grant Accessibility on this error alone: verify the seat with `\(DaemonInvocation.command) --check-accessibility`"
             )
         case .treeCaptureFailed(let reason):
             // 错误码保持 GP_E_AX_UNAVAILABLE（码表冻结），但 remedy 必须与**成因**
@@ -3097,7 +3097,7 @@ public final class EngineCore {
                 return GPError(
                     code: .axUnavailable,
                     message: "tree capture failed: \(reason)",
-                    remedy: "narrow the scope: retry observe/snapshot with a smaller maxDepth (1...10) or a more specific selector; the AX channel is alive — only this capture hit its time budget. Do not re-grant Accessibility: verify the seat with `glasspaned --check-accessibility`"
+                    remedy: "narrow the scope: retry observe/snapshot with a smaller maxDepth (1...10) or a more specific selector; the AX channel is alive — only this capture hit its time budget. Do not re-grant Accessibility: verify the seat with `\(DaemonInvocation.command) --check-accessibility`"
                 )
             }
             return GPError(code: .axUnavailable, message: "tree capture failed: \(reason)")
@@ -3107,17 +3107,17 @@ public final class EngineCore {
             // the grant-the-seat advice. Every variant keeps the honest
             // degradation statement (pixelDiff null → T6 INCONCLUSIVE).
             let label = Self.pixelCaptureFailureLabel(reason: reason)
-            let seatAdvice = "grant Screen Recording to the daemon (System Settings > Privacy & Security > Screen Recording), then restart the daemon to pick it up; verify with `glasspaned --check-screen-permission`"
+            let seatAdvice = "grant Screen Recording to the daemon (System Settings > Privacy & Security > Screen Recording), then restart the daemon to pick it up; verify with `\(DaemonInvocation.command) --check-screen-permission`"
             let advice: String
             switch label {
             case "screen-recording-denied":
                 advice = seatAdvice
             case "pixel-capture-timeout":
-                advice = "the capture query itself ran out of its time budget, so this is not a missing Screen Recording seat (confirm in one line with `glasspaned --check-screen-permission` and do not re-grant on this error alone): the window server or ScreenCaptureKit did not answer in time — retry the operation after the app stops redrawing, and narrow the observed window if it repeats"
+                advice = "the capture query itself ran out of its time budget, so this is not a missing Screen Recording seat (confirm in one line with `\(DaemonInvocation.command) --check-screen-permission` and do not re-grant on this error alone): the window server or ScreenCaptureKit did not answer in time — retry the operation after the app stops redrawing, and narrow the observed window if it repeats"
             case "pixel-capture-no-onscreen-window":
-                advice = "the target owns no on-screen window right now, which no permission grant can fix (the seat is verifiable with `glasspaned --check-screen-permission`): unminimise or reopen the window, or attach to the pid that owns it, then retry"
+                advice = "the target owns no on-screen window right now, which no permission grant can fix (the seat is verifiable with `\(DaemonInvocation.command) --check-screen-permission`): unminimise or reopen the window, or attach to the pid that owns it, then retry"
             case "pixel-capture-window-outside-display":
-                advice = "the window frame intersects no display, so the capture area is off every screen: move the window back on screen (or check its saved frame) and retry — the Screen Recording seat is not the problem, verify it with `glasspaned --check-screen-permission` if unsure"
+                advice = "the window frame intersects no display, so the capture area is off every screen: move the window back on screen (or check its saved frame) and retry — the Screen Recording seat is not the problem, verify it with `\(DaemonInvocation.command) --check-screen-permission` if unsure"
             // R9: `pixel-capture-no-surface` used to fall into `default:`, whose
             // text sends the agent to re-grant Screen Recording and restart the
             // daemon. The MCP shell forwards daemon remedies verbatim, so a
@@ -3135,7 +3135,7 @@ public final class EngineCore {
             case "pixel-capture-window-resized":
                 advice = "the window changed size during the operation, so the two captures share no pixel domain: retry while the window keeps its size — a live-autosizing or animating window will keep hitting this — or take a baseline with gp_snapshot before the operation and compare against the AX tree when the size cannot be held"
             case "pixel-capture-failed":
-                advice = "the capture failed with a cause this classifier cannot name: the verbatim reason after the label is the daemon's own words and it is the only trustworthy guide here — act on what it states, confirm the seat reads back granted with `glasspaned --check-screen-permission` before changing anything about permissions, and report the visual channel as not measured until a capture succeeds"
+                advice = "the capture failed with a cause this classifier cannot name: the verbatim reason after the label is the daemon's own words and it is the only trustworthy guide here — act on what it states, confirm the seat reads back granted with `\(DaemonInvocation.command) --check-screen-permission` before changing anything about permissions, and report the visual channel as not measured until a capture succeeds"
             default:
                 // R10-中5: this arm used to carry the seat sentence, and it was
                 // reached by nothing — `pixelCaptureFailureLabel` is a closed set of
@@ -3148,7 +3148,7 @@ public final class EngineCore {
                 // measured. Say only what an unclassifiable cause supports: read the
                 // verbatim reason, and change nothing about the seat or the process
                 // on this line's authority.
-                advice = "this failure carries a cause the capture classifier does not recognise, so nothing here can say what it was: read the verbatim reason after the label above, which is the daemon's own words and the only evidence available. Do not re-grant anything and do not recycle the daemon on this answer — neither is implicated by a cause this switch did not name, and restarting cancels an act that is mid-flight on the user's screen. If the reason does state a permission problem, confirm the seat reads back granted with `glasspaned --check-screen-permission` before touching it. Until a capture succeeds the visual channel is not measured: read the structure with gp_observe and report the visual check as not-done rather than as passed"
+                advice = "this failure carries a cause the capture classifier does not recognise, so nothing here can say what it was: read the verbatim reason after the label above, which is the daemon's own words and the only evidence available. Do not re-grant anything and do not recycle the daemon on this answer — neither is implicated by a cause this switch did not name, and restarting cancels an act that is mid-flight on the user's screen. If the reason does state a permission problem, confirm the seat reads back granted with `\(DaemonInvocation.command) --check-screen-permission` before touching it. Until a capture succeeds the visual channel is not measured: read the structure with gp_observe and report the visual check as not-done rather than as passed"
             }
             return GPError(
                 code: .axUnavailable,

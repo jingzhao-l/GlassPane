@@ -196,7 +196,7 @@ public enum PermissionSeatReport {
                 "status": status.rawValue,
                 "pane": PermissionGuide.systemPaneURL(for: kind),
                 "request": submit,
-                "recheck": "glasspaned --permissions",
+                "recheck": "\(DaemonInvocation.command) --permissions",
             ]
         }
     }
@@ -221,14 +221,14 @@ public enum PermissionSeatReport {
                 "status": (statuses[kind] ?? .unverifiable).rawValue,
                 "judgedByThisCommand": false,
                 "reason": "TCC exposes no query API for this seat, so this command never measures it; reporting it as granted or denied would be a verdict nobody read",
-                "next": "glasspaned --check-developer-tools",
+                "next": "\(DaemonInvocation.command) --check-developer-tools",
             ]
         }
         let next: String
         if notGranted.isEmpty {
-            next = "all three seats this command can measure read granted; the developer-tools seat is answered by `glasspaned --check-developer-tools`, not by this one"
+            next = "all three seats this command can measure read granted; the developer-tools seat is answered by `\(DaemonInvocation.command) --check-developer-tools`, not by this one"
         } else {
-            next = "run the request command listed for each seat under `seatsNotGranted` (it asks as the daemon's own identity through launchd), then re-read with `glasspaned --permissions` — the pane URL is there too when a person has to tick the switch"
+            next = "run the request command listed for each seat under `seatsNotGranted` (it asks as the daemon's own identity through launchd), then re-read with `\(DaemonInvocation.command) --permissions` — the pane URL is there too when a person has to tick the switch"
         }
         return [
             "subject": subjectValue,

@@ -402,7 +402,7 @@ public final class ProjectRegistry {
         guard loadFailed else { return }
         throw GPError(
             code: .internalError,
-            message: "\(unreadableReport ?? "projects.json exists but could not be decoded") — refusing to overwrite it, because this process is holding an empty table read from that unreadable file (writing it would replace every stored registration with the \(projects.count) entry/entries this process holds). Writes stay refused until the process restarts. Remedy: make the file readable again (restore it from a copy), then restart the background service so it re-reads: `node <repo>/installer/cli.js --restore-launchd`, or the restart button in the GlassPane panel.",
+            message: "\(unreadableReport ?? "projects.json exists but could not be decoded") — refusing to overwrite it, because this process is holding an empty table read from that unreadable file (writing it would replace every stored registration with the \(projects.count) entry/entries this process holds). Writes stay refused until the process restarts. Remedy: make the file readable again (restore it from a copy), then restart the background service so it re-reads: `npx glasspane-install --restore-launchd`, or the restart button in the GlassPane panel.",
             remedy: unreadableRemedy
         )
     }
@@ -542,7 +542,7 @@ public final class ProjectRegistry {
             throw GPError(
                 code: .internalError,
                 message: "project registry write to \(filePath) refused: the file changed after this process read it (\(clash.detail)) — nothing was published, because renaming the \(projects.count) entry/entries this process holds over it would silently revert the other writer's result while every caller was told this write verified. Writes stay refused until a process re-reads the file\(discardStagedCopy(tmpPath))",
-                remedy: "re-read the table (`glasspaned --list-projects`) and repeat the change against what is on disk now; the background service has to restart to pick the file up (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`, or the restart button in the GlassPane panel). Do not delete \(filePath) — the newer registrations are only in it"
+                remedy: "re-read the table (`\(DaemonInvocation.command) --list-projects`) and repeat the change against what is on disk now; the background service has to restart to pick the file up (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`, or the restart button in the GlassPane panel). Do not delete \(filePath) — the newer registrations are only in it"
             )
         } catch {
             // No silent fallback write: the caller hears that the registry did
@@ -561,7 +561,7 @@ public final class ProjectRegistry {
                     ? "project registry write to \(filePath) failed after the rename (\(error)) — the name on disk already holds this process's table, so the file is NOT unchanged; this write is reported as failed and the in-memory table was rolled back, which means the running daemon and the file now disagree and neither is a copy of the other"
                     : "project registry write to \(filePath) failed (\(error)); the file on disk is unchanged and the change was rolled back in memory") + cleanup,
                 remedy: landed
-                    ? "re-read what actually landed before anything else writes (`glasspaned --list-projects`), then restart the background service so the daemon's table is the file's (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`); do not repeat the create until the read-back agrees — a second write publishes the whole table from memory, which is one entry short of what is on disk"
+                    ? "re-read what actually landed before anything else writes (`\(DaemonInvocation.command) --list-projects`), then restart the background service so the daemon's table is the file's (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`); do not repeat the create until the read-back agrees — a second write publishes the whole table from memory, which is one entry short of what is on disk"
                     : "check that the directory is writable and has free space (`ls -ld \(RemedyCommand.quote(destination.deletingLastPathComponent().path))`, `df -k \(RemedyCommand.quote(destination.deletingLastPathComponent().path))`), fix it, then repeat the call — until then the registry in the running daemon and the file disagree"
             )
         }
@@ -621,7 +621,7 @@ public final class ProjectRegistry {
             throw GPError(
                 code: .internalError,
                 message: "the project registry write to \(filePath) reads back \(decoded.count) entry/entries instead of \(count)",
-                remedy: "another writer likely replaced the file concurrently; re-read the registry (`glasspaned --list-projects`) before repeating the change"
+                remedy: "another writer likely replaced the file concurrently; re-read the registry (`\(DaemonInvocation.command) --list-projects`) before repeating the change"
             )
         }
     }

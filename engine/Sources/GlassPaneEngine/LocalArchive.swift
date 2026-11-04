@@ -516,7 +516,7 @@ public enum LocalArchive {
         }
         if !replyShaped {
             return "后台服务没有按约定的形状回这条清理命令（退出码 \(exitCode)），注册表未改动。"
-                + "这多半是它已经不认得 `--project-prune`——跑一次 `glasspaned --help` 核对。"
+                + "这多半是它已经不认得 `--project-prune`——跑一次 `\(DaemonInvocation.command) --help` 核对。"
                 + "这一句不代表已经干净了：一条都没删，也没人去问过有没有可删的。"
         }
         if loadFailed {
@@ -559,7 +559,7 @@ public enum LocalArchive {
         if !cliRan { return "删除命令没能跑起来，注册表未改动。" }
         if !replyShaped {
             return "后台服务没有按约定的形状回这条删除命令（退出码 \(exitCode)），注册表未改动。"
-                + "这多半是它已经不认得 `--project-remove`——跑一次 `glasspaned --help` 核对。"
+                + "这多半是它已经不认得 `--project-remove`——跑一次 `\(DaemonInvocation.command) --help` 核对。"
                 + "这一句不是说该 id 不存在：命令没被理解，还没走到查 id 那一步。"
         }
         if removed {

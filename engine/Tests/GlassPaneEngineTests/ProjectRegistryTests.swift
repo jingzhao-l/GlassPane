@@ -375,7 +375,7 @@ final class ProjectRegistryTests: XCTestCase {
             "and which archive it owns: that is the archive the engine's sentence calls \"shared\""
         )
         XCTAssertTrue(
-            payload.contains("\"next\": \"glasspaned --prune-evidence"),
+            payload.contains(#""next": "\(DaemonInvocation.command) --prune-evidence"#),
             "the remedy has to name, in the emitted command, the surface that actually owns the shared archive"
         )
         XCTAssertTrue(

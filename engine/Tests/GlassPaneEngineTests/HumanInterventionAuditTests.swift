@@ -199,12 +199,15 @@ final class HumanInterventionAuditTests: XCTestCase {
         var checked = 0
         for code in GPErrorCode.allCases {
             let remedy = GPError.remedy(for: code)
-            for flag in flags(after: "glasspaned ", in: remedy) {
+            // 2026-11-04：出路里的 daemon 命令现在是 `'<绝对路径>/glasspaned' --flag`（裸名不在
+            // PATH 上，见 `DaemonInvocation`）。两种拼写都扫，否则扫描器抓到 0 条、下面那条
+            // "非空转对照"立刻把这条闸自己判成空跑——那正是它要防的事。
+            for flag in flags(after: "glasspaned ", in: remedy) + flags(after: "glasspaned' ", in: remedy) {
                 XCTAssertTrue(daemonSource.contains("case \"\(flag)\":"),
                     "\(code.rawValue) 的 remedy 指向 glasspaned \(flag)，但解析器里没有这个 case：\(remedy)")
                 checked += 1
             }
-            for flag in flags(after: "installer/cli.js ", in: remedy) {
+            for flag in flags(after: "installer/cli.js ", in: remedy) + flags(after: "glasspane-install ", in: remedy) {
                 XCTAssertTrue(installerSource.contains("case '\(flag)':"),
                     "\(code.rawValue) 的 remedy 指向 installer \(flag)，但 cli.js 不解析它：\(remedy)")
                 checked += 1

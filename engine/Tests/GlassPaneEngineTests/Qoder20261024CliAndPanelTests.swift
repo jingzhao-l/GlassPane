@@ -631,7 +631,13 @@ final class Qoder20261024PermissionSeatReportTests: XCTestCase {
                 entry["pane"] as? String, PermissionGuide.systemPaneURL(for: kind),
                 "面板深链要与卡片同一个真源：\(entry["pane"] ?? "nil")"
             )
-            XCTAssertEqual(entry["recheck"] as? String, "glasspaned --permissions")
+            let recheck = try XCTUnwrap(entry["recheck"] as? String)
+            XCTAssertTrue(recheck.hasSuffix("--permissions"), recheck)
+            // 判据是"这条能不能粘进 shell 就跑到 daemon"，不是"它长得像从前那句"：裸名
+            // `glasspaned` 不在 PATH 上（127），而 `Bundle.main` 在面板/xctest 进程里给出的
+            // 是宿主二进制（2026-11-04 三条 XCTest 因此变红）。带引号的绝对 daemon 路径才是出路。
+            XCTAssertTrue(recheck.hasPrefix("'") && recheck.contains("/glasspaned' "),
+                          "recheck 必须指得到 daemon 的二进制本身，且引号成一个词：\(recheck)")
             let request = try XCTUnwrap(entry["request"] as? String)
             XCTAssertTrue(request.hasPrefix(Launchctl.path + " submit -l "), "不猜 launchctl 的位置：\(request)")
             XCTAssertTrue(request.contains("--request-permission \(kind.cliValue)"),
@@ -699,7 +705,8 @@ final class Qoder20261024PermissionSeatReportTests: XCTestCase {
         let next = try XCTUnwrap(notGranted["next"] as? String)
         XCTAssertFalse(next.isEmpty, "一份不给下一步的报告读起来就是「就这样吧」")
         XCTAssertTrue(next.contains("seatsNotGranted"), next)
-        XCTAssertTrue(next.contains("glasspaned --permissions"), next)
+        XCTAssertTrue(next.contains("--permissions") && next.contains("/glasspaned' "),
+                      "下一步那句要能直接粘进 shell：\(next)")
         XCTAssertEqual(entries(notGranted["seatsNotGranted"]).map(seat), ["input-monitoring"])
         XCTAssertEqual(
             notGranted["permissions"] as? [String: String],

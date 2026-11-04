@@ -1736,7 +1736,13 @@ test("the daemon's own project-limit remedy names the same removals", () => {
   assert.ok(!/this surface offers no delete/i.test(remedy),
     "daemon 还在说这一面没有删除动作，而它自己就解析 --project-remove");
   const flags = daemonCliFlags();
-  const quoted = [...remedy.matchAll(/glasspaned\s+(--[a-z-]+)/g)].map((match) => match[1]);
+  // 2026-11-04：daemon 的出路不再印裸名 `glasspaned`（它不在 PATH 上，照抄得到 127），而是印
+  // `\(DaemonInvocation.command)`——一个带引号的绝对 daemon 二进制。两种拼写都要认，否则这条
+  // 对照读到的开关数是 0，"每个开关都被 daemon 解析"那句就变成空话（本轮实测：改前它红了）。
+  const quoted = [
+    ...[...remedy.matchAll(/glasspaned\s+(--[a-z-]+)/g)].map((match) => match[1]),
+    ...[...remedy.matchAll(/DaemonInvocation\.command\)\s+(--[a-z-]+)/g)].map((match) => match[1]),
+  ];
   assert.ok(quoted.length >= 2, `daemon 的出路没引用可核对的开关：${quoted.join(", ")}`);
   assert.deepEqual(quoted.filter((flag) => !flags.has(flag)), [],
     `daemon 的出路报了自己不解析的开关：${quoted.join(", ")}`);

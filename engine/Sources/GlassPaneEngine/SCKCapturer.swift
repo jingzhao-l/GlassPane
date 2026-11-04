@@ -70,7 +70,7 @@ public enum SCKCapturer {
     public static func captureWindow(ownerPid pid_t: pid_t, windowId: Int?) throws -> Capture {
         guard CGPreflightScreenCaptureAccess() else {
             throw ChannelError.pixelCaptureDenied(
-                reason: "screen recording permission not granted (P1 onboarding: glasspaned --guide-screen-permission)"
+                reason: "screen recording permission not granted (P1 onboarding: \(DaemonInvocation.command) --guide-screen-permission)"
             )
         }
 
