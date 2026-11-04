@@ -79,6 +79,7 @@ const cannot = (detail) => {
 
 const argv = process.argv.slice(2)
 let repoRoot = path.resolve(here, "..", "..")
+let transportArg = ""
 for (let i = 0; i < argv.length; i += 1) {
   const flag = argv[i]
   if (flag === "--check") continue
@@ -89,8 +90,15 @@ for (let i = 0; i < argv.length; i += 1) {
     i += 1
     continue
   }
+  if (flag === "--transport") {
+    const value = argv[i + 1]
+    if (!value || value.startsWith("--")) cannot("--transport needs a URL, or the name of a git remote configured in this repository")
+    transportArg = value
+    i += 1
+    continue
+  }
   if (flag === "--record") cannot("--record is not a mode of this tool: the artifact either equals trunk's bytes or it does not, and there is nothing to baseline")
-  cannot(`unknown flag ${flag} (this tool answers --check, optionally --repo <path>)`)
+  cannot(`unknown flag ${flag} (this tool answers --check, optionally --repo <path>, optionally --transport <url|remote-name>)`)
 }
 
 // `git` reads/writes the measured repository; `gitIn` is for the scratch object store. Both return
@@ -158,6 +166,43 @@ if (typeof splitUrl !== "string" || splitUrl === "") cannot(`${productPath} carr
 
 const tagName = `v${version}`
 
+// Which URL this run speaks to the published repository over. `product.json` declares an https URL
+// and that is the right thing for a manifest: an installer and a `gh` reader both use it without
+// credentials. It is not always the transport the machine that CUTS the releases can use. Measured
+// on 2026-11-04 on this workstation: every https git call toward github.com died on a dead local
+// proxy (`Failed to connect to 127.0.0.1 port 15556`) while `ssh -T git@github.com` authenticated and
+// the same repository was already configured as a git remote — so the anchor for the release line
+// could not run at all on the machine that runs the release line, and the honest-looking exit 2 it
+// printed was indistinguishable from "the remote is genuinely unreachable for everyone". The default
+// stays the declared URL; an operator may name another transport, and the name of the one used is
+// printed in the report so an anchor that vouched for a lookalike repository is visible in the log
+// rather than buried. If the named URL is not the declared repository, that is said out loud too.
+const asKey = (url) => {
+  const bare = String(url).trim().replace(/\.git$/, "").replace(/\/+$/, "")
+  const ssh = /^[^@/\s]+@[^:\s]+:(.+)$/.exec(bare)
+  const withoutScheme = ssh ? ssh[1] : bare.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*@?/i, "")
+  return withoutScheme.toLowerCase().replace(/^\/+/, "")
+}
+const remoteUrlOf = (name) => {
+  const out = git("config", "--get", `remote.${name}.url`)
+  return out === null || out === "" ? null : out
+}
+const configuredRemotes = () => {
+  const out = git("remote")
+  return out === null || out === "" ? [] : out.split("\n").map((line) => line.trim()).filter(Boolean)
+}
+let transport = { url: splitUrl, label: "declared product.repoUrl" }
+if (transportArg !== "") {
+  const byName = remoteUrlOf(transportArg)
+  transport = {
+    url: byName ?? transportArg,
+    label: byName ? `git remote "${transportArg}"` : `operator-named URL ${transportArg}`,
+  }
+  if (asKey(transport.url) !== asKey(splitUrl))
+    console.log(`  ! --transport names ${transport.url}, which is not the declared repository ${splitUrl} — the comparison below runs against it because you asked, and a mismatch is what you should expect to see`)
+}
+const remote = transport.url
+
 // The subtree has to be committed: measuring a working-tree state against a released tag would
 // report agreement about two things that are neither of them.
 const dirty = git("status", "--porcelain", "--", SUBTREE)
@@ -170,8 +215,14 @@ if (trunkTree === null) cannot(`HEAD has no ${SUBTREE} tree in ${repoRoot}`)
 // One ls-remote answers both questions — can the remote be reached at all, and which of the two
 // refs it publishes. A remote that will not answer is "cannot measure"; a remote that answers
 // "no such tag" is a disagreement this tool has to say out loud.
-const listed = gitNet("ls-remote", splitUrl, "refs/heads/main", `refs/tags/${tagName}`)
-if (listed === null) cannot(`git ls-remote ${splitUrl} failed — the published repository could not be reached, so neither the artifact nor the 搬运 branch was observed`)
+const listed = gitNet("ls-remote", remote, "refs/heads/main", `refs/tags/${tagName}`)
+if (listed === null)
+  cannot(
+    `git ls-remote ${remote} failed (transport: ${transport.label}) — the published repository could not be reached, so neither the artifact nor the 搬运 branch was observed.` +
+      (transportArg === "" && configuredRemotes().length > 0
+        ? `\nremedy: if this machine cannot speak the declared https URL (a dead local proxy is one shape of that, and it looks exactly like an unreachable repository), re-run with \`node harness/tools/release-artifact.mjs --check --transport <name>\` — this repository has remotes: ${configuredRemotes().join(", ")}. Naming a transport is not a way to make the anchor pass: it still compares the same two trees.`
+        : ""),
+  )
 const shaOf = (ref) => {
   const line = listed.split("\n").find((l) => l.split("\t")[1] === ref)
   return line ? line.split("\t")[0] : null
@@ -203,9 +254,9 @@ const refspecs = []
 if (mainSha !== null) refspecs.push("refs/heads/main:refs/artifact/main")
 if (tagSha !== null) refspecs.push(`refs/tags/${tagName}:refs/artifact/tag`)
 if (refspecs.length > 0) {
-  if (gitInNet(scratchRepo, "fetch", "-q", "--no-tags", "--depth", "1", splitUrl, ...refspecs) === null) {
+  if (gitInNet(scratchRepo, "fetch", "-q", "--no-tags", "--depth", "1", remote, ...refspecs) === null) {
     cleanup()
-    cannot(`fetching ${refspecs.map((r) => r.split(":")[0]).join(" and ")} from ${splitUrl} did not materialize — neither the 搬运 branch nor the released artifact was observed`)
+    cannot(`fetching ${refspecs.map((r) => r.split(":")[0]).join(" and ")} from ${remote} (transport: ${transport.label}) did not materialize — neither the 搬运 branch nor the released artifact was observed`)
   }
 }
 const treeAt = (name) => gitIn(scratchRepo, "rev-parse", `refs/artifact/${name}^{tree}`)
@@ -390,6 +441,9 @@ if (measured === 0) {
 }
 
 console.log(`release-artifact — ${agreements.length} agreement(s) held, ${notes.length} tolerated lag(s), ${problems.length} problem(s) [trunk ${trunkTree}]`)
+// Which door the answer came through is part of the answer: this line is what makes a release anchor
+// read against a lookalike repository visible in the log instead of inferred weeks later.
+console.log(`  transport: ${transport.label} → ${remote}`)
 for (const a of agreements) console.log(`  ✓ ${a}`)
 for (const n of notes) console.log(`  △ ${n}`)
 for (const p of problems) console.error(`  ✗ ${p}`)

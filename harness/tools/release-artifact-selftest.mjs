@@ -249,6 +249,31 @@ expect("F unreachable remote refuses", fixture("dead-url", { trunkFiles: base, s
   mustInclude: ["CANNOT MEASURE", "git ls-remote"],
 })
 
+// F2. the same dead declared URL, but with the published repository reachable under another
+// transport the operator can name. This is the 2026-11-04 workstation shape: the https URL the
+// product declares dies on a dead local proxy while the very same repository answers over the
+// remote the release round actually pushes with. Two things have to hold — the plain run still
+// REFUSES (an unmeasured anchor is never a pass, and the remedy must be something an agent can run),
+// and naming the transport measures the real trees instead of laundering the failure.
+{
+  const f = fixture("dead-url-remote", { trunkFiles: base, splitFiles: base, urlOverride: pathToFileURL(path.join(scratch, "no-such-repo-2")).href })
+  g(f.trunkDir, "remote", "add", "published", pathToFileURL(f.splitDir).href)
+  expect("F2 dead declared URL with a named remote still refuses, and says how to ask", f.trunkDir, {
+    rc: 2,
+    mustInclude: ["CANNOT MEASURE", "remedy:", "--transport", "published"],
+  })
+  const via = runTool(["--check", "--repo", f.trunkDir, "--transport", "published"])
+  if (via.rc !== 0) bad(`F2b --transport published should have measured the equal trees, got exit ${via.rc}\n${via.text}`)
+  if (!via.text.includes('transport: git remote "published"')) bad(`F2b never printed which transport answered: ${via.text}`)
+  if (!via.text.includes("1 agreement") && !via.text.includes("2 agreement")) bad(`F2b did not report its agreements: ${via.text}`)
+  else ok('F2b --transport published measured the anchor and printed its transport')
+
+  // A transport whose URL is not the declared repository is said out loud rather than silently trusted.
+  const cross = runTool(["--check", "--repo", f.trunkDir, "--transport", pathToFileURL(path.join(scratch, "some-other-repo")).href])
+  if (!cross.text.includes("not the declared repository")) bad(`F2c a cross-repository transport was not flagged: ${cross.text}`)
+  else ok("F2c a transport pointing elsewhere is flagged before it is used")
+}
+
 // G. a dirty subtree is not a state anybody released: refuse instead of comparing.
 {
   const f = fixture("dirty", { trunkFiles: base, splitFiles: base })
