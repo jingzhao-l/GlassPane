@@ -85,6 +85,16 @@ export type EvidenceAnchor = {
   operationId?: string
   outcome?: string
   ledgerLine?: number
+  /**
+   * The kernel's chain position for this entry, from `metadata.decisionLog.sequence`.
+   * This is the field the file's own header names ("the ledger sequence + entry hash"),
+   * and it is not the same number as `ledgerLine`: `line` is where the entry happens to
+   * sit in one file today — the plugin's `prune` rewrites paths and renumbers lines,
+   * while `sequence` is the chain position the hash is computed over. Printing the line
+   * and calling it the chain position pointed a reader at a row that a later prune
+   * would not agree about.
+   */
+  ledgerSequence?: number
   ledgerHash?: string
   ledgerPath?: string
 }
@@ -204,6 +214,7 @@ export function collectEvidenceAnchors(messages: unknown): AnchorCollection {
         operationId: read.ok ? read.pack.operationId : undefined,
         outcome: text(note.outcome),
         ledgerLine: numberOf(note.line),
+        ledgerSequence: numberOf(note.sequence),
         ledgerHash: text(note.hash),
         ledgerPath: text(note.path),
       })
@@ -391,7 +402,11 @@ export function renderAnchorBlock(collected: AnchorCollection, plan: PlanRead = 
       anchor.method,
       anchor.operationId ? `op ${anchor.operationId}` : undefined,
       anchor.outcome ? `outcome ${anchor.outcome}` : undefined,
-      anchor.ledgerLine !== undefined ? `ledger #${anchor.ledgerLine}` : undefined,
+      anchor.ledgerSequence !== undefined
+        ? `ledger seq ${anchor.ledgerSequence}`
+        : anchor.ledgerLine !== undefined
+          ? `ledger line ${anchor.ledgerLine}`
+          : undefined,
       anchor.ledgerHash ? `entry sha256 ${anchor.ledgerHash.slice(0, 16)}…` : undefined,
     ].filter((bit): bit is string => bit !== undefined)
     lines.push(`- ${bits.join(" · ")}`)
@@ -399,8 +414,14 @@ export function renderAnchorBlock(collected: AnchorCollection, plan: PlanRead = 
   if (collected.anchors.length === 0) {
     lines.push("- no decision-log entries were recorded in this session")
   }
-  const ledgerPath = [...collected.anchors].reverse().find((anchor) => anchor.ledgerPath !== undefined)?.ledgerPath
-  if (ledgerPath) lines.push("", `ledger: ${ledgerPath}`)
+  // One line per ledger FILE among the anchors shown, in the order they were first
+  // written. Reading only the newest anchor's path was a lie about the older ones: when
+  // `GLASSPANE_DECISION_LOG` or the harness data directory moved mid-session, the earlier
+  // entries live in a file this block does not name, while the line above it promises
+  // "the ledger below has the full chain".
+  const ledgerPaths = [...new Set(collected.anchors.map((anchor) => anchor.ledgerPath).filter((p): p is string => p !== undefined))]
+  if (ledgerPaths.length > 0) lines.push("")
+  for (const ledgerPath of ledgerPaths) lines.push(`ledger: ${ledgerPath}`)
   return lines.join("\n")
 }
 

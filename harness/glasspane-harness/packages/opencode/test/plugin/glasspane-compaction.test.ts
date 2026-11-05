@@ -97,6 +97,10 @@ describe("what the hook preserves", () => {
         operationId: OP_OK,
         outcome: "pass",
         ledgerLine: 1,
+        // The receipt's own chain position. The fixture sets `sequence: 0` and `line: 1` to
+        // DIFFERENT numbers on purpose: the block used to print the line and call it the
+        // chain position, which an identical pair would have hidden forever.
+        ledgerSequence: 0,
         ledgerHash: HASH,
         ledgerPath: "/tmp/gp-ledger/decisions.jsonl",
       },
@@ -129,7 +133,7 @@ describe("what the hook preserves", () => {
     const collected = collectEvidenceAnchors([message("gp_observe", { metadata: okMetadata({ decisionLog: receipt() }) })])
     const block = renderAnchorBlock(collected)
     expect(block).toBeDefined()
-    expect(block).toContain(`- observe · op ${OP_OK} · outcome pass · ledger #1 · entry sha256 ${HASH.slice(0, 16)}…`)
+    expect(block).toContain(`- observe · op ${OP_OK} · outcome pass · ledger seq 0 · entry sha256 ${HASH.slice(0, 16)}…`)
     expect(block).toContain("gp_* calls: 1 · decisions recorded: 1 · without a decision record: 0")
     expect(block).toContain("ledger: /tmp/gp-ledger/decisions.jsonl")
     expect(block).toContain("does not re-judge")
@@ -267,7 +271,12 @@ describe("what the hook preserves", () => {
     expect(output.context[0]).toContain("status-only or failed calls")
   })
 
-  test("the ledger line follows the most recent anchor, not the first", () => {
+  test("every ledger file the anchors were written to is named, not just the newest", () => {
+    // The block above the paths promises "the ledger below has the full chain". With one
+    // exception this was false: when `GLASSPANE_DECISION_LOG` or the harness data directory
+    // moved mid-session, the older anchor's entry lives in a file the block never named,
+    // and the reader following that line would find a chain missing its first links.
+    // This fixture is the moving case — two anchors, two files.
     const first = collectEvidenceAnchors([
       message("gp_observe", { metadata: okMetadata({ decisionLog: receipt({ path: "/tmp/old/decisions.jsonl" }) }) }),
     ])
@@ -280,7 +289,15 @@ describe("what the hook preserves", () => {
     ])
     expect(first.anchors.length).toBe(1)
     expect(merged.anchors.length).toBe(2)
-    expect(renderAnchorBlock(merged)).toContain("ledger: /tmp/new/decisions.jsonl")
+    const block = renderAnchorBlock(merged)
+    expect(block).toContain("ledger: /tmp/old/decisions.jsonl")
+    expect(block).toContain("ledger: /tmp/new/decisions.jsonl")
+    // Conversation order, so the file the chain starts in reads first.
+    expect(block.indexOf("/tmp/old/decisions.jsonl")).toBeLessThan(block.indexOf("/tmp/new/decisions.jsonl"))
+    // And a single-file session still prints exactly one path — the fix must not turn the
+    // common case into a list of one that reads like a warning.
+    const single = renderAnchorBlock(collectEvidenceAnchors([message("gp_observe", { metadata: okMetadata({ decisionLog: receipt() }) })]))
+    expect(single.match(/^ledger: /gm)?.length).toBe(1)
   })
 })
 
@@ -505,7 +522,7 @@ describe("what the hook refuses to invent", () => {
     expect(collected.anchors.length).toBe(1)
     expect(collected.anchors[0].operationId).toBeUndefined()
     const block = renderAnchorBlock(collected)
-    expect(block).toContain("- observe · outcome pass · ledger #1")
+    expect(block).toContain("- observe · outcome pass · ledger seq 0")
     expect(block).not.toContain("op ")
   })
 
