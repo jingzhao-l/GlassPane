@@ -1685,3 +1685,41 @@ stderr 空。`.asc` 在一次性钥匙环里验：`using RSA key 0929EA31DF4F742
 - `npm stage list <pkg>` 在本机跑不了（无 npm 登录态，E401）。存在性判断换成两条能跑的：
   publish job 按设计不会在 staged-only 时变绿，而它 3m45s success 且 registry 两包读回 1.30.0。
 - Apple 公证仍未启用（owner 决策），本轮没有以任何方式把它写成已完成。
+
+## 每日真机核对 2026-11-05（同日第二条会话；本机 GUI 会话；被测产物＝本轮工作树的 debug 构建 `engine/.build/debug`，本节的提交只动这份文档）
+
+本轮的真机目标只有一件事：`--check-developer-tools` 这一次改成三档判决之后，真机上答的是哪一档、
+给的下一步是不是做得动的那一条。全部运行都带 `--state-dir <临时根>`，破坏性旗标一次都没执行过。
+
+1. **三档判决的真机读数**（`glasspaned --state-dir <根> --check-developer-tools`）：退 **1**，
+   报文 `{"capability":"developer-tools-debug","launch":{"state":"denied"},"attach":{"state":"denied"},
+   "granted":false,"verdict":"denied","verdictStates":{"launch":"denied","attach":"denied"}}`。
+   这一档是**系统明确拒绝**，不是没量到：两臂都答了 `denied`，所以 `verdict` 与旧布尔一致，
+   本版没有把一次真实的拒绝改口成别的东西。`next` 现在点名的是被测那一枚二进制本身
+   （`'/Volumes/Eng-Dev/GlassPane/engine/.build/debug/glasspaned'`，带引号成一个词），
+   并同句给出勾选与复验那一条命令——从前这一档只说"唯一人工步骤是系统设置勾选"。
+2. **`unverifiable` 那一档本机造不出真实现场**（诚实边界，不是没做）：探测走的是绝对路径
+   `/usr/bin/xcrun`，这台机器上 CLT 在位且能答，所以"工具链不在位 / lldb 那一臂没答"这一档
+   在这台机器上无法由真进程产生。它由注入层 `DebugCapabilityProbe.Running` 量：
+   `DailyRound20261105DeveloperToolsVerdictTests` 的 5 条（其中反向破坏那一轮里，把第三档折回
+   `denied` 时 3 条具名红）。补上真实现场需要的动作：在一台没有 Xcode Command Line Tools 的
+   mac 上跑同一条命令（`xcrun --find lldb` 在那里就答不出来），预期 `verdict: unverifiable` 且退 5。
+3. **对照的另外两位**：`glasspaned --state-dir <根> --permissions` 退 0，
+   `{"accessibility":"granted","developer-tools":"unverifiable","input-monitoring":"granted","screen-recording":"granted"}`，
+   `verdict: granted` 且 developer-tools 被 `verdictExcludes` 明写为本命令不量——本轮新加的那一档
+   用的就是这三个词（`granted|denied|unverifiable`），与面板那一卡
+   （`DeveloperToolsCapability.status`）同一个词表，没有另造第四个词。
+   同一条命令的 stderr 那一句照旧如实说明它不咨询 `--state-dir`
+   （`nothing was read, created, tightened or written under it`），事后核对那个临时根里除 `daemon.log`
+   外没有新字节，`~/.glasspane` 没有被这一轮的任何一次运行写过。
+4. **面板那一侧没有重走 6 个页签**，理由不是省事：本轮改的那一条命令在面板里唯一的读者是
+   `SettingsModel.swift:799` → `DeveloperToolsCapability.parse`，它要的键
+   （`capability` / `launch.state` / `attach.state` / `granted`）一个没动，本版只是**新增**字段，
+   卡片判据（`status`）本来就已经把"没量到"与"被拒"分开了（`PermissionStatus.swift:564-568`）——
+   也就是说 GUI 那一面早就是三档，本轮补的是 CLI 那一面。今早那一节（2026-11-03/11-05 第一条会话）
+   的 88 枚标识 / 2 枚按不动各有理由 / 4 枚读不到 enabled 单独报出，本轮没有可推翻它的改动。
+   补它的那条命令：`engine/.build/debug/glasspane-settings --state-dir <临时根>` 起来后按
+   `gp-perm-developer-tools-*` 读徽标（本机无 pyobjc，走自写 Swift AX helper，先例见 11-03 那一节）。
+5. **进程与临时件**：本轮起的 daemon 一次性运行都在 `--state-dir` 隔离根上，跑完即退；
+   收口时按两次 `pgrep` 判据核对（见台账【收口】那一节）。
+
