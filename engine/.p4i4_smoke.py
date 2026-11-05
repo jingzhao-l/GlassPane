@@ -27,6 +27,7 @@ P4 v4.0 §34 把 P4-I4 标为"拖拽无法自动化模拟，待 GUI 人工目视
 
 用法：python3 .p4i4_smoke.py [--panel-pid N] [--skip-drag]
 """
+import hashlib
 import json
 import os
 import re
@@ -107,6 +108,30 @@ case "texts":
     for window in appElements(pidArg!) { walk(window, depth: 0, into: &out) }
     let data = try! JSONSerialization.data(withJSONObject: out)
     FileHandle.standardOutput.write(data)
+    exit(0)
+case "controls":
+    // controls <pid>：把"屏上有文案的控件"连它的 AXIdentifier 与 enabled 位一起交出去。
+    // `texts` 只给字符串，所以"按不动的控件必须说得出理由"这一条从前在真机上无法点名——
+    // 不知道那句 help 挂在哪一枚控件上，也就证伪不了"理由挂错了控件"（2026-11-05 候选 A 的
+    // 真机那一格）。enabled 读不到时不许折算成 true：那一格单独报 enabledRead=false。
+    var controlOut: [[String: Any]] = []
+    for entry in collectAll(pidArg!) {
+        let help = str(entry.el, kAXHelpAttribute) ?? ""
+        let identifier = str(entry.el, "AXIdentifier") ?? ""
+        if help.isEmpty && identifier.isEmpty { continue }
+        var raw: CFTypeRef?
+        let readable = AXUIElementCopyAttributeValue(entry.el, kAXEnabledAttribute as CFString, &raw) == .success
+        controlOut.append([
+            "role": entry.role,
+            "identifier": identifier,
+            "help": help,
+            "enabled": (raw as? Bool) ?? false,
+            "enabledRead": readable,
+            "strings": entry.strings,
+        ])
+    }
+    let controlData = try! JSONSerialization.data(withJSONObject: controlOut)
+    FileHandle.standardOutput.write(controlData)
     exit(0)
 case "press":
     // press <pid> <needle>：按标题/值含 needle 的按钮（如引导横幅的「关闭」）。
@@ -233,7 +258,16 @@ def build_helper():
     cache_dir = os.path.join(tempfile.gettempdir(), "glasspane-p4i4-smoke")
     os.makedirs(cache_dir, exist_ok=True)
     binary = os.path.join(cache_dir, "p4i4_helper")
-    if not os.path.exists(binary):
+    stamp = os.path.join(cache_dir, "p4i4_helper.sha256")
+    # 从前这里只看"二进制在不在"，于是辅助器被**第一次跑它的那个人**冻住：改过 HELPER_SRC
+    # （加一种读数）之后，同一条命令仍在用旧的那一份，新读数以"屏上找不到"的身份消失。
+    # 现在按源码内容作决定：HELPER_SRC 变了就重编译，没变就复用缓存。
+    digest = hashlib.sha256(HELPER_SRC.encode("utf8")).hexdigest()
+    cached = None
+    if os.path.exists(stamp):
+        with open(stamp, encoding="utf8") as handle:
+            cached = handle.read().strip()
+    if not os.path.exists(binary) or cached != digest:
         source = os.path.join(cache_dir, "p4i4_helper.swift")
         with open(source, "w", encoding="utf-8") as handle:
             handle.write(HELPER_SRC)
@@ -241,6 +275,8 @@ def build_helper():
                                 capture_output=True, text=True, timeout=240)
         if result.returncode != 0:
             raise RuntimeError("swiftc 编译辅助器失败：\n" + result.stderr[-2000:])
+        with open(stamp, "w", encoding="utf8") as handle:
+            handle.write(digest + "\n")
     return binary
 
 

@@ -60,15 +60,43 @@ def not_asked_caption():
     草稿写死的是「没问」——面板从来没说过这两个字（实机 2026-10-23 读到的整屏里一处都没有），
     于是这条真机闸无论产品怎么表现都恒红。判据必须指向产品真的那句话，措辞将来再改时红的是
     这条冒烟，而不是一次没人看见的失败。
+
+    2026-11-05 本机实测：这一条在 `git show HEAD:…` 上就已经取不到文案了（抛 RuntimeError，
+    连面板都没起）——原来 `case .notAsked:` 与 `unmeasuredLine(` 之间隔着三行注释，
+    旧算式只容得下空白。两处都得改：
+      · 取文案要先跳过注释行（但只跳注释与空行，跳到别的语句就算没找到——否则这条闸
+        会去匹配同一文件里任意一句 `unmeasuredLine("…")`，把形状改动洗成一次绿）；
+      · 文案里有 `\\(ConsoleModel.daemonStatsRecoveryLabel(pathKnown: false))` 这一枚插值，
+        屏上出现的是它算出来的那个词，所以整串永远 `in` 不进屏文；截到插值**之前**为止，
+        拿到的是屏上真存在的那一段前缀。产品改口时红的仍是这条冒烟。
     """
     source = os.path.join(HERE, "Sources", "glasspane-settings", "EvidenceStatsView.swift")
     with open(source, encoding="utf8") as handle:
-        text = handle.read()
-    match = re.search(r"case \.notAsked:\s*\n\s*unmeasuredLine\(\"([^\"]+)\"\)", text)
-    if not match:
-        raise RuntimeError(f"没能在 {source} 里找到 .notAsked 那一行的文案—— SwiftUI 改了形状，"
+        lines = handle.read().split("\n")
+
+    try:
+        start = next(i for i, line in enumerate(lines) if line.strip() == "case .notAsked:")
+    except StopIteration:
+        raise RuntimeError(f"没能在 {source} 里找到 `.notAsked` 那一档——SwiftUI 改了形状，"
                            "这条真机判据得跟着改，而不是改回一个屏幕上不存在的名词")
-    return match.group(1)
+
+    body = None
+    for line in lines[start + 1:]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("//"):
+            continue  # 只跳注释与空行
+        match = re.match(r'unmeasuredLine\("(.*)"\)\s*$', stripped)
+        if match:
+            body = match.group(1)
+        break  # 撞上的第一条真语句不是 unmeasuredLine，就算没找到
+    if body is None:
+        raise RuntimeError(f"{source} 里 `.notAsked` 那一档后面跟的不是 unmeasuredLine(\"…\")，"
+                           "形状变了；这条真机判据要跟着改，不许放宽成'任意一句文案'")
+
+    prefix = re.split(r"\\\(", body)[0].rstrip()
+    if len(prefix) < 8:
+        raise RuntimeError(f"截出来的前缀太短（{prefix!r}），在屏上撞什么都是命中，这条闸不作数")
+    return prefix
 
 
 class Peer:
