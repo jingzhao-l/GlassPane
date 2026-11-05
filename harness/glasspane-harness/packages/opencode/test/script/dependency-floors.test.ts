@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { readFileSync, readdirSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { spawnSync } from "node:child_process"
 import { checkFloors, compareVersions, minimumOf, run, type Declared, type Floor, type RunInput } from "../../script/dependency-floors"
 
 /**
@@ -52,6 +54,12 @@ function input(contract: unknown, manifests: readonly { path: string; text: stri
 describe("the floor list against the tree that ships it", () => {
   test("the real contract and the real manifests agree, and both were actually read", () => {
     const contractText = readFileSync(contractPath, "utf8")
+    // The SAME set the CLI reads: `packages/*/package.json` plus the workspace root. This
+    // list used to mirror only the packages glob, which is how the guard stayed green while
+    // `harness/glasspane-harness/package.json` — still upstream's manifest by name, so the
+    // exact file a sync replays — carried `"glob": "13.0.5"`, inside the vulnerable range
+    // this very contract cites. A test that reads a narrower set than the CLI is a test of
+    // a program nobody ships.
     const manifestTexts = readdirSync(join(forkRoot, "packages"))
       .map((entry) => join(forkRoot, "packages", entry, "package.json"))
       .filter((path) => {
@@ -63,6 +71,7 @@ describe("the floor list against the tree that ships it", () => {
         }
       })
       .map((path) => ({ path, text: readFileSync(path, "utf8") }))
+    manifestTexts.push({ path: join(forkRoot, "package.json"), text: readFileSync(join(forkRoot, "package.json"), "utf8") })
     expect(manifestTexts.length).toBeGreaterThan(1)
     const result = run(input(contractText, manifestTexts))
     expect(result.exit).toBe(0)
@@ -201,5 +210,69 @@ describe("the four ways this check cannot observe, each of which refuses", () =>
     const result = run(input({ floors: [globFloor] }, [manifestText("core", "14.0.2"), { path: "packages/app/package.json", text: "{ not json" }]))
     expect(result.exit).toBe(2)
     expect(result.lines.join("\n")).toContain("packages/app/package.json is not valid JSON")
+  })
+
+  /**
+   * The workspace ROOT, driven through the real CLI rather than through `run()`.
+   *
+   * This is the shape that escaped the guard when it shipped: every package manifest was
+   * raised above the floor, `bun.lock` resolved 14.0.2 for the product code, and the root
+   * manifest — upstream's own file, with upstream's name on it — stayed at `"glob":
+   * "13.0.5"`, inside the range the shipped contract names as vulnerable. `run()` cannot
+   * catch that by itself because the CLI decides WHICH manifests it hands over, so the
+   * fixed point has to drive the entry point that CI runs.
+   */
+  test("the CLI reads the workspace root, and a root below a floor is a refusal by name", () => {
+    const script = join(forkRoot, "packages/opencode/script/dependency-floors.ts")
+    const staged = mkdtempSync(join(tmpdir(), "gp-floors-root-"))
+    mkdirSync(join(staged, "packages/core"), { recursive: true })
+    writeFileSync(
+      join(staged, "packages/core/package.json"),
+      JSON.stringify({ name: "@opencode-ai/core", dependencies: { glob: "14.0.2", minimatch: "11.0.1" } }),
+    )
+    const rootBelow = join(staged, "root-below.json")
+    writeFileSync(rootBelow, JSON.stringify({ name: "opencode", devDependencies: { glob: "13.0.5" } }))
+    const rootAtFloor = join(staged, "root-at-floor.json")
+    writeFileSync(rootAtFloor, JSON.stringify({ name: "opencode", devDependencies: { glob: "14.0.2" } }))
+    const invoke = (root: string) =>
+      spawnSync(process.execPath, [script, "--contract", contractPath, "--packages", join(staged, "packages"), "--root", root], { encoding: "utf8" })
+
+    const refused = invoke(rootBelow)
+    const refusedOutput = `${refused.stdout ?? ""}${refused.stderr ?? ""}`
+    expect(refused.status).toBe(1)
+    // Named: the file, the version, the floor and the advisory — not a count with no reader.
+    expect(refusedOutput).toContain("root-below.json")
+    expect(refusedOutput).toContain("13.0.5 is below 14.0.2")
+    expect(refusedOutput).toContain("GHSA-3g3m-2fjr-6pw4")
+
+    // The control: the same tree with the root at the floor passes, so the refusal above is
+    // about the version and not about the file being the root.
+    const clean = invoke(rootAtFloor)
+    expect(`${clean.stdout ?? ""}${clean.stderr ?? ""}`).toContain("2 manifest(s)")
+    expect(clean.status).toBe(0)
+
+    // And a root nobody can read is "cannot observe", never a silent pass.
+    const unreadable = invoke(join(staged, "no-such-manifest.json"))
+    expect(unreadable.status).toBe(2)
+    expect(`${unreadable.stdout ?? ""}${unreadable.stderr ?? ""}`).toContain("CANNOT OBSERVE")
+
+    rmSync(staged, { recursive: true, force: true })
+  })
+
+  /**
+   * The tree this guard ships inside has to satisfy the contract at the root too — the
+   * assertion that would have caught the 13.0.5 before it was ever committed.
+   */
+  test("the fork's own workspace root is at or above every cited floor", () => {
+    const rootManifest = join(forkRoot, "package.json")
+    const rootJson = JSON.parse(readFileSync(rootManifest, "utf8")) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> }
+    const contract = JSON.parse(readFileSync(contractPath, "utf8")) as { floors: Floor[] }
+    const against = checkFloors(
+      contract.floors,
+      Object.entries({ ...(rootJson.dependencies ?? {}), ...(rootJson.devDependencies ?? {}) }).map(([name, spec]) =>
+        declared(rootManifest, name, spec ?? ""),
+      ),
+    )
+    expect(against.problems.map((problem) => `${problem.manifest} ${problem.name}: ${problem.detail}`)).toEqual([])
   })
 })

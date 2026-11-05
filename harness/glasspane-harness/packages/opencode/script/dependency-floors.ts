@@ -279,6 +279,20 @@ if (import.meta.main) {
       skipped.push(entry)
     }
   }
+  // The workspace root is a manifest too — and it is the one this contract exists for.
+  // `harness/glasspane-harness/package.json` is still upstream's file (upstream's name,
+  // upstream's repo URL), which is exactly the path a future sync replays upstream's pins
+  // down. Scanning only `packages/*/package.json` let the root keep `"glob": "13.0.5"` —
+  // inside the range THIS contract's own `vulnerable` field cites for GHSA-3g3m-2fjr-6pw4
+  // — while the guard printed "2 floor(s) against 21 manifest(s)" and exited 0. A floor
+  // that cannot see the file it was written about is a floor with a blind spot, not a floor.
+  const rootManifest = resolve(flag("--root") ?? join(productRoot, "package.json"))
+  try {
+    manifestTexts.push({ path: rootManifest, text: readFileSync(rootManifest, "utf8") })
+  } catch (error) {
+    console.log(`CANNOT OBSERVE: ${rootManifest} could not be read (${error instanceof Error ? error.message : String(error)})`)
+    process.exit(2)
+  }
   const result = run({ contractText, contractOrigin: contractPath, manifestTexts })
   for (const line of result.lines) console.log(line)
   if (skipped.length > 0) console.log(`  ${skipped.length} directory/directories under packages/ carried no readable package.json: ${skipped.join(", ")}`)
