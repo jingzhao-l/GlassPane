@@ -1613,3 +1613,75 @@ helper 沿用 `/var/tmp/glasspane-main-check-20261030/gp-ax-walk.swift`（本机
    因此没有本 run 的遗留进程；`pgrep -fl "state-dir /tmp/gp-state"` 空命中。在册那枚已安装 daemon
    （`/Users/ethanlin/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned --socket-path
    /Users/ethanlin/.glasspane/engine.sock`）**没碰**——它不是本 run 起的，归属判据是不动。
+
+## 每日真机核对 2026-11-05（v1.30.0 这一轮）
+
+上一节（11-04）把"面板六页 AX 走查"记成未观测。本轮把它跑了，另外还量了新加的控件读数和两条
+一直坏着的真机冒烟。判据是当场读回来的，不是源码级核对。
+
+### 1. 先把两条真机闸修好（不然"走过"就等于没走过）
+
+- `engine/.panel_refusal_smoke.py` 在 `git show HEAD:…` 上就起不来：`not_asked_caption()` 那把
+  算式只容得下"`.notAsked:` 紧接一行 `unmeasuredLine("…")`"，而中间隔着三行注释，于是它抛
+  RuntimeError、面板根本没启动。修法不是放宽：跳行**只跳注释与空行**，撞上的第一条真语句不是
+  `unmeasuredLine` 仍算"没找到"；另外那句文案里有 `\(ConsoleModel.daemonStatsRecoveryLabel(…))`
+  一枚插值，整串永远 `in` 不进屏文，所以截到插值之前为止，比的是屏上真存在的那段前缀。
+- `engine/.p4i4_smoke.py` 的 `build_helper()` 只看"二进制在不在"，辅助器被**第一个跑它的人**冻住。
+  本轮给 `HELPER_SRC` 加了一种读数（`controls`：控件的 `AXIdentifier` + `AXEnabled` + `AXHelp`），
+  旧缓存里没它。现在按 `HELPER_SRC` 的 sha256 决定重编译还是复用。
+  为什么非要这一种读数：`texts` 只给字符串，"按不动的控件必须说得出理由"这条纪律在真机上无法点名
+  ——不知道那句 help 挂在哪一枚控件上，就证伪不了"理由挂错了控件"。
+
+### 2. daemon 自报（隔离状态根，`--state-dir` 而非环境变量）
+
+```
+engine/.build/debug/glasspaned --state-dir /tmp/gp-daily-20261105-perm.8aRAvF --permissions
+rc=0
+{"permissions":{"accessibility":"granted","developer-tools":"unverifiable",
+ "input-monitoring":"granted","screen-recording":"granted"},
+ "verdict":"granted","verdictSeats":["accessibility","input-monitoring","screen-recording"],
+ "verdictExcludes":[{"seat":"developer-tools","status":"unverifiable",
+   "reason":"TCC exposes no query API for this seat, so this command never measures it; …"}],
+ "subject":{"binaryPath":"…/engine/.build/debug/glasspaned","hasBundleIdentity":false}}
+```
+stderr 那一句 note 是产品自己写的：`--permissions` 不读状态，所以这一轮点名的根没有被 consulted，
+"什么都没读、没建、没收紧、没写"。对照：临时根里除了脚本自己的两个文件之外没有别的东西。
+
+### 3. 面板六页走查 + 控件读数（`.build/debug/glasspane-settings --state-dir <临时根>`）
+
+用修好的 helper 逐页 `press`（证据档案 / 项目 / 审批台账 / 配方 / 这台机器 / 更新），再 `controls`
+读整棵 AX 树，按 `(identifier, help, enabled, enabledRead)` 去重：
+
+| 读数 | 值 |
+|---|---|
+| 有 `AXIdentifier` 的控件 | 88 枚 |
+| 读得出 `AXEnabled` 且为 false（按不动） | 2 枚 |
+| 其中**没给理由**（`AXHelp` 为空）的 | **0 枚** |
+| `AXEnabled` 读不到的 | 4 枚（`settings`、`settings, SidebarNavigationSplitView`、`ListColumn`、`gp-recipe-editor`）——单独报出，不折算成"可点" |
+| `gp-daemon-age-retention` 在树上 | 是，那一行读回来的是 `年龄闸读数（daemon）：not enforced by the daemon; --prune-evidence --older-than <days> is the only age path` |
+
+上面最后那一格就是本轮候选 M 的终点：daemon 早就在 `--evidence-stats` 里发这一句，面板从前没读它；
+现在它以一枚有标识的行出现在用户眼前，读的是**真 daemon 的真回话**（面板连的是这台机器在跑的
+那枚 daemon，没有代测、没有借别的卡读数）。
+
+只读性：面板与 daemon 全程只读，`~/.glasspane/evidence` 条数走查前后各数一次 **582 → 582**。
+本轮起的两个进程（面板与临时 daemon）在脚本末尾 terminate 并由 `pgrep -fl glasspane-settings`
+确认空命中；在册那枚已安装 daemon（`/Users/ethanlin/Applications/GlassPane Daemon.app/…`）**没碰**。
+
+### 4. 发布物那一头（真归档，不是本地工作树）
+
+`GlassPane-1.30.0.tar.gz`（API digest 与本机重算、`SHA256SUMS` 内容三处相等
+`43d185ef…ab6ab77`）解包 → 树内 `npm pack` → 装进干净前缀 rc=0 → `prefix/bin/glasspane-mcp`
+仍是符号链接（1.12.3 那次的交付形状，说明 realpath 那道闸没退化）→ 用 stdin 打一条
+`initialize`，回的是
+`{"id":1,"jsonrpc":"2.0","result":{…"serverInfo":{"name":"glasspane-mcp","version":"1.30.0"}}}`，
+stderr 空。`.asc` 在一次性钥匙环里验：`using RSA key 0929EA31DF4F7429F63FC53189D88B1D043A1298`
++ `Good signature`，与 `updater/lib/signature.js` 钉的那枚逐字相等。
+
+### 5. 本轮没有把哪一格写成"验过"
+
+- 探针包的 `swift test --package-path engine/probe` 里 Swift Testing 那格是 `0 tests in 0 suites`：
+  探针包只有 XCTest 用例（58 条），这一格是空集，不是绿。
+- `npm stage list <pkg>` 在本机跑不了（无 npm 登录态，E401）。存在性判断换成两条能跑的：
+  publish job 按设计不会在 staged-only 时变绿，而它 3m45s success 且 registry 两包读回 1.30.0。
+- Apple 公证仍未启用（owner 决策），本轮没有以任何方式把它写成已完成。
