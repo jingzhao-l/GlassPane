@@ -539,6 +539,19 @@ const percentageRefusal = "surface B measured 0 file(s), so it contributes nothi
 const recordedCount = (surf) =>
   Array.isArray(surf?.files) ? surf.files.length : typeof surf?.files === "number" ? surf.files : Object.keys(surf?.byFile ?? {}).length
 
+/**
+ * The names this run measured, and the names the baseline recorded.
+ * Surface A carries them in `byFile` (its `files` field is a count), surface B in `files`
+ * (a list of `{file, kind, lines}`); one reader for both shapes so a rule cannot compare
+ * names on one surface and counts on the other.
+ */
+const fileNames = (surf) =>
+  Array.isArray(surf?.files)
+    ? surf.files.map((entry) => (typeof entry === "string" ? entry : entry?.file)).filter((name) => typeof name === "string")
+    : Object.keys(surf?.byFile ?? {})
+
+const NAME_SAMPLE_LIMIT = 8
+
 function coverageProblems(golden) {
   const problems = []
   for (const [name, now, was] of [
@@ -560,6 +573,34 @@ function coverageProblems(golden) {
         `${name}: the baseline measured ${recorded} file(s), this run measures ${now} — ${recorded - now} file(s) left the MEASURED set. That is a caliber change (an emptied fork-diff list, a narrowed REF_EXTS, a widened isTest, a renamed bucket), not a smaller surface: LOC that is not measured cannot grow. Restore what the rule reads, or --record in the same commit and say why those files are no longer part of the surface.`,
       )
     }
+  }
+  // NAMES, not just their count. Two files, one leaving the measured set and one entering
+  // it, keeps `recorded === now` and the count check above stays silent: the LOC ratchet
+  // only fires on GROWTH, and the percentage crossing check is already spent for both
+  // surfaces (their baselines sit over the documented limit), so a same-count substitution —
+  // swap a 2,000-line `mcp-shell/src/a.ts` for a 5-line `b.ts` — relabels what "the surface"
+  // means and prints green. This is the sibling rule `surface-semantics.mjs` already
+  // implements for its own scan set (files compared by identity, and `rulers-selftest.mjs`
+  // has the named case for it); before this, tool-surface counted and brand-surface counted,
+  // and only the ruler that had already been bitten checked names.
+  for (const [name, was, observedSurf] of [
+    ["surface A (mcp-shell/src)", golden?.surfaces?.mcpShell, observed.surfaces.mcpShell],
+    ["surface B (fork, ours)", golden?.surfaces?.fork, observed.surfaces.fork],
+  ]) {
+    const recordedNames = new Set(fileNames(was))
+    const observedNames = new Set(fileNames(observedSurf))
+    if (recordedNames.size === 0 || observedNames.size === 0) continue
+    const entered = [...observedNames].filter((n) => !recordedNames.has(n))
+    const left = [...recordedNames].filter((n) => !observedNames.has(n))
+    const sample = (list) => list.slice(0, NAME_SAMPLE_LIMIT).join(", ") + (list.length > NAME_SAMPLE_LIMIT ? `, … (${list.length - NAME_SAMPLE_LIMIT} more)` : "")
+    if (entered.length)
+      problems.push(
+        `${name}: ${entered.length} file(s) are in THIS run's measured set but not in the baseline's — ${sample(entered)}. A name the golden never recorded is a file whose growth has no floor to compare against; --record in the same commit as the change that added it, so the widened caliber is on the record with the bytes.`,
+      )
+    if (left.length)
+      problems.push(
+        `${name}: ${left.length} file(s) the baseline measured are NOT in this run's set — ${sample(left)}. LOC that leaves the caliber stops being measured; restore what the rule reads, or --record in the same commit and say why these files are no longer part of the surface.`,
+      )
   }
   return problems
 }

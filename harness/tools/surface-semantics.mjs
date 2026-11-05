@@ -217,8 +217,14 @@ function assertRulesCanFire() {
     // rule whose pattern ignores comment markers would report hits on a `[gp]` note that only
     // *explains* a removal — the failure shape this tool's own history names "flagging its own
     // explanation", and it is invisible to the positive control above.
-    const commented = prepare(`// ${control.judgement}\n`).code
-    if (rule.scope === "code" && rule.count(commented) > 0) {
+    const commented = prepare(`// ${control.judgement}\n`)
+    // The anti-control runs on the SAME form production feeds this rule, not only on the
+    // code form. Gating it on `rule.scope === "code"` left the two arithmetic rules
+    // (`threshold-comparison`, `verdict-synthesis` read the string-stripped text) never
+    // proven comment-blind: a pattern that also fires inside a `[gp]` note that merely
+    // explains a removal would pass every control above and then produce the exact failure
+    // this file names — flagging its own explanation.
+    if (rule.count(rule.scope === "code" ? commented.code : commented.arithmetic) > 0) {
       die(
         2,
         `positive control: rule "${rule.id}" fires on a commented-out judgement — production strips comments first, so this rule counts text no engine ever executes, and a [gp] note explaining a removal would read as a live violation`,

@@ -283,6 +283,56 @@ function forkTextFiles() {
  * `assertRulesCanFire`. Silent non-firing is the worst failure a pattern can have: the golden's
  * `hits: []` then certifies an answer no rule produced.
  */
+/**
+ * The shipped-source rules, hoisted out of `scan()` into a named table.
+ *
+ * They used to be an inline tuple array inside the file loop, and that placement had a
+ * consequence nobody noticed: `assertRulesCanFire` iterates `RULES`, so these four
+ * patterns — the gateway, the wire identity, a third party's `$schema` written into a file
+ * the user edits, and the legacy db/log names — were driven against the tree on every run
+ * and against a KNOWN-HIT sample never. A pattern that no sample has ever fired is a
+ * pattern whose zero hits mean nothing: `hits: []` in the golden certifies an answer no
+ * rule produced, which is the failure shape `surface-semantics.mjs` already refuses with
+ * exit 2 ("a rule that cannot go red cannot clear anything"). Hoisting them is what makes
+ * the battery able to name them.
+ */
+const SHIPPED_RULES = [
+  [
+    "first-party-gateway",
+    FIRST_PARTY_GATEWAY,
+    "a first-party gateway surface came back (provider id, upsell copy or a link to the paid cloud)",
+  ],
+  [
+    "wire-identity",
+    /["'`](?:X-Title|x-title|X-Source|X-Cerebras-3rd-Party-Integration)["'`]\s*:\s*["'`]opencode["'`]|(?:originator|User-Agent)\s*:\s*[`"']opencode\//,
+    "a request header still identifies us to third-party providers as opencode",
+  ],
+  [
+    "foreign-schema-write",
+    /\$schema["'`]?\s*[:=]\s*["'`]https:\/\/opencode\.ai\/(?:config|tui|theme)\.json/,
+    "a third party's schema URL is written into a file the user edits",
+  ],
+  [
+    "product-file-name",
+    // The legacy database name is allowed in exactly one place: the migration
+    // that renames it. `LEGACY_NAME_ALLOWANCE` lists the files where the old
+    // name is the *subject* rather than the product's own name.
+    /["'`]opencode\.(?:db|log)["'`]|default:\s*["'`]opencode\.local["'`]/,
+    "the user's own files or the LAN service are named for the upstream project",
+  ],
+]
+
+/**
+ * One known-hit sample per `SHIPPED_RULES` id — the smallest text that IS the violation,
+ * written the way production writes it. Missing entry is a `CANNOT MEASURE`, not a skip.
+ */
+const SHIPPED_RULE_CONTROLS = {
+  "first-party-gateway": 'const gateway = "opencode-go"',
+  "wire-identity": 'const headers = { "X-Title": "opencode" }',
+  "foreign-schema-write": 'const doc = { "$schema": "https://opencode.ai/config.json" }',
+  "product-file-name": 'const database = "opencode.db"',
+}
+
 function assertRulesCanFire() {
   for (const rule of RULES) {
     const controls = CONTROLS.filter((c) => c.id === rule.id)
@@ -301,7 +351,28 @@ function assertRulesCanFire() {
       }
     }
   }
-  console.log(`brand-surface — positive controls: ${RULES.length}/${RULES.length} rule(s) fired on a known brand string and stayed silent on its commented-out form`)
+  // The shipped-source table gets the same two halves: its sample must fire, and the
+  // commented-out sample must NOT, because production strips comments before any rule
+  // reads the bytes. These four rules were the ones the loop above could not see — they
+  // were not in `RULES`, so their zero hits had never been produced by a firing pattern.
+  for (const [id, re, why] of SHIPPED_RULES) {
+    const sample = SHIPPED_RULE_CONTROLS[id]
+    if (!sample) {
+      console.error(`brand-surface: CANNOT MEASURE — positive control: shipped-source rule "${id}" carries no known-hit sample (${why}); nothing has shown this rule can fire, so its zero hits certify nothing`)
+      process.exit(2)
+    }
+    if (occ(stripComments(`${sample}\n`), re) === 0) {
+      console.error(`brand-surface: CANNOT MEASURE — positive control: shipped-source rule "${id}" does not fire on ${JSON.stringify(sample)} — the pattern is broken, not the tree clean`)
+      process.exit(2)
+    }
+    if (occ(stripComments(`// ${sample}\n`), re) > 0) {
+      console.error(`brand-surface: CANNOT MEASURE — positive control: shipped-source rule "${id}" fires on the commented-out form of ${JSON.stringify(sample)} — a [gp] note that only explains a removal would read as a live violation`)
+      process.exit(2)
+    }
+  }
+  console.log(
+    `brand-surface — positive controls: ${RULES.length + SHIPPED_RULES.length}/${RULES.length + SHIPPED_RULES.length} rule(s) fired on a known brand string and stayed silent on its commented-out form (${RULES.length} product-file rules + ${SHIPPED_RULES.length} shipped-source rules)`,
+  )
 }
 
 function scan() {
@@ -381,31 +452,7 @@ function scan() {
     // the old name on purpose, and a rule that flagged its own explanation would be
     // a rule nobody could keep green.
     const text = stripComments(readShipped(rel))
-    for (const [rule, re, why] of [
-      [
-        "first-party-gateway",
-        FIRST_PARTY_GATEWAY,
-        "a first-party gateway surface came back (provider id, upsell copy or a link to the paid cloud)",
-      ],
-      [
-        "wire-identity",
-        /["'`](?:X-Title|x-title|X-Source|X-Cerebras-3rd-Party-Integration)["'`]\s*:\s*["'`]opencode["'`]|(?:originator|User-Agent)\s*:\s*[`"']opencode\//,
-        "a request header still identifies us to third-party providers as opencode",
-      ],
-      [
-        "foreign-schema-write",
-        /\$schema["'`]?\s*[:=]\s*["'`]https:\/\/opencode\.ai\/(?:config|tui|theme)\.json/,
-        "a third party's schema URL is written into a file the user edits",
-      ],
-      [
-        "product-file-name",
-        // The legacy database name is allowed in exactly one place: the migration
-        // that renames it. `LEGACY_NAME_ALLOWANCE` lists the files where the old
-        // name is the *subject* rather than the product's own name.
-        /["'`]opencode\.(?:db|log)["'`]|default:\s*["'`]opencode\.local["'`]/,
-        "the user's own files or the LAN service are named for the upstream project",
-      ],
-    ]) {
+    for (const [rule, re, why] of SHIPPED_RULES) {
       // A legacy name is legitimate where the code migrates *from* it or still accepts
       // it as an input — and only for the rule that name belongs to (see the map above).
       if ((LEGACY_NAME_ALLOWANCE[rule] ?? []).includes(rel)) continue
@@ -621,12 +668,15 @@ const observed = {
     { id: "product-file-name", why: "the user's own files are named for the product" },
     { id: "removed-tree", why: "an upstream tree this product deleted must not be referenced again" },
   ],
-  productFiles: PRODUCT_FILES.length,
+  // NAMES, not a size. `docFiles` below has always carried the list itself; `productFiles`
+  // carried only a count, which meant "drop one, add one" is the same 26 and the file that
+  // left the list stops being opened without a single line of output saying so.
+  productFiles: [...PRODUCT_FILES],
   docFiles: DOC_FILES,
   ...scan(),
 }
 
-console.log(`brand-surface — ${observed.productFiles} product file(s) + ${DOC_FILES.length} doc(s); ${observed.shippedFiles} shipped-code file(s); ${observed.hits.length} hit(s); lineage ${observed.lineage.occurrences} occurrence(s) across ${observed.lineage.filesScanned} file(s)`)
+console.log(`brand-surface — ${observed.productFiles.length} product file(s) + ${DOC_FILES.length} doc(s); ${observed.shippedFiles} shipped-code file(s); ${observed.hits.length} hit(s); lineage ${observed.lineage.occurrences} occurrence(s) across ${observed.lineage.filesScanned} file(s)`)
 for (const hit of observed.hits) console.log(`    ${hit.rule} ×${hit.count}  ${hit.file}`)
 
 if (mode === "record") {
@@ -726,8 +776,18 @@ if (!Array.isArray(golden.hits)) {
 // 24 of the 26 entries was a green `--check` and a clean `--record`, which is the accident this
 // gate exists for (the file's own header records two brand leaks that shipped from outside the
 // list). Movement in either direction is a caliber change and must be argued in the same commit.
-if (golden.productFiles !== observed.productFiles) {
-  problems.push(`product-file scan set moved: the golden records ${JSON.stringify(golden.productFiles)} and this run reads ${observed.productFiles} — ${observed.productFiles < (golden.productFiles ?? 0) ? `a product file left the list and stopped being brand-checked (${PRODUCT_FILES.join(", ")})` : "the list grew, which is deliberate work: re-record so the caliber travels with it"}`)
+if (!Array.isArray(golden.productFiles)) {
+  problems.push(
+    `product-file scan set cannot be compared: the golden records ${JSON.stringify(golden.productFiles)}, and this run reads the NAMES of ${observed.productFiles.length} file(s) — a count cannot tell a same-count substitution (one file dropped, another added) from an unchanged list, which is the only way a product file escapes brand checking in silence. Re-record so the caliber travels with the names.`,
+  )
+} else {
+  const recordedProducts = new Set(golden.productFiles)
+  const leftProducts = golden.productFiles.filter((rel) => !observed.productFiles.includes(rel))
+  const joinedProducts = observed.productFiles.filter((rel) => !recordedProducts.has(rel))
+  if (leftProducts.length || joinedProducts.length)
+    problems.push(
+      `product-file scan set moved by NAME: ${leftProducts.length} file(s) the golden brand-checks are no longer in the list — ${leftProducts.join(", ") || "(none)"}; ${joinedProducts.length} file(s) this run reads were never recorded — ${joinedProducts.join(", ") || "(none)"}. A file that leaves this list is simply never opened again, so its brand claims stop being measured; movement either way is deliberate work and must be argued in the same commit as the re-record.`,
+    )
 }
 if (!Array.isArray(golden.docFiles) || golden.docFiles.join("\u0000") !== DOC_FILES.join("\u0000")) {
   problems.push(`doc-file scan set moved: the golden records ${JSON.stringify(golden.docFiles)} and this run reads ${JSON.stringify(DOC_FILES)} — a README that leaves this list stops being judged line by line, and only the tree-wide bloodline count would notice, which is the backstop this file's own history says cannot replace the named rule`)
@@ -786,6 +846,20 @@ if (!Number.isFinite(recordedOcc)) {
   problems.push(
     `lineage occurrences grew ${recordedOcc} → ${observed.lineage.occurrences} (bloodline names may shrink, never multiply)`,
   )
+} else if (observed.lineage.occurrences < recordedOcc && observed.lineage.filesScanned === golden.lineage?.filesScanned) {
+  // The direction this ratchet REWARDS is the one that needs the second look. The sum is
+  // taken over the tree with its comments left in — only the product-file rules strip them —
+  // so deleting an unrelated paragraph of upstream prose pays the drop without removing a
+  // single brand claim from a shipped surface. That is the failure shape this repository
+  // already names ("源码扫描把注释当缺陷 ⇒ 会被删注释换绿"), and the green run is what makes it
+  // dangerous: the number goes down and nothing about the product changed.
+  // A drop is therefore accepted when a file leaving the scanned tree explains it (and that
+  // path is judged by `coverageProblem` above, not here), or when the record carries the
+  // sentence naming what was removed. Anything else is a request for a note, not a pass.
+  if (!golden.lineageNote)
+    problems.push(
+      `lineage occurrences fell ${recordedOcc} → ${observed.lineage.occurrences} while the SAME ${observed.lineage.filesScanned} file(s) were scanned and the golden carries no \`lineageNote\` saying which bloodline name was removed — a drop paid by deleting prose is not brand work. Re-record with \`--lineage-note "<what left, and why>"\`, or restore the text that was cut for the wrong reason.`,
+    )
 }
 if (observed.lineage.filesScanned === 0) {
   console.error("brand-surface: scanned zero files — refusing to report success")
