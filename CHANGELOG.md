@@ -7,6 +7,113 @@
 （空。1.29.1 收口后没有未归号的条目——那一版是 2026-11-04 这一轮把 11-03 没走完的发布补完的，
 本版内容见上面 `## [1.29.1]` 里"本版还带上 2026-11-04 这一轮"那一节。）
 
+## [1.30.0] — 2026-11-05
+
+### 版本判断：minor
+
+判据沿用本仓自己写下那一条（1.6.2 条目）：patch 要求「状态文件的字段没动、退出码集合没动、
+CLI 参数没动、npm 包的 `bin` 声明没动」，动了其中任一项（含新增用户可见控制件）即 minor。本版动了：
+
+- **载荷字段**：`glasspaned --prune-evidence` 新增 `failed` / `failures`（删不掉的枚数与名字），
+  `--approval-verify` 新增 `ledgerPresent`（缺席与空表分得开），`observe` 回话新增
+  `depthLimit` / `unexpandedAtDepthLimit`（这一趟走到哪一档停了）。
+- **退出码语义**：同一个「这台机器没注册这个名字」的事实，从前在 `--active-project` 上是 1、
+  在 `--project-remove` 上是 3、在 `--prune-evidence`/`--evidence-stats --project` 上又是 1；
+  本版统一成 §12.3.1 早已给定的 3。**码的集合没变**（3 本来就可达），变的是两条命令对同一个
+  事实的回答——按 rc 分叉的脚本会读到不同的那一支，因此不能算 patch。
+- **用户可见面**：设置面板证据页新增一行「年龄闸读数（daemon）」（daemon 早就在
+  `--evidence-stats` 里发这一句，面板从前没读）；12 处按不动的控件把理由同时交给读屏。
+- **新错误码**：更新器 `state-root-conflict`（两枚在册同义旗标给出两个不同的根时当场拒绝）。
+
+### 本版合并了此前未发布的 main 内容
+
+`v1.29.1` 之后 main 上共 15 笔提交（量法：`git log --oneline v1.29.1..HEAD | wc -l`；其中带
+`[gp]` 前缀的是 harness 那条线的 6 笔，本轮这条线 9 笔）。发布归档 =
+被 tag 的树**减去 `harness/`**，所以 harness 那一堆不进本版的归档；`release-artifact` 那把尺子
+盯的是"已发布 harness tag 的树 == 主干 `harness/glasspane-harness` 子树"，本版的 CI 里那一格
+是否绿即那条等式是否成立（本轮未动 `harness/` 一个字节）。
+
+### 上一轮留在工作树里没提交的批次（候选 A/B/C/D/G/H/I/J/L 收口 + 各自的另一半）
+
+判据是文件字节而不是分支名或提交信息：那 19 改 6 新在 main 上没有任何对应提交（`specs/GlassPane_每日2026-11-04_发现台账.md`
+第 5 节把它们列成「未修候选」）。本轮把每一条**补齐到两面同答**才收：
+
+- 候选 B（P1，退出码）：两条命令改成 3 之后，`RegistryCliRefusalShapeTests` 里把旧号钉成契约
+  的两条断言是红的——那是同一件事的另一面。改成新契约并新增一条**跨命令同码**的闸：四条命令
+  对同一个未注册 id 必须同答 3，而表读不开那一档必须仍回 1（两档不许合流）。
+- 候选 D（P1，线字节）：上一轮改的是 `StreamLineIo`，生产路径真正构造的是
+  `ReconnectingSocketIo`——它的窄签名靠 TypeScript 的参数双变性合法通过类型检查，于是
+  `raw` 恒为 undefined，那句 "sha256 of the exact bytes this transport received" 仍是没兑现的
+  承诺。现在签名与转发都跟着 `LineIo`，并补一条走**完整生产链**的端到端。
+- 候选 G（P1，出路跑不通）：上一轮把 `redactHome` 铺进了 `RemedyCommand.quote(...)` 里面，
+  出路印成 `chmod 700 '~/.glasspane'`。单引号里的 `~` 不归 shell 展开——本机实测
+  `test -e '~'` 退 1、`test -e ~` 退 0，`ls -ld '~/.glasspane'` 报 No such file or directory。
+  这一条对**每一个用默认状态根的装机**都失败。现在分工写成判据：散文折 `~`，命令位带真路径
+  （与 `main.swift` 里 `--state-dir` 的既有约定同形），并由
+  `DailyRound20261105RemedyWordUsableTests` 用真 `/bin/bash` 量那个词开不开。
+  同一轮还查出那处折主目录**根本跑不到**（`listing()` 的兜底只在 `unreadableReport == nil` 时
+  走到，而 `loadFailed` 为真时它恒不为 nil），真源那时原样发出 `/Users/<账号>`；`NSError.description`
+  又把账号名写在句子**中间**，`hasPrefix` 那一支够不着，所以新增 `redactHomeWithin` /
+  `described(_:)` 并把四处失败描述出口改过去。
+- 候选 J（P1，锚点判据）：`slug()` 改成逐枚空格换 `-` 之后不凭记忆判对错，装了 GitHub 自己用的
+  `github-slugger@2.0.0` 实跑（`"License & attribution" -> license--attribution`、
+  `"安装 / Installation" -> 安装--installation`）——**改对了**，而它对完之后闸红了 16 条：
+  那 16 条是一直存在、被旧合并规则藏住的**真死链**。本仓中文 README 的 15 条目录锚点逐条改成
+  GitHub 真渲染的那一形；剩下的 1 条在 `harness/` 的门面文档里，见下面「归口」那一节。
+- 候选 L：两枚在册同义旗标同时给出、且值不一样时，从前 `??` 静默取一枚——而状态根是所有落点
+  相对的那一棵，读错根的下一步就是往另一套档案里写。现在要么一致、要么带码拒绝且零读写。
+  **同一行取值里还藏着一条 P1**：`??` 挡得住 `null`/`undefined`，挡不住**空串**，所以
+  `--state-dir "" --state-root <真的另一棵树>` 回的是默认根 `~/.glasspane`——那一趟以为在动
+  另一棵树，写的却是这台机器正在用的那一棵，连需要人确认的那道门都没经过。这条是本轮把上一轮
+  那份"点名不存在路径"的夹具换成真 `mkdtemp` 目录之后当场红出来的（上一份夹具里三条断言比的
+  是同一个回落值，所以它是绿的却没量任何东西）。
+- 候选 A / C / H / I 各自收口（面板 12 处 `accessibilityHint` 与目录扫描闸、更新器路径整体
+  引号、prune 的残渣上账且与 dry-run 共用同一判据、深度上限那一档不再被写成确定负例）。
+
+### 本轮复审交回的判定层缺陷（发现 15 / 修复 14 / 否证 1 / 未修 0）
+
+共同形状是**没量到的东西被写成量到了**。逐条回代码复核，成立 12 条、否证 1 条：
+
+| # | 严重度 | 位置 | 失效模式 | 修法 |
+|---|---|---|---|---|
+| R-11 | P1 | `EvidenceStore.read` + `EngineCore.resolvedPack` | 打不开／解不开／挂别人号三种情形都回 nil，`gp_last_evidence`/`diagnose` 把它们念成 `GP_E_NO_EVIDENCE`（"这台机器没有这一条的证据"）；列不出目录也被念成"档案是空的" | `readFailure` 记下理由；nil 且有理由时抛 `GP_E_INTERNAL` + 做得动的出路；真缺席那一档仍是 `GP_E_NO_EVIDENCE`（对照跑过） |
+| R-12 | P1 | `AXChannel.buildNode` + `observe` | 走到 `maxDepth` 那一档就停，交出的树与"这棵子树真是叶子"同形 | 回话新增 `depthLimit` / `unexpandedAtDepthLimit`（从已交回的树里数，不再问一次 AX） |
+| R-13 | P2 | `EngineCore.ownabilityDefect` | `.ownerAccountID` 缺席时 `?? -1` 既触发拒绝又打印 "owned by uid -1" | 读不出主人就说不出主人是谁，与相邻那一支同一规矩 |
+| R-15 | P2 | `EvidenceStore.removeExpired` | 删除失败被吃进 `(try? …) != nil`：dry-run 报 10、真跑删 7、CLI 报 `pruned: 7` 并退 0 | `pruneFailures`/`pruneFailureTotal` 点名；载荷加 `failed`/`failures`（与 `--project-prune` 同形）；部分成功退 1 |
+| R-10 | P3 | `ApprovalGate` + `--approval-verify` | "文件不在"与"文件里零条"交出逐字节相同的回话 | 新增核验那一刻量的 `ledgerPresent`；空链仍然合法，这一格只负责分开两件事 |
+| R-16 | P3 | `ProjectRegistry` | 上一轮的折主目录是死代码，真源原样发出账号名 | 见上面候选 G 那一节 |
+| R-17 | P3 | `RecipeLoader` | `acceptedParamKeys[method] ?? []` 把"这张表没covering它"念成"它一个键都不读"，运行期同一情形是直接返回 | 校验层跟着运行期；新增两个门面**逐方法同答**的对照 |
+| R-9 | P3 | `engine-client.ts` | 迟到回话那一支把 `JSON.stringify(frame.error)` 原样写进 stderr，与紧邻下面那句"正文不许写"当面矛盾 | 改用本文件已有的那把尺 `shortFieldValue` |
+| R-4 | P3 | `io.ts` | 背压导致 `write()` 返回 false 时不记 `dropped`，`gp_diagnose` 对一次没送达的回话报 `droppedFrames: 0` | 两条丢帧路径共用同一个计数器 |
+| R-5 | P3 | 两份扫描型夹具 | `deepEqual(offenders, [])` 没有地板，扫到空集合照样绿 | 补数到的条数并在失败话术里点名 |
+| R-2 | P1 | `project-registry.ts` + `tools.ts` | 11 处打印给 agent 的 daemon 命令带空格却没引号，照抄拿到三个词 | 整体双引号；`remedy-shell-quoting` 补静态操作数那一面（它从前只查带插值的字面量，所以这 11 处结构上看不见） |
+| R-1 | P1 | `installer/cli.js` | `verified` 只看退出码，不认签名用的是哪把钥匙；校验程序由被验那棵树选；分类靠会翻译的散文 | 钥匙必须点名且对上钉死的那枚，对不上是 `invalid`，读不出是 `unavailable`（失败即关）；钉 locale 与 `gpg.program`/`gpg.format` |
+| R-3 | P2 | `installer/cli.js` | 四处出路让用户跑 `git tag -v`，而那把钥匙只导进了一次性环、当场已删 | 四处共用一条 `isolatedVerifyCommand(...)`，测试里真跑对 `v1.29.1` 回 0 |
+| R-8 | P2 | `installer/cli.js` | `chmod`/`stat`/`openSync("a")` 跟着叶子链接走，`~/.glasspane` 的预置软链能让"已收成 0700"去替另一棵树作保 | `leafSymlinkDefect()` 三处共用 + `O_NOFOLLOW`；测试种真软链并断言根外那棵树模式与内容一字未动 |
+
+**否证的一条**（不算未修）：复审说 `EngineCore.projectGet` / `pruneEvidence` 会从读不开的表答
+"unknown projectId"。回代码复核不成立——两条都先过 `requireRegistry()`，它在 `loadFailed` 时
+已经拒绝，`get()` 拿不到那一次读。
+
+### 归口与它的收件人（不是"下一轮再看"）
+
+`harness/glasspane-harness/README.md` 那一处失效锚点（`#license-attribution`，GitHub 真渲染的是
+`license--attribution`）本仓改不得：`release-artifact` 钉着"已发布 fork tag 的树 == 主干子树"。
+处理方式不是把扫描集合缩小（试过，量过之后收回：`FORK_DOCS` 是有意登记 fork 门面的，扩到整体
+会顺手抹掉 48 张真表），而是新增一条**会自己过期**的归口通道 `DEFERRED_FINDINGS`：逐字整行匹配、
+每轮打印成一行 `△` 并带判据与收件人、那一行下次不再发生时闸反过来红并点名"删掉这条豁免"。
+收件人真实存在且会跑：发现连同测量与两种修法写进了 `tools/prompts/daily-glasspane-harness.md`，
+而那条线的提示词自己就写着"交给我修，不是列进汇报就完事"。
+
+### 两条一直坏着、没人发现的真机闸
+
+`engine/.panel_refusal_smoke.py` 在 `HEAD` 上就跑不起来（取文案的算式容不下注释行，而那句文案
+里有插值，整串永远进不了屏文比对）；`engine/.p4i4_smoke.py` 的 `build_helper()` 只看二进制在不
+在，于是辅助器被第一个跑它的人冻住，本轮新加的读数（控件的 `AXIdentifier` + `AXEnabled` +
+`AXHelp`）在旧缓存里根本不存在。两处都修了，本轮面板的真机读数（88 枚有标识的控件、2 枚按不动
+且**每一枚都给了理由**、4 枚 `AXEnabled` 读不到单独报出、`gp-daemon-age-retention` 在树上）
+是修好之后量到的。
+
 ## [1.29.1] — 2026-11-03
 
 ### 版本判断：patch
