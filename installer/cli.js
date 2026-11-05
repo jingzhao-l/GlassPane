@@ -108,7 +108,7 @@ export const INSTALL_SH_URL =
 /** 发布线锚点（版本真源 = 根 package.json，由 scripts/set-version.mjs 统一改写，
  *  勿手改）：npx 形态下本地没有仓库时，引导 clone 的就是这个 tag，与 install.sh
  *  的 `GLASSPANE_RELEASE` 同值——两条一键入口必须拿到同一份源码。 */
-export const RELEASE_VERSION = '1.30.0'
+export const RELEASE_VERSION = '1.31.0'
 /** 发布 ref（tag 名）。GLASSPANE_REF 环境变量可覆盖（追主干用 `main`）。 */
 export const REPO_REF = `v${RELEASE_VERSION}`
 
@@ -2772,7 +2772,7 @@ export function nextStepsText({
     '   口径提醒：daemon 必须由 launchd/登录项拉起，权限自报才等于真实席位；从终端或',
     '   GUI 手动起的实例会继承启动者 app 的判定（真机实测：同 bundle 两种起法读数不同）。',
     '3. daemon 已注册 launchd 开机自启（--no-launchd 可跳过）；维护命令：',
-    '   glasspaned --approval-audit / --approval-verify / --prune-evidence / --evidence-stats',
+    '   daemon 旗标：--approval-audit / --approval-verify / --prune-evidence / --evidence-stats',
     `   作业被 bootout（等授权期间常发生）后的恢复**不需要手敲 launchctl**：`,
     `   node ${quoteShellArg(path.join(rootDir, 'installer', 'cli.js'))} --restore-launchd`,
     `   （检测→bootstrap→hello 校验自报席位；勾完 TCC 框重跑即自动换进程复验）`,
@@ -2912,7 +2912,7 @@ export function installGuard({ home = '', uid = null } = {}) {
         // 改 `$HOME` 只挪得动命令行这一头，挪不动 daemon 与设置面板读的那一份——把一次性的
         // 变量覆盖写成正式补救，等于把这条裂缝制度化。所以这里只点名真正生效的开关。
         + '补救：状态根要用 `--state-dir <路径>` 点名（更新器 `node updater/cli.js … --state-dir <路径>`、'
-        + '后台服务 `glasspaned --state-dir <路径>` 都收这一面旗），或设 `GLASSPANE_STATE_DIR=<路径>`'
+        + '后台服务那一侧的 `--state-dir <路径>` 也收这一面旗），或设 `GLASSPANE_STATE_DIR=<路径>`'
         + '（更新器与 `glasspane` 这条命令都读它）。这两条是 daemon、面板、更新器一起认的那一个根，'
         + '它读的是**口令档案里的家目录**（`dscl . -read /Users/<账号> NFSHomeDirectory` 问的就是这一个）；'
         + '改 `$HOME` 不改变它们读到的状态根。'
@@ -2929,7 +2929,7 @@ export function installGuard({ home = '', uid = null } = {}) {
         + 'plist 里的 StandardOutPath 也是相对的，launchd 不会收。补救：本安装器自己拼的这几条路径读 $HOME，'
         + '所以在 $HOME 为绝对路径的那个登录 shell 里重跑同一条命令即可；状态根那一头不要靠 $HOME——它读口令档案，'
         + '改 $HOME 不改变 daemon 与设置面板读到的那一份。要指名状态根就用 `--state-dir <路径>`'
-        + '（`node updater/cli.js … --state-dir <路径>`、`glasspaned --state-dir <路径>`），'
+        + '（`node updater/cli.js … --state-dir <路径>`、后台服务的 `--state-dir <路径>`），'
         + '或 `GLASSPANE_STATE_DIR=<路径>`（更新器与 `glasspane` 这条命令读它）。',
     }
   }
@@ -3448,7 +3448,7 @@ export function installVerification({
   if (!builtVersion) {
     return {
       verified: false,
-      note: '读不出本轮构建产物的版本（`glasspaned --version` 没给出可解析的一行），'
+      note: '读不出本轮构建产物的版本（刚构建出来的 daemon 可执行文件答 `--version` 没给出可解析的一行），'
         + '所以无法证明应答 hello 的那一份就是本轮构建——本次不算校验通过。',
     }
   }
@@ -3559,7 +3559,7 @@ export function verificationFailureText({
       `本命令退出码 ${exitCode}：install.sh 与调用它的脚本/agent 按安装失败处理，先别接 MCP。`,
       '补救：在交互终端重跑本命令，并对"将用本轮产物覆盖已存在的 .app"回答继续；'
         + '脚本/自动化里显式加 --no-prompt。（--restore-launchd 修的是作业注册，不覆盖 bundle，这条用不上。）',
-      `对照口径：本轮构建产物自己报的版本取自 ${daemonLog} 同一次安装的 glasspaned --version；装上盘才算数。`,
+      `对照口径：本轮构建产物自己报的版本取自 ${daemonLog} 同一次安装的 daemon \`--version\` 读数；装上盘才算数。`,
     ].join('\n')
   }
   return [

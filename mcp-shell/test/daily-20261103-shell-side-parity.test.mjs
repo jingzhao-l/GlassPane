@@ -89,7 +89,10 @@ test("gp_project_set 的对外上界读的是 registry 的常量，不是重抄�
 /* --------------------------------------- 4. remedy 里的命令必须真的跑得动 */
 
 test("remedy 不许把 daemon 写成裸名：裸名走的是这个读者控制不了的 PATH", () => {
-  const files = ["project-registry.ts", "tools.ts", "update-state.ts", "engine-client.ts"];
+  // 扫描集从目录读，不抄名单：这份名单从前是四个文件名，`http-gateway.ts` 就在同一只目录下
+  // 却从来不在闸里（2026-11-05 记账；跨三面的完整遍历见 `daily-20261105-bare-daemon-command-scan.test.mjs`）。
+  const files = fs.readdirSync(SRC).filter((name) => name.endsWith(".ts")).sort();
+  assert.ok(files.length >= 10, `src 目录只读出 ${files.length} 份文件——这条闸在空转，不是在守规矩`);
   const bare = [];
   for (const name of files) {
     const source = read(name);
