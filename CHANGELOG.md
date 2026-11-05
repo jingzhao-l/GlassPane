@@ -8,6 +8,69 @@
 （draft=false、target=`070d6ddf`、4 件资产、`.asc` 由钉死的 `0929EA31…` 签出）、registry 两个裸名包
 都读 1.30.0，所以本轮没有留下未归号的内容。）
 
+## [1.31.0] — 2026-11-05
+
+**版本判断：minor。** 判据还是 1.6.2 写下、此后每一号各自复述过的那一条。本版触碰了两条：
+`--check-developer-tools` 的**退出码多出一档**（5 = 这一趟没量到，从前它和"系统拒绝"共用 1），
+以及它的 JSON **载荷新增三个字段**（`verdict` / `verdictStates` / `next`）。老读码方不受影响
+（非零仍读作"这一席没成"），但按 1.6.2 那句话，动了载荷字段与退出码语义就不是 patch。
+
+**本版不合并任何未发布号**：`v1.30.0` 已发（tag、GitHub Release 非草稿、registry 两包同读
+1.30.0），已发布的 tag 一律不动，所以本轮 5 条另取一号。
+
+### 本轮 5 条发现全部修完（发现 5 / 修复 5 / 未修 0）
+
+台账：`specs/GlassPane_每日2026-11-05_第二条会话_发现台账.md`。
+
+1. **P1 `--check-developer-tools` 把一次没跑成的探测答成"这一席被拒"**（`main.swift:1222`、
+   `DebugCapabilityProbe.swift:276`）。这份报文只有一个 `granted` 布尔，而 `Snapshot.granted`
+   在**两件不同的事**上都回 false：系统明确拒绝（`.denied`）与这一趟压根没量到（`.timeout` /
+   `.spawnFailed`——工具链不在位、lldb 那一臂没答）。退出码 `granted ? 0 : 1` 把两件事折成
+   一个号，而 note 那句"granted=false 的唯一人工步骤是系统设置勾选"给一次没发生的测量指派了
+   一个人工步骤——同族的 `--check-input-permission` / `--check-accessibility` 早就按"判决在
+   打印的那个词里、码只说测没测"办（`DaemonPermissionVocabularyTests` 钉着），这一位是那一族里
+   唯一还在用布尔答判决的。修：三档词表 `granted|denied|unmeasured` 进 payload，下一步随档位走
+   （unmeasured 指 `xcrun --find lldb` / `xcode-select --install`，不指勾选），退出码 0/1/5
+   各自一档，`--help` 的 EXIT CODES 那一格补上 5。测试
+   `DailyRound20261105DeveloperToolsVerdictTests`（5 条，含"两臂各报各自状态"与"码分三档"的
+   源码对照）；反向：把 `verdict` 折回布尔、或把那一支改回 `granted ? 0 : 1`，具名用例红。
+2. **P2 裸 daemon 命令的扫描集是手抄名单**（`mcp-shell/test/daily-20261103-shell-side-parity.test.mjs:92`）。
+   那条纪律读的四个文件名全在 `mcp-shell/src` 里，同目录的 `http-gateway.ts` 从来没被它扫过，
+   `installer/`、`updater/`、`engine/Sources/` 三面则根本不在它的视野里——这是本仓第六次
+   "名单永远少下一枚"（前五次：`SHELL_ONLY`、面 A keep-list、残渣闸的 heredoc 名单、
+   引号闸的动词表、`REQUIRED_IN_ARCHIVE` 的那份抄件）。实测余下 5 处 `glasspaned --…` 在装机
+   引导文案里（`installer/cli.js` 的 2775/2915/2932/3451/3562），`command -v glasspaned` 本机
+   实测无输出、也没有任何包声明这个 `bin`，照抄即 127。修：扫描集改为目录遍历
+   （`mcp-shell/src`、`engine/Sources`、`installer`、`updater`、`scripts`、`tools`、`install.sh`），
+   唯一豁免是 daemon 自己的用法提纲（`printUsage()` 里那段 `let usage = """`），且**豁免吃掉的
+   行数由闸自己打出来**（掉到 0 就说明提纲搬家而豁免还在）；5 处站点按"命名程序而不是给出跑不动
+   的命令"改写；那条老闸的名单也换成 `readdirSync`。测试
+   `mcp-shell/test/daily-20261105-bare-daemon-command-scan.test.mjs`（3 条，含"同一句话搬进代码段
+   就要被抓"的非空转对照，以及"老闸不许再用手抄名单"）。
+3. **P2 签名身份闸会被自己打断**（`tools/release-signing-gate.sh:171`）。
+   `gpg --list-keys | awk '$1=="fpr"{print $10; exit}'` 站在本脚本自己的 `set -euo pipefail`
+   上：awk 读到第一枚指纹就退，gpg 被 SIGPIPE 打死退 141，整段在**它该打印 `::error::` 之前**
+   终止——被削弱的是"哪把 key 签的 vs 钉的是哪把"那一句，而不是判决本身。这条形状
+   `check-workflows.mjs` 的 2e 早就命名过并建了闸，但 2e 只扫 workflow 内联 run 体，
+   `bash tools/…` 委托出去的文件在它视野外。修：改为先落盘再 `awk … < 文件`（没有写者就没有
+   可被打断的管道）；并把判据铺到委托脚本上。
+4. **P2 测试计数闸吃的日志清单是另一份手抄**（`.github/workflows/ci.yml:51/56/62`）。
+   同一条 swift job 里 `swift test … | tee /tmp/gp-*.log` 各写自己的目标，下一步
+   `assert-test-count.mjs swift 1 <文件…>` 的 argv 是另抄的一份；`assert-test-count.mjs` 只对
+   交给它的文件负责，所以第三条 `tee` 一旦出现（或某枚被摘掉）那一格用例就永远不进计数闸而 CI
+   照绿。修：新闸读 ci.yml 自己核对两侧集合相等（并有非空转下限：tee 少于 2 处、argv 少于 2 个
+   都直接红）。
+5. **P3 发布链工作流的注释里是残句**（`.github/workflows/ci.yml:632-641`）。
+   "本文件 32 行那两条都是 ）" / "从前这里钉死 ，" / "而 / 要的就是 ci.yml 在被 tag 那笔 sha 上
+   success" —— 名词被一次写入事故吃掉，留下的句子没有主语也没有对象。这是 11-01 那条 #30
+   （命令文本漏进文档）的同一族，只是落在 `.github/workflows/*.yml`：`check-doc-links` 的残渣与
+   表格判据只扫 markdown，`check-workflows` 解析结构并明确跳过 `#` 行，所以没有任何一层看得见
+   它。修：按可核事实改写（第 32 行那条 `runs-on:`、GitHub 已排定 2026-11-02 退役的 macOS 14
+   镜像、`scripts/assert-tag-ready.mjs` 才是那句"要 success"的主语、`../../../product.json`
+   补回被吞的那对反引号）。
+
+**没有新增对外能力**：本版 5 条都在既有形状里，`gp_*` 工具数目、发布平台矩阵、产品定位一个字没动。
+
 ## [1.30.0] — 2026-11-05
 
 ### 版本判断：minor
