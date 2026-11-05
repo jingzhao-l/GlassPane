@@ -36,14 +36,26 @@ function offendersOf(text) {
   return [...executableSource(text).matchAll(BARE_DAEMON_COMMAND)].map((match) => match[2]);
 }
 
+/** daemon 命令位（裸名或带位置的写法都算）：这条闸"看见了几个位置"的空转下界用它说话。 */
+const DAEMON_COMMAND_POSITION = /glasspaned(?:\\?["'])?\s+--/g;
+
 test("no caller-facing string in src runs the daemon by a bare name", () => {
   const offenders = [];
+  let positions = 0;
   for (const name of files()) {
     const text = fs.readFileSync(path.join(SRC, name), "utf8");
+    const code = executableSource(text);
     for (const flag of offendersOf(text)) {
       offenders.push(`${name}: glasspaned --${flag}`);
     }
+    // 空转下界（2026-11-05，风格同 remedy-shell-quoting 末尾的具名 floor）：`deepEqual(offenders, [])`
+    // 在"一个文件都没扫、一处命令位都没看见"时同样绿。扫描集一旦塌掉，这里必须先红。
+    positions += (code.match(DAEMON_COMMAND_POSITION) ?? []).length;
   }
+  assert.ok(files().length >= 8,
+    `src 只扫到 ${files().length} 个 .ts——文件列表塌了，裸名闸正在对着空集点头`);
+  assert.ok(positions >= 8,
+    `daemon 命令位只看见 ${positions} 处（本轮引号修完后实数 12）：扫描集空了，offenders 为空不再说明任何事`);
   assert.deepEqual(offenders, [],
     `这些出路把 daemon 写成裸名，而它不在 PATH 上（照抄得到 127）：${offenders.join(" | ")}`);
 });

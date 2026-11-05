@@ -62,7 +62,14 @@ test('every array schema the shipped shell validates carries an upper bound (GHS
 
 test('every array in the pinned kernel corpus declares maxItems outside branch overrides', () => {
   assert.ok(fs.existsSync(KERNEL_SCHEMAS), `no kernel corpus at ${KERNEL_SCHEMAS}`);
+  // 空转下界（2026-11-05）：这一条从前在"目录里一个 .json 都没列出、一个数组节点都没走到"时
+  // 照样绿——`deepEqual(offenders, [])` 对空集恒真。扫描集塌掉（文件改名、语料被搬走）必须先
+  // 在这里红，而不是伪装成"语料全都有界"。两个数都是本轮实量：8 份 schema、10 个数组节点。
+  const schemaFiles = listFiles(KERNEL_SCHEMAS, (name) => name.endsWith('.json'));
+  assert.ok(schemaFiles.length >= 8,
+    `kernel/schemas 只列出 ${schemaFiles.length} 份 .json（本轮实数 8）：语料塌了，下面那条判据就是在对空集点头`);
   const offenders = [];
+  let arrayNodes = 0;
   const walk = (node, at, file) => {
     if (Array.isArray(node)) {
       node.forEach((child, i) => walk(child, `${at}[${i}]`, file));
@@ -70,8 +77,11 @@ test('every array in the pinned kernel corpus declares maxItems outside branch o
     }
     if (node === null || typeof node !== 'object') return;
     const isArraySchema = node.type === 'array' || node.items !== undefined || node.minItems !== undefined;
-    if (isArraySchema && typeof node.maxItems !== 'number') {
-      offenders.push(`${file} at ${at || '$'} — array without maxItems`);
+    if (isArraySchema) {
+      arrayNodes += 1;
+      if (typeof node.maxItems !== 'number') {
+        offenders.push(`${file} at ${at || '$'} — array without maxItems`);
+      }
     }
     for (const [key, value] of Object.entries(node)) {
       if (BRANCH_KEYS.has(key)) {
@@ -90,9 +100,11 @@ test('every array in the pinned kernel corpus declares maxItems outside branch o
       walk(value, at ? `${at}/${key}` : key, file);
     }
   };
-  for (const file of listFiles(KERNEL_SCHEMAS, (name) => name.endsWith('.json'))) {
+  for (const file of schemaFiles) {
     walk(JSON.parse(fs.readFileSync(file, 'utf8')), '', path.relative(repoRoot, file));
   }
+  assert.ok(arrayNodes >= 5,
+    `整个语料只走到 ${arrayNodes} 个数组 schema 节点（本轮实数 10）：判据在对空集放行`);
   assert.deepEqual(
     offenders,
     [],

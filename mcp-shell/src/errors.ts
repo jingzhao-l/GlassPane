@@ -172,6 +172,22 @@ export function formatToolErrorShape(error: ToolErrorText): string {
 }
 
 /**
+ * 一道 `GP_E_BAD_PARAMS` 的出路，两个门面共用同一句话（候选 E，2026-11-05）。
+ *
+ * 缺陷形状：zod 校验失败时，stdio 那一侧写的是 `check the tool's input schema; <issues>`，
+ * 而 HTTP 那一侧（`http-gateway.ts` 的 `spec.validate` 失败支）把 `<issues>` **裸着**当成整条
+ * remedy 发出去。zod 的原话是对模式失败的描述（"Invalid input: expected string, received
+ * number at …"），不是一条做得动的动作——curl 的调用方拿到的是一个对问题的复述，而不是下一步。
+ * 本仓对 remedy 的口径一直是"agent 照着敲就得做得动"，而这条口径不能只在一道门上成立。
+ *
+ * 放在 `errors.ts` 而不是任一门面的文件里：这一层住的就是"对外怎么措辞"，两个门面都从这里取
+ * （`tools.ts` 与 `http-gateway.ts` 都已 import 本文件），抄第二份就又是一条事实两种拼写。
+ */
+export function badParamsRemedy(issues: string): string {
+  return `check the tool's input schema; ${issues}`;
+}
+
+/**
  * Quote one value for the backticked command an error frame tells the agent to run.
  *
  * This is not a cosmetic concern: the product's own rule is that a remedy is *a command

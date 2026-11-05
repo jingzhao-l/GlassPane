@@ -573,7 +573,11 @@ test("the shell-override notice keeps the stray write apart from the state-dir c
     const notice = daemonRestartNotice(reg.filePath);
     assert.match(notice, new RegExp(`${PROJECTS_FILE_ENV}[^.]*is honoured by this MCP shell only`));
     assert.match(notice, /its default root/, "the home-derived file is the default, not the only root");
-    assert.match(notice, /glasspaned --state-dir <root>/, `第二个根必须在文案里：${notice}`);
+    // 2026-11-05：出路里那一枚 daemon 程序路径现在带双引号（`"$HOME/Applications/GlassPane
+    // Daemon.app/…/glasspaned"`），因为那一段里有空格，不引号就被 shell 劈成两个词。断言跟着
+    // 改的是**引号那一枚字符**，`glasspaned` 与 `--state-dir <root>` 之间的紧邻关系一位没放宽：
+    // 把引号去掉、或在两者之间塞进别的词，这一条照样红。
+    assert.match(notice, /glasspaned"?\s+--state-dir <root>/, `第二个根必须在文案里：${notice}`);
     assert.ok(notice.includes(reg.filePath), "it names the file that was written");
     // The way out of the stray write stays spelled out, and the case where no
     // job exists at all remains the installer's call rather than a guess.

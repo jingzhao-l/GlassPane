@@ -21,10 +21,36 @@
  *    no test on this machine can reach (a read-only volume's `chmod`, an `fsync` failure's
  *    `ls -lO`) is covered by the same rule rather than by remembering to check it.
  *
+ * 2026-11-05 本轮的两段（都是**这一半源码扫描**的缺陷，行为半边不动）：
+ *
+ * ① 静态那半边（缺陷二）。旧闸里 `if (!literal.includes("${")) continue;` 只把**带插值的**
+ *    命令字面量送进词解析；一条**静态**的、含空格的 bundle 路径（`$HOME/Applications/
+ *    GlassPane Daemon.app/Contents/MacOS/glasspaned`）于是从来没被交给拆词器，代理照抄得到
+ *    argv[0]="...GlassPane"，命令根本跑不起来（本轮实测 src 里 11 处）。新增的
+ *    `scanStaticOperands` 按行读原始文本（行首注释滤掉、行内残渣交给 executableSource），
+ *    反引号成对先认转义对内层、再认掩蔽后的外层，判据是**可判定的那一形**：一个裸词含有
+ *    `.app/`、且前一词落在路径尾巴上——空格把 bundle 劈开了。修法形状是双引号包住整段路径、
+ *    保留 `$HOME` 展开，所以静态这半的双引号段按"作者的静态展开"放行（"双引号不惰性"讲的是
+ *    会带调用方值的洞；一段没有洞的文字里，`$` 只能是作者自己写下的那枚 `$HOME`）。
+ *    两个独立操作数（`mv /tmp/a b/c`）在文本上与"断开的操作数"不可区分，这条闸不越界去猜——
+ *    bundle 那一形是判定得到的全部。REVERSE：把 src 任一处引号撤掉 ⇒ 本文件具名那处 file:line。
+ *
+ * ② 比较句不是命令（缺陷三）。`updater/cli.js` 的拒绝句
+ *    `--state-dir /a and --state-root /b name two different roots` 是**说两枚旗标不相等**的
+ *    散文：选项左边没有命令词，印出来的文本里也没有反引号——行为半边（反引号是命令边界）
+ *    从不把它当命令，源码这半却按"选项紧贴洞"的形状判据把它读成了参数位并要它加引号。
+ *    错的是闸，不是 updater：给比较句加引号等于向读者展示一条他并不执行的命令，而那条句子
+ *    根本没有照抄位。修法只关掉**形状**那一半对"以选项开头的字面量"的适用；动词名单、
+ *    赋值位、选项后置位照常判定，文末的具名 floor（inspected 的各半）与
+ *    "the scanner bites"对照（比较句静默、`glasspaned --state-dir ${dir}` 仍被具名）证明
+ *    这一刀不是把闸看瞎。
+ *
  * MUTATION THIS PINS: drop a `quoteShellArg(...)` at any of those sites and the source
  * gate names it; make the helper double-quote (or delete it and interpolate raw) and the
  * behavioural half goes red on the hostile path, with the injected word appearing as a
- * separate shell word.
+ * separate shell word; un-quote the bundle path at any of the 11 printed sites (or re-shape
+ * the refusal sentence into a command) and the static half / the leading-flag carve-out
+ * names it — both directions are measured, not asserted.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -455,8 +481,17 @@ const COMMAND_VERB_PREFIX = new RegExp(
 /** 参数位紧邻一枚选项：`git -C <洞>`、`node <洞> --restore-launchd`。 */
 const OPTION_BEFORE = /(?:^|[\s"'([{])-{1,2}[A-Za-z][\w-]*(?:[ \t]+[\w-]+)*[ \t]*["']?$/;
 const OPTION_AFTER = /^[^\n]{0,40}[ \t"']-{1,2}[A-Za-z]/;
-const COMMAND_PREFIX = (before, after) =>
-  COMMAND_VERB_PREFIX.test(before) || (OPTION_BEFORE.test(before) && !/[\w-]{17,}$/.test(before)) || OPTION_AFTER.test(after);
+/**
+ * 字面量以一枚选项**开头**：那一串选项是在点名旗标，不是在下一道命令（2026-11-05 缺陷三：
+ * `updater/cli.js` 的 `--state-dir ${dir} and --state-root ${root} name two different roots`
+ * 是比较句，行为半边从不把它当命令，形状判据也不许当）。只关掉 OPTION_* 这半；动词名单与
+ * 赋值位照常——见文末对照里"比较句静默、命令形仍具名"那一对。
+ */
+const LEADING_OPTION = /^\s*-{1,2}[A-Za-z]/;
+const COMMAND_PREFIX = (before, after, body) =>
+  COMMAND_VERB_PREFIX.test(before)
+  || (!LEADING_OPTION.test(body)
+    && ((OPTION_BEFORE.test(before) && !/[\w-]{17,}$/.test(before)) || OPTION_AFTER.test(after)));
 
 const ANY_HOLE = /\$\{([^{}]*)\}/g;
 /** An interpolation whose name says it carries a filesystem location. */
@@ -465,14 +500,18 @@ const ANY_HOLE = /\$\{([^{}]*)\}/g;
 // 它和目录名一样是 shell 文本，不是参数值。2026-11-04 那两处注入之一就是从这里漏的。
 const PATH_TYPED = /(?:path|Path|dir|Dir|file|File|root|Root|target|Target|cli|Script|directory|remote|Remote)/;
 
-test("every interpolated value inside a command-shaped literal in src and updater goes through the quoting helper", () => {
+/**
+ * 插值那一半：带洞的命令字面量里，坐在参数位上的洞必须走引号助手。
+ * `where` 是"哪一半扫描集/哪个文件"的名字，offender 条目原样带上它。
+ */
+function scanInterpolatedOperands(where, source) {
   const offenders = [];
   const inspected = [];
-  for (const target of SCAN_TARGETS) {
-    for (const name of fs.readdirSync(target.dir).filter((entry) => entry.endsWith(target.ext))) {
-      const source = executableSource(fs.readFileSync(path.join(target.dir, name), "utf8"));
-      for (const match of source.matchAll(/`(?:[^`\\]|\\.)*`/g)) {
+  for (const match of source.matchAll(/`(?:[^`\\]|\\.)*`/g)) {
         const literal = match[0];
+        // 静态那半边不在这里——看不见没洞的字面量正是 2026-11-05 缺陷二（src 里 11 处印出来的
+        // bundle 路径从没进过拆词器）。行级判据在 `scanStaticOperands`；这个 `continue` 现在
+        // 只对插值洞负责，不再决定这条闸能看见什么。
         if (!literal.includes("${")) continue;
         const body = literal.slice(1, literal.length - 1);
         // 第二半的结构判据（不是词表）：一条**待照抄的命令**在这个仓库里总是带着至少一枚选项
@@ -500,7 +539,7 @@ test("every interpolated value inside a command-shaped literal in src and update
     && !(/^[A-Za-z_][A-Za-z0-9_]*=(?:"|')?$/.test(body.slice(0, hole.index).trim())
          && body.slice(hole.index + hole[0].length).trim() === "");
   if (!assignmentShaped && /[\p{Script=Han}]/u.test(before)) continue;
-  if (!assignmentShaped && !COMMAND_PREFIX(before, after)) continue;
+  if (!assignmentShaped && !COMMAND_PREFIX(before, after, body)) continue;
           // 选项必须**紧挨着这一枚参数位**——在它前面那一段里，或者紧跟其后（`node "${cli}"
           // --restore-launchd` 就是后者）。整条字面量里"出现过一根横杠"不算：
           // `nothing installed at ${appsDir} reports a version (no .app bundle …)` 那句是散文，
@@ -515,13 +554,116 @@ test("every interpolated value inside a command-shaped literal in src and update
           // 是同一规则的两份可执行体，规则本身由本文件的行为半边钉死）；判据只看名字，
           // 所以 `quoteShellArg(` 前缀对两种语言同样放行。
           if (expression.startsWith("quoteShellArg(") || ALREADY_QUOTED_PRODUCERS.has(expression)) continue;
-          offenders.push(`${target.label}/${name}: ${JSON.stringify(expression)} 坐在命令 ${JSON.stringify(literal.slice(0, 90))} 的参数位上，却没走引号助手`);
+          offenders.push(`${where}: ${JSON.stringify(expression)} 坐在命令 ${JSON.stringify(literal.slice(0, 90))} 的参数位上，却没走引号助手`);
         }
-        if (sawOperand) inspected.push(`${target.label}/${name}: ${literal.slice(0, 90)}`);
+        if (sawOperand) inspected.push(`${where}: ${literal.slice(0, 90)}`);
+  }
+  return { offenders, inspected };
+}
+
+/** 静态命令词按 shell 词切开：被引号包住的整段算一枚词，其余按空白。不抛错——这里只找"劈开"。 */
+function staticShellWords(text) {
+  const words = [];
+  let current = null;
+  let quoted = false;
+  let i = 0;
+  const flush = () => {
+    if (current !== null && current !== "") words.push({ text: current, quoted });
+    current = null;
+    quoted = false;
+  };
+  while (i < text.length) {
+    const c = text[i];
+    if (c === " " || c === "\t") {
+      flush();
+      i += 1;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      if (current === null) current = "";
+      quoted = true;
+      i += 1;
+      while (i < text.length && text[i] !== c) {
+        current += text[i];
+        i += 1;
       }
+      i += 1;
+      continue;
+    }
+    if (current === null) current = "";
+    current += c;
+    i += 1;
+  }
+  flush();
+  return words;
+}
+
+/**
+ * 可判定的那一形：一枚**裸词**带着 `.app/` 的 bundle 尾巴、坐在另一枚含 `/` 的词后面——
+ * 空格劈开的是一段路径，不是两个操作数。双引号里的那枚 `$HOME` 是作者自己写下的展开，
+ * 这一段文字没有洞、没有调用方能塞东西进来的位置，所以包成一个词就作数（行为半边讲的
+ * "双引号不惰性"针对的是会带值的插值，不是静态文字）。两个独立操作数（`mv /tmp/a b/c`）
+ * 在文本上与"被劈开的一段"不可区分，判据不越界去猜——bundle 那一形是判定的全部。
+ */
+function bundleSplitsOf(span) {
+  const splits = [];
+  const words = staticShellWords(span);
+  for (let index = 1; index < words.length; index += 1) {
+    const prev = words[index - 1];
+    const cur = words[index];
+    if (cur.quoted || !cur.text.includes(".app/")) continue;
+    if (/^(?:[-/<$(~[])/.test(cur.text)) continue;
+    if (!prev.text.includes("/")) continue;
+    splits.push(`${prev.text} ${cur.text}`);
+  }
+  return splits;
+}
+
+/**
+ * 静态那一半（2026-11-05 缺陷二）：按**行**读原始文本，行号就是文件行号——撤掉引号的出路
+ * 必须被点名到 file:line，否则修的人还得自己对一遍十一处。行首注释滤掉、行内残渣交给
+ * executableSource，与裸名闸（daily-20261104-bare-daemon-name）同一口径：散文不许点燃闸。
+ * 转义对内层先认（那是印给读者的反引号边界），掩掉之后再认外层成对——从左到右统一配对
+ * 会把内层词挪出视野（本轮实测：2480/316 两行的内层 pair 会被外层反引号挤错奇偶）。
+ */
+function scanStaticOperands(where, rawText) {
+  const offenders = [];
+  const inspected = [];
+  rawText.split("\n").forEach((line, index) => {
+    if (/^\s*(\/\/|\*|\/\*)/.test(line)) return;
+    const code = executableSource(line);
+    const spans = [];
+    for (const match of code.matchAll(/\\`([^`\n]*?)\\`/g)) spans.push(match[1]);
+    const masked = code.replace(/\\`[^`\n]*?\\`/g, "@@SPAN@@").replace(/\\"/g, '"');
+    for (const match of masked.matchAll(/`([^`\n]*?)`/g)) spans.push(match[1]);
+    spans.forEach((span, spanIndex) => {
+      const at = `${where}:${index + 1}#${spanIndex + 1}`;
+      if (span.includes(".app/")) inspected.push(`${at}: ${span.slice(0, 90)}`);
+      for (const split of bundleSplitsOf(span)) {
+        offenders.push(`${at}: 未加引号的空格把 bundle 路径劈成 ${JSON.stringify(split)}，照抄的命令词不再是可执行文件 — ${span.slice(0, 90)}`);
+      }
+    });
+  });
+  return { offenders, inspected };
+}
+
+test("every interpolated value inside a command-shaped literal in src and updater goes through the quoting helper", () => {
+  const offenders = [];
+  const inspected = [];
+  const staticInspected = [];
+  for (const target of SCAN_TARGETS) {
+    for (const name of fs.readdirSync(target.dir).filter((entry) => entry.endsWith(target.ext))) {
+      const rawText = fs.readFileSync(path.join(target.dir, name), "utf8");
+      const where = `${target.label}/${name}`;
+      const interpolation = scanInterpolatedOperands(where, executableSource(rawText));
+      offenders.push(...interpolation.offenders);
+      inspected.push(...interpolation.inspected);
+      const staticHalf = scanStaticOperands(where, rawText);
+      offenders.push(...staticHalf.offenders);
+      staticInspected.push(...staticHalf.inspected);
     }
   }
-  assert.deepEqual(offenders, [], `这些命令位上的路径没有过引号助手，代理照着执行时会被 shell 重排：${offenders.join(" | ")}`);
+  assert.deepEqual(offenders, [], `这些命令位上的值没有过引号助手、或 bundle 路径被未加引号的空格劈开，代理照着执行时会被 shell 重排：${offenders.join(" | ")}`);
   // Vacuity: the scan must actually be looking at the sites this fix converted, or a
   // refactor that moves the commands into another shape would silently retire the gate.
   assert.ok(inspected.length >= 4,
@@ -566,4 +708,35 @@ test("every interpolated value inside a command-shaped literal in src and update
     `installer 的 git -C 出路不在扫描结果里（动词形状没生效）：${installerInspected.join(" | ")}`);
   assert.ok(installerInspected.some((entry) => entry.includes("--accept-unverified-signature")),
     "installer 的 --accept-unverified-signature 出路不在扫描结果里");
+  // 静态那一半的空转对照（style 同上 527 行的 floor）：本轮修掉的 11 处印出来的 bundle 命令词
+  // 必须**仍在闸的视野里**——修法把它们引好之后，闸不是"没东西可报"，而是"看见了、判过、放行"。
+  assert.ok(staticInspected.length >= 11,
+    `静态那半边只扫到 ${staticInspected.length} 处 bundle 命令词，2026-11-05 的十一处印出位已不在闸的视野里：${staticInspected.join(" | ")}`);
+  assert.ok(staticInspected.filter((entry) => entry.startsWith("src/project-registry.ts")).length >= 5
+    && staticInspected.filter((entry) => entry.startsWith("src/tools.ts")).length >= 5,
+    `daemon 的 bundle 命令词必须两份文件都在视野里：${staticInspected.join(" | ")}`);
+});
+
+test("the two halves bite: a split bundle word is named with file:line, a comparison sentence is not", () => {
+  // 反向对照，两半各一对——缺了它们，上面那条 floor 只需要"扫到东西"，不需要"咬得住缺陷形"。
+  // 静态半边（缺陷二的 REVERSE）：撤掉引号就是本轮修掉的那一形，必须被点名到 file:line。
+  const bad = 'const notice = "start it as `$HOME/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned --state-dir <root>` first";';
+  const badScan = scanStaticOperands("synthetic/bad.ts", bad);
+  assert.equal(badScan.offenders.length, 1, `劈开的 bundle 词必须被具名一次：${JSON.stringify(badScan.offenders)}`);
+  assert.ok(badScan.offenders[0].includes("synthetic/bad.ts:1"), `offender 要报出文件与行号：${badScan.offenders[0]}`);
+  // 修好的形态：静默，但仍在 inspected 里——"不再报"与"看不见"是两件事。
+  const fixed = 'const notice = "start it as `\\"$HOME/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned\\" --state-dir <root>` first";';
+  const fixedScan = scanStaticOperands("synthetic/fixed.ts", fixed);
+  assert.deepEqual(fixedScan.offenders, [], "整段引起来的路径是一个词，不许再被报成劈开");
+  assert.ok(fixedScan.inspected.length >= 1, "修好的形态必须留在闸的视野里，否则 floor 是空转");
+  // 不可判形不越界：两个独立操作数在文本上与"被劈开的一段"无法区分，要求引号是不可能的事。
+  const operands = "run `mv /tmp/one /tmp/two.app/Contents` once";
+  assert.deepEqual(bundleSplitsOf(operands), [], "两个独立操作数被误判成劈开的 bundle，下一条出路就是有人把闸改松");
+  // 洞半边（缺陷三的 REVERSE）：以旗标开头的比较句不是命令；同一对旗标坐在真命令词后面仍必须被具名。
+  const prose = "const refusal = `--state-dir ${dir} and --state-root ${root} name two different roots. These two flags are documented synonyms`;\n";
+  const proseScan = scanInterpolatedOperands("synthetic/prose.js", prose);
+  assert.deepEqual(proseScan.offenders, [], `比较句被读成了命令位（缺陷三那一红）：${proseScan.offenders.join(" | ")}`);
+  const command = "fail(`glasspaned --state-dir ${dir} --permissions`);";
+  const commandScan = scanInterpolatedOperands("synthetic/command.js", command);
+  assert.equal(commandScan.offenders.length, 1, `真命令位上的裸 ${"${dir}"} 必须仍然被具名——这一刀不许把闸看瞎：${JSON.stringify(commandScan.offenders)}`);
 });

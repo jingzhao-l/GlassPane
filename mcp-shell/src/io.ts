@@ -341,7 +341,10 @@ export class StreamLineIo implements LineIo {
     return this.output.writableLength;
   }
 
-  onMessage(handler: (line: string) => void): void {
+  // 注册侧的签名从前只收 `(line)`，而 `LineIo` 接口与内部 `messageHandler` 都带 `raw`：
+  // 于是 #16 那句"sha256 of the exact bytes this transport received"在 socket 这一路永远是
+  // 拿不到真字节的那一支（2026-11-04 候选 D）。签名与实际传的东西必须一致。
+  onMessage(handler: (line: string, raw?: Buffer) => void): void {
     this.messageHandler = handler;
   }
 

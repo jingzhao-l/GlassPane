@@ -1186,7 +1186,7 @@ export class EngineJsonRpcClient {
      */
     private readonly expectedDaemonMethods: readonly string[] = [],
   ) {
-    this.io.onMessage((line) => this.handleMessage(line));
+    this.io.onMessage((line, raw) => this.handleMessage(line, raw));
     this.io.onError((error) => {
       if (error instanceof OversizeFrameError) {
         // One frame was dropped; the connection is fine and only the request
@@ -1753,8 +1753,14 @@ export class EngineJsonRpcClient {
       // Name the missing operationId rather than leaving this to read as a reply
       // that was logged and then silently not recorded: an error answer carries
       // nothing the trail could hold on to.
+      //
+      // `error` 那一格里坐的是**对端写的**内容，不是本 shell 的字段名。从前这里直接
+      // `JSON.stringify(frame.error)` 进 stderr，与下面那段"正文不许写"的自述当面矛盾：
+      // socket 路径上任何应答者把 error 撑成一屏，就等于替它把一屏写进了本产品的日志。
+      // `shortFieldValue` 是这一文件已有的那一把尺（超界就只报字节数与摘要），用它，
+      // 而不是在这里再抄一条上界。
       this.report(
-        `late engine reply for '${entry.method}' (id ${entry.id}), ${entry.deadlineMs}ms deadline already reported, is an error frame (${JSON.stringify(frame.error)}): an error answer names no operationId, so nothing can be recorded in the trail for it${byOrder}`,
+        `late engine reply for '${entry.method}' (id ${entry.id}), ${entry.deadlineMs}ms deadline already reported, is an error frame (${shortFieldValue(frame.error)}): an error answer names no operationId, so nothing can be recorded in the trail for it${byOrder}`,
       );
       return;
     }
@@ -2129,7 +2135,7 @@ export type EngineTransportOpener = (socketPath: string) => Duplex;
 class ReconnectingSocketIo implements LineIo {
   private inner: StreamLineIo | null = null;
   private closed = false;
-  private messageHandler: ((line: string) => void) | null = null;
+  private messageHandler: ((line: string, raw?: Buffer) => void) | null = null;
   private closeHandler: (() => void) | null = null;
   private errorHandler: ((error: Error) => void) | null = null;
   private openHandler: (() => void) | null = null;
@@ -2150,7 +2156,10 @@ class ReconnectingSocketIo implements LineIo {
     return this.inner?.bufferedBytes() ?? 0;
   }
 
-  onMessage(handler: (line: string) => void): void {
+  // `LineIo` 声明的是 `(line, raw?)`。这一侧从前只收 `(line)`，TypeScript 的参数双变性
+  // 让窄一点的那个覆盖合法，于是 `raw` 在生产传输上被剪掉而类型检查一声不响（2026-11-04
+  // 候选 D 修的是 `StreamLineIo`，这一枚是同一件事的另一半）。签名与转发的实参都要跟着接口。
+  onMessage(handler: (line: string, raw?: Buffer) => void): void {
     this.messageHandler = handler;
   }
 
@@ -2190,7 +2199,7 @@ class ReconnectingSocketIo implements LineIo {
     }
     const socket = this.open(this.socketPath);
     const io = new StreamLineIo(socket, socket);
-    io.onMessage((line) => this.messageHandler?.(line));
+    io.onMessage((line, raw) => this.messageHandler?.(line, raw));
     io.onError((error) => {
       // An oversize frame is a *per-frame* verdict and this transport survives
       // it: `LineReader` discarded exactly the remainder of that one line and

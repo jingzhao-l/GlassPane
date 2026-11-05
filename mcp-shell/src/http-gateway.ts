@@ -14,6 +14,7 @@ import {
   unixSocketEngineClient,
 } from "./engine-client.js";
 import {
+  badParamsRemedy,
   GP_E_BAD_PARAMS,
   GP_E_ENGINE_BACKLOG,
   GP_E_ENGINE_TIMEOUT,
@@ -1100,9 +1101,13 @@ async function handleToolForward(
 
   const checked = spec.validate(body);
   if (!checked.ok) {
+    // 出路是真源那一句话，不是 zod 的原话（候选 E，2026-11-05）。从前这里直接把
+    // `checked.issues` 当整条 remedy 发出去——那是一段对模式失败的**复述**，不是一条
+    // 做得动的动作，而 stdio 那道门同一情形发的是 `badParamsRemedy(…)`。两道门对同一
+    // 帧说两种话，正是本文件已经为另一处 amend 过的那一族。
     fail(res, 400, GP_E_BAD_PARAMS,
       `invalid arguments for '${name}'`,
-      checked.issues);
+      badParamsRemedy(checked.issues));
     return;
   }
 

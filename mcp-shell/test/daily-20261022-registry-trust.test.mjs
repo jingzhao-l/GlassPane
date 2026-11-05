@@ -397,7 +397,10 @@ test("the root a daemon reports about itself is classified before anything is de
     assert.match(message, /0700/, `${label}: the mode it would have applied`);
     assert.match(message, /Nothing was read and nothing was written/, `${label}: what actually happened`);
     assert.match(message, /--state-dir <a directory this install owns>/, `${label}: the daemon's own remedy shape`);
-    assert.match(message, /glasspaned --state-dir/, `${label}: the remedy has to name the binary that takes the flag`);
+    // 2026-11-05：那一枚 daemon 程序路径整体带双引号了（路径里那枚空格会把一条命令劈成两句，
+    // 照抄的 agent 拿到的是"找不到文件"）。容一个尾引号，不容换词：`glasspaned` 与
+    // `--state-dir` 之间的 `\s+` 紧邻关系与上面四条断言一起，仍是这条出路在被量。
+    assert.match(message, /glasspaned"?\s+--state-dir/, `${label}: the remedy has to name the binary that takes the flag`);
     assert.ok(message.includes(root), `${label}: the refused value has to be visible in the refusal: ${message}`);
   }
 

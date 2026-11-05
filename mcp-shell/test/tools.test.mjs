@@ -1712,7 +1712,10 @@ test("the project-limit remedy orders only actions this surface can perform", as
     // binary accepts: a renamed or dropped flag reads perfectly and answers
     // "unknown argument".
     const flags = daemonCliFlags();
-    const quoted = [...text.matchAll(/glasspaned\s+(--[a-z-]+)/g)].map((match) => match[1]);
+    // 2026-11-05：程序路径那一枚词现在整体带双引号（路径里有空格）。这里多容一个 `"` 字符，
+    // 但取开关的那一段没变——引号去掉、或把开关挪到别的词上，`quoted` 就少一枚，下面那条
+    // "一条都没抠到"的地板先红。
+    const quoted = [...text.matchAll(/glasspaned"?\s+(--[a-z-]+)/g)].map((match) => match[1]);
     assert.ok(quoted.length > 0, "remedy 引用了 CLI 却没有可核对的开关，这条断言就成了空的");
     assert.deepEqual(quoted.filter((flag) => !flags.has(flag)), [],
       `remedy 报了 daemon 不解析的开关：${quoted.join(", ")}`);
