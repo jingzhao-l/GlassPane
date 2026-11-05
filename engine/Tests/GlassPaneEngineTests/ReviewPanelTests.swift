@@ -237,7 +237,7 @@ final class ReviewPanelTests: XCTestCase {
         await waitUntil { console.daemonStats.isLoaded }
         XCTAssertEqual(console.daemonStats,
                        ConsoleModel.DaemonStats.loaded(
-                           count: 3, totalBytes: 42, listFailure: nil, dir: "/tmp/evidence"
+                           count: 3, totalBytes: 42, listFailure: nil, dir: "/tmp/evidence", ageRetention: nil
                        ))
     }
 
@@ -251,7 +251,7 @@ final class ReviewPanelTests: XCTestCase {
         XCTAssertEqual(ConsoleModel.foldDaemonStats(fromCLIReply: nil), .unreachable, "起不来不等于零条")
         // 缺 `listFailure` 键（旧 daemon）：读成 nil，不是读成一句失败，也不是读成整行作废。
         let legacy = ConsoleModel.parseDaemonStats(#"{"count":0,"totalBytes":0,"dir":"/x"}"#)
-        XCTAssertEqual(legacy, .loaded(count: 0, totalBytes: 0, listFailure: nil, dir: "/x"))
+        XCTAssertEqual(legacy, .loaded(count: 0, totalBytes: 0, listFailure: nil, dir: "/x", ageRetention: nil))
     }
 
     // MARK: - 单条档案（发现 7）：读不出要说读不出，不许永远转圈
@@ -657,9 +657,15 @@ final class ReviewPanelTests: XCTestCase {
         try FileManager.default.createDirectory(atPath: movedRoot, withIntermediateDirectories: true)
         let argvFile = dir + "/argv.txt"
         let spy = dir + "/glasspaned"
+        // argv 落盘必须**一次可见**：`printf '%s\\n' "$@"` 对每个参数各发一次 write，
+        // 而下面那一圈轮询看见"非空就收"，于是高负载时能读到只写了前三个参数的半份档案——
+        // 报红的是一条没写完的 argv，而不是面板发错了参数（2026-11-05 本机负载下实测到两次）。
+        // 改的是观察的形状（先写临时名再 rename），判据一位都没放宽。
+        let argvTmp = argvFile + ".writing"
         let script = """
         #!/bin/sh
-        printf '%s\\n' "$@" > '\(argvFile)'
+        printf '%s\\n' "$@" > '\(argvTmp)'
+        mv '\(argvTmp)' '\(argvFile)'
         if [ "$1" != "--state-dir" ] || [ -z "$2" ]; then
           echo "glasspaned: unknown argument: $1" >&2
           exit 64

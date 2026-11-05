@@ -188,6 +188,15 @@ public final class ApprovalGate {
     /// default instead would point an agent at a file this process never opens.
     public var ledgerPath: String? { path }
 
+    /// 核验这一刻台账文件在不在。R6-07 那句"更短的链照样从同一枚创世哈希验通"说的是同一件事的
+    /// 一半：`count: 0` + `valid: true` 既可能是"这台机器从没记过授权"，也可能是"有人把整份
+    /// 台账删了"（2026-11-05 复审 R-10）。空链是合法的，缺席不是错——但这两种必须**分得开**，
+    /// 所以这里给一个当场量到的布尔，而不是把缺席折算成空表或者折算成失败。
+    public var ledgerPresent: Bool {
+        guard let path else { return false }
+        return FileManager.default.fileExists(atPath: path)
+    }
+
     /// Current chain, head first.
     public func chain() -> [ApprovalRecord] {
         records

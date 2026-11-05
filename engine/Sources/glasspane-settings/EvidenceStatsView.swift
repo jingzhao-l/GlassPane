@@ -5,7 +5,7 @@ import GlassPaneEngine
 ///
 /// 数据源分两类，**来源必须分开标注，绝不混为一谈**：
 ///  - daemon 统计：经 `--evidence-stats` 一次性 CLI 拿到的是整个档案目录的
-///    `{count, totalBytes, listFailure, dir}`（那一侧由 `ConsoleModel` 发起并解析，
+///    `{count, totalBytes, listFailure, dir, ageRetention}`（那一侧由 `ConsoleModel` 发起并解析，
 ///    这一张卡只负责如实呈现）。它没有按 level / class / 时间分布的字段，
 ///    所以那些分布不能从 daemon 造出来，只能标注来源为本地扫描。
 ///  - 本地扫描：ConsoleModel 已把本地 evidence 目录聚合进 `summaries`；熔断级别、
@@ -73,7 +73,19 @@ struct EvidenceStatsView: View {
             case .unreachable:
                 unmeasuredLine("后台服务不可达或超时，未从 daemon 测得统计。")
                 retryButton
-            case .loaded(let count, let totalBytes, let listFailure, let dir):
+            case .loaded(let count, let totalBytes, let listFailure, let dir, let ageRetention):
+                // 年龄闸那一句单独成行：它说的不是"有多少条"，而是"这些条目会不会自己走掉"，
+                // 而 daemon 报的是**没有**配置年龄闸——这一格从前什么都不显示（候选 M）。
+                if let ageRetention {
+                    Text("年龄闸读数（daemon）：\(ageRetention)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("gp-daemon-age-retention")
+                } else {
+                    unmeasuredLine("这一版后台服务的统计里没有年龄闸那一句（没报这个键），所以这里不替它下结论。")
+                }
                 if let listFailure {
                     unmeasuredLine("后台服务读不了档案：\(listFailure)")
                     retryButton

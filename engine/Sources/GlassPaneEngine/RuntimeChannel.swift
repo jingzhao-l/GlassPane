@@ -95,7 +95,10 @@ public enum ChannelError: Error, Equatable {
     case appNotFound
     /// The element exists but rejected the action.
     case actRejected(reason: String)
-    case assertTargetNotFound
+    /// 断言没定位到目标。`reason` 分两档，且只有一档是负例：整棵树读完且没有匹配，
+    /// 或者搜索停在 `AXChannel.searchMaxDepth` 那一档、下面的子树从没被读过
+    /// （措辞真源：`AXChannel.selectorMissReason(truncatedByDepth:)`）。
+    case assertTargetNotFound(reason: String)
     /// Tree capture failed partially (timeout on subtree); channel alive.
     case treeCaptureFailed(reason: String)
     /// The element exists but does not expose the asserted AX attribute.

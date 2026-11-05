@@ -277,7 +277,8 @@ final class EngineCoreTests: XCTestCase {
     func testAssertTargetNotFoundMapsToError() throws {
         try attach()
         _ = try core.act(selector: submitSelector, action: .press)
-        channel.propertyResult = .failure(.assertTargetNotFound)
+        channel.propertyResult = .failure(.assertTargetNotFound(
+            reason: AXChannel.selectorMissReason(truncatedByDepth: false)))
         XCTAssertThrowsGPError(.assertTargetNotFound) {
             _ = try core.assertElement(selector: submitSelector, property: .title, expected: .string("X"))
         }
@@ -998,7 +999,7 @@ final class EngineCoreWaveThreeMappingTests: XCTestCase {
         XCTAssertTrue(mapped.remedy.contains("--check-accessibility"), mapped.remedy)
         XCTAssertFalse(mapped.remedy.contains("--grant-accessibility"), "no phantom grant advice")
         XCTAssertEqual(
-            EngineCore.map(.assertTargetNotFound).code, .assertTargetNotFound,
+            EngineCore.map(.assertTargetNotFound(reason: AXChannel.selectorMissReason(truncatedByDepth: false))).code, .assertTargetNotFound,
             "the distinction must not swallow the real negative"
         )
     }

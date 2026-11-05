@@ -338,7 +338,7 @@ public final class AXChannel: RuntimeChannel {
           let .pixelCaptureDenied(reason):
             return reason
         case .appNotFound: return "the app is gone"
-        case .assertTargetNotFound: return "target not found"
+        case let .assertTargetNotFound(reason): return reason
         // kAXErrorCannotComplete 被归一成 `.pingTimeout`，但它同时也是"这一次读
         // 应用没在超时里答上"。写成"ping 超时"是在断言一件没发生过的事——
         // 遍历子树时根本没有发过 ping，而这句话会原样进入审计结论与诊断输出。
@@ -424,12 +424,13 @@ public final class AXChannel: RuntimeChannel {
         // 与每一次 AXChildren 读取都带自己的超时，无上界时一次 act 可以挂几分钟。
         let deadline = CFAbsoluteTimeGetCurrent() + Self.treeTimeoutSeconds
         defer { AXUIElementSetMessagingTimeout(element, Float(Self.messagingTimeoutSeconds)) }
-        // findElement 抛错时上抛（"我没读到" ≠ "界面上没有"，R2-06）；返回 nil
-        // 现在只有一个含义：整棵树被完整读完且确实没有匹配项。
-        guard let target = try findElement(
-            matching: selector, root: element, deadline: deadline
-        ) else {
-            throw ChannelError.actRejected(reason: "no element matches the selector")
+        // findElement 抛错时上抛（"我没读到" ≠ "界面上没有"，R2-06）；没命中时还要再分一档：
+        // 整树读完 ⇒ "没有这个控件"是一次测量；停在深度档 ⇒ 那句只能说这次搜索没走完。
+        let search = try findElement(matching: selector, root: element, deadline: deadline)
+        guard let target = search.match else {
+            throw ChannelError.actRejected(
+                reason: Self.selectorMissReason(truncatedByDepth: search.truncatedByDepth)
+            )
         }
         let actionName = Self.axActionName(for: action)
         try Self.enforceBudget(on: target, deadline: deadline, what: "performing '\(actionName)'")
@@ -445,10 +446,11 @@ public final class AXChannel: RuntimeChannel {
         let element = try requireAppElement()
         let deadline = CFAbsoluteTimeGetCurrent() + Self.treeTimeoutSeconds
         defer { AXUIElementSetMessagingTimeout(element, Float(Self.messagingTimeoutSeconds)) }
-        guard let target = try findElement(
-            matching: selector, root: element, deadline: deadline
-        ) else {
-            throw ChannelError.assertTargetNotFound
+        let search = try findElement(matching: selector, root: element, deadline: deadline)
+        guard let target = search.match else {
+            throw ChannelError.assertTargetNotFound(
+                reason: Self.selectorMissReason(truncatedByDepth: search.truncatedByDepth)
+            )
         }
         let attribute = Self.axAttribute(for: property)
         try Self.enforceBudget(on: target, deadline: deadline, what: "reading \(attribute)")
@@ -677,29 +679,49 @@ public final class AXChannel: RuntimeChannel {
         }
     }
 
-    /// Iterative selector search; the first match wins. nil means "the whole
-    /// tree was read and nothing matched" — a failed read throws instead
-    /// (R2-06), otherwise a busy main thread turns into the false statement
-    /// "no element matches the selector" and the search can also skip the real
-    /// target and hand back a later node with the same role.
+    /// 没命中时说的那一句。**两档一个真源**：act 与 assert 都从这里取措辞，
+    /// 免得同一件事在这一层写出两种拼写（2026-11-03 #18 记过的那条）。
+    ///
+    /// 深度上限那一档不许读成"界面上没有"：它说的是这次搜索的预算，不是那个界面。
+    public static func selectorMissReason(truncatedByDepth: Bool) -> String {
+        guard truncatedByDepth else { return "no element matches the selector" }
+        return "the selector search reached depth \(searchMaxDepth) and stopped expanding there, "
+            + "so the tree below that depth was never read: this sentence reports the search budget, "
+            + "not that interface. Name the target more specifically (identifier or title) or aim at "
+            + "a shallower root; the accessibility channel answered normally, so do not re-grant Accessibility"
+    }
+
+    /// Iterative selector search; the first match wins.
+    ///
+    /// 一次没命中的搜索有两种，且它们说的不是同一件事（2026-11-04 本轮记账）：
+    ///   · 整棵树读完且没有匹配 ⇒ "界面上没有这个控件"是一句测量；
+    ///   · 走到 `searchMaxDepth` 那一档就不再展开 ⇒ 下面的子树**从没被读过**，这句不是关于
+    ///     界面的陈述。从前这里只回 `nil`，而文档写着"nil means the whole tree was read"，
+    ///     两个读者（act 与 assert）又把那个 nil 打印成 "no element matches the selector"——
+    ///     深度上限被说成确定负例，与 X-9 修掉的那条（"读不出属性"答成"控件不存在"）同一族。
+    /// 判据留在 Swift，两档共用下面那一句真源。
     private func findElement(
         matching selector: Selector,
         root: AXUIElement,
         deadline: CFTimeInterval
-    ) throws -> AXUIElement? {
+    ) throws -> (match: AXUIElement?, truncatedByDepth: Bool) {
         var stack: [(element: AXUIElement, depth: Int)] = [(root, 0)]
+        var truncatedByDepth = false
         while let (current, depth) = stack.popLast() {
             // depth 0 是 app 元素本身，不参与匹配：选择器打的是界面里的控件。
             if depth > 0 {
                 let matched = try elementMatches(selector, current, deadline: deadline)
-                if matched { return current }
+                if matched { return (current, false) }
             }
             if depth < Self.searchMaxDepth,
                let children = try childElements(of: current, deadline: deadline) {
                 stack.append(contentsOf: children.reversed().map { ($0, depth + 1) })
+            } else if depth >= Self.searchMaxDepth {
+                // 记的是"这一档以下没读过"这件事本身，不是它为什么没读。
+                truncatedByDepth = true
             }
         }
-        return nil
+        return (nil, truncatedByDepth)
     }
 
     private func elementMatches(

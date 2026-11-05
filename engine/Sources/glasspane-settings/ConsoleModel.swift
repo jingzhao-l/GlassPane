@@ -92,7 +92,7 @@ final class ConsoleModel: ObservableObject {
         /// 说"不可达"——那是对一次没发生过的请求下结论。
         case notAsked
         case asking
-        case loaded(count: Int?, totalBytes: Int?, listFailure: String?, dir: String?)
+        case loaded(count: Int?, totalBytes: Int?, listFailure: String?, dir: String?, ageRetention: String?)
         case unreachable
 
         /// 只有"真的拿到了一份有形状的回话"算数；其余三种都没读出后台服务的想法。
@@ -568,7 +568,7 @@ final class ConsoleModel: ObservableObject {
 
     /// 后台服务在 `--evidence-stats` 里报的那个读不了原因（没问过 / 没报 = nil）。
     private var daemonListFailure: String? {
-        if case .loaded(_, _, let failure, _) = daemonStats { return failure }
+        if case .loaded(_, _, let failure, _, _) = daemonStats { return failure }
         return nil
     }
 
@@ -632,7 +632,12 @@ final class ConsoleModel: ObservableObject {
             count: object["count"] as? Int,
             totalBytes: object["totalBytes"] as? Int,
             listFailure: object["listFailure"] as? String,
-            dir: object["dir"] as? String
+            dir: object["dir"] as? String,
+            // 候选 M（2026-11-04）的那一半：daemon 早就在 `--evidence-stats` 里发这一句
+            // （S2-3 把它记进 `EvidenceArchiveStats.ageRetention`，CLI 转读它），但这一侧
+            // 从没读过它——发布却没有读者，就等于没有发布。缺键读成 nil（旧 daemon），
+            // 面板那一格跟着说"这一版后台没报这个读数"，不替它编一句。
+            ageRetention: object["ageRetention"] as? String
         )
     }
 

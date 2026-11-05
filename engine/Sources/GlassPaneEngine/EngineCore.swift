@@ -535,7 +535,7 @@ public final class EngineCore {
         guard let projectRegistry else {
             throw GPError(
                 code: .internalError,
-                message: "no project registry is configured for this engine instance, so no projectId can be resolved and nothing can be registered — this is not an answer about \(ProjectRegistry.defaultProjectsPath): nothing was read and nothing was written",
+                message: "no project registry is configured for this engine instance, so no projectId can be resolved and nothing can be registered — this is not an answer about \(EngineCore.redactHome(ProjectRegistry.defaultProjectsPath)): nothing was read and nothing was written",
                 remedy: Self.noRegistryRemedy
             )
         }
@@ -727,9 +727,15 @@ public final class EngineCore {
                     return "\(redactHome(cursor.path)) is writable by group or other (mode "
                         + String(format: "%04o", mode) + "), so an evidence pack under it is not tamper-evident"
                 }
-                let owner = attributes[.ownerAccountID] as? NSNumber
-                if (owner?.intValue ?? -1) != Int(getuid()) {
-                    return "\(redactHome(cursor.path)) is owned by uid \(owner?.intValue ?? -1), not this process (uid \(getuid()))"
+                // 读不到主人就说不出主人是谁：从前这里 `?? -1`，于是"属性缺席"既触发了拒绝、
+                // 又把一个从没量过的 `uid -1` 写进了句子（与上面 `.posixPermissions` 那一支
+                // 的"exists but its permissions cannot be read"同一条规矩，2026-11-05 复审 R-13）。
+                guard let owner = attributes[.ownerAccountID] as? NSNumber else {
+                    return "\(redactHome(cursor.path)) exists but its owner cannot be read, "
+                        + "so nothing here can say whether this process owns it"
+                }
+                if owner.intValue != Int(getuid()) {
+                    return "\(redactHome(cursor.path)) is owned by uid \(owner.intValue), not this process (uid \(getuid()))"
                 }
                 return nil
             }
@@ -783,13 +789,31 @@ public final class EngineCore {
         return path
     }
 
+    /// 把**长句里任意位置**出现的主目录折成 `~`。
+    ///
+    /// 为什么 `redactHome` 不够：Foundation 的 `NSError.description` 自带
+    /// `UserInfo={NSFilePath=/Users/<账号>/…}`，主目录在句子中间而不是开头，`hasPrefix`
+    /// 那一支永远走不到（2026-11-05 复审量到的：拒绝报文折过了，紧跟其后的那句
+    /// `(Error Domain=… NSFilePath=/Users/ethanlin/…)` 又把账号名原样带了回去）。
+    /// 只用于**散文**；命令位仍走真路径，由 `DailyRound20261105RemedyWordUsableTests` 钉着。
+    static func redactHomeWithin(_ text: String, home: String = NSHomeDirectory()) -> String {
+        let strippedHome = stripFirmlink(home)
+        guard !strippedHome.isEmpty else { return text }
+        return text.replacingOccurrences(of: strippedHome, with: "~")
+    }
+
+    /// 错误描述进报文之前先过一遍上面那一条。
+    static func described(_ error: Error) -> String {
+        redactHomeWithin("\(error)")
+    }
+
     /// A project that never named a directory owns no archive. Pruning
     /// `EvidenceStore.defaultDirectory` in its place would delete from an
     /// archive the caller never pointed at.
     public static func noArchiveRefusal(projectId: String) -> GPError {
         GPError(
             code: .badParams,
-            message: "project \(projectId) has no evidenceStoragePath, so it owns no evidence archive of its own; the shared default directory (\(EvidenceStore.defaultDirectory)) is not its substitute and nothing was deleted",
+            message: "project \(projectId) has no evidenceStoragePath, so it owns no evidence archive of its own; the shared default directory (\(EngineCore.redactHome(EvidenceStore.defaultDirectory))) is not its substitute and nothing was deleted",
             remedy: "name the archive you mean instead of leaving the target implicit. This project's own: gp_project_set with \"evidenceStoragePath\": \"\(evidenceStorageExample)\" and then restart the background service (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`) so it reloads projects.json. The shared archive: `\(DaemonInvocation.command) --prune-evidence --older-than <days>` with no `--project` — that is the process which owns it; an engine instance built without one has no shared archive to fall back to and says so, and leaving projectId out of a call on such an instance deletes nothing."
         )
     }
@@ -810,7 +834,7 @@ public final class EngineCore {
     public static func noStoreArchiveRefusal() -> GPError {
         GPError(
             code: .badParams,
-            message: "this engine instance has no evidence archive injected, so it has no directory to prune or measure: the shared default directory (\(EvidenceStore.defaultDirectory)) is not its substitute and nothing was deleted",
+            message: "this engine instance has no evidence archive injected, so it has no directory to prune or measure: the shared default directory (\(EngineCore.redactHome(EvidenceStore.defaultDirectory))) is not its substitute and nothing was deleted",
             remedy: "name the archive you mean. Either give this instance one where it is built — EngineCore(evidenceStore:) with a store over a directory, the way the background service injects EvidenceStore.at(stateRoot:) with the root --state-dir named (or the home default when nothing was named) — or scope the call to a project that owns one: gp_project_set {\"projectId\": \"<that prj_…>\", \"displayName\": …, \"bundleId\" or \"pid\": …, \"evidenceStoragePath\": \"\(evidenceStorageExample)\"} (repeat the project's other fields — the update replaces them), restart the background service so it reloads projects.json (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`), then call again with that projectId. To prune the shared archive itself use the process that owns it: `\(DaemonInvocation.command) --prune-evidence --older-than <days>`, after looking at what is there with `\(DaemonInvocation.command) --evidence-stats` and counting without deleting via `--dry-run`"
         )
     }
@@ -1771,11 +1795,17 @@ public final class EngineCore {
         }
         let treeData = try AxNode.arrayEncoder.encode(roots)
         let treeObject = try JSONSerialization.jsonObject(with: treeData)
+        // R-12：把"这一趟走到哪一档就停了"跟着树一起交出去。`unexpandedAtDepthLimit` 大于 0
+        // 就是说"这些节点下面的子树从没被读过"，调用方不许把那一档读成"界面上没有控件"。
+        // 它是从**已经交回的这棵树**数出来的，没有再问一次 AX，所以既不夸大也不缩小。
+        let unexpanded = TreeDigest.nodesAtDepth(roots, depth: maxDepth)
         return [
             "axTree": treeObject,
             "nodeCount": nodeCount,
             "digest": digest,
-            "latencyMs": snapshot.latencyMs
+            "latencyMs": snapshot.latencyMs,
+            "depthLimit": maxDepth,
+            "unexpandedAtDepthLimit": unexpanded
         ]
     }
 
@@ -1791,7 +1821,7 @@ public final class EngineCore {
         // to the archive, so an assert taken right after a daemon restart used to
         // answer GP_E_NO_OPERATION while the operation it wants to reuse was
         // sitting in the archive on disk.
-        guard let context = resolvedPack(operationId: nil) else {
+        guard let context = try resolvedPack(operationId: nil) else {
             // P0 §3.3：assert 证据的 signals 复用最近一次 act 的上下文，因此它不能
             // 成为会话的第一个操作。错误码保持 GP_E_NO_OPERATION（错误码表冻结），
             // 但 remedy 必须可执行——原文案"run act or assert_element first"对这条
@@ -1856,7 +1886,7 @@ public final class EngineCore {
         // R1-06: existence is answered by the same resolver `last_evidence`
         // uses (memory ring + disk archive); only the error code stays
         // diagnose's own.
-        guard let resolved = resolvedPack(operationId: operationId) else {
+        guard let resolved = try resolvedPack(operationId: operationId) else {
             // A5: this arm used to fall back on the table's default remedy, and
             // that default told the caller to "run act or assert_element first"
             // — `assert_element` needs a pack to exist, so following it got you
@@ -2074,7 +2104,7 @@ public final class EngineCore {
     public func lastEvidence(operationId: String?) throws -> EvidencePack {
         // R1-06: the same resolver backs `diagnose`, so the two method surfaces
         // can never disagree about whether an operationId exists.
-        if let target = resolvedPack(operationId: operationId) {
+        if let target = try resolvedPack(operationId: operationId) {
             return target
         }
         // P1 v1.3: a lookup miss means "no such evidence in the bounded
@@ -2825,20 +2855,37 @@ public final class EngineCore {
     /// contradicted, and R1-06's restart semantics stay as published: the archive
     /// is the audit trail, and inventing a refusal there would be the same
     /// "cannot prove ⇒ refuse" move this project keeps rejecting.
-    private func resolvedPack(operationId: String?) -> EvidencePack? {
+    private func resolvedPack(operationId: String?) throws -> EvidencePack? {
         archiveFallbackRefusal = nil
         if let operationId {
             if let found = pack(withId: operationId) {
                 return found
             }
-            return evidenceStore?.read(operationId: operationId)
+            guard let evidenceStore else { return nil }
+            let stored = evidenceStore.read(operationId: operationId)
+            if stored == nil, let reason = evidenceStore.readFailure {
+                throw Self.archiveUnreadable(message: """
+                    the archive entry named \(operationId) exists but this daemon could not read it: \(reason)
+                    """)
+            }
+            return stored
         }
         if let latest = latestPack() {
             return latest
         }
         // Memory is empty (fresh daemon / history evicted): fall back to the
         // most recently written archive entry so the audit trail survives.
-        if let evidenceStore, let newestId = evidenceStore.lastOnDisk() {
+        guard let evidenceStore else { return nil }
+        let newestId = evidenceStore.lastOnDisk()
+        if newestId == nil, let reason = evidenceStore.listingFailure {
+            // 列不出目录 ≠ 档案是空的：把一次失败的列举念成"还没记录任何证据"，
+            // 正是本仓在 `--evidence-stats` 上修过的那一族（R-11）。
+            throw Self.archiveUnreadable(message: """
+                this daemon could not list its own evidence archive, so it cannot say whether an \
+                operation was recorded: \(reason)
+                """)
+        }
+        if let newestId {
             if let owner = archiveOwner(of: newestId), let attached = attachedApp, owner != attached {
                 archiveFallbackRefusal = """
                 the newest archive entry of this store was written while this daemon was attached \
@@ -2849,9 +2896,33 @@ public final class EngineCore {
                 """
                 return nil
             }
-            return evidenceStore.read(operationId: newestId)
+            let stored = evidenceStore.read(operationId: newestId)
+            if stored == nil, let reason = evidenceStore.readFailure {
+                throw Self.archiveUnreadable(message: """
+                    the newest archive entry this daemon found (\(newestId)) could not be read: \(reason)
+                    """)
+            }
+            return stored
         }
         return nil
+    }
+
+    /// 一次读不出来的档案该用什么码答复。`GP_E_NO_EVIDENCE` 说的是"这台机器上没有这一条的
+    /// 证据"——那是一句关于档案的陈述，而这里什么都没读到。错误码表是冻住的，所以用
+    /// `GP_E_INTERNAL`（后台服务自己的缺陷），并把下一步写成**读得动**的动作而不是"先产一份证据"。
+    static func archiveUnreadable(message: String) -> GPError {
+        GPError(
+            code: .internalError,
+            message: message,
+            remedy: "this is a daemon-side read failure, not an answer about the operation: the archive entry "
+                + "was opened for reading and the read is what failed, so re-issuing the call with a different "
+                + "operationId fixes nothing. Ask the same process what it can see — "
+                + "`\(DaemonInvocation.command) --evidence-stats` prints `listFailure` when the archive cannot be "
+                + "listed at all and `count` when it can — then make the entry readable where it lies "
+                + "(`ls -l` the archive directory the `dir` key names, and the file inside it). Do not delete, "
+                + "rename or rewrite the entry to get past this refusal: that destroys the only bytes recording "
+                + "the operation, and the refusal says nothing was returned rather than that nothing was recorded."
+        )
     }
 
     /// The attachment a stored operation was archived under, or nil when this
@@ -3071,8 +3142,9 @@ public final class EngineCore {
             return GPError(code: .appNotFound, message: "no running app matches the given bundleId/pid")
         case .actRejected(let reason):
             return GPError(code: .actFailed, message: "action rejected: \(reason)")
-        case .assertTargetNotFound:
-            return GPError(code: .assertTargetNotFound, message: "no element matches the selector")
+        case .assertTargetNotFound(let reason):
+            // 两档共用渠道那一侧的真源：整树读完的负例与"停在深度档"不许再挤进同一句话。
+            return GPError(code: .assertTargetNotFound, message: reason)
         case .attributeUnavailable(let reason):
             // X-9: "I could not read this attribute" is a statement about the
             // read, never about the element. It used to answer

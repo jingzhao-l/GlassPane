@@ -139,6 +139,9 @@ struct SettingsPanelView: View {
                             .help(model.isRestartInFlight
                                 ? "上一次重启还在等后台服务回话"
                                 : "立即重启后台服务（会打断正在执行的操作）")
+                            .accessibilityHint(model.isRestartInFlight
+                                ? "上一次重启还在等后台服务回话"
+                                : "立即重启后台服务（会打断正在执行的操作）")
                     }
                     // 实测结论：换过进程号才算重启成，读不到就留在屏幕上说读不到。
                     if let outcome = model.restartOutcomeText {

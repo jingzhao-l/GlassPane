@@ -126,8 +126,13 @@ struct DailyRound20261028PanelUiDefectTests {
             updaterPath: updaterPath, stateRoot: shownRoot, code: "release-unsigned"
         )
         #expect(
-            statusOnly.contains("node \(updaterPath) status --state-dir \(RemedyCommand.quote(shownRoot))"),
+            statusOnly.contains(
+                "node \(RemedyCommand.quote(updaterPath)) status --state-dir \(RemedyCommand.quote(shownRoot))"),
             "读状态那一句没带这一页显示的根：\(statusOnly)"
+        )
+        #expect(
+            !statusOnly.contains("node \(updaterPath) status"),
+            "更新器路径含空格时裸插值会把一条命令劈成两句（2026-11-04 候选 C）：那一句必须带引号：\(statusOnly)"
         )
         let gated = UpdatePanel.consentGateNextStepText(
             updaterPath: updaterPath, stateRoot: shownRoot, code: UpdatePanel.nonDefaultStateDirCode

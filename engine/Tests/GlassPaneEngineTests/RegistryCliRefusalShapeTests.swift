@@ -105,7 +105,8 @@ final class RegistryCliRefusalShapeTests: XCTestCase {
         try plantReadableRegistry(in: root)
 
         let result = run(root, ["--active-project", probeId])
-        XCTAssertEqual(result.status, 1, "未注册在这条命令里仍是拒绝式回答：\(result.stdout)\(result.stderr)")
+        XCTAssertEqual(result.status, 3,
+                       "未注册是 §12.3.1 的那一号（3），不是「这条命令本身坏了」那一号（1）：\(result.stdout)\(result.stderr)")
         let payload = try XCTUnwrap(result.json)
         XCTAssertEqual(payload["found"] as? Bool, false, "\(payload)")
         XCTAssertNil(payload["loadFailed"], "读得开的表不该被说成读不开")
@@ -153,14 +154,51 @@ final class RegistryCliRefusalShapeTests: XCTestCase {
     }
 
     /// 对照：读得开的表 + 真没有这条 id → 那句 "unknown project" 是测到的答案，必须留下。
+    /// 号也必须是 3：与 `--active-project`、`--project-remove` 同一条判据（见下面那条三条命令同码的闸）。
     func testMaintenanceProjectDimensionStillNamesUnknownProjectWhenReadable() throws {
         let root = sandboxRoot("maint-known-unknown")
         try plantReadableRegistry(in: root)
         let result = run(root, ["--evidence-stats", "--project", probeId])
-        XCTAssertEqual(result.status, 1)
+        XCTAssertEqual(result.status, 3,
+                       "「这台机器没注册这个名字」在维护命令上回的是拒绝表的 1，而 remove/active 回 3：\(result.stderr)")
         let payload = try XCTUnwrap(result.json)
         XCTAssertEqual(payload["error"] as? String, "unknown project \(probeId)")
         XCTAssertNil(payload["loadFailed"])
+    }
+
+    // MARK: - 2b. 一条事实一个号：三条命令对同一个未注册 id 必须同答
+
+    /// 候选 B（2026-11-04）的完整修法。同一个事实——"读得开的表里没有这个名字"——从前在
+    /// `--active-project` 上是 1、在 `--project-remove` 上是 3、在 `--prune-evidence`/
+    /// `--evidence-stats --project` 上又是 1。按 rc 分叉的调用方只能把其中两条读成
+    /// "这条命令自己坏了"，而 §12.3.1 给这一档定的只有一个号。
+    /// 这一条闸把"同码"钉成不变量，并把"读不开仍是 1"留在上面那几条里——两档不许再合流。
+    /// REVERSE：把 `main.swift` 任一支 `exit(3)` 改回 `exit(1)` ⇒ 本条红并点名那一支。
+    func testAnUnregisteredIdAnswersTheSameCodeOnEveryCommandThatAsks() throws {
+        let root = sandboxRoot("unregistered-one-code")
+        try plantReadableRegistry(in: root)
+        let commands: [(String, [String])] = [
+            ("--active-project", ["--active-project", probeId]),
+            ("--project-remove", ["--project-remove", probeId]),
+            ("--evidence-stats", ["--evidence-stats", "--project", probeId]),
+            ("--prune-evidence", ["--prune-evidence", "--older-than", "1", "--project", probeId]),
+        ]
+        var seen: [(String, Int32)] = []
+        for (name, arguments) in commands {
+            let result = run(root, arguments)
+            seen.append((name, result.status))
+        }
+        let codes = Set(seen.map { Int($0.1) })
+        XCTAssertEqual(codes, [3],
+            "同一个未注册 id 在这些命令上回了不止一个号：\(seen.map { "\($0.0)=\($0.1)" }.sorted().joined(separator: ", "))")
+        // 对照的另一半：表读不开时同一条命令必须回 1，闸不许把两档压成同一个数。
+        let blindRoot = sandboxRoot("unregistered-but-blind")
+        _ = try plantUnreadableRegistry(in: blindRoot)
+        for (name, arguments) in commands {
+            let result = run(blindRoot, arguments)
+            XCTAssertEqual(result.status, 1,
+                "\(name)：读不开不是「没注册」，它仍必须回拒绝表的 1 而不是 3：\(result.stderr)")
+        }
     }
 
     // MARK: - 3. `--list-projects`：拒绝形状的对照（真二进制）

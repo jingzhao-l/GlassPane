@@ -702,7 +702,13 @@ private func printUsage() {
                 --older-than not a positive integer, or --recipe-validate named a file
                 that cannot be read. NOT a usage error in the 64 sense: the flag was
                 understood, its argument was not
-        3   --project-remove named an id that is not registered
+        3   a named id that is not registered — the one answer for "this mac has no
+                such project", whichever command was asked: --project-remove,
+                --active-project, and --prune-evidence/--evidence-stats given
+                --project <id>. It does NOT mean "the registry could not be read"
+                (that is 1, with loadFailed on stderr) nor "the write only partly
+                landed" (also 1). One fact, one code: these three branches used to
+                answer 1/3/1 for the same input.
         64  usage error, printed with the whole usage block: an unknown argument;
                 more than one subcommand in one invocation (this binary answers
                 exactly one per invocation, and such a run executes none of them); a
@@ -1360,7 +1366,10 @@ if let activeId = options.activeProjectId {
             "error": "no project \(activeId) is registered",
             "next": "\(DaemonInvocation.command) --list-projects"
         ], to: .standardError)
-        exit(1)
+        // §12.3.1 给"未注册 id"定的那一号是 3，`--project-remove` 同一条判据也是 3；这一支从前回 1，
+        // 于是同一个事实（这个名字这台机器没注册过）在两条命令上是两个答案，按 rc 分叉的脚本
+        // 只能把其中一条读成"命令本身坏了"（2026-11-04 候选 B）。1 留给"表读不开/写没落盘"。
+        exit(3)
     }
     writeJSON([
         "command": "--active-project",
@@ -1636,6 +1645,9 @@ if options.approvalAudit || options.approvalVerify {
             "tailHash": gate.tailHash(),
             "firstBrokenIndex": verdict.firstBrokenIndex.map { $0 as Any } ?? NSNull(),
             "loadFailed": gate.loadFailed,
+            // 缺席与空表是两件事（R-10）：`count: 0` 加上这一枚为 false，说的是"这一台机器
+            // 现在没有这份文件"；加上它为 true，说的是"文件在，里面零条授权"。
+            "ledgerPresent": gate.ledgerPresent,
             "persistFailed": gate.persistFailed ?? NSNull(),
             "ledgerPath": gate.ledgerPath ?? NSNull(),
             "stateRoot": stateRoot.path
@@ -1762,7 +1774,9 @@ if options.pruneEvidence || options.evidenceStats {
                 ],
                 to: .standardError
             )
-            exit(1)
+            // 与上面 `--active-project`、下面 `--project-remove` 同一档：§12.3.1 把"这台机器没注册
+            // 这个名字"定成 3。从前这里回 1，同一个事实三条命令两个答案（2026-11-04 候选 B）。
+            exit(3)
         }
         switch EngineCore.projectArchiveDirectory(projectId: projectId, entry: entry) {
         case .failure(let refusal):
@@ -1812,13 +1826,21 @@ if options.pruneEvidence || options.evidenceStats {
             dryRun: options.pruneDryRun,
             project: options.maintenanceProjectId,
             dir: dir,
-            listFailure: listFailure
+            listFailure: listFailure,
+            failures: store.pruneFailures,
+            failureTotal: store.pruneFailureTotal
         ))
         // `pruned: null` is exactly the "partly succeeded / refused" case that §the
         // usage block assigns to 1, and `--list-projects` already answers 1 for the
         // same unreadable archive. Exiting 0 here handed a caller a green answer
         // that reports it obtained nothing.
-        exit(listFailure == nil ? 0 : 1)
+        //
+        // 同一条规矩跟着删不掉的枚数走（R-15，2026-11-05）：真跑那一趟报了 7、目录里还留着 3，
+        // 那不是一次成功的修剪。从前 `failed` 这一格根本不存在，调用方只能看见一个偏小的数
+        // 和一个 0——与 `--project-prune` 的 `failed`/`failures` 同形之后，两条删除命令对
+        // "部分成功"给出同一个答案。`--dry-run` 不删任何东西，所以它的失败数恒为 0。
+        let partial = !options.pruneDryRun && store.pruneFailureTotal > 0
+        exit((listFailure == nil && !partial) ? 0 : 1)
     }
     if options.evidenceStats {
         let stats = store.stats()

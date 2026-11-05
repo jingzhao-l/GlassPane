@@ -303,11 +303,17 @@ public struct RecipeLoader {
             //
             // 只判**多出来**的键，不判缺失的必填键：后者要靠每个 handler 的
             // require/opt 规则，那是十份判据的副本，而这条缺陷关于的是被吞掉的那一半。
-            let accepted = Dispatcher.acceptedParamKeys[method] ?? []
-            for key in params.keys.sorted() where !accepted.contains(key) {
-                errors.append(
-                    "'steps[\(index)].params' has key '\(capped(key))' that `\(method.rawValue)` does not read; that method reads only \(accepted.isEmpty ? "no params keys at all" : accepted.sorted().joined(separator: ", ")) — the recipe passes the file contract but the engine would refuse this step with GP_E_BAD_PARAMS before it ran"
-                )
+            //
+            // 表里没有这个方法时**什么都不判**，与运行期同一答（R-17，2026-11-05 复审）：
+            // `requireOnlyReadParamKeys` 写的是 `guard let accepted = … else { return }`——
+            // 没有规则就是不拒绝。从前这里 `?? []`，把"这张表没covering它"念成"它一个键都不读"，
+            // 于是校验层替运行期编了一句它没量过的断言（还会推着人去改一份本来能跑的配方）。
+            if let accepted = Dispatcher.acceptedParamKeys[method] {
+                for key in params.keys.sorted() where !accepted.contains(key) {
+                    errors.append(
+                        "'steps[\(index)].params' has key '\(capped(key))' that `\(method.rawValue)` does not read; that method reads only \(accepted.isEmpty ? "no params keys at all" : accepted.sorted().joined(separator: ", ")) — the recipe passes the file contract but the engine would refuse this step with GP_E_BAD_PARAMS before it ran"
+                    )
+                }
             }
         }
     }

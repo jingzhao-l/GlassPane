@@ -463,6 +463,7 @@ struct EvidenceDetailView: View {
             // 而它的同胞「打开报告」是带着禁用理由画出来的。判据两边现在同一套：
             // 这条档案的读取结局 + 扫描给出的落盘路径，都是这一页测到的东西。
             .help(revealControl.help)
+            .accessibilityHint(revealControl.help)
             .disabled(!revealControl.enabled)
             .accessibilityIdentifier("gp-reveal-evidence-file")
 
@@ -474,6 +475,7 @@ struct EvidenceDetailView: View {
             // 判据是这条档案的**读取结局**，不是那个把"还在读"与"读不出"混在一起的 nil：
             // 三种形态各有各的下一步，从前它们共用一句只描述启用态的 help。
             .help(reportControl.help)
+            .accessibilityHint(reportControl.help)
             .disabled(!reportControl.enabled)
             .accessibilityIdentifier("gp-open-evidence-report")
         }

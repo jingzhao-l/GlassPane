@@ -45,7 +45,9 @@ public enum EvidencePruneReport {
         dryRun: Bool,
         project: String?,
         dir: String,
-        listFailure: String?
+        listFailure: String?,
+        failures: [[String: String]] = [],
+        failureTotal: Int = 0
     ) -> [String: Any] {
         [
             "pruned": pruned.map { $0 as Any } ?? NSNull(),
@@ -53,6 +55,10 @@ public enum EvidencePruneReport {
             "project": project ?? NSNull(),
             "dir": dir,
             "listFailure": listFailure ?? NSNull(),
+            // 与 `--project-prune` 同形：删不动的那几枚点名给出，`failed` 是总数
+            // （`failures` 只到上限条数，两者不等时要看得见"还有多少没列出来"）。
+            "failed": failureTotal,
+            "failures": failures,
         ]
     }
 }
@@ -64,7 +70,9 @@ public enum EvidencePruneReport {
 /// Layout and semantics (spec v1.5 §9.2):
 /// - one file per operationId, key-sorted JSON via `EvidencePack.encoder`;
 /// - atomic write via tmp + rename (same pattern as `ProjectRegistry.save`);
-/// - `read` decodes and validates; missing/corrupt returns nil (never throws);
+/// - `read` decodes and validates; a genuinely absent entry returns nil, an entry that
+///   is present but cannot be opened / does not decode / carries another operation's id
+///   returns nil **with the reason in `readFailure`** (never throws);
 /// - directory is created on first write, and is brought to (or proven) 0700
 ///   before any pack lands in it — an archive that cannot be made private to
 ///   this account refuses writes instead (R5-04).
@@ -189,29 +197,65 @@ public final class EvidenceStore {
         return value > 0 ? value : nil
     }
 
+    /// 哪些 `.tmp-*` 属于"写它的那个进程已经不在了"——这一份判据是 reclaim 与 dry-run
+    /// 计数**共用**的那一个（P5 §12.2：同一来源的数，不是估计）。从前只有 reclaim 内部有它，
+    /// 于是 `--dry-run` 报的数永远不含残渣，而真跑那一趟会连残渣一起删掉。
+    func staleStagingNames() -> [String] {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory) else {
+            return []  // 读不到目录就是"这一趟没量到"，不是"没有残渣"
+        }
+        return names.sorted().filter { name in
+            guard let pid = EvidenceStore.stagingTempPid(name) else { return false }
+            // 0 == 还活着（不碰）；-1/ESRCH == 那个进程没了，这一枚才轮到我们收。
+            if kill(pid, 0) == 0 { return false }
+            let target = URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent(name)
+            let values = try? target.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            // 只收自己创建的普通文件；符号链接与目录一律不动（与 `isDeletableEntry` 同一条理由）。
+            return values?.isRegularFile == true && values?.isSymbolicLink != true
+        }
+    }
+
     /// Remove staging files left by processes that are gone. Returns how many went.
     public func reclaimStaleStagingFiles() -> Int {
         let url = URL(fileURLWithPath: directory, isDirectory: true)
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory) else {
-            return 0  // 读不到目录就是"这一趟没量到"，不是"没有残渣"
-        }
         var removed = 0
-        for name in names.sorted() {
-            guard let pid = EvidenceStore.stagingTempPid(name) else { continue }
-            // 0 == 还活着（不碰）；-1/ESRCH == 那个进程没了，这一枚才轮到我们收。
-            if kill(pid, 0) == 0 { continue }
+        for name in staleStagingNames() {
             let target = url.appendingPathComponent(name)
-            let values = try? target.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
-            // 只收自己创建的普通文件；符号链接与目录一律不动（与 `isDeletableEntry` 同一条理由）。
-            guard values?.isRegularFile == true, values?.isSymbolicLink != true else { continue }
             do {
                 try FileManager.default.removeItem(at: target)
                 removed += 1
             } catch {
+                noteRemovalFailure(url: target, error: error)
                 log.error("the stale staging file \(target.path) could not be removed (\(error))")
             }
         }
         return removed
+    }
+
+    /// 这一趟删除里**没删掉**的那几枚：名字 + 原因。上限 `removalFailureCap` 条，总数另记在
+    /// `removalFailureTotal`（上限存在的理由是长跑的 daemon 不许被一次坏目录撑开内存，与
+    /// `archivedUnderApp` 那一份 FIFO 同一道理）。
+    ///
+    /// 它存在的理由是 R-15（2026-11-05 复审）：`removeExpired` 从前把 `removeItem` 的失败
+    /// 吃进 `(try? …) != nil` 里，于是 dry-run 报 10、真跑删掉 7、CLI 报 `pruned: 7` 并退 0——
+    /// 一次部分成功被写成了一次圆满成功，而那 3 枚还在盘上。`--project-prune` 早就是
+    /// `failed` + `failures` 的形状（`main.swift`），两条删除命令不能一个看得见一个看不见。
+    public private(set) var pruneFailures: [[String: String]] = []
+    public private(set) var pruneFailureTotal: Int = 0
+    static let removalFailureCap = 32
+
+    private func resetRemovalFailures() {
+        pruneFailures = []
+        pruneFailureTotal = 0
+    }
+
+    private func noteRemovalFailure(url: URL, error: Error) {
+        pruneFailureTotal += 1
+        guard pruneFailures.count < Self.removalFailureCap else { return }
+        pruneFailures.append([
+            "file": EngineCore.redactHome(url.path),
+            "reason": "\(error)",
+        ])
     }
 
     /// Deletion identity for every destructive pass: an entry this store owns
@@ -766,15 +810,36 @@ public final class EvidenceStore {
         }
     }
 
-    /// Read and validate a pack by operationId. Missing or corrupt files
-    /// return nil (the caller maps this to GP_E_NO_EVIDENCE); `read` itself
-    /// never throws so a single bad entry cannot crash the daemon.
+    /// Read and validate a pack by operationId. A genuinely absent entry returns
+    /// nil (the caller maps *that* to GP_E_NO_EVIDENCE); an entry that is there but
+    /// could not be opened, does not decode, or carries another operation's id
+    /// returns nil **and** leaves the reason in `readFailure`. `read` itself never
+    /// throws so a single bad entry cannot crash the daemon.
+    ///
+    /// 这一分法是产品本身的：`GP_E_NO_EVIDENCE` 说的是"这台机器上没有这一条的证据"，
+    /// 而一次打不开的读**没有**说出这句话（2026-11-05 复审 R-11）。从前这三种都只回 nil，
+    /// 调用方把它们一律念成"查无此档"。
     public func read(operationId: String) -> EvidencePack? {
+        readFailure = nil
         let filePath = path(for: operationId)
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: filePath)) else {
+        let data: Data
+        do {
+            data = try Data(contentsOf: URL(fileURLWithPath: filePath))
+        } catch let failure as NSError where failure.domain == NSCocoaErrorDomain
+            && failure.code == NSFileReadNoSuchFileError {
+            return nil  // 这份文件确实不在——这一条才是缺席的陈述
+        } catch {
+            readFailure = "\(EngineCore.redactHome(filePath)) is there but this process could not open it "
+                + "(\(EngineCore.described(error))), so nothing here can say whether \(operationId) was archived"
+            log.error("evidence read refused: \(readFailure ?? "")")
             return nil
         }
-        guard let pack = try? EvidencePack.decodeAndValidate(data) else { return nil }
+        guard let pack = try? EvidencePack.decodeAndValidate(data) else {
+            readFailure = "\(EngineCore.redactHome(filePath)) holds \(data.count) bytes that do not decode "
+                + "as an evidence pack for \(operationId), so this entry was read but not judged"
+            log.error("evidence read refused: \(readFailure ?? "")")
+            return nil
+        }
         // The file answers for the operation its **name** states, so the pack has to
         // agree: without this, copying or renaming `op_A.json` over `op_B.json` makes
         // gp_last_evidence{op_B}, the archive scan and the HTML report all present A's
@@ -782,6 +847,8 @@ public final class EvidenceStore {
         // A same-user writer can recompute the bytes, which is why this is stated as
         // detectability of a misfiled record, not as tamper-proofing.
         guard pack.operationId == operationId else {
+            readFailure = "\(EngineCore.redactHome(filePath)) carries operationId \(pack.operationId), "
+                + "so it is not an answer about \(operationId); nothing was returned"
             log.error("evidence pack \(filePath) carries operationId \(pack.operationId): refusing to answer it as \(operationId)")
             return nil
         }
@@ -791,8 +858,14 @@ public final class EvidenceStore {
         return pack.markingMissingBoundsProvenance()
     }
 
+    /// 上一次 `read(operationId:)` 为什么没交出档案；nil 要么是没读过一次 `read`，要么那一次
+    /// 真的答复了"没有这一条"。与 `listingFailure` 同一条规矩：没问到不许写成答案是"没有"。
+    public private(set) var readFailure: String?
+
     /// OperationId of the most recently written file, by file modification
-    /// time. Returns nil when the directory is empty or missing.
+    /// time. Returns nil when the directory is empty, missing, **or unreadable** —
+    /// the last two are told apart by `listingFailure`, which the caller must
+    /// consult before concluding "nothing was recorded".
     public func lastOnDisk() -> String? {
         let urls = archiveEntryURLs(keys: [.contentModificationDateKey])
         let newest = urls.max { a, b in
@@ -872,14 +945,18 @@ public final class EvidenceStore {
     /// directory returns 0.
     @discardableResult
     public func clear() -> Int {
+        resetRemovalFailures()
         // 先收 `.tmp-*` 残渣：它们过不了 `isEntryName`，`archiveEntryURLs` 一条都看不见，
         // 于是"清空档案目录"这句话会漏掉目录里真实存在的字节（清完还在，就是假清完）。
         let reclaimed = reclaimStaleStagingFiles()
         let urls = archiveEntryURLs(keys: [])
         var removed = reclaimed
         for url in urls {
-            if (try? FileManager.default.removeItem(at: url)) != nil {
+            do {
+                try FileManager.default.removeItem(at: url)
                 removed += 1
+            } catch {
+                noteRemovalFailure(url: url, error: error)
             }
         }
         return removed
@@ -942,32 +1019,44 @@ public final class EvidenceStore {
     @discardableResult
     public func prune(olderThanDays: Int) -> Int {
         guard olderThanDays >= 1 else { return 0 }
+        resetRemovalFailures()
         // 与 `clear()` 同一半：这一趟是"按年龄清"，残渣不属于任何年龄档，不收就永远留在目录里。
-        _ = reclaimStaleStagingFiles()
-        return removeExpired(effectiveMaxAgeDays: olderThanDays, now: now())
+        // 收下来的那一截必须**上账**——`clear()` 早把 reclaimed 计进返回值，prune 从前用 `_ =`
+        // 把它丢了，于是 CLI 报的删除数比目录里真少掉的个数小（2026-11-04 候选 H）。
+        let reclaimed = reclaimStaleStagingFiles()
+        return reclaimed + removeExpired(effectiveMaxAgeDays: olderThanDays, now: now())
     }
 
     /// How many entries `prune(olderThanDays:)` *would* remove, using the
     /// identical judgment path with deletion skipped — backs the CLI --dry-run
-    /// contract (P5 §12.2: same-source count, not an estimate).
+    /// contract (P5 §12.2: same-source count, not an estimate). 残渣那一半走同一个
+    /// `staleStagingNames()` 判据，否则 dry-run 报的数与真跑那一趟删的个数天然不同。
     public func countExpired(olderThanDays: Int) -> Int {
         guard olderThanDays >= 1 else { return 0 }
         let current = now()
-        return archiveEntryURLs(keys: [.contentModificationDateKey]).filter {
+        let expired = archiveEntryURLs(keys: [.contentModificationDateKey]).filter {
             isExpired(url: $0, maxAgeDays: olderThanDays, now: current)
         }.count
+        return expired + staleStagingNames().count
     }
 
     /// Actual deletion pass over every entry older than the effective TTL.
+    /// A refusal to delete is **not** folded into the returned count: it is named
+    /// in `pruneFailures` so the CLI can say "moved 7, 3 still there" instead of
+    /// reporting a partial pass as the whole job done (R-15).
     private func removeExpired(effectiveMaxAgeDays: Int?, now: Date) -> Int {
         guard let effectiveMaxAgeDays else { return 0 }
         let urls = archiveEntryURLs(keys: [.contentModificationDateKey])
         guard !urls.isEmpty else { return 0 }
         var removed = 0
         for url in urls {
-            if isExpired(url: url, maxAgeDays: effectiveMaxAgeDays, now: now),
-               (try? FileManager.default.removeItem(at: url)) != nil {
+            guard isExpired(url: url, maxAgeDays: effectiveMaxAgeDays, now: now) else { continue }
+            do {
+                try FileManager.default.removeItem(at: url)
                 removed += 1
+            } catch {
+                noteRemovalFailure(url: url, error: error)
+                log.error("expired evidence entry \(url.path) could not be removed (\(error)) — it is still on disk")
             }
         }
         return removed
@@ -1046,7 +1135,7 @@ public final class EvidenceStore {
             listingFailure = nil
             return .absent
         } catch {
-            listingFailure = "cannot list the evidence archive at \(directory) (\(error))"
+            listingFailure = "cannot list the evidence archive at \(EngineCore.redactHome(directory)) (\(EngineCore.described(error)))"
             return .unreadable(directory)
         }
     }

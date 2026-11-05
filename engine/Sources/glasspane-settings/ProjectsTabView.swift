@@ -82,6 +82,7 @@ struct ProjectsTabView: View {
                 .controlSize(.small)
                 .disabled(!model.canPreviewTestResiduePrune)
                 .help(model.pruneControlHelp)
+                .accessibilityHint(model.pruneControlHelp)
                 .accessibilityIdentifier("gp-prune-projects")
         }
         .padding(10)
@@ -104,6 +105,7 @@ struct ProjectsTabView: View {
                 .controlSize(.small)
                 .disabled(settings.isRestartInFlight)
                 .help(settings.isRestartInFlight ? "上一次重启还在等后台服务回话" : "让后台服务重新加载注册表")
+                .accessibilityHint(settings.isRestartInFlight ? "上一次重启还在等后台服务回话" : "让后台服务重新加载注册表")
                 .accessibilityIdentifier("gp-restart-after-prune")
             }
             // 重启的实测结论就在横幅里，收起横幅的条件由它决定：失败时横幅留着，
@@ -235,6 +237,7 @@ struct ProjectsTabView: View {
                                 // 什么都不做——一句"打开了"都没有，正是这一产品里的静默失效。
                                 .disabled(!evidenceDirectoryEnabled(entry))
                                 .help(evidenceDirectoryHelp(entry))
+                                .accessibilityHint(evidenceDirectoryHelp(entry))
                                 .accessibilityIdentifier("gp-open-evidence-directory")
                                 Button("复制项目 ID") {
                                     NSPasteboard.general.clearContents()

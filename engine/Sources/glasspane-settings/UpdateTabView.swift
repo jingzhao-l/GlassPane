@@ -251,6 +251,7 @@ struct UpdateTabView: View {
                     .accessibilityIdentifier("gp-update-check")
                     .disabled(!buttons.checkEnabled)
                     .help(buttons.checkReason ?? "现在问一次源上有没有新版本")
+                    .accessibilityHint(buttons.checkReason ?? "现在问一次源上有没有新版本")
 
                 Button(UpdatePanel.applyButtonTitle) { model.applyUpdate() }
                     .buttonStyle(.borderedProminent)
@@ -258,6 +259,7 @@ struct UpdateTabView: View {
                     .accessibilityIdentifier(UpdatePanel.applyButtonIdentifier)
                     .disabled(!buttons.applyEnabled)
                     .help(buttons.applyReason ?? "装那份已经校验过的新版本")
+                    .accessibilityHint(buttons.applyReason ?? "装那份已经校验过的新版本")
 
                 // 作者身份缺口下才有这一枚：那一次检查在下载前就停了，盘上没有
                 // 可装的东西，"安装"按不动是对的，但必须给一个做得动的确认动作，
@@ -283,6 +285,7 @@ struct UpdateTabView: View {
                     .controlSize(.small)
                     .disabled(!buttons.toggleEnabled)
                     .help(buttons.toggleReason ?? "每天到点自动检查并安装（跨大版本不算，它永远等你按按钮）")
+                    .accessibilityHint(buttons.toggleReason ?? "每天到点自动检查并安装（跨大版本不算，它永远等你按按钮）")
                     .accessibilityIdentifier("gp-update-auto")
                 } else {
                     HStack(spacing: 6) {

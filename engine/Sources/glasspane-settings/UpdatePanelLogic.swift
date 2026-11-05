@@ -507,7 +507,7 @@ enum UpdatePanel {
             ? ""
             : " --state-dir \(RemedyCommand.quote(measuredRoot))"
         let readIt = "要看清缺什么、以及怎么把它补上，就把下面「更新器」那一栏记着的这一份读一次状态："
-            + "node \(updaterPath) status" + rootArgument
+            + "node \(RemedyCommand.quote(updaterPath)) status" + rootArgument
             + (rootArgument.isEmpty
                 ? "。这条命令里没带状态根，因为这一屏还没量到它在用哪一个——"
                   + "先在下面「状态根」那一栏认出根，再读那一次状态，读回来的才是这一页显示的这一份。"
@@ -516,7 +516,7 @@ enum UpdatePanel {
             return readIt
         }
         return readIt + "这一道门不是只能看：更新器自己就备了一条走得完的安装命令——"
-            + "node \(updaterPath) apply --state-dir \(RemedyCommand.quote(measuredRoot)) --consent state-dir。"
+            + "node \(RemedyCommand.quote(updaterPath)) apply --state-dir \(RemedyCommand.quote(measuredRoot)) --consent state-dir。"
             + "跑不跑由你决定：这一枚按下去不会发生任何事（这一道确认要由你本人给，"
             + "它按不动说的就是这件事），上面那一条由你自己敲出去的命令才会动它——"
             + "那一次安装带着你这一次给的确认去换版，确认不写进任何默认值，"

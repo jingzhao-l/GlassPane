@@ -127,7 +127,7 @@ public final class ProjectRegistry {
 
     public func listing() -> RegistryListing {
         if loadFailed {
-            return .unreadable(reason: unreadableReport ?? "projects.json at \(filePath) could not be read")
+            return .unreadable(reason: unreadableReport ?? "projects.json at \(EngineCore.redactHome(filePath)) could not be read")
         }
         return .registered(projects)
     }
@@ -155,9 +155,15 @@ public final class ProjectRegistry {
     /// The unreadable registry as one agent-facing sentence, or nil when the
     /// registry is trustworthy. Shared by every refusal so the write side and
     /// the read side cannot describe the same damage differently.
+    ///
+    /// 这一句是**散文**：主目录折成 `~`，账号名不上线（2026-11-03 #2 定的那一半）。它也是
+    /// 唯一的作者——`listing()` 里那一支只在 `unreadableReport` 为 nil 时才走到，而 `loadFailed`
+    /// 为真时它恒不为 nil，所以从前那一处的 `redactHome` 是一段跑不到的代码，而这**真源**
+    /// 原样把 `/Users/<账号>` 发进每一条拒绝（2026-11-05 复审 R-16）。命令位仍然带真路径，
+    /// 由 `DailyRound20261105RemedyWordUsableTests` 那条闸钉着。
     public var unreadableReport: String? {
         guard loadFailed else { return nil }
-        return "projects.json at \(filePath) \(loadFailure ?? "could not be read")"
+        return "projects.json at \(EngineCore.redactHome(filePath)) \(loadFailure ?? "could not be read")"
     }
 
     /// Executable repair path for an unreadable registry. Deliberately does
@@ -318,7 +324,7 @@ public final class ProjectRegistry {
             data = try Data(contentsOf: URL(fileURLWithPath: filePath))
         } catch {
             loadFailed = true
-            loadFailure = "cannot be read (\(error))"
+            loadFailure = "cannot be read (\(EngineCore.described(error)))"
             return
         }
         // The identity is taken from the bytes just read, so a refusal can only
@@ -333,7 +339,7 @@ public final class ProjectRegistry {
             // The table stays empty on purpose (ApprovalGate's posture), but the
             // flag makes "empty" mean "unreadable" everywhere it is used.
             loadFailed = true
-            loadFailure = "is not a decodable project list (\(error))"
+            loadFailure = "is not a decodable project list (\(EngineCore.described(error)))"
         }
     }
 
@@ -419,7 +425,7 @@ public final class ProjectRegistry {
         } catch {
             throw GPError(
                 code: .internalError,
-                message: "the project registry could not be encoded (\(error)); nothing was written to \(filePath)",
+                message: "the project registry could not be encoded (\(error)); nothing was written to \(EngineCore.redactHome(filePath))",
                 remedy: "this is a daemon-side defect, not a parameter problem: report the registry fields you passed (displayName/bundleId/pid and the three paths) — one of them carries a value the encoder rejected — and re-run after fixing it"
             )
         }
@@ -443,7 +449,7 @@ public final class ProjectRegistry {
             if dirInfo.st_uid == getuid(), chmod(registryDirectory, mode_t(0o700)) != 0 {
                 throw GPError(
                     code: .internalError,
-                    message: "the directory holding \(filePath) could not be tightened to 0700: \(String(cString: strerror(errno)))",
+                    message: "the directory holding \(EngineCore.redactHome(filePath)) could not be tightened to 0700: \(String(cString: strerror(errno)))",
                     remedy: "the registry was NOT written; make the directory owner-only yourself and retry (`chmod 700 \(RemedyCommand.quote(registryDirectory))`), or move the state root with --state-dir onto a volume that honours permissions"
                 )
             }
@@ -451,7 +457,7 @@ public final class ProjectRegistry {
             if stat(registryDirectory, &after) == 0, after.st_mode & 0o077 != 0 {
                 throw GPError(
                     code: .internalError,
-                    message: "the directory holding \(filePath) is mode \(String(format: "%04o", Int(after.st_mode & 0o777))) after tightening — every local account can still list the registry this daemon acts on",
+                    message: "the directory holding \(EngineCore.redactHome(filePath)) is mode \(String(format: "%04o", Int(after.st_mode & 0o777))) after tightening — every local account can still list the registry this daemon acts on",
                     remedy: "the registry was NOT written; find out what holds that directory (`ls -ld \(RemedyCommand.quote(registryDirectory))`, an ACL or an immutable flag shows there), fix it, then retry"
                 )
             }
@@ -484,8 +490,8 @@ public final class ProjectRegistry {
             if let defect = isolationCheck(tmpPath) {
                 throw GPError(
                     code: .internalError,
-                    message: "the project registry temp file \(tmpPath) could not be made owner-only: \(defect); nothing was published to \(filePath)",
-                    remedy: "the directory holding \(filePath) is on a volume that ignores chmod (read-only mount, ACL or immutable flag): make the directory owner-only writable, or move the state root with --state-dir to one that honors permissions; the registry was not written either way"
+                    message: "the project registry temp file \(tmpPath) could not be made owner-only: \(defect); nothing was published to \(EngineCore.redactHome(filePath))",
+                    remedy: "the directory holding \(EngineCore.redactHome(filePath)) is on a volume that ignores chmod (read-only mount, ACL or immutable flag): make the directory owner-only writable, or move the state root with --state-dir to one that honors permissions; the registry was not written either way"
                 )
             }
             // Last look before the item is published: everything above this line
@@ -531,7 +537,7 @@ public final class ProjectRegistry {
             }
             throw GPError(
                 code: .internalError,
-                message: "project registry write to \(filePath) did not reach the disk: \(fault.message) — the write is reported as failed rather than as saved, so no caller may treat these \(projects.count) registration(s) as persisted; the volume holding \(filePath) has to answer fsync",
+                message: "project registry write to \(EngineCore.redactHome(filePath)) did not reach the disk: \(fault.message) — the write is reported as failed rather than as saved, so no caller may treat these \(projects.count) registration(s) as persisted; the volume holding \(EngineCore.redactHome(filePath)) has to answer fsync",
                 remedy: "check the volume and the directory (`df -k \(RemedyCommand.quote(destination.deletingLastPathComponent().path))`, `ls -ld \(RemedyCommand.quote(destination.deletingLastPathComponent().path))`); until the registry is on durable bytes, restart the background service so no process trusts an in-memory table (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`)"
             )
         } catch let clash as ConcurrentWriteRefusal {
@@ -541,8 +547,8 @@ public final class ProjectRegistry {
             // `update`, `remove` all undo a throwing write).
             throw GPError(
                 code: .internalError,
-                message: "project registry write to \(filePath) refused: the file changed after this process read it (\(clash.detail)) — nothing was published, because renaming the \(projects.count) entry/entries this process holds over it would silently revert the other writer's result while every caller was told this write verified. Writes stay refused until a process re-reads the file\(discardStagedCopy(tmpPath))",
-                remedy: "re-read the table (`\(DaemonInvocation.command) --list-projects`) and repeat the change against what is on disk now; the background service has to restart to pick the file up (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`, or the restart button in the GlassPane panel). Do not delete \(filePath) — the newer registrations are only in it"
+                message: "project registry write to \(EngineCore.redactHome(filePath)) refused: the file changed after this process read it (\(clash.detail)) — nothing was published, because renaming the \(projects.count) entry/entries this process holds over it would silently revert the other writer's result while every caller was told this write verified. Writes stay refused until a process re-reads the file\(discardStagedCopy(tmpPath))",
+                remedy: "re-read the table (`\(DaemonInvocation.command) --list-projects`) and repeat the change against what is on disk now; the background service has to restart to pick the file up (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`, or the restart button in the GlassPane panel). Do not delete \(EngineCore.redactHome(filePath)) — the newer registrations are only in it"
             )
         } catch {
             // No silent fallback write: the caller hears that the registry did
@@ -578,7 +584,7 @@ public final class ProjectRegistry {
         if let defect = isolationCheck(filePath) {
             throw GPError(
                 code: .internalError,
-                message: "the project registry at \(filePath) landed but is not owner-only: \(defect) — every local account can read the project list this daemon acts on, and the write is reported as failed rather than as saved",
+                message: "the project registry at \(EngineCore.redactHome(filePath)) landed but is not owner-only: \(defect) — every local account can read the project list this daemon acts on, and the write is reported as failed rather than as saved",
                 remedy: "chmod 600 \(RemedyCommand.quote(filePath)) and make its directory owner-only (`ls -ld \(RemedyCommand.quote(destination.deletingLastPathComponent().path))`); if the volume still ignores chmod (read-only mount, ACL or immutable flag) move the state root with --state-dir to one that honors permissions and restart the background service (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`). Nothing was deleted: the table on disk is the new one, it is simply not private."
             )
         }
@@ -606,21 +612,21 @@ public final class ProjectRegistry {
         } catch {
             throw GPError(
                 code: .internalError,
-                message: "the project registry write to \(filePath) did not land: the file cannot be read back (\(error)); the \(count) entry/entries exist only in this process",
+                message: "the project registry write to \(EngineCore.redactHome(filePath)) did not land: the file cannot be read back (\(error)); the \(count) entry/entries exist only in this process",
                 remedy: "check the directory (`ls -ld \(RemedyCommand.quote(destination.deletingLastPathComponent().path))`, `df -k \(RemedyCommand.quote(destination.deletingLastPathComponent().path))`); the write must be retried before any caller relies on this registration"
             )
         }
         guard let decoded = try? JSONDecoder().decode([ProjectEntry].self, from: data) else {
             throw GPError(
                 code: .internalError,
-                message: "the project registry at \(filePath) was written but does not decode (\(data.count) bytes); this process's table and the file are now different representations",
+                message: "the project registry at \(EngineCore.redactHome(filePath)) was written but does not decode (\(data.count) bytes); this process's table and the file are now different representations",
                 remedy: "inspect the file (`python3 -m json.tool \(RemedyCommand.quote(filePath))`); until it decodes, restart the background service so no process trusts an in-memory-only registry"
             )
         }
         guard decoded.count == count else {
             throw GPError(
                 code: .internalError,
-                message: "the project registry write to \(filePath) reads back \(decoded.count) entry/entries instead of \(count)",
+                message: "the project registry write to \(EngineCore.redactHome(filePath)) reads back \(decoded.count) entry/entries instead of \(count)",
                 remedy: "another writer likely replaced the file concurrently; re-read the registry (`\(DaemonInvocation.command) --list-projects`) before repeating the change"
             )
         }

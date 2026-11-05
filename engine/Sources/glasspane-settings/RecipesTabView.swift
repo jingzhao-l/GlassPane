@@ -148,6 +148,7 @@ struct RecipesTabView: View {
                             .font(.callout)
                     }
                     .help("把模板文本加载进编辑器")
+                    .accessibilityHint("把模板文本加载进编辑器")
                     .disabled(isValidating)
                     .accessibilityIdentifier("gp-recipe-template-\(template.key)")
                 }
@@ -194,6 +195,7 @@ struct RecipesTabView: View {
                     Label("清空", systemImage: "trash")
                 }
                 .help("把编辑器里的文本清成空白（不落盘、不动项目）")
+                .accessibilityHint("把编辑器里的文本清成空白（不落盘、不动项目）")
                 .disabled(isValidating)
 
                 Spacer()
@@ -561,6 +563,7 @@ struct RecipesTabView: View {
             // 字段结构本来就随每次渲染重读盘，这里没有任何可"刷新"的东西。
             // 按钮说什么，它就得做什么。
             .help("清掉上一次显示的校验结论（配方内容保存在本机设置里，不会丢失）")
+            .accessibilityHint("清掉上一次显示的校验结论（配方内容保存在本机设置里，不会丢失）")
             .disabled(isValidating)
             .accessibilityIdentifier("gp-clear-recipe-verdict")
         }

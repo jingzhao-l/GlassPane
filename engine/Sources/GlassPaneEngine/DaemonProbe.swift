@@ -155,7 +155,7 @@ public final class DaemonProbe: @unchecked Sendable {
     ///   建立本身就证明名字有主（A-18）。
     public func liveness(socketPath: String, waitForHello: Bool = true) -> Liveness {
         guard fileExists(socketPath) else {
-            return .noListener(reason: "no socket file at \(socketPath)")
+            return .noListener(reason: "no socket file at \(EngineCore.redactHome(socketPath))")
         }
         let request = Data("{\"id\":0,\"method\":\"hello\"}\n".utf8)
         switch rawTransport(socketPath, request, waitForHello) {
@@ -317,7 +317,7 @@ public final class DaemonProbe: @unchecked Sendable {
 
         guard var address = UnixSocketAddress.address(for: socketPath) else {
             // 路径连 sockaddr_un 都装不下，这个名字后面不可能有监听者。
-            return .noListener(reason: "socket path does not fit sockaddr_un: \(socketPath)")
+            return .noListener(reason: "socket path does not fit sockaddr_un: \(EngineCore.redactHome(socketPath))")
         }
 
         // unix 流套接字的 connect() 是同步的，所以非阻塞模式下返回值本身就是答案：
