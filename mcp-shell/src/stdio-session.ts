@@ -221,9 +221,14 @@ export function startStdioServer(options: CliOptions): void {
     if (response === null) {
       return;
     }
-    // The id is handed to the writer so a dropped reply names which request was
-    // lost, and the boolean is not discarded: `false` means this reply will never
-    // reach stdout, which `gp_diagnose` then surfaces from the writer's counter.
+    // 这一枚返回值**是**被丢掉的，从前这里写着"没有被丢掉"，那句是假的（2026-11-05 复审 R-4
+    // 复核出来的形状）。两种 `false` 说的不是同一件事，也不该共用一个计数器：
+    //  · 不队列上限那一支——这一帧从没交给 stdout，`DrainAwareWriter` 把它记进 `droppedFrames`，
+    //    `gp_diagnose` 读的就是那一个数，"哪些回话丢了"因此是可问的；
+    //  · drain 看门狗那一支——字节已经在内核缓冲里，只是这一侧不再等读者把它取走。把它记成
+    //    "丢了"是在声称一次没量过的损失；那一支现在由 `write()` 自己那条注记原样报出去
+    //    （带等待毫秒数与积压字节数），既不进 `droppedFrames`，也不静默。
+    // 于是这里 `await` 之后不再假装读那个布尔：两者的可观测出口都在 writer 那一侧。
     const id = (response as { id?: number | string | null }).id;
     await replies.write(canonicalJson(response) + "\n", id);
   };

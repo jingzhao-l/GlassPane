@@ -876,11 +876,19 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
   }
   // 归口条目要自己证明它还该在：这一次它对应的那一行**没有**再发生，说明那条线已经修好了，
   // 留着豁免就等于给一道已经不复存在的缺陷作掩护——下一次它换个人、换个文件复发时，没人记得它存在过。
+  //
+  // 但"没再发生"只在**真的看过那一份文件**时才算数。`check()` 的文档集合是注入的（各条测试都拿
+  // 临时根跑，见 `updater/test/scripts-check-doc-links.test.mjs`），在一个不含 fork 门面的根里，
+  // 那一行当然不会发生——那不能算"那条线修好了"，只能算"这一轮没看那份文件"。不这么分开的话，
+  // 这条自过期检查会把每一个合成根的测试都判红（本轮第一次跑就撞上，正是那条既有测试拦住的）。
+  const seenDocs = new Set(present);
   for (const d of DEFERRED_FINDINGS) {
+    const file = d.problem.split(':')[0];
     if (deferredHit.has(d.id)) {
       advisories.push(`归口待修 ${d.id}：${d.problem}｜判据 ${d.measured}｜归 ${d.owner}｜已于 ${d.openedOn} 交接给 ${d.handedTo}`)
       continue
     }
+    if (!seenDocs.has(file)) continue // 这一轮没看过那一份文件，不作"已修"的结论
     problems.push(`归口条目 ${d.id} 这一轮没有再发生（它钉的是「${d.problem}」）：那条线大概已经修好了，`
       + `把这条豁免从 DEFERRED_FINDINGS 删掉——留着它，这道闸就在替一个已经不存在的问题作掩护`)
   }

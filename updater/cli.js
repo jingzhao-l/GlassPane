@@ -291,7 +291,13 @@ export function resolveStateRoot({ flags = {}, env = process.env, homeDir = reco
       { stateDir: dir, stateRoot: root },
     )
   }
-  const named = dir ?? root ?? env.GLASSPANE_STATE_DIR
+  // 取"第一个真给了值的"那一枚，而不是 `??`。`??` 只挡 `null`/`undefined`，挡不住**空串**：
+  // 本轮把 `updater/test/daily-20261104-…` 的夹具从不存在的路径换成真存在的目录之后量到，
+  // `--state-dir "" --state-root <真的另一棵树>` 回的是**默认根** `~/.glasspane`——那一趟以为
+  // 自己按另一个根在动，写的却是这台机器正在用的那一棵，连 `nonDefaultStateDir` 那道要人来
+  // 确认的门都没经过。空串按"没点名"处理才是它的意思，两枚旗标共用这一条规矩。
+  const named = [dir, root, env.GLASSPANE_STATE_DIR]
+    .find((value) => typeof value === 'string' && value.trim() !== '')
   const defaultRoot = canonicalPath(path.join(homeDir, '.glasspane'))
   if (typeof named === 'string' && named.trim() !== '') {
     const lexical = canonicalPath(named)
