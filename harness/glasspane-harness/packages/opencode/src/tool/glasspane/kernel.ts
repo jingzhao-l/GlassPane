@@ -25,7 +25,7 @@
  * double-write that produced audit findings B-1 and A-15 — one defect, two
  * copies, fixed twice).
  */
-import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs"
 import path from "node:path"
 
 import { Global } from "@opencode-ai/core/global"
@@ -226,7 +226,36 @@ function engineStateRoot(env: NodeJS.ProcessEnv): StateRoot {
  * caller can actually name. A path that cannot be realpaths at all comes back unchanged:
  * this is a guard, not a resolver, and a refusal it produces must be about the bytes.
  */
+/**
+ * How far one trailing component may chase `readlink` before this guard gives up.
+ * `lstat`+`readlink` is manual resolution, so the loop needs a ceiling of its own: a
+ * two-entry cycle (`a -> b`, `b -> a`) is a file the operator can create with two
+ * `ln -s`, and without a bound this function spins forever inside what is supposed to
+ * be a refusal path. Reaching the limit returns the deepest path followed, which the
+ * containment test then reads as what it physically is — not as "no problem".
+ */
+const SYMLINK_HOP_LIMIT = 32
+
 function physicalPath(candidate: string): string {
+  // Resolution runs in rounds, not one pass: following a link can land on a path whose OWN
+  // ancestors are links (measured 2026-11-04 — a leaf link under `/var/folders/...` targets
+  // a spelling that still needs realpath'ing to `/private/var/folders/...`, which is exactly
+  // what the state root resolved to, so a one-pass follow compared two spellings of the same
+  // tree and called them different). Each round returns a path that is at least one link
+  // shorter than the one it was given; when a round changes nothing, the answer is stable.
+  // The bound is for a cycle (`a -> b`, `b -> a`): two `ln -s` from anyone would otherwise
+  // spin this loop forever inside what is meant to be a refusal path.
+  let current = candidate
+  for (let round = 0; round < SYMLINK_HOP_LIMIT; round += 1) {
+    const next = resolveLinksOnce(current)
+    if (next === current) return current
+    current = next
+  }
+  return current
+}
+
+/** One pass: realpath the deepest existing ancestor, then follow any trailing link. */
+function resolveLinksOnce(candidate: string): string {
   if (candidate.length === 0) return candidate
   const absent: string[] = []
   let current = candidate
@@ -236,11 +265,32 @@ function physicalPath(candidate: string): string {
     absent.unshift(path.basename(current))
     current = parent
   }
+  let resolved: string
   try {
-    return path.join(realpathSync(current), ...absent)
+    resolved = realpathSync(current)
   } catch {
     return candidate
   }
+  // The names below the last existing ancestor are not inert text. `existsSync` FOLLOWS
+  // symlinks, so a leaf that is a symlink to a file nobody has created yet reads as
+  // "absent" above, lands in `absent`, and used to be appended to the ancestor's realpath
+  // and handed back as if it were the physical answer. Measured 2026-11-04: with
+  // `<tmp>/ledger.jsonl` a symlink to `<tmp>/.glasspane/sub/decisions.jsonl` (target not
+  // yet created), the guard compared the OUTSIDE-looking path, passed, and the writer's
+  // `open()` then followed the link and created the ledger inside the engine's tree — the
+  // double writer this function exists to stop, arriving through the one component the
+  // loop refused to look at. Follow one link per round and let `physicalPath` settle it.
+  for (const name of absent) {
+    resolved = path.join(resolved, name)
+    let stat: ReturnType<typeof lstatSync>
+    try {
+      stat = lstatSync(resolved)
+    } catch {
+      continue
+    }
+    if (stat.isSymbolicLink()) return path.resolve(path.dirname(resolved), readlinkSync(resolved))
+  }
+  return resolved
 }
 
 /**
