@@ -702,6 +702,11 @@ private func printUsage() {
                 --older-than not a positive integer, or --recipe-validate named a file
                 that cannot be read. NOT a usage error in the 64 sense: the flag was
                 understood, its argument was not
+        5   --check-developer-tools could not run its probe: the debugger never answered
+                (the toolchain is missing, or the launch/attach arm timed out). This is
+                neither granted nor denied — the payload's `verdict` says which arm said
+                what, and its `next` names the toolchain step. A run that could not
+                measure no longer shares exit code 1 with a refusal.
         3   a named id that is not registered — the one answer for "this mac has no
                 such project", whichever command was asked: --project-remove,
                 --active-project, and --prune-evidence/--evidence-stats given
@@ -1219,7 +1224,16 @@ if options.checkDeveloperTools {
     let probe = DebugCapabilityProbe()
     let payload = probe.jsonPayload()
     writeJSON(payload)
-    exit((payload["granted"] as? Bool) == true ? 0 : 1)
+    // 三档分三个号。从前这里是 `granted ? 0 : 1`，于是"探测压根没跑成"（工具链不在位、lldb
+    // 那一臂超时）与"系统明确拒绝这一席"回同一个 1——按 rc 分叉的调用方拿到的是一次它没做过的
+    // 判决，而产品唯一的红线就是不许把没量到的写成量到的（2026-11-05 记账）。
+    // 读码方不受影响：非零仍是"这一席没成"，只是多出一档能自己说是为什么。
+    switch payload["verdict"] as? String {
+    case "granted": exit(0)
+    case "denied": exit(1)
+    // `verdict` 读不出来＝这份报文自己坏了，同样不能替系统答"被拒"。
+    default: exit(5)
+    }
 }
 if options.checkInputPermission {
     // P2 §17.2 真机冒烟前置：C33 输入监控 TCC 状态对外如实输出

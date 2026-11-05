@@ -47,6 +47,41 @@ public final class DebugCapabilityProbe {
             if launch == .denied || attach == .denied { return false }
             return attach == .ok
         }
+
+        /// 这一席读成了什么——三档，且 `false` 不再同时表示"被拒"和"没量到"。
+        public enum SeatVerdict: String {
+            case granted
+            case denied
+            case unverifiable
+        }
+
+        public var verdict: SeatVerdict {
+            if launch == .denied || attach == .denied { return .denied }
+            if attach == .ok { return .granted }
+            return .unverifiable
+        }
+
+        /// 每一档给一条做得动的下一步。判据与那句措辞住在同一处，免得句子和动作各写一份
+        /// （`ConsoleModel.daemonStatsRecovery` 是同一形状的先例）。
+        public var nextStep: String {
+            switch verdict {
+            case .granted:
+                return "no manual step: this run attached with the debugger, which is what the seat is for"
+            case .denied:
+                return "the system refused this seat: open System Settings > Privacy & Security > "
+                    + "Developer Tools, enable the entry for this daemon binary (\(DaemonInvocation.command)), "
+                    + "then re-run \(DaemonInvocation.command) --check-developer-tools — the ask itself answers "
+                    + "nothing, this probe is the measurement"
+            case .unverifiable:
+                return "this run measured nothing about the seat: the probe never got an answer from the debugger "
+                    + "(launch=\(Self.stateName(launch)), attach=\(Self.stateName(attach))). First check the "
+                    + "toolchain is installed — `xcrun --find lldb`, and if that fails `xcode-select --install` — "
+                    + "then re-run \(DaemonInvocation.command) --check-developer-tools. Do not change any "
+                    + "permission checkbox on this verdict alone"
+            }
+        }
+
+        static func stateName(_ outcome: Outcome) -> String { outcome.rawValue }
     }
 
     /// Injectable process layer so unit tests never touch lldb.
@@ -273,7 +308,18 @@ public final class DebugCapabilityProbe {
             "launch": encode(snap.launch),
             "attach": encode(snap.attach),
             "granted": snap.granted,
-            "note": "TCC 无公开查询 API；本结果是受限真实 lldb 探测的三态陈述。granted=false 的唯一人工步骤是系统设置勾选，验证/复验全由本命令承担。",
+            // 三档词表，与 `--check-input-permission` / `--check-accessibility` 那两位同族
+            // （`DaemonPermissionVocabularyTests` 钉着它们的取值表）。从前这份报文只有一个
+            // `granted` 布尔，于是"探测压根没跑成"（toolchain 不在位、lldb 超时）与"系统把这
+            // 一席拒了"共用一个 false，而下面那句 note 还把 false 的唯一出路写成系统设置勾选
+            // ——给一个没量到的东西指派了一个人工步骤（2026-11-05 记账）。
+            "verdict": snap.verdict.rawValue,
+            "verdictStates": ["launch": Snapshot.stateName(snap.launch),
+                              "attach": Snapshot.stateName(snap.attach)],
+            "next": snap.nextStep,
+            "note": "TCC 无公开查询 API；本结果是受限真实 lldb 探测的陈述。verdict 说这一席读成了什么："
+                + "granted 是实测附加成功，denied 是系统明确拒绝，unverifiable 是这一趟没量到——"
+                + "unverifiable 不许被读成拒绝，它给的下一步是工具链，不是勾选。",
         ]
     }
 }
