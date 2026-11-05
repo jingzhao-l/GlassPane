@@ -40,7 +40,7 @@ test("不队列上限那一支：从没交给 stdout 的那一帧计进 droppedF
   assert.equal(writer.droppedFrames, 1, "从没交给 stdout 的一帧不计数，`gp_diagnose` 就会报 0");
   assert.equal(notes.length, 1, "丢一帧要说一帧");
   assert.match(notes[0], /reply 7/, `报话要点名是哪一条 id：${notes[0]}`);
-  assert.match(notes[0], /past the 0 bytes ceiling/, notes[0]);
+  assert.match(notes[0], /past the 0 ceiling/, notes[0]);
 });
 
 test("drain 看门狗那一支：不算丢（字节已在缓冲里），但必须把这等事说出来", async () => {
