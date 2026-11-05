@@ -388,7 +388,21 @@ function rawRequest(method: string, params: object, timeoutMs: number): Promise<
     socket.on("data", (chunk: string) => {
       buffer += chunk
       if (Buffer.byteLength(buffer) > MAX_FRAME_BYTES) {
-        finish(failure("GP_E_PAYLOAD_TOO_LARGE", `the daemon sent more than ${MAX_FRAME_BYTES} bytes before a frame boundary`, "retry with a narrower query (smaller maxDepth, or a role filter)"))
+        // The narrowing advice is only an remedy for a method that HAS narrowing
+        // parameters. `observe` takes `maxDepth`/`role`; `diagnose`, `last_evidence`,
+        // `attach` and `probe_status` take neither, so sending their caller "retry with a
+        // narrower query" sends an agent back to the same call it just made. Everything
+        // past `observe` is the engine breaching its own ceiling, which the caller can
+        // only report — not fix — so name the log to read and forbid the retry loop.
+        finish(
+          failure(
+            "GP_E_PAYLOAD_TOO_LARGE",
+            `the daemon sent more than ${MAX_FRAME_BYTES} bytes before a frame boundary`,
+            method === "observe"
+              ? "retry with a narrower query (smaller maxDepth, or a role filter)"
+              : `"${method}" takes no maxDepth or role to narrow with — the engine sent past its own ${MAX_FRAME_BYTES}-byte frame ceiling, which is its failure, not the shape of your query. Read \`tail -n 20 ~/.glasspane/installer-daemon.log\` and report this call as failed; do not retry it in a loop, and do not cite evidence this frame was supposed to carry`,
+          ),
+        )
         return
       }
       const newline = buffer.indexOf("\n")
@@ -506,7 +520,15 @@ export interface Capabilities {
   version: string
   protocolVersion: string
   capabilities: string[]
-  permissions: Record<string, string>
+  /**
+   * `null` means the engine sent NO `permissions` field — it did not answer the
+   * question. `{}` means it answered, and the answer is "no seats". Collapsing the
+   * two made `gp_probe_status` report "no permission seats" for an older engine that
+   * reports nothing, which is a guess about the host's TCC state; `EngineCore`'s own
+   * comment requires the panel to degrade to unverified (`permissionsReport: (() ->
+   * DaemonPermissionSnapshot?)? = nil`, "缺省 nil 表示不上报…面板据此如实降级为'未验证'，不猜测").
+   */
+  permissions: Record<string, string> | null
 }
 
 /**
@@ -554,15 +576,33 @@ export function probeCapabilities() {
         // is the one thing this surface must not do — decide what a permission state means.
         // A seat this layer cannot read keeps its NAME (dropping it would make the report say the
         // engine has fewer seats than it adverted) and gets a value that says what went wrong.
-        permissions: Object.fromEntries(
-          Object.entries(report.permissions ?? {}).map(([seat, state]) => [
-            seat,
-            typeof state === "string" ? state : `unreadable: the engine sent ${state === null ? "null" : typeof state}, not a state string`,
-          ]),
-        ) as Record<string, string>,
+        //
+        // A MISSING field is a different fact and used to be rendered as the empty one:
+        // `report.permissions ?? {}` turned "this engine reports no seats at all" (an older
+        // `glasspaned`, where `permissionsReport` is nil by design) into `{}` — which the panel
+        // then read as "no permission seats", a claim about the host's TCC state that nobody
+        // made. `null` is that answer; `{}` stays the answer to a different question.
+        permissions: readSeats(report.permissions),
       },
     }
   })
+}
+
+/**
+ * The engine's permission seats, read — not assumed. `null` is "the engine did not
+ * give a seat report I can read" (field absent, or a non-object where a seat map
+ * belongs); `{}` is "the engine gave a seat map and it is empty". Only the second one
+ * is a statement about the host.
+ */
+function readSeats(value: unknown): Record<string, string> | null {
+  if (value === null || value === undefined) return null
+  if (typeof value !== "object" || Array.isArray(value)) return null
+  return Object.fromEntries(
+    Object.entries(value).map(([seat, state]) => [
+      seat,
+      typeof state === "string" ? state : `unreadable: the engine sent ${state === null ? "null" : typeof state}, not a state string`,
+    ]),
+  )
 }
 
 /** `hello` answered but not with a capability list. The engine said nothing about

@@ -85,7 +85,16 @@ export function present(
   dimension: string | null = null,
   provider: ProviderAttribution | null = null,
 ): Tool.ExecuteResult {
-  if (!reply.ok) return refused(tool, method, reply.error, dimension, provider)
+  // A refusal carries NO provider. `provider` answers "whose artifact is this", and a
+  // refusal produced no artifact — half of these errors (`GP_E_ENGINE_UNREACHABLE`,
+  // `GP_E_SOCKET_TRUST`, `GP_E_ENGINE_TIMEOUT`, the oversize frame) are minted by
+  // `daemon.ts` before a byte crossed the socket, so stamping them with
+  // `{id, version, method, requires}` would hand the transcript a provenance claim for
+  // a judgement the engine never made. That is the same rule `DAEMON_ORIGIN` already
+  // states for refusals ("`refused` deliberately carries nothing"), applied to the field
+  // this function is handed. The lookup still runs first — the registration question is
+  // answered or the call is refused — it just is not attributed to anything.
+  if (!reply.ok) return refused(tool, method, reply.error, dimension)
   return {
     // "answered", not "ok". The transport got a frame, which is the only thing this layer
     // knows; whether the action *took* is in the payload (`actConfirmed`, `axChanged`,
@@ -128,12 +137,15 @@ export function refused(
   method: string,
   error: Daemon.DaemonError,
   dimension: string | null = null,
-  provider: ProviderAttribution | null = null,
 ): Tool.ExecuteResult {
   return {
     title: `${tool}: ${error.code}`,
     output: `${error.message}\nremedy: ${error.remedy}`,
-    metadata: { ok: false, method, code: error.code, message: error.message, remedy: error.remedy, dimension, provider, result: null },
+    // `provider: null` is in the object literal, not a parameter: after 2026-11-04 there is
+    // no way for a caller to hand attribution to a refusal, so the invariant "a refusal
+    // claims no provider" is a property of this function rather than a convention every one
+    // of its eight call sites has to remember. See `present` for why.
+    metadata: { ok: false, method, code: error.code, message: error.message, remedy: error.remedy, dimension, provider: null, result: null },
   }
 }
 
