@@ -102,14 +102,20 @@ SHIM
 
 make_prefix() {
   # $1 = page mode; $2 = "yes" (default) to build a *patched* fake binary, "no" for one whose bytes
-  # lack everything the declared patch must show. Prints the prefix path, or nothing on failure.
-  local p mode markers
+  # lack everything the declared patch must show; $3 = the `os` array to write into the INSTALLED
+  # manifest, defaulting to the product's own. The third argument is what makes the os/cpu gate's
+  # RED direction reachable at all: every prefix this file used to build copied `os`/`cpu` straight
+  # out of product.json, so the assertion that "the installed manifest must agree with the product"
+  # was only ever driven in the agreeing direction — a gate that has only ever been shown its happy
+  # input is a gate whose zero is not evidence.
+  local p mode markers os_field
   mode="$1"
   markers="${2:-yes}"
+  os_field="${3:-$OS_FIELD}"
   p="$(mktemp -d "${TMPDIR:-/tmp}/gp-vp-prefix-$mode-XXXXXX")" || return 1
   mkdir -p "$p/bin" "$p/lib/node_modules/$NAME" || return 1
   printf '{"name":"%s","version":"%s","os":%s,"cpu":%s}\n' \
-    "$NAME" "$VERSION" "$OS_FIELD" "$CPU_FIELD" > "$p/lib/node_modules/$NAME/package.json" || return 1
+    "$NAME" "$VERSION" "$os_field" "$CPU_FIELD" > "$p/lib/node_modules/$NAME/package.json" || return 1
   for b in $BINS; do
     printf '#!/bin/sh\nGP_FAKE_VERSION="%s" exec node "$GP_FAKE_SHIM" "$@"\n' "$VERSION" > "$p/bin/$b" || return 1
     if [ "$markers" = "yes" ]; then
@@ -126,12 +132,13 @@ run_case() {
   # $1 = page mode, $2 = expected label, $3 = expected rc ("" = must not be 0, "0" = must be 0,
   # "no-web-fail" = the web label must not appear as FAIL), $4 = version to ask for,
   # $5 = "no" to install a binary that does NOT carry the patch's bytes
-  local mode want_label want_rc ask_version out rc pfx matched markers
+  local mode want_label want_rc ask_version out rc pfx matched markers os_field
   mode="$1"
   want_label="$2"
   want_rc="${3-}"
   ask_version="${4:-$VERSION}"
   markers="${5:-yes}"
+  os_field="${6:-$OS_FIELD}"
   # An empty expectation is not a passing expectation: `grep -qF ""` matches every line, and
   # that is how this file once reported three green checks while `$mode` was never assigned
   # and every case ran the same fake. Refuse the shape instead of being satisfied by it.
@@ -140,7 +147,7 @@ run_case() {
     fails=$((fails + 1))
     return
   fi
-  pfx="$(make_prefix "$mode" "$markers")"
+  pfx="$(make_prefix "$mode" "$markers" "$os_field")"
   if [ -z "$pfx" ]; then
     say FAIL "$mode: could not build the fake prefix"
     fails=$((fails + 1))
@@ -219,6 +226,16 @@ run_case good "the version asked for was 9.9.9" "" "9.9.9"
 # lane had before) would look exactly as green here as one that measures.
 run_case good "ok    the published bytes carry the fork's MCP SDK patch" no-web-fail
 run_case good "FAIL  the published bytes carry the fork's MCP SDK patch" 1 "$VERSION" no
+
+# The installed-manifest gate, in the direction nobody had driven it. `make_prefix` writes the
+# `os` array of the package that stands in for the installed wrapper, and until now every case
+# in this file passed it the product's own value — so "the installed manifest must agree with
+# the platform block" had only ever been shown agreement. That is the same shape as a fixture
+# that answers for any input: the check could have been deleted and this battery would not have
+# noticed. Two refusals now, each naming the mismatch it found, plus the version branch of the
+# same check.
+run_case good "os is [\"linux\"], product declares" 1 "$VERSION" yes '["linux"]'
+run_case good "the manifest says $VERSION, the version asked for was 8.8.8" 1 "8.8.8"
 
 rm -rf "$SHIM_DIR"
 if [ "$fails" -gt 0 ]; then

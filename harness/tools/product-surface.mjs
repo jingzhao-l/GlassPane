@@ -147,6 +147,34 @@ const SCAN_SET_FLOORS = {
 // ---- manifest agreement
 check("manifest-name", manifest.name === product.name, `package.json name "${manifest.name}" != product.json name "${product.name}"`)
 check("manifest-version", manifest.version === product.version, `package.json version ${manifest.version} != product.json version ${product.version}`)
+// ---- the resolved graph names the product too.
+// `bun.lock` embeds a header for every workspace, and this version line had eight readers
+// and no ninth. Measured 2026-11-04 on the tree that shipped 0.14.2: `packages/opencode`
+// still carried `"version": "0.14.1"` inside the lock while product.json and package.json
+// said 0.14.2 — and the CI install step, `bun install --frozen-lockfile`, did NOT catch it
+// (measured rc=0, "Checked 1500 installs across 1641 packages (no changes)": frozen mode
+// refuses to change the graph, and a workspace's own version header is not graph drift to
+// it). So a release can carry a lock that names a version nobody published. Any plain
+// `bun install` rewrites that line, which is why the file goes in and out of sync without
+// anyone deciding to.
+{
+  const lockText = read("bun.lock")
+  // Read by pattern, not `JSON.parse`: `bun.lock` is JSONC — it carries trailing commas
+  // (measured: strict parsing dies at line 14, `"typescript": "catalog:",` followed by `}`),
+  // so a parser that insisted on JSON would report "unreadable" on every real lock and the
+  // rule would be red in the only direction it can ever point.
+  const header = /"packages\/opencode"\s*:\s*\{\s*"name"\s*:\s*"([^"]*)"\s*,\s*"version"\s*:\s*"([^"]*)"/.exec(lockText)
+  check(
+    "lock-version",
+    header !== null,
+    `bun.lock no longer carries a \`"packages/opencode": { "name": …, "version": … }\` header in that shape — the lock this product installs from stopped naming the workspace it resolves, so nothing here can tell whether an installed tree is the release. Read with the same pattern product-surface uses ("lock-version"); if bun changed the lock format, fix the reader and say which version of bun changed it.`,
+  )
+  if (header) {
+    const [lockName, lockVersion] = [header[1], header[2]]
+    check("lock-name", lockName === product.name, `bun.lock names its opencode workspace "${lockName}", product.json says "${product.name}" — the install graph resolves a package the product does not ship`)
+    check("lock-version", lockVersion === product.version, `bun.lock embeds ${product.name} at ${lockVersion} while product.json says ${product.version} — a stale version inside the file CI installs from: \`bun install --frozen-lockfile\` does not correct it (measured rc=0, "no changes", with exactly this drift), so re-run \`bun install\` in the fork directory and commit the lock in the same change that moved the version line`)
+  }
+}
 // The declared product shape has to match the tree. `product.json` used to list
 // `packages/web (docs site — kept for lineage and still builds)` plus console/enterprise/stats/
 // infra/artifacts under `lineageOnly`, and none of those six paths exists in this repository —

@@ -1068,9 +1068,23 @@ assert_code "an unaskable releases API does not fail the install" "$?" "0"
 assert_has "and it is answered as cannot-tell, not as newest" "$SCRATCH/newest-unknown.log" "cannot say whether 9.9.9 is the newest published release"
 mv "$SCRATCH/latest.aside" "$FIX/latest"
 
+# The tally is ASSERTED, not only printed. Before this, the script judged one thing about
+# itself: whether `FAILURES` was zero. A scenario whose fixture went missing, or a guard
+# that stopped calling `check`, shrank the run and still printed "all $CHECKS checks held"
+# with exit 0 — and ci.yml quotes that number as the truth about installer coverage. A
+# battery that cannot notice its own cases disappearing is a battery with a hole in it.
+# FLOOR measured 2026-11-04 by running this file end to end: 208 checks, agreeing with
+# `grep -c "^PASS"` on the same log. Raise it in the same commit that adds checks; a red
+# here means coverage LEFT the run, so fix the missing scenario rather than the number.
+MIN_CHECKS=208
+if [ "$CHECKS" -lt "$MIN_CHECKS" ]; then
+  echo "installer-selftest: only $CHECKS of $MIN_CHECKS expected checks ran — a scenario stopped calling check, so this run is not the coverage ci.yml reads as truth"
+  exit 1
+fi
+
 if [ "$FAILURES" -gt 0 ]; then
   echo "installer-selftest: $FAILURES of $CHECKS checks failed"
   exit 1
 fi
-echo "installer-selftest: all $CHECKS checks held"
+echo "installer-selftest: all $CHECKS checks held (floor $MIN_CHECKS)"
 exit 0
