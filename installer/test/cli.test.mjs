@@ -24,6 +24,19 @@ import {
   repoHasRef,
   verifyCloneTagGpg,
 } from '../cli.js'
+import {
+  BAD_SIG_STDERR,
+  FOREIGN_KEY_ID,
+  FOREIGN_SIG_STDERR_C_LOCALE,
+  GOOD_SIG_STDERR_C_LOCALE,
+  GOOD_SIG_STDERR_C_LOCALE_ULTIMATE,
+  GOOD_SIG_STDERR_ZH_LOCALE,
+  NO_PUBLIC_KEY_STDERR,
+  PINNED_KEY_ID,
+  STATUS_FD_STDERR,
+  UNSIGNED_STDERR,
+  statusFdLines,
+} from './support/gpg-verify-fixtures.mjs'
 
 function makeFakeRoot() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glasspane-installer-test-'))
@@ -553,19 +566,72 @@ function makeGitRepoWithUnsignedTag() {
   return repo
 }
 
-test('classifyTagVerify: 退出码 0 = 验签通过', () => {
+/**
+ * `classifyTagVerify` 的夹具：2026-11-05 之前这几条喂的是 `stdout: 'Good signature'`——
+ * 生产里没有任何一趟 gpg 会打出这七个字节。判据当时只看退出码，所以这种桩与真输出**不可区分**，
+ * 于是"退出码 0 就算验签通过"这条错判据被测试替它担保（详见 `support/gpg-verify-fixtures.mjs`
+ * 顶部那一段）。现在桩换成同一趟命令量出来的真 stderr 字节。
+ */
+test('classifyTagVerify: 退出码 0 且点名钉死的钥匙 = verified（detail 里要出现那一把）', () => {
+  const res = classifyTagVerify({ status: 0, stdout: '', stderr: GOOD_SIG_STDERR_C_LOCALE })
+  assert.equal(res.status, 'verified', res.detail)
+  assert.deepEqual(res.keyIds, [PINNED_KEY_ID])
+  // 缺陷 P1 的那一句"出自发布者私钥"没说是谁的私钥：现在 detail 必须把比对过的指纹写出来。
+  assert.match(res.detail, /0929EA31DF4F7429F63FC53189D88B1D043A1298/, res.detail)
+  assert.ok(!/出自发布者私钥/.test(res.detail), '旧那句不含指纹的说法不许回来：' + res.detail)
+  // gpg 在 WARNING 段落末尾**又**打印一次主钥匙指纹；读成"两把钥匙"就把多签名的说法搞错了。
+  assert.equal(classifyTagVerify({ status: 0, stderr: GOOD_SIG_STDERR_C_LOCALE_ULTIMATE }).status, 'verified')
+  // updater 那一形（`--status-fd` 的 VALIDSIG）走同一条判据：两条入口不许对同一世界给两种词。
+  assert.equal(classifyTagVerify({ status: 0, stdout: statusFdLines(PINNED_KEY_ID), stderr: STATUS_FD_STDERR }).status, 'verified')
+})
+
+test('classifyTagVerify: 退出码 0 而钥匙不是钉死的那把 = invalid，两个指纹都要点名', () => {
+  const res = classifyTagVerify({ status: 0, stdout: '', stderr: FOREIGN_SIG_STDERR_C_LOCALE })
+  assert.equal(res.status, 'invalid', '别人的好钥匙验通过不是发布者的签名：' + res.detail)
+  assert.match(res.detail, new RegExp(FOREIGN_KEY_ID), res.detail)
+  assert.match(res.detail, new RegExp(PINNED_KEY_ID), res.detail)
+  // VALIDSIG 那一形也一样：读到的指纹与 pin 不同就是没锚上。
+  assert.equal(classifyTagVerify({ status: 0, stdout: statusFdLines(FOREIGN_KEY_ID), stderr: '' }).status, 'invalid')
+  // 多签名：钉死的那把在场 = verified，但别的那把必须被点名，不许被静默吞掉。
+  const multi = classifyTagVerify({
+    status: 0,
+    stdout: statusFdLines(FOREIGN_KEY_ID),
+    stderr: GOOD_SIG_STDERR_C_LOCALE,
+  })
+  assert.equal(multi.status, 'verified', multi.detail)
+  assert.match(multi.detail, new RegExp(FOREIGN_KEY_ID), '不匹配的钥匙要在 detail 里点名：' + multi.detail)
+  // 短 key id（gpg 1.x 与 `git --format` 的一些读法只回 16 位）认尾 16 位。
+  assert.equal(
+    classifyTagVerify({ status: 0, stderr: 'gpg:                using RSA key 89D88B1D043A1298\n' }).status,
+    'verified',
+  )
+})
+
+test('classifyTagVerify: 退出码 0 而读不出任何 key id = unavailable（fail closed，不由默认放行）', () => {
+  // 这一条就是 REVERSE MUTATION 的靶子：把"0 就是过"改回来，这里红。
   const res = classifyTagVerify({ status: 0, stdout: 'Good signature', stderr: '' })
-  assert.equal(res.status, 'verified')
+  assert.equal(res.status, 'unavailable', '一句没点名钥匙的 0 不是结论：' + res.detail)
+  assert.deepEqual(res.keyIds, [])
+  // 中文 locale（本机不钉 LC_ALL 时的真字节）：散文是译文，读不出措辞 → 同一档。
+  // 这一条在说：判据的确定性来自 `verifyCloneTagGpg` 那三个 spawn 的 `LC_ALL=C`，不是来自运气。
+  assert.equal(classifyTagVerify({ status: 0, stdout: '', stderr: GOOD_SIG_STDERR_ZH_LOCALE }).status, 'unavailable')
+  // 未知判据也不许塌回"通过"。
+  assert.equal(classifyTagVerify({ status: 0, stderr: 'gpg: something else entirely' }).status, 'unavailable')
 })
 
 test('classifyTagVerify: no signature found = 未签名（非篡改）', () => {
-  const res = classifyTagVerify({ status: 1, stderr: 'error: no signature found' })
+  const res = classifyTagVerify({ status: 1, stderr: UNSIGNED_STDERR })
   assert.equal(res.status, 'unsigned')
+  assert.equal(classifyTagVerify({ status: 1, stderr: 'gpg: no signature found' }).status, 'unsigned')
 })
 
 test('classifyTagVerify: 其余非零失败 = invalid（签名对不上/无法确证）', () => {
-  assert.equal(classifyTagVerify({ status: 1, stderr: 'gpg: BAD signature from ...' }).status, 'invalid')
+  assert.equal(classifyTagVerify({ status: 1, stderr: BAD_SIG_STDERR }).status, 'invalid')
   assert.equal(classifyTagVerify({ status: 2, stderr: 'Could not check signature: public key not found' }).status, 'invalid')
+  // 真那一形：别人的 tag、钥匙环里没有那把，git 退 1（这一档与"没签名"两码事）。
+  const missing = classifyTagVerify({ status: 1, stderr: NO_PUBLIC_KEY_STDERR })
+  assert.equal(missing.status, 'invalid', missing.detail)
+  assert.match(missing.detail, new RegExp(FOREIGN_KEY_ID), '非零失败里点名的钥匙也要进 detail：' + missing.detail)
 })
 
 test('repoHasRef: 有 tag 为 true，无则为 false（不抛错）', () => {
@@ -652,7 +718,14 @@ test('tagVerifyDecision: 只有 tag 真没签名才继续，签不上与没跑�
   // 惰性值原样印（`/repo` 不含 shell 元字符），这既是要照抄的命令也是 `quoteShellArg` 的表；
   // 非惰性的那一半由 mcp-shell/test/daily-20261103-shell-printed-operand-inertness.test.mjs
   // 与 remedy-shell-quoting.test.mjs 用真载荷钉，这里不重复一遍。
-  assert.match(refusal.text, /git -C \/repo tag -v v1\.2\.3/, '拒绝必须给得出可执行的核对步骤（惰性词，不是双引号）')
+  // 2026-11-05（P2）改了这一条的期望：以前它要的是 `git -C /repo tag -v v1.2.3`，而那句读的是
+  // 读者自己的 `~/.gnupg`——安装器把内置公钥导进的是**一次性钥匙环**、跑完就删（见
+  // verifyCloneTagGpg 的 finally），所以照抄那一行对一份完全健康的发布也只会回
+  // "Can't check signature: No public key"：一条永远跑不通的补救，长得却像证据。
+  // 现在这条出路是 `isolatedVerifyCommand` 产出的同一条链（自带钥匙环），断言跟着改成它。
+  assert.match(refusal.text, /git -C \/repo -c gpg\.program=gpg -c gpg\.format=openpgp verify-tag v1\.2\.3/,
+    '拒绝必须给得出**跑得通**的核对步骤（惰性词，不是双引号）')
+  assert.doesNotMatch(refusal.text, /tag -v/, '那一句读 ~/.gnupg，钥匙不在里面：不许再把它当补救')
   assert.doesNotMatch(refusal.text, /git -C "\/repo"/, '双引号包不住 $( ) 与反引号：核对步骤不许再用它')
   assert.match(refusal.text, /GLASSPANE_REF=/, '拒绝必须给得出下一步怎么继续安装')
 

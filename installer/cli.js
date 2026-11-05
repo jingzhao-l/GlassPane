@@ -113,7 +113,12 @@ export const RELEASE_VERSION = '1.29.1'
 export const REPO_REF = `v${RELEASE_VERSION}`
 
 /** 发布公钥的 key id 与 uid：拒绝文案里两者要成对出现，读者才知道要比对的是**哪一把**
- *  钥匙——"随便一把签过名的钥匙"不算证据。 */
+ *  钥匙——"随便一把签过名的钥匙"不算证据。
+ *  2026-11-05（P1）起它不只是文案：`classifyTagVerify` 读的就是这一枚，gpg 点名的钥匙与它
+ *  相等才判 `verified`。改这一行等于换锚点（与 `updater/lib/signature.js` 的
+ *  `PINNED_PRIMARY_FINGERPRINT` 同值，`updater/test/review-2026-10-09.test.mjs` 与
+ *  `installer/test/daily-20261105-signature-key-id.test.mjs` 都按内置公钥重新推出它，
+ *  两边漂移是红测试不是静默）。 */
 export const GLASSPANE_SIGNING_KEY_ID = '0929EA31DF4F7429F63FC53189D88B1D043A1298'
 export const GLASSPANE_SIGNING_KEY_UID = 'jingzhao-l (sign-github) <ET_lin@outlook.com>'
 
@@ -121,8 +126,11 @@ export const GLASSPANE_SIGNING_KEY_UID = 'jingzhao-l (sign-github) <ET_lin@outlo
  *  jingzhao-l (sign-github) <ET_lin@outlook.com>）。与 npm 安装链的 Integrity 不同，
  *  GPG 校验的是"来源/作者身份"而不是"内容哈希"：clone 到的发布 tag 若带 GPG 签名，
  *  用这把公钥验签通过，才能确证源码出自发布者之手（而非同名 tag 或中间人）。
- *  恒为 best-effort：未签名/不可用只告警不阻断，因为 HTTPS clone + tag 钉版本已保证
- *  内容完整性，GPG 是额外的一层来源证明。 */
+ *  "用这把公钥"这件事由 `classifyTagVerify` 读 gpg 点名的 key id 来强制（2026-11-05），
+ *  不是由退出码来强制——别人的钥匙也能把签名验出 0。
+ *  阻断与否按 `tagVerifyDecision` 那一档一档判：`invalid` 是任何同意都不覆盖的硬拒，
+ *  `unsigned`/`unavailable` 默认也拒，只有 `--accept-unverified-signature` 放行且放行话
+ *  要如实打出缺的是哪一层证明。 */
 export const GLASSPANE_SIGNING_PUBLIC_KEY = [
   '-----BEGIN PGP PUBLIC KEY BLOCK-----',
   '',
@@ -1565,26 +1573,160 @@ export async function restoreLaunchd({
   }
 }
 
+/** 钉死的发布公钥 key id 只在"确实是一枚指纹"时才是锚点：40 位十六进制、大写。
+ *  与 `updater/lib/signature.js` 的 `normalizePinnedFingerprint` 同一判据、同一形状——
+ *  锚点自己坏掉不是"那就比不了、继续装"，而是这道门没有钥匙可对，按硬拒走。 */
+export function normalizePinnedKeyId(value) {
+  const text = String(value ?? '').trim().toUpperCase()
+  return /^[0-9A-F]{40}$/.test(text) ? text : null
+}
+
+/** 一枚读到的 key id 是不是钉死的那把：全长比整串，16 位的短 id（gpg 的 keyid 就是
+ *  指纹截断）比尾 16 位。只按尾 16 位放宽一次，不再放宽第三种长度。 */
+function keyIdMatchesPinned(id, pinned) {
+  if (id.length === 40) return id === pinned
+  return id.length === 16 && pinned.endsWith(id)
+}
+
+/** gpg 在 C locale 下点名"这枚签名用的是哪把钥匙"的那一行（本机实测 2026-11-05，
+ *  `git verify-tag v1.29.1` 的 stderr）：`gpg:                using RSA key 0929EA…1298`。
+ *  算法那一格随 gpg 版本变（2.4 起写 `using rsa2048 key …`），所以只要求它是一个词。
+ *  同一趟的其它十六进制串**不能**当证据：git 会打印 tag 指向的 commit sha，gpg 会在
+ *  "not certified with a trusted signature" 那一段末尾再打印一次主钥匙指纹——都不是
+ *  "这枚签名由谁做出"的那句话，所以只认这一行与下面那一行的**第一个**字段。 */
+const GPG_USING_KEY_LINE = /using\s+[A-Za-z0-9]+\s+key\s+([0-9A-Fa-f]{40}|[0-9A-Fa-f]{16})(?![0-9A-Fa-f])/g
+/** `--status-fd` 那一形（updater 验分离签名走的就是它）没有上面那句散文，只有
+ *  `[GNUPG:] VALIDSIG <指纹> …`：第一个字段是签名的钥匙，第九个才是主钥匙——取第一个，
+ *  与 `updater/lib/signature.js` 的 `validSigFingerprint` 同一个口径。 */
+const GPG_VALIDSIG_LINE = /^\[GNUPG:\]\s+VALIDSIG\s+([0-9A-Fa-f]{40}|[0-9A-Fa-f]{16})(?![0-9A-Fa-f])/gm
+
+/** 从一趟 gpg 的输出里读出"签名钥匙"的 key id（大写、去重、保持出现顺序）。
+ *  纯函数：读的是文本，不碰文件系统——`verified` 这个词从此只由它说了算。 */
+export function signatureKeyIds(text) {
+  const found = []
+  for (const pattern of [GPG_USING_KEY_LINE, GPG_VALIDSIG_LINE]) {
+    for (const match of String(text ?? '').matchAll(pattern)) found.push(match[1].toUpperCase())
+  }
+  return [...new Set(found)]
+}
+
 /** 判定 `git verify-tag` 结果的语义（纯函数，可单测）。
  *  git 对"未签名 tag"与"签名无效"都返回退出码 1，必须靠 stderr 里的
  *  "no signature found" 区分——前者是"本来就没签"（未签名），后者才是"签名对不上"
- *  （invalid）。退出码 0 = 用已导入的发布公钥验签通过。 */
+ *  （invalid）。
+ *  退出码 0 **不再**等于"验签通过"（2026-11-05 P1）：0 只说明"有一把钥匙把这枚签名
+ *  验过了"，它是哪一把写在 stderr 的 `using RSA key <指纹>` 那一行里（`--status-fd`
+ *  那一形则是 `[GNUPG:] VALIDSIG <指纹>`）。本函数现在要求那一行读出的 key id 等于
+ *  本文件钉死的 `GLASSPANE_SIGNING_KEY_ID`（全长或尾 16 位的短 id）才判 `verified`，
+ *  并在结论里点名那一把；0 而钥匙对不上 = `invalid`（观察到的与钉死的两个指纹都写进
+ *  detail）；0 而**读不出任何 key id** = `unavailable`——这道检查没给出结论，落进原有
+ *  的 unavailable 一档（默认拒装，只有 `--accept-unverified-signature` 才放行），
+ *  永不由默认放行。多签名的 tag：至少一枚对上就算 verified，其余不匹配的必须点名。 */
 export function classifyTagVerify({ status, stdout = '', stderr = '' } = {}) {
   const text = `${stdout ?? ''}\n${stderr ?? ''}`
+  const pinned = normalizePinnedKeyId(GLASSPANE_SIGNING_KEY_ID)
+  if (pinned === null) {
+    return {
+      status: 'invalid',
+      keyIds: [],
+      detail: `本文件钉死的发布公钥 key id 不是一枚 40 位十六进制指纹（实为 ${JSON.stringify(GLASSPANE_SIGNING_KEY_ID)}）：`
+        + '没有可比对的锚点，"验签通过"就退化成"随便一把钥匙验过都算"——这道门没有钥匙，按硬拒处理。',
+    }
+  }
+  const keyIds = signatureKeyIds(text)
   if (status === 0) {
-    return { status: 'verified', detail: '发布 tag 的 GPG 签名有效，出自发布者私钥' }
+    if (keyIds.length === 0) {
+      // 没有结论就不是结论：这一趟退出码是 0，可它没说出签名用的是哪把钥匙（被换掉的
+      // gpg、非 C locale 的译文、旧措辞都能长成这样）。把 0 当成"通过"就是前面那条缺陷
+      // 的形状，所以这里判 unavailable，让 `tagVerifyDecision` 走拒装那一支。
+      return {
+        status: 'unavailable',
+        keyIds,
+        detail: '验签回的是退出码 0，但输出里没有一行点出这枚签名用的是哪把钥匙'
+          + `（要找的是 \`using … key ${pinned}\` 或 \`[GNUPG:] VALIDSIG ${pinned}\` 那样的指纹点名）：`
+          + '这一趟没有给出可核对的结论，不能算"用发布公钥验过"。',
+      }
+    }
+    const matched = keyIds.filter((id) => keyIdMatchesPinned(id, pinned))
+    const foreign = keyIds.filter((id) => !keyIdMatchesPinned(id, pinned))
+    if (matched.length === 0) {
+      return {
+        status: 'invalid',
+        keyIds,
+        detail: `验签退出码 0，但签名不是用本文件钉死的发布公钥做的：读到 ${foreign.join('、')}，`
+          + `钉死的是 ${pinned}（uid ${GLASSPANE_SIGNING_KEY_UID}）。一把别人的好钥匙验得通过的签名，`
+          + '证明的不是这份源码出自发布者之手。',
+      }
+    }
+    return {
+      status: 'verified',
+      keyIds,
+      keyId: pinned,
+      foreignKeyIds: foreign,
+      detail: `发布 tag 的 GPG 签名有效，且点名做签的钥匙就是本文件钉死的发布公钥 ${pinned}`
+        + `（短 key id ${pinned.slice(-16)}，uid ${GLASSPANE_SIGNING_KEY_UID}）`
+        + (matched.includes(pinned) ? '' : `；本次读出的是短 key id ${matched.join('、')}`)
+        + (foreign.length > 0
+          ? `；同一枚 tag 上还读到别的钥匙签名（${foreign.join('、')}），它们不作为放行依据`
+          : ''),
+    }
   }
   if (/no signature found/i.test(text)) {
-    return { status: 'unsigned', detail: '该发布 tag 未做 GPG 签名（不是内容被篡改，只是缺签名层）' }
+    return { status: 'unsigned', keyIds, detail: '该发布 tag 未做 GPG 签名（不是内容被篡改，只是缺签名层）' }
   }
-  return { status: 'invalid', detail: `git verify-tag 失败（退出码 ${status}），签名无法确证` }
+  return {
+    status: 'invalid',
+    keyIds,
+    detail: `git verify-tag 失败（退出码 ${status}），签名无法确证`
+      + (keyIds.length > 0 ? `；输出里点名的钥匙是 ${keyIds.join('、')}（钉死的是 ${pinned}）` : ''),
+  }
+}
+
+/** 本文件自己的绝对路径：隔离验签那条补救从**这里**把内置公钥读出来，而不是让用户
+ *  去找一份他手上没有的 .asc。（node 把 ESM 入口按 realpath 载入，见文件末尾那条守卫。） */
+const SELF_CLI_PATH = fileURLToPath(import.meta.url)
+
+/**
+ * 一条**真的跑得通**的隔离验签命令（2026-11-05 P2）。
+ *
+ * 为什么不能再写 `git -C <repo> tag -v <ref>`：安装器把发布公钥导进的是**一次性钥匙环**，
+ * 跑完就在 `verifyCloneTagGpg` 的 finally 里删掉了，用户 `~/.gnupg` 里没有这把钥匙。
+ * 于是那句"下一步：手动核对"对一份完全健康的发布回的是
+ * `gpg: Can't check signature: No public key`——教给读者的补救永远跑不通，而它跑不通的样子
+ * 又正好像"验不过"。本函数产出的就是安装器自己跑的那一串：临时钥匙环 → 从**这个文件**
+ * 取 `GLASSPANE_SIGNING_PUBLIC_KEY` → 导入 → 在 `GNUPGHOME` + `LC_ALL=C` 下验，
+ * 并用 `-c gpg.program=gpg -c gpg.format=openpgp` 不让被验的那棵树自选校验程序。
+ * 插进去的三份值都不给 shell 留可重排的面：`repoDir` 与 `ref` 就地走本文件的 `quoteShellArg`
+ * （目录名来自 `--repo` / `GLASSPANE_REPO`），`installerPath` 先编码成 file:// URL 再嵌进
+ * `node -e` 的那段程序，而**整段程序**同样是一个 `quoteShellArg` 的产物。
+ * 整串包在 `( … )` 里：`exit $rc` 只结束这个子 shell（照抄进交互 shell 也不会把读者的终端关掉），
+ * 而钥匙环在成功与失败两条路上都被删掉——与 `verifyCloneTagGpg` 的 finally 同一个义务。
+ */
+export function isolatedVerifyCommand({ repoDir, ref, installerPath = SELF_CLI_PATH } = {}) {
+  const href = pathToFileURL(String(installerPath)).href
+  const keyProgram = `const m = await import(${JSON.stringify(href)}); `
+    + 'const key = m.GLASSPANE_SIGNING_PUBLIC_KEY; '
+    + 'if (typeof key !== "string" || !key.includes("BEGIN PGP PUBLIC KEY")) { '
+    + 'console.error("this installer/cli.js exports no armored GLASSPANE_SIGNING_PUBLIC_KEY"); process.exit(3) } '
+    + 'process.stdout.write(key)'
+  const chain = [
+    'chmod 700 "$KEYRING"',
+    `node --input-type=module -e ${quoteShellArg(keyProgram)} > "$KEYRING/publish-key.asc"`,
+    'LC_ALL=C LANG=C GNUPGHOME="$KEYRING" gpg --homedir "$KEYRING" --batch --import "$KEYRING/publish-key.asc"',
+    `LC_ALL=C LANG=C GNUPGHOME="$KEYRING" git -C ${quoteShellArg(repoDir)} `
+      + '-c gpg.program=gpg -c gpg.format=openpgp '
+      + `verify-tag ${quoteShellArg(ref)}`,
+  ].join(' && ')
+  return `( KEYRING=$(mktemp -d "\${TMPDIR:-/tmp}/glasspane-verify-XXXXXX") || exit 1; ${chain} ; `
+    + 'rc=$?; rm -rf "$KEYRING"; exit $rc )'
 }
 
 /**
  * 验签结论怎么落成安装动作。四种结局各说各话：
  *  - `verified`   绿字继续；
- *  - `unsigned`   黄字继续——tag 里**确实**没有签名层，缺的是来源证明的增量：
- *    被验的 tag 与装进构建的源码是同一个 ref，HTTPS + tag 钉版本已经保证内容完整；
+ *  - `unsigned`   默认**拒绝**（发现 #11，2026-11-03 与 `unavailable` 合流到"要人批准"）——
+ *    tag 里**确实**没有签名层，缺的是来源证明的增量：被验的 tag 与装进构建的源码是同一个
+ *    ref，HTTPS + tag 钉版本已经保证内容完整，所以这一档的出路是那一枚显式旗标而不是硬拒；
  *  - `unavailable` **拒绝**（2026-10-28 缺陷 2）。这一档从前与 `unsigned` 合流，可它
  *    说的根本不是"这个 tag 没签名"——是"这道验签在本机没跑成"（没有 gpg / 导入内置
  *    公钥失败 / 验签自己抛错）。把"没跑成的检查"讲成"检查过了、答案是没签名"，等于
@@ -1598,9 +1740,17 @@ export function classifyTagVerify({ status, stdout = '', stderr = '' } = {}) {
  *    那一份"，必须**停下**，且任何旗标都不覆盖。
  * 判据放在纯函数里：这一段从前埋在 main() 的 if 里，没有一条测试能指到它。
  */
-export function tagVerifyDecision({ sig, pinRef, repoDir, acceptUnverified = false }) {
+export function tagVerifyDecision({ sig, pinRef, repoDir, acceptUnverified = false, installerPath = SELF_CLI_PATH }) {
+  // 四支拒绝共用同一条"你自己把这道检查跑一遍"的出路（2026-11-05 P2）：以前四处都写
+  // `git -C <repo> tag -v <ref>`，而那一问读的是 `~/.gnupg`——安装器的一次性钥匙环早在
+  // finally 里删了，公钥从没进过用户的钥匙环，于是照抄下来对一份健康的发布也只能回
+  // "Can't check signature: No public key"。出路只有一份，且必须真的跑得通。
+  const remedy = isolatedVerifyCommand({ repoDir, ref: pinRef, installerPath })
   if (sig.status === 'verified') {
-    return { action: 'pass', text: `发布 tag ${pinRef} GPG 签名验证通过` }
+    return {
+      action: 'pass',
+      text: `发布 tag ${pinRef} GPG 签名验证通过（${sig.detail}）`,
+    }
   }
   if (sig.status === 'invalid') {
     return {
@@ -1613,7 +1763,9 @@ export function tagVerifyDecision({ sig, pinRef, repoDir, acceptUnverified = fal
         + '安装到此为止：没有跑 npm install，没有 swift build，没有注册 launchd 作业。\n'
         + `内置公钥：key ${GLASSPANE_SIGNING_KEY_ID}（uid ${GLASSPANE_SIGNING_KEY_UID}），`
         + '就是本文件里那份 GLASSPANE_SIGNING_PUBLIC_KEY——要比对的是这一把，不是随便哪把签过名的。\n'
-        + `下一步：核对远端与这个 tag（git -C ${quoteShellArg(repoDir)} remote -v；git -C ${quoteShellArg(repoDir)} tag -v ${quoteShellArg(pinRef)}）；`
+        + `下一步：先核对远端（git -C ${quoteShellArg(repoDir)} remote -v），再把安装器自己那道验签原样跑一遍`
+        + '（它自带一次性钥匙环与内置公钥，不依赖你 `~/.gnupg` 里有没有这把钥匙）：\n'
+        + `  ${remedy}\n`
         + '确认仓库与发布者公钥都无误后改用更新的发布 tag（GLASSPANE_REF=v<版本> 重跑）。'
         + '要装开发主线用 GLASSPANE_REF=main（那条路不做 tag 验签，会如实告警）。\n'
         + '该看的地方：SECURITY.md 的 "What the checks prove, and what they do not"——'
@@ -1634,7 +1786,7 @@ export function tagVerifyDecision({ sig, pinRef, repoDir, acceptUnverified = fal
           + '就是本文件里那份 GLASSPANE_SIGNING_PUBLIC_KEY。\n'
           + `下一步（先自己把这道检查跑一遍，看清缺的是哪一样）：`
           + `gpg --version；git -C ${quoteShellArg(repoDir)} rev-parse --verify ${quoteShellArg(`refs/tags/${pinRef}`)}；`
-          + `git -C ${quoteShellArg(repoDir)} tag -v ${quoteShellArg(pinRef)}\n`
+          + `然后原样跑安装器那一条（自带一次性钥匙环，不读你的 ~/.gnupg）：\n  ${remedy}\n`
           + '确实在没有 gpg 的机器上要装，就修好工具链再重跑（`brew install gnupg` 或 `xcode-select --install`）；'
           + '理解风险、决定就在这一档缺结论的情况下继续，才显式带上放行旗标重跑：\n'
           + `  node installer/cli.js --repo ${quoteShellArg(repoDir)} --accept-unverified-signature\n`
@@ -1665,8 +1817,9 @@ export function tagVerifyDecision({ sig, pinRef, repoDir, acceptUnverified = fal
           + '安装到此为止：没有跑 npm install，没有 swift build，没有注册 launchd 作业。\n'
           + '签名**存在而验不过**（invalid）是另一档，任何同意都不覆盖它；这里缺的是来源证明的增量。\n'
           + `内置公钥：key ${GLASSPANE_SIGNING_KEY_ID}（uid ${GLASSPANE_SIGNING_KEY_UID}）。\n`
-          + `下一步：先问这一版到底有没有发布签名（git -C ${quoteShellArg(repoDir)} tag -v ${quoteShellArg(pinRef)}；`
-          + '发布物那一侧看 SHA256SUMS-<版本>.txt.asc 在不在），确认你是在没有作者身份证明的情况下有意安装，'
+          + `下一步：先问这一版到底有没有发布签名（发布物那一侧看 SHA256SUMS-<版本>.txt.asc 在不在；`
+          + `tag 这一侧原样跑安装器那一条，它自带一次性钥匙环、不读你的 ~/.gnupg：\n  ${remedy}\n`
+          + '确认你是在没有作者身份证明的情况下有意安装，'
           + '才显式带上放行旗标重跑：\n'
           + `  node installer/cli.js --repo ${quoteShellArg(repoDir)} --accept-unverified-signature\n`
           + '它与 updater 的 `--consent unsigned-release` 同一形态；`--no-prompt` 不是这里说的同意。',
@@ -1685,7 +1838,8 @@ export function tagVerifyDecision({ sig, pinRef, repoDir, acceptUnverified = fal
     action: 'refuse',
     text: `发布 tag ${pinRef} 的验签回了一个安装器不认识的判据（${sig.status}：${sig.detail}）。`
       + '安装到此为止：不认识的判据不许当成"没签名"放过。\n'
-      + `下一步：手动核对（git -C ${quoteShellArg(repoDir)} tag -v ${quoteShellArg(pinRef)}），确认无误后重新安装。`,
+      + `下一步：把安装器自己那道验签原样跑一遍（自带一次性钥匙环，不读你的 ~/.gnupg）：\n  ${remedy}\n`
+      + '确认无误后重新安装。',
   }
 }
 
@@ -1734,10 +1888,32 @@ export function tagVerifyAgainstTree({ verdict, tree, pinRef, repoDir }) {
   }
 }
 
+/** 验签那几趟子进程的环境与 git 旗标（2026-11-05 P1 的另一半，两条都不是装饰）：
+ *  - `LC_ALL=C` / `LANG=C`：点名签名钥匙的那一行是**散文**，会跟着操作者的语言走。本机实测
+ *    （中文 locale）同一趟回的是 `gpg:                使用 RSA 密钥 0929EA…`——`classifyTagVerify`
+ *    读的是英文措辞，不钉 locale 就等于让操作系统的语言设置决定这道检查出不出结论。
+ *    updater 那侧早就钉了（`updater/lib/signature.js` 的 `defaultRunGpg`），两条入口读同一份
+ *    判据就该喂同一份字节。
+ *  - `-c gpg.program=gpg` / `-c gpg.format=openpgp`：这两项属于**被验的那棵树**的
+ *    `.git/config`。一棵把 `gpg.program` 指到别的可执行文件的仓库，就能决定这道"验签"跑的
+ *    是什么程序、它打印什么——那已经不是校验器，是被校验对象请来的证人。签名格式同理。
+ *    在这里用命令行旗标压住，树自己选不了。（`GNUPGHOME` 仍指向一次性钥匙环：用户的
+ *    `~/.gnupg` 既不是判据来源，也不该被这次运行读写。） */
+const GIT_VERIFY_PINNED_CONFIG = ['-c', 'gpg.program=gpg', '-c', 'gpg.format=openpgp']
+function verifyEnv(gnupgHome = null) {
+  const env = { ...process.env, LC_ALL: 'C', LANG: 'C' }
+  if (gnupgHome !== null) env.GNUPGHOME = gnupgHome
+  return env
+}
+
 /** 对 clone 下来的发布 tag 做 GPG 验签（探测本身 best-effort，不抛错）。
- *  隔离 GNUPGHOME 并临时导入发布公钥，`git verify-tag` 只看退出码与 stderr；不动
- *  用户钥匙环、无网络依赖。返回 classifyTagVerify 的口径（verified/unsigned/invalid/
- *  unavailable）。这里只负责**读出哪一档**；落成什么动作由 `tagVerifyDecision` 判——
+ *  隔离 GNUPGHOME 并临时导入发布公钥，`git verify-tag` 的输出交给 `classifyTagVerify`：
+ *  **退出码 0 加上"这枚签名出自哪把钥匙"的那一行读出的是钉死的那一把**才算 verified
+ *  （2026-11-05 前只看出退码，等于把"随便一把好钥匙验过"读成"发布者签过"）。
+ *  不动用户钥匙环、无网络依赖，跑完删掉一次性钥匙环——所以拒装文案里给读者的下一步
+ *  **不是** `git tag -v`（那一问读 `~/.gnupg`，这把钥匙不在里面），而是
+ *  `isolatedVerifyCommand` 产出的同一条链。返回 classifyTagVerify 的口径
+ *  （verified/unsigned/invalid/unavailable）；落成什么动作由 `tagVerifyDecision` 判——
  *  `unavailable`（检查没跑成）默认拒装，不再与"这个 tag 没签名"合流放行。 */
 export function verifyCloneTagGpg({
   repoDir,
@@ -1747,7 +1923,7 @@ export function verifyCloneTagGpg({
   mkdtemp = fs.mkdtempSync,
   remove = fs.rmSync,
 } = {}) {
-  const gpgVersion = spawn('gpg', ['--version'], { encoding: 'utf8' })
+  const gpgVersion = spawn('gpg', ['--version'], { encoding: 'utf8', env: verifyEnv() })
   if (gpgVersion.error || gpgVersion.status !== 0) {
     return { status: 'unavailable', detail: 'gpg 不可用，跳过发布 tag GPG 验签' }
   }
@@ -1764,13 +1940,16 @@ export function verifyCloneTagGpg({
     fs.mkdirSync(gnupgHome, { recursive: true })
     const keyPath = path.join(gnupgHome, 'publish-key.asc')
     fs.writeFileSync(keyPath, GLASSPANE_SIGNING_PUBLIC_KEY, 'utf8')
-    const imp = spawn('gpg', ['--homedir', gnupgHome, '--batch', '--import', keyPath], { encoding: 'utf8' })
+    const imp = spawn('gpg', ['--homedir', gnupgHome, '--batch', '--import', keyPath], {
+      encoding: 'utf8',
+      env: verifyEnv(gnupgHome),
+    })
     if (imp.status !== 0) {
       return { status: 'unavailable', detail: '导入发布公钥失败，跳过验签' }
     }
-    const res = spawn('git', ['-C', repoDir, 'verify-tag', ref], {
+    const res = spawn('git', ['-C', repoDir, ...GIT_VERIFY_PINNED_CONFIG, 'verify-tag', ref], {
       encoding: 'utf8',
-      env: { ...process.env, GNUPGHOME: gnupgHome },
+      env: verifyEnv(gnupgHome),
     })
     return classifyTagVerify({ status: res.status, stdout: res.stdout, stderr: res.stderr })
   } catch (error) {
@@ -2168,6 +2347,44 @@ export function formatMode(mode) {
   return `0${(Number(mode ?? 0) & 0o777).toString(8).padStart(3, '0')}`
 }
 
+/**
+ * 叶子自己是一枚符号链接时给出拒绝理由，不是链接（或根本还没建）时回 null。
+ *
+ * 判据抄本仓已有的那两处同族闸，抄的是**判定**而不是代码：
+ *  - `engine/Sources/GlassPaneEngine/StateRoot.swift` 的 `leafSymlinkDefect`：`lstat` 只看
+ *    `S_IFLNK`，并在拒绝里明写 "Nothing was chmod-ed here"；
+ *  - `updater/lib/fsutil.js` 的 `assertPrivateRoot`：链接指向谁就点名谁，并说清
+ *    "nothing was written and nothing was removed"。
+ *
+ * 为什么安装器也要有这一刀（2026-11-05 P2）：`stat`/`chmod`/`openSync` 都**跟着叶子链接走**。
+ * 一枚预先摆好的 `~/.glasspane -> 别处的一棵树`，会让这三处那句"owner-only 已验证"的绿字
+ * 说的是**这棵根之外**的目录：0700/0600 落在别人的树上，而安装器以为它收紧的是自己的根。
+ * 拒绝必须点名"没做的那几件事"，否则读者无从知道自己手上现在是什么形状。
+ *
+ * `lstat` 读不出又不存在（ENOENT）不是缺陷——这一趟就是来建它的；读不出别的错（父目录不可
+ *  遍历等）才是"无法确证它不是链接"，与 engine 的 `isolateFile` 同一分法。
+ */
+export function leafSymlinkDefect(target, { lstat = fs.lstatSync, notDone = '没有 chmod，也没有改过任何属主' } = {}) {
+  let stats = null
+  try {
+    stats = lstat(target)
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return null
+    return `${target} 的叶子类型读不出来（${error.message}）：无法确证它不是一枚符号链接，`
+      + `而 “chmod 跟着链接走” 这件事没法在这里排除——${notDone}，安装在这里中止。`
+  }
+  if (!stats || typeof stats.isSymbolicLink !== 'function' || !stats.isSymbolicLink()) return null
+  let where = '指向读不出来的地方'
+  try {
+    where = `指向 ${fs.realpathSync(target)}`
+  } catch { /* 断链也要拒：跟着走的后果一样不可知 */ }
+  return `${target} 这一层的叶子本身是一枚符号链接（${where}）：`
+    + 'stat 与 chmod 都跟着链接走，所谓 owner-only 会落在**这棵根之外**的那棵树上——'
+    + `${notDone}，屏幕上也不会出现"权限已验证"那句。`
+    + '下一步：把这枚链接换成真实目录（`rm` 掉链接后重跑，让它重新建成本账号自己的 0700 目录），'
+    + '或用 `--state-dir <路径>` / `GLASSPANE_STATE_DIR=<路径>` 点名一个真实目录。'
+}
+
 /** 创建日志/socket 目录（`~/.glasspane`），一次性、幂等（A-8 的后半段）。
  *
  *  为什么必须由安装器在**写 plist 之前**做，而不是等 startDetached 顺手 mkdir：
@@ -2179,8 +2396,21 @@ export function formatMode(mode) {
  *  launchd，而它要写的目录还不存在。startDetached 里的 mkdirSync 救不了这一枪。
  *
  *  不改变任何文件位置：只建目录，路径口径与 install() 里算出来的完全一致。 */
-export function ensureLogDir(logPath, { mkdir = fs.mkdirSync, chmod = fs.chmodSync, statMode = (p) => fs.statSync(p).mode & 0o777 } = {}) {
+export function ensureLogDir(logPath, {
+  mkdir = fs.mkdirSync,
+  chmod = fs.chmodSync,
+  statMode = (p) => fs.statSync(p).mode & 0o777,
+  lstat = fs.lstatSync,
+} = {}) {
   const dir = path.dirname(logPath)
+  // 先问叶子是不是链接（2026-11-05 P2）：`mkdir -p` 对一枚指着他处的链接回"已存在"，紧跟着
+  // 那次 `chmod` 就把**别人那棵树**收成 0700，而这里读回的模式看起来完全健康——"owner-only
+  // 已验证"说的就不是自己这棵根了。链接一律不追，追之前先拒。
+  const defect = leafSymlinkDefect(dir, {
+    lstat,
+    notDone: '没有 mkdir，没有 chmod，也没有往这个名字下面写任何东西',
+  })
+  if (defect) return { ok: false, dir, mode: null, error: `日志/socket 目录不可用：${dir}（${defect}）` }
   try {
     // mode 只作用在**新建**的那一层、还要被 umask 削一刀；目录已经存在时（上一轮安装留下的
     // 0755）mkdirSync 一个字都不改。这个目录里放着 socket、审批记录、证据和 installer-daemon.log，
@@ -2204,22 +2434,44 @@ export function ensureLogDir(logPath, { mkdir = fs.mkdirSync, chmod = fs.chmodSy
   }
 }
 
+/** `openPrivateLog` 的打开旗标：`'a'` 的三件套（写、建、追加）加一枚 `O_NOFOLLOW`。
+ *  node 在没有这枚常量的平台上（Windows）退回 `'a'` 那套等价旗标——本产品的状态根只落在
+ *  macOS（install.sh 的平台闸），在那里 `O_NOFOLLOW` 一定导出，而且上面那条测试会当场把它读出来。 */
+export function privateLogFlags(constants = fs.constants) {
+  if (!constants || typeof constants.O_WRONLY !== 'number') return 'a'
+  const base = constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND
+  return constants.O_NOFOLLOW ? base | constants.O_NOFOLLOW : base
+}
+
 /** 以 owner-only(0600) 打开或创建 daemon 日志，并把模式**读回来**。
  *
  *  为什么不能只 `openSync(logPath, 'a')`：那条口令既没有 mode（新建文件因此拿到 0644 & ~umask），
  *  也不改**已存在**文件的模式（上一轮安装留下的 0644 就这么留着）。这份日志里是审批与证据线索，
  *  而 daemon 的启动清扫只收紧 registry/approvals/evidence（engine StateRoot.swift 的那一段），
- *  从不碰它——SECURITY.md 记的正是这条"量到而未修"。chmod 没落住按写失败报告。 */
+ *  从不碰它——SECURITY.md 记的正是这条"量到而未修"。chmod 没落住按写失败报告。
+ *
+ *  第三道（2026-11-05 P2）：`fchmod` 改的是**打开到的那个 inode**，而 `open` 本身跟着叶子链接走，
+ *  所以一枚摆好的 `installer-daemon.log -> 别处的一份文件` 会让这里"把日志收成 0600"落在别人
+ *  的文件上。打开旗标里带 `O_NOFOLLOW`（`bridge/glasspane_bridge.py` 的 `_secure_out_write` 用的
+ *  就是这一枚），链接在**内核那一层**就被拒，不给判据留竞态；拒绝话说清没 chmod、没写。 */
 export function openPrivateLog(logPath, {
-  open = (file) => fs.openSync(file, 'a', STATE_FILE_MODE),
+  open = (file) => fs.openSync(file, privateLogFlags(), STATE_FILE_MODE),
   chmod = fs.fchmodSync,
   fstat = fs.fstatSync,
   close = fs.closeSync,
+  lstat = fs.lstatSync,
 } = {}) {
   let fd
   try {
     fd = open(logPath)
   } catch (error) {
+    // `O_NOFOLLOW` 在 macOS 上回 ELOOP；先按叶子类型分一句人话出来，别让"符号链接"读成
+    // "权限不够"。判定与 engine/updater 同族：链接不追，追之前先说清什么都没做。
+    const defect = leafSymlinkDefect(logPath, {
+      lstat,
+      notDone: '没有打开这个文件，没有 chmod，没有追加一行日志',
+    })
+    if (defect) return { ok: false, fd: null, mode: null, error: `日志文件打不开：${defect}` }
     return { ok: false, fd: null, mode: null, error: `日志文件打不开：${error.message}` }
   }
   try {
@@ -2269,6 +2521,13 @@ export function openPrivateLog(logPath, {
  *  控制只在机器空时成立（这类控制会在CI上随机红，也会在真出问题时随机绿）。 */
 export async function startDetached(binPath, args, logPath, { settleMs = LAUNCH_SETTLE_MS, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), openLog = openPrivateLog } = {}) {
   try {
+    // 兜底 mkdir 也走同一道叶子判定（2026-11-05 P2）：这里的 `chmodSync` 与 ensureLogDir 那
+    // 一处是同一个洞的另一个入口——预先摆好的 `~/.glasspane` 链接会让这句 chmod 落在别人的
+    // 树上。install() 里 ensureLogDir 先跑，直接调用方（`glasspane` 命令、单测）没有那道前置。
+    const dirDefect = leafSymlinkDefect(path.dirname(logPath), {
+      notDone: '没有 mkdir，没有 chmod，没有启动任何子进程',
+    })
+    if (dirDefect) return { ok: false, pid: null, error: `日志目录不可用：${dirDefect}`, exit: null }
     fs.mkdirSync(path.dirname(logPath), { recursive: true, mode: STATE_DIR_MODE })
     fs.chmodSync(path.dirname(logPath), STATE_DIR_MODE)
   } catch (error) {
@@ -2396,7 +2655,8 @@ export function usageText() {
     '                     恢复要换的是**已加载**作业的定义时，它和 install 一样先过 ① 那道门',
     '  --skip-build       跳过 npm/tsc/swift 编译（已构建过时使用）',
     '  --accept-unverified-signature  放行**一档**验签结论：发布 tag 的 GPG 验签在本机没跑成',
-    '                     （unavailable：没有 gpg、导入内置发布公钥失败、或验签命令自己抛错）。',
+    '                     （unavailable：没有 gpg、导入内置发布公钥失败、验签命令自己抛错，',
+    '                      或它回了退出码 0 却没点出这枚签名用的是哪把钥匙）。',
     '                     默认是拒装——"没跑成的检查"不许被讲成"检查过了、答案是没签名"。',
     '                     带上本 flag 才继续，并在屏幕上如实打出"这一版是在没有验签结论的情况下',
     '                     装上的"。形态与 updater 的 `--consent unsigned-release` 一致：它只批',
@@ -2693,12 +2953,21 @@ export function installGuard({ home = '', uid = null } = {}) {
 /** daemon 的 LaunchAgents plist 按 updater 同规格写：owner-only + 模式读回（finding 7）。
  *  旧写法 0644 把同一份文件（里面是本机装了哪些可执行、日志与 socket 的确切路径）摊给
  *  同机所有账号读；`updater/lib/launchd.js` 给自己的代理 plist 早就写 0600 并读回核对。
- *  chmod 没落住按**写失败**处理（与 ensureLogDir/openPrivateLog、updater 的 tightenMode 同一判据）。 */
+ *  chmod 没落住按**写失败**处理（与 ensureLogDir/openPrivateLog、updater 的 tightenMode 同一判据）。
+ *  第三道（2026-11-05 P2）：写之前先问叶子——`writeFileSync` 与 `chmodSync` 都跟着链接走，
+ *  一枚摆好的 `com.glasspane.daemon.plist -> 别处的一份文件` 会让"owner-only 的 LaunchAgent"
+ *  变成"覆盖别人的文件并把它的模式读回来当证据"。这一处不追链接：没写、没 chmod。 */
 export function writePrivatePlist(plistPath, xml, {
   write = (file, text) => fs.writeFileSync(file, text, { mode: STATE_FILE_MODE }),
   chmod = fs.chmodSync,
   statMode = (file) => fs.statSync(file).mode & 0o777,
+  lstat = fs.lstatSync,
 } = {}) {
+  const defect = leafSymlinkDefect(plistPath, {
+    lstat,
+    notDone: '没有写过这份 plist，没有 chmod，磁盘上那个被指向的文件一个字节都没变',
+  })
+  if (defect) return { ok: false, mode: null, error: `launchd plist 拒绝写入：${defect}` }
   try {
     write(plistPath, xml)
     chmod(plistPath, STATE_FILE_MODE)

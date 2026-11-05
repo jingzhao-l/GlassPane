@@ -16,6 +16,11 @@
  * 准备过的 argv 回话，认不出的命令直接抛——"对任何输入都答成功"的 stub 会把拒绝分支测成假绿。
  * 断言落在**替身记录下来的调用**上（发了没发 `kill`、发了没发 `launchctl kickstart`），
  * 不落在屏幕文案上；屏幕文案只作为"这句话有没有说出口"的补充证据。
+ *
+ * 2026-11-05（P1 夹具更新）：`verifyCloneTagGpg` 的判据从"看退出码"改成"读 gpg 点名的那把
+ *  钥匙"之后，本文件那副默认回 `stderr: ''` 的替身就不再是生产形状了（真 gpg 验签成功时
+ *  一定打印 `using RSA key <指纹>`）。桩的默认值换成同一趟命令在本机量到的字节
+ *  （`support/gpg-verify-fixtures.mjs`），"验签通过"那一档从此要靠真那一行才测得出来。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -38,6 +43,7 @@ import {
   usageText,
   verifyCloneTagGpg,
 } from '../cli.js'
+import { GOOD_SIG_STDERR_C_LOCALE, UNSIGNED_STDERR } from './support/gpg-verify-fixtures.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const CLI = path.join(HERE, '..', 'cli.js')
@@ -253,8 +259,16 @@ test('缺陷1：uid 读不出来时接管那句仍是红字（桩拒绝得像生
  * 缺陷 2
  * ========================================================================= */
 
-/** gpg / git 替身：`gpg --version` 可按需缺席，`git verify-tag` 回摆在测试手里的那一档。 */
-function verifyDouble({ gpgMissing = false, importStatus = 0, verifyStatus = 0, verifyStderr = '' } = {}) {
+/** gpg / git 替身：`gpg --version` 可按需缺席，`git verify-tag` 回摆在测试手里的那一档。
+ *  默认那副桩（`verifyDouble({})`）回的是**本机 2026-11-05 量到的 stderr 字节**：判据现在读
+ *  的是"这枚签名用的是哪把钥匙"那一行，一个只回退出码 0、不回那一行的桩在生产里不存在
+ *  （旧桩就是这样，见 support/gpg-verify-fixtures.mjs 顶部那一段）。 */
+function verifyDouble({
+  gpgMissing = false,
+  importStatus = 0,
+  verifyStatus = 0,
+  verifyStderr = verifyStatus === 0 ? GOOD_SIG_STDERR_C_LOCALE : UNSIGNED_STDERR,
+} = {}) {
   const calls = []
   const spawn = (cmd, args) => {
     calls.push([cmd, ...args.map(String)])
@@ -291,7 +305,11 @@ test('缺陷2：gpg 不在 → 验签 unavailable → 拒装，且拒装文案�
     assert.equal(verdict.action, 'refuse', '"这道检查没跑成"不许塌进"tag 没签名"那支放行')
     assert.match(verdict.text, /没有跑 npm install/, verdict.text)
     assert.match(verdict.text, /--accept-unverified-signature/, '拒绝必须给出可执行的下一步')
-    assert.match(verdict.text, /git -C \/Users\/dev\/glasspane tag -v v1\.24\.1/, verdict.text)
+    // 2026-11-05（P2）：这一条的期望从 `git -C … tag -v …` 改成了安装器自己那条隔离验签链。
+    // 原因见 cli.test.mjs 里同一条改动的注释——`tag -v` 读读者的 ~/.gnupg，而内置公钥只在
+    // 一次性钥匙环里活过那一趟，照抄它连一份健康的发布都验不过。
+    assert.match(verdict.text, /git -C \/Users\/dev\/glasspane -c gpg\.program=gpg -c gpg\.format=openpgp verify-tag v1\.24\.1/, verdict.text)
+    assert.doesNotMatch(verdict.text, /tag -v/, '旧的核对步骤不再出现在任何出路上：' + verdict.text)
     assert.doesNotMatch(verdict.text, /git -C "/, '核对步骤不许再用双引号：它包不住 $( ) 与反引号（2026-11-03 本轮改走 quoteShellArg）')
     assert.ok(!verdict.text.includes('继续安装'), '拒装文案里不许出现放行：' + verdict.text)
   } finally {
@@ -331,7 +349,7 @@ test('缺陷2：gpg 在且验签通过 → 继续（对照，判据不是"永远
 
     // 同一副桩换成"tag 里确实没签名"：2026-11-03 起这一档也要显式同意了（发现 #24，
     // 与 `unavailable` 合流）。这里同时验两半：没同意必须拒，带了同意才放行。
-    const unsigned = verifyDouble({ verifyStatus: 1, verifyStderr: 'gpg: no signature found' })
+    const unsigned = verifyDouble({ verifyStatus: 1 })
     const sig2 = verifyCloneTagGpg({ repoDir: '/Users/dev/glasspane', ref: 'v1.24.1', tmpDir: home, spawn: unsigned.spawn })
     assert.equal(sig2.status, 'unsigned')
     const say2 = tagVerifyDecision({ sig: sig2, pinRef: 'v1.24.1', repoDir: '/Users/dev/glasspane' })
