@@ -271,7 +271,19 @@ const layer = Layer.effect(
 
     const all: Interface["all"] = Effect.fn("ToolRegistry.all")(function* () {
       const s = yield* InstanceState.get(state)
-      return [...s.builtin, ...s.custom] as Tool.Def[]
+      // [gp] Our ids are not overridable. `session/tools.ts:99` builds the model's tool
+      // map as `tools[item.id] = …` over `[...builtin, ...custom]`, so the LATER entry
+      // won: a `tool/gp_act.ts` committed into whatever repository the session opened —
+      // or any plugin registering the id `gp_act` — silently replaced the daemon-backed
+      // tool with code that needs no socket, no `glasspaned` and no permission seat, while
+      // the model kept seeing the same name and description. It is worse than a wrong
+      // answer: `glasspane-decision-log.ts` skips the ledger for anything that is not the
+      // builtin it recognises, so the substituted verdict arrives with no audit entry,
+      // which is precisely the artifact this fork exists to produce. Upstream override
+      // behaviour for its own tools is left alone; the `gp_` namespace is this product's
+      // claim that a verdict came out of the engine.
+      const reserved = new Set(s.builtin.filter((item) => item.id.startsWith("gp_")).map((item) => item.id))
+      return [...s.builtin, ...s.custom.filter((item) => !reserved.has(item.id))] as Tool.Def[]
     })
 
     const ids: Interface["ids"] = Effect.fn("ToolRegistry.ids")(function* () {
