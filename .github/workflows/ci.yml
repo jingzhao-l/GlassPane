@@ -629,16 +629,17 @@ jobs:
   # harness-rulers，得到的只能是"因主机选错而红"——和它要防的"因产物坏而红"完全是两回事，红久了
   # 就没人看。而 `if: runner.os == 'macOS'` 那种写法等于没跑（本仓明令禁止，见 fork 的 ci.yml 里
   # installer-selftest 的同一处理）。所以它自成一条 macOS job：在这张机器上它是**测量**，不是跳过。
-  # 依赖只到 bun + node：发布闸 import 的只有 `bun`、`node:*` 与../../../product.json，不需要
+  # 依赖只到 bun + node：发布闸 import 的只有 `bun`、`node:*` 与 `../../../product.json`
+  # （那是 fork 树里 `packages/opencode/script/` 往上第三级 = `harness/glasspane-harness/product.json`），不需要
   # workspace 安装，所以这条 job 不跑 `bun install`。
   publish-gate-selftest:
     name: publish gate selftest (verify-published, macOS-only product)
-    # 与全仓其余 macOS job 同一个镜像标签（本文件 32 行那两条都是 ）。
-    # 从前这里钉死 ，而 GitHub 已排定该镜像 **2026-11-02 退役**并正在做
+    # 与全仓其余 macOS job 同一个镜像标签：本文件第 32 行那一条 `runs-on:` 用的就是同一个词。
+    # 从前这里钉的是 GitHub 已排定 **2026-11-02 退役**的 macOS 14 镜像，而 GitHub 正在做
     # scheduled brownout：brownout 窗口里这条 job 被直接取消（annotation 原文：
     # "This job failed because of a scheduled macOS 14 runner image brownout"），
     # 于是整条 CI 的结论是 cancelled——其余十道 job 全绿也救不回来，而
-    # / 要的就是 ci.yml 在被 tag 那笔 sha 上 success。
+    # `scripts/assert-tag-ready.mjs` 要的就是 ci.yml 在被 tag 那笔 sha 上 success。
     # 结果：发布链被一张正在下线的镜像钉死。这不是"改判据让它变绿"：macOS 这一侧仍是
     # **测量**（本 job 存在的理由一个字没动），换的只是那张机器叫什么。
     runs-on: macos-latest
