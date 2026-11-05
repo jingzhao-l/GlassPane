@@ -32,7 +32,26 @@ function stalledSink(highWaterMark = 1) {
   return sink;
 }
 
-test("不队列上限那一支：从没交给 stdout 的那一帧计进 droppedFrames，并报出是哪一条 id", async () => {
+/**
+ * 把事件环交给一枚 ref'd 计时器撑着。
+ *
+ * `DrainAwareWriter` 自己的看门狗计时器是 `unref()` 的——一次 bounded report 不该替产品把进程
+ * 钉住，那是产品的正确设计（见 `io.ts` 里那行注释）。于是"等一次 drain 超时"这一条 `await`
+ * 背后没有任何 ref'd handle：GitHub 的 runner 上实测报
+ * `Promise resolution is still pending but the event loop has already resolved`，本机因为旁边
+ * 还有句柄活着而过去了。留一环是**夹具**的事，判据一位没动：writer 仍然只等那 20 ms，
+ * 仍然不许计数。
+ */
+async function withLoopAlive(body) {
+  const keepLoopAlive = setTimeout(() => {}, 2_000);
+  try {
+    await body();
+  } finally {
+    clearTimeout(keepLoopAlive);
+  }
+}
+
+test("不队列上限那一支：从没交给 stdout 的那一帧计进 droppedFrames，并报出是哪一条 id", () => withLoopAlive(async () => {
   const notes = [];
   const writer = new DrainAwareWriter(stalledSink(), (n) => notes.push(n), 5, () => {}, 0);
   const ok = await writer.write('{"id":7,"result":{}}\n', 7);
@@ -41,9 +60,9 @@ test("不队列上限那一支：从没交给 stdout 的那一帧计进 droppedF
   assert.equal(notes.length, 1, "丢一帧要说一帧");
   assert.match(notes[0], /reply 7/, `报话要点名是哪一条 id：${notes[0]}`);
   assert.match(notes[0], /past the 0 ceiling/, notes[0]);
-});
+}));
 
-test("drain 看门狗那一支：不算丢（字节已在缓冲里），但必须把这等事说出来", async () => {
+test("drain 看门狗那一支：不算丢（字节已在缓冲里），但必须把这等事说出来", () => withLoopAlive(async () => {
   const notes = [];
   const writer = new DrainAwareWriter(stalledSink(), (n) => notes.push(n), 20, () => {}, 1_000_000);
   const ok = await writer.write('{"id":9,"result":{}}\n', 9);
@@ -53,4 +72,4 @@ test("drain 看门狗那一支：不算丢（字节已在缓冲里），但必�
   const note = notes.join("\n");
   assert.match(note, /has not drained within 20ms/, `这一支的可观测出口就是那条注记：${note}`);
   assert.doesNotMatch(note, /dropped, not queued/, `两种说法不许混用：${note}`);
-});
+}));
