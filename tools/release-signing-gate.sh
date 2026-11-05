@@ -169,8 +169,15 @@ signer_of() {  # $1 = payload, $2 = gnupg home (empty string = the caller's defa
 }
 
 keyring_primary_fpr() {  # $1 = gnupg home -> primary fingerprint of the first key in that ring
-  gpg --homedir "$1" --batch --with-colons --list-keys 2>/dev/null \
-    | awk -F: '$1=="fpr"{print $10; exit}'
+  # 先把钥匙环整个打完，再交给 awk。管道 + `awk '…exit'` 在本脚本的 `set -euo pipefail`
+  # （见上面那一行）下是一次自伤：awk 读完第一枚 fpr 就走，gpg 还在往管道里写就被 SIGPIPE 打死，
+  # 退 141 ⇒ 整段在这里断掉，而断掉的地方**早于**它该给出的那句 `::error::`——身份闸在它唯一
+  # 会说话的那一步之前先把自己打死了。这里是 `tools/` 里的委托脚本，
+  # `check-workflows.mjs` 的 2e 只扫 workflow 内联 run 体，看不见这一层（2026-11-05 记账）。
+  # 用 here-string 而不是管道：没有写者，就没有可以被打断的那根管道。
+  gpg --homedir "$1" --batch --with-colons --list-keys 2>/dev/null > "${TMPDIR:-/tmp}/gp-keyring-$$.txt"
+  awk -F: '$1=="fpr"{print $10; exit}' < "${TMPDIR:-/tmp}/gp-keyring-$$.txt"
+  rm -f "${TMPDIR:-/tmp}/gp-keyring-$$.txt"
 }
 
 # 只留下**判定行**（err() 写的 `::error::` 那些），供自测定点检查。
