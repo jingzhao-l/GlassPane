@@ -4611,3 +4611,61 @@ owner 2026-09-25："那几个配套产品面还是需要的" + "README 等基础
   工程含义：不 pin `ghostty-web`，任何带 TLS 拦截或无 github 直连的干净环境都构建不了这个 fork（上游 CI 能过只是它环境没这层拦截）。
 - **从源码可运行：已验证。** `bun packages/opencode/src/index.ts --version` exit 0（输出 `local`，源码运行未注入发布版本时的正常值）。
 - 遗留：`jingzhao-l/glasspane-harness` 远端未创建，subtree split 发布尚未执行（外部写操作，需用户点头）。
+
+### 七、收尾读数（同一会话）· 发布三格、三条安装通道、四条告警的关闭，以及一条我自己写错的读数要收回
+
+**先收回 §六 第一条。** 那三条写于我以为 `glasspane-harness-darwin-x64@0.13.0` 是一个没有 wrapper 的孤儿子包、需要 owner 用 `npm deprecate` 去标废的时候。逐个点名重量之后结论反了：0.13.0 的三包都在 registry 上（见 §一），所以没有半发布需要标废，本机 `npm whoami` = 401 也就不构成本轮的物理边界——本轮没有任何动作需要 npm 凭据，发布全部走 CI 的 OIDC。
+
+那三条原文**留在 §六 一字不改**，这不是省事：发布出去的 tag 里带着它们，而台账在本仓是 append-only 的。实测过一次改写的后果——把 §六 第一条替换掉之后 `release-artifact` 不再打 `△`，而是把那 3 行点名成"published-only"并警告 RE-SPLIT RISK：台账豁免只认"主干在前"这一个方向，两向都差就意味着下一次 `git subtree split` 会覆盖搬运仓里主干没有的字节。收回与更正因此写在这里，不改动已经发出去的那一段。
+
+
+**发布链的实际状态（每条都是当场问出来的，不是推断）。**
+
+| 格 | 读数 |
+| --- | --- |
+| 主仓 main | 本轮 7 笔 `[gp]`（`92d2b4b0` 代码 / `7d29946e` 控制修正 / `9d309fcd` 金样 / `0c61fdc0` 台账 / `7a27ae5e` fork-diff 跟笔 / `4b56398f` 运输层 / 本笔与它引发的跟笔），全部已在 main 与 origin/main；`git status --porcelain` 对本线为空（树上另有并行会话的在飞批次，见§八） |
+| 搬运仓 main | `bdb119bc`，tree `626f4a7dafbcb7981b0ad79ab9fbd75aa0df3b1a` == 主干子树（两侧 `git rev-parse` 逐字相等才推）；普通 fast-forward `2f51c996..bdb119bc`，**没有用 force**，远端有而我缺的提交 = 0 |
+| tag | `v0.14.2` 已打已推，peel == `bdb119bc`，`git verify-tag` 报"完好的签名"（key `0929EA31…43A1298`） |
+| GitHub Release | `draft=false`，6 件资产：`glasspane-harness-darwin-{arm64,x64}.zip` + 各自 `.asc` + `SHA256SUMS.txt` + 其 `.asc`；`targetCommitish` = 被 tag 的 commit（不是分支名） |
+| Release run（push 触发） | `41800894368` 十一格全 `success`（含 `tag, manifests and CI all agree`、两条 binaries、`SHA256SUMS…`、`Make the release visible…`） |
+| npm run（dispatch on tag） | `41802169821`：`publish-gate` `success`（**本笔新加的那条半发布预检在这里第一次真跑**：集合为空 → "a clean publish" 放行）、两条平台包 `success`、wrapper `success`、`install the published bytes and run them` `success` |
+| registry | 三包 `latest` 逐个点名 == **0.14.2**；再按 `glasspane-harness@0.14.2` / `-darwin-arm64@0.14.2` / `-darwin-x64@0.14.2` 显式点名各答 0.14.2；wrapper `dist.shasum=acdcb165…`、arm64 `4e9583fb…` |
+| `verify-published 0.14.2` | 本机 rc=0，13 条具名 `ok`：注册表读得到该版本（7 秒 1 次）、两个平台包都供得到、装的是发布物、两个命令名都报 0.14.2、os/cpu/version 三道闸读自**已安装**清单、每个 optionalDependency 都活着、带 registry integrity、带 SLSA provenance、发布物里有本 fork 的 MCP SDK 补丁（`all 8 artifact-checkable item(s) present`，读 145,758,434 字节）、那份二进制真在供内嵌 web（`content-type=text/html doctype=true assets=referenced`） |
+| Dependabot | 两仓八条 alert（父 #67–#70、子 #99–#102）**全部关闭**——判据是 `gh api …/dependabot/alerts?state=open` 返回空，不是"我改了清单"；两条 PR（父 #25、子 #7）都已 CLOSED，父 #25 是 08:37:23Z 由 dependabot 自己关的（我的清单落地在它之前），开着的 PR 两仓各 0 条 |
+
+**三条安装通道（这台机器答的，不是 selftest 的桩）。**
+
+1. npm 全局：`npm install -g --prefix "$HOME/.local" glasspane-harness` rc=0 ⇒
+   `~/.local/bin/glasspane-harness --version` = **0.14.2**、`gp-harness --version` = **0.14.2**；
+   npm 11 照例打 `install-scripts` 警告并给出 `--allow-scripts=glasspane-harness` 点名式补救，
+   与 `scripts/install.sh` 打印的那条一致。
+2. curl 兜底（**强制**走它：`env -i` 只给系统路径 + homebrew，读数先打印
+   `node? absent` / `npm? absent`）：`[WARN] npm not found on PATH — using the GitHub release asset instead`
+   → `resolved release tag: v0.14.2`（钉 tag，不读 moving latest）→ `[OK] sha256 verified against SHA256SUMS.txt`
+   → `[OK] GPG provenance verified: release asset signature is from the signing key`（真 `/opt/homebrew/bin/gpg`，
+   不是桩）→ rc=0，临时前缀里两个命令名都答 **0.14.2**。
+3. bun 全局：`bun add -g glasspane-harness@0.14.2` rc=0（postinstall 实耗 1m35.7s），
+   `~/.bun/bin/glasspane-harness --version` = **0.14.2**。
+
+**`release-artifact` 的量法与那一处修复**：本机上默认运输（声明的 https URL）问不到——死代理
+`127.0.0.1:15556`——所以 `--check` 诚实地退 2；`--transport harness` 答
+`2 agreement(s) held, 0 tolerated lag(s), 0 problem(s)`，两侧树哈希都是 `626f4a7d…`。本笔台账落进子树之后，
+`artifact` 那一格会转成"落后 N 行 SYNCLOG"的 `△`（这就是它设计上允许的唯一落后方向），搬运分支随后按 3b
+再推一次，使 `split-main` 那一格继续逐字相等——不消耗版本号，那是搬运分支，不是发布物。
+
+### 八、清理盘点（本会话的收口最后一步）
+
+| 项 | 处置 | 判据 |
+| --- | --- | --- |
+| `gp-harness-advisory-20261103` | `git branch -d` | 其提交全部是 main 的祖先（`git merge-base --is-ancestor` 逐条 5/5 成立） |
+| `gp-harness-close-20261105`（本笔那两笔） | 推完 main 后 `git branch -d` | 同上：内容已在 main |
+| `backup-advisory-prerebase` | `git branch -D`，并在此记录判据 | 它是 rebase 前的旧链（`70f8381a`/`eb660bb2`），rebase 把它们换成了 main 上的 `9d309fcd`/`0c61fdc0`——**内容已落地而提交号不是祖先**那一族，`-d` 恒拒绝、`git cherry` 也会误报。字节判据：`git diff --name-only backup-advisory-prerebase main -- harness/` 只有五个文件——两把尺子的金样（在 11-04 重记的面 A 基线上又记了一次）、`release-artifact.mjs` 与它的自测（rebase 之后新加的那笔）、`SYNCLOG.md` 里我那两处读数更正（main 上是**更正后的**版本，旧链那两行是被替换而不是被丢弃）。没有任何一行只存在于旧链，所以 `-D` 删掉的只是提交号 |
+| `split/0.14.2` | 设 upstream 到 `harness/main` 后 `git branch -d` | `git merge-base --is-ancestor split/0.14.2 harness/main` 成立，且它承载的树已由 tag `v0.14.2` 固定 |
+| `.worktrees/harness-advisory-20261103`、`.worktrees/harness-close-20261105` | `git worktree remove` + `git worktree prune` | 删除前 `git -C <wt> status --porcelain` 为空；两处 `.external/opencode` 是本会话用 APFS clonefile 建的（各 ~223 MB 名义、实际共享块），随目录一起消失 |
+| `/var/tmp/glasspane-harness/daily-20261102/`、`advisory-20261103/` | 删 | 都是本会话（含其四条泳道）的 scratch 与日志；`ca-bundle.pem` 是环境，留下 |
+| **不删**：`.worktrees/harness-daily-20261104`、`.worktrees/harness-daily-20261105` 与同名两条分支、主树里那 8 条未提交文件 | 保持原状并点名 | 那是本线另两次 10:30 会话的在飞批次。与本轮改动的重叠判断：它们碰 `packages/opencode/src/tool/glasspane/daemon.ts`、`engine/**`、`mcp-shell/**`、`installer/**`、根 `.github/workflows/ci.yml`、`tools/release-signing-gate.sh`——本笔一处都没碰（我只动 `harness/glasspane-harness/**` 与 `harness/tools/{product-surface,release-artifact}.mjs`），所以没有需要替它们收尾的缺陷；他们未提交的东西里若含缺陷，归他们那一轮 |
+| 进程 | 本会话起的后台命令全部退出 | 判据是两次 `pgrep`（不是"我执行过 pkill"）：`pgrep -fl "e2e.sh\|bun install --frozen\|gates.sh\|record.sh\|final.sh"` 起前非空、收口后必须空命中；`bun add -g` 的 postinstall 与 `verify-published` 起的临时前缀进程随命令结束自然退出 |
+| 遗留未追踪件 | 0 | 变异用的 `release-artifact.mjs` 备份、`my-synclog.md`、金样基线 sha 都在 `/var/tmp`，随上面那条一起删；仓库树里没有本会话留下的未追踪文件（`git status --porcelain` 中属于本线的为 0 行） |
+
+
+
