@@ -273,7 +273,25 @@ export function recordHomeDir() {
 }
 
 export function resolveStateRoot({ flags = {}, env = process.env, homeDir = recordHomeDir() } = {}) {
-  const named = flags['state-dir'] ?? flags['state-root'] ?? env.GLASSPANE_STATE_DIR
+  const dir = flags['state-dir']
+  const root = flags['state-root']
+  // 两枚旗标都是**在册的同义词**（`--state-root` 是那一份 launchd plist 用的拼写，见
+  // `updater/lib/idle.js:165`）。同时给出、且两个值不一样时，从前 `?? ` 静默取 `--state-dir`
+  // 那一枚——而这一支写的是状态根，读错根的下一步就是往别的档案里写（2026-11-04 候选 L）。
+  // 现在要么一致，要么拒绝：不一致不是"挑一个"，是这条调用自己没说清要动哪一棵。
+  const bothDiffer = typeof dir === 'string' && typeof root === 'string'
+    && dir.trim() !== '' && root.trim() !== '' && dir.trim() !== root.trim()
+  if (bothDiffer) {
+    throw new UpdaterError(
+      CODES.stateRootConflict,
+      `--state-dir ${dir} and --state-root ${root} name two different roots. These two flags are documented `
+        + 'synonyms, so nothing here can tell which root this call means, and the state root is the one location '
+        + 'every outcome is written relative to — reading the wrong one is writing into another install. '
+        + 'Nothing was read or written. Run the command with one flag, or with both set to the same path.',
+      { stateDir: dir, stateRoot: root },
+    )
+  }
+  const named = dir ?? root ?? env.GLASSPANE_STATE_DIR
   const defaultRoot = canonicalPath(path.join(homeDir, '.glasspane'))
   if (typeof named === 'string' && named.trim() !== '') {
     const lexical = canonicalPath(named)

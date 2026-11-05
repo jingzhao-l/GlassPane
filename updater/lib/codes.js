@@ -74,6 +74,8 @@ export const CODES = Object.freeze({
   // §2 when a swap is allowed
   busyOrUnreachable: 'busy-or-unreachable',
   nonDefaultStateDir: 'non-default-state-dir',
+  /** 两枚在册同义旗标给了两个不同的根——这条调用自己没说清要动哪一棵。 */
+  stateRootConflict: 'state-root-conflict',
   notStaged: 'not-staged',
   consentRequired: 'consent-required',
   autoDisabled: 'auto-disabled',

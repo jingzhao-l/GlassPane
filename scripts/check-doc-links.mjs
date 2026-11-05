@@ -99,6 +99,34 @@ const MAIN_DOCS = [
 
 export const DOCS = [...MAIN_DOCS, ...FORK_DOCS]
 
+/**
+ * 本闸**看得见、但本仓不许修**的缺陷——每一条都必须带齐四样，缺一样就不许进这张表：
+ *   ① `problem`：与 `problems.push(…)` 逐字同形的完整一行（不是模式，模式会连别人的缺陷一起豁免）；
+ *   ② `measured`：判据本身怎么量的（写命令与读数，不写"据说"）；
+ *   ③ `owner` + `handedTo`：收件人存在且会跑——本仓有一条被反复咬过的教训：把发现降级成
+ *      "交给另一条线"而那头没人接，等于一条有纸面记录的无闸；
+ *   ④ 它会**自己过期**：下一次这一条不再发生时，本闸反过来红，点名"把这条豁免删掉"。
+ *      没有这一半，豁免清单只会随时间变宽。
+ *
+ * 2026-11-05 唯一一条的来历：`slug()` 改成与 GitHub 自己的 `github-slugger@2.0.0` 同答
+ * （逐枚空格换 `-`、不合并；本机 `npm i github-slugger` 实跑 `"License & attribution" ->
+ * license--attribution`）之后才露出来的。那一行在 fork 的门面文档里，而本仓对 `harness/`
+ * 有两条同时成立的纪律：不改它的内容（10:30 那条线独立任务、独立取号），以及
+ * `release-artifact` 钉着"已发布 fork tag 的树 == 主干子树"——动一个字节就要那条线重新发号。
+ * 所以归口，不在本仓修，也不把判据放宽回去（合并空格那道旧规则会把这一处与另外 15 处
+ * 真死链一起重新藏起来：`README.zh-CN.md` 里 15 条双语锚点就是这么被藏住的，本轮已逐条改对）。
+ */
+const DEFERRED_FINDINGS = [
+  {
+    id: 'harness-readme-license-anchor',
+    problem: 'harness/glasspane-harness/README.md: 同文档锚点失效 → #license-attribution',
+    measured: 'github-slugger@2.0.0 slug("License & attribution") == "license--attribution"（本机 npm 实装跑出）',
+    owner: '10:30 那条线（harness fork 本体）',
+    handedTo: 'tools/prompts/daily-glasspane-harness.md',
+    openedOn: '2026-11-05',
+  },
+]
+
 /** 成对文档：任一侧缺失即漂移（双语约定不能只留一条腿）。 */
 const MIRROR_PAIRS = [
   ['README.md', 'README.zh-CN.md'],
@@ -114,7 +142,9 @@ export function slug(heading) {
     .toLowerCase()
     .replace(/[`*_~]/g, '')
     .replace(/[^\p{L}\p{N}\s-]/gu, '')
-    .replace(/\s+/g, '-')
+    // 逐枚空格换 '-'，不合并：GitHub 的 slugger 用 `/\s/g → '-'`，两枚连续空格在它那儿是 `--`。
+    // 从前这里用 `\s+`，同一个标题在两边算出两个锚——那条锚点判定就再也不是它声称的那一件（2026-11-04 候选 J）。
+    .replace(/\s/g, '-')
 }
 
 /**
@@ -731,6 +761,7 @@ export function rulerProvenance({ rootDir = ROOT } = {}) {
 export function check({ rootDir = ROOT, docs = DOCS } = {}) {
   const problems = []
   const advisories = []
+  const deferredHit = new Set()
   const present = docs.filter((d) => fs.existsSync(path.join(rootDir, d)))
   // 登记过却不在磁盘上的文档是**问题**，不是"本轮不归它管"。从前各支各自 `existsSync` 过滤，
   // 于是把一份文档（或整个 MAIN_DOCS）改名/删掉，这条闸会打出 `文档 0 份 … OK` 并退 0——
@@ -803,7 +834,10 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
         }
         const set = anchors.get(doc) ?? new Set()
         if (!set.has(decodedAnchor.value)) {
-          problems.push(`${doc}: 同文档锚点失效 → #${rawAnchor}`)
+          const problem = `${doc}: 同文档锚点失效 → #${rawAnchor}`
+          const deferred = DEFERRED_FINDINGS.find((d) => d.problem === problem)
+          if (deferred) deferredHit.add(deferred.id)
+          else problems.push(problem)
         }
         continue
       }
@@ -839,6 +873,16 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
         }
       }
     }
+  }
+  // 归口条目要自己证明它还该在：这一次它对应的那一行**没有**再发生，说明那条线已经修好了，
+  // 留着豁免就等于给一道已经不复存在的缺陷作掩护——下一次它换个人、换个文件复发时，没人记得它存在过。
+  for (const d of DEFERRED_FINDINGS) {
+    if (deferredHit.has(d.id)) {
+      advisories.push(`归口待修 ${d.id}：${d.problem}｜判据 ${d.measured}｜归 ${d.owner}｜已于 ${d.openedOn} 交接给 ${d.handedTo}`)
+      continue
+    }
+    problems.push(`归口条目 ${d.id} 这一轮没有再发生（它钉的是「${d.problem}」）：那条线大概已经修好了，`
+      + `把这条豁免从 DEFERRED_FINDINGS 删掉——留着它，这道闸就在替一个已经不存在的问题作掩护`)
   }
   return { docs: present.length, links, external, tables: shape.tables, mdFiles: shape.files, problems, advisories }
 }
@@ -1192,6 +1236,12 @@ export function installLandingAdvisories({ rootDir = ROOT, files = INSTALL_LANDI
  *    那里的文档归那条线（它有 10:30 的独立任务与独立尺子），把它们扫进来，就等于让一次上游
  *    bump 能红在本仓的闸上——而那种红的唯一修法是放宽本闸。
  *
+ *    2026-11-05 试过把这一条从 `packages/` 扩到整个 fork 体，量过之后**收回**：本闸的 `FORK_DOCS`
+ *    登记表（见文件头）是有意登记 fork 门面文档的——"产品在私有化之后前门搬到了这里，前门上的
+ *    死链一样是死链"。扩到整体会一边从表格统计里少掉 48 张真表（本机实量 470→422）、一边
+ *    仍然报出那一处锚点，因为它走的是 `DOCS` 那条通道。归口写在下面 `DEFERRED_FINDINGS`，
+ *    不在扫描集合上动手。
+ *
  * `.worktrees` 与 `dist` 同族（2026-10-29 实测加入）：并行会话与每日任务会把隔离工作树开在
  * 仓库目录**里面**，那是同一棵树的多份未追踪拷贝。本机实量：`.worktrees/` 下开出 5 份之后，
  * 这道闸自己打印的扫描量从 122 份 markdown 涨到 1257 份、表格从 448 张涨到 3275 张——读的人
@@ -1203,6 +1253,28 @@ const MD_SKIP_DIRS = new Set(['node_modules', '.build', '.git', '.external', '.s
 const MD_SKIP_ROOTS = ['harness/glasspane-harness/packages/']
 const MD_MAX_DEPTH = 14
 const CELL_PLACEHOLDER = '\u0001'
+
+let skippedMarkdown = 0
+function countMarkdownBeneath(dir) {
+  let n = 0
+  const stack = [dir]
+  while (stack.length) {
+    const current = stack.pop()
+    let entries
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const e of entries) {
+      if (MD_SKIP_DIRS.has(e.name)) continue
+      const abs = path.join(current, e.name)
+      if (e.isDirectory()) stack.push(abs)
+      else if (e.name.endsWith('.md')) n += 1
+    }
+  }
+  return n
+}
 
 function markdownFilesUnder(rootDir) {
   const out = []
@@ -1218,7 +1290,12 @@ function markdownFilesUnder(rootDir) {
       if (MD_SKIP_DIRS.has(e.name)) continue
       const abs = path.join(dir, e.name)
       const rel = path.relative(rootDir, abs).split(path.sep).join('/')
-      if (MD_SKIP_ROOTS.some((r) => rel.startsWith(r))) continue
+      if (MD_SKIP_ROOTS.some((r) => rel.startsWith(r))) {
+        // 跳过要**看得见**：静默少扫 N 份与"扫过了"在输出里长得一样，就是这道闸下一次
+        // 被人当空跑的理由（本仓被"扫描集合说不清自己扫了什么"咬过不止一次）。
+        if (e.isDirectory()) skippedMarkdown += countMarkdownBeneath(abs)
+        continue
+      }
       if (e.isDirectory()) walk(abs, depth + 1)
       else if (e.name.endsWith('.md')) out.push(abs)
     }
@@ -1488,7 +1565,7 @@ if (isEntrypoint && process.argv.includes('--help')) {
 
 if (invokedAsEntrypoint()) {
   const { docs, links, external, tables, mdFiles, problems, advisories } = check()
-  process.stdout.write(`文档 ${docs} 份 | 仓库内链接 ${links} 条 | 外链 ${external} 条（不请求）| markdown 表格 ${tables} 张（扫 ${mdFiles} 份 markdown）\n`)
+  process.stdout.write(`文档 ${docs} 份 | 仓库内链接 ${links} 条 | 外链 ${external} 条（不请求）| markdown 表格 ${tables} 张（扫 ${mdFiles} 份 markdown，按 MD_SKIP_ROOTS 另跳过 ${skippedMarkdown} 份）\n`)
   // `△` ＝ 量到了、说出来了、但不从这道闸判红（那是另一条泳道的写域）。与 `check-workflows.mjs`
   // 对 `harness/` 子树同一符号、同一理由：范围限制要每轮都出现在读的人眼前，而不是写在注释里。
   for (const a of advisories ?? []) process.stdout.write(`  △ ${a}\n`)

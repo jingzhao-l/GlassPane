@@ -23,20 +23,20 @@
 
 ## 目录
 
-- [这项目是什么 / About This Project](#这项目是什么-about-this-project)
-- [能力一览 / At a Glance](#能力一览-at-a-glance)
-- [快速开始 / Quick Start](#快速开始-quick-start)
-- [安装 / Installation](#安装-installation)
-- [用法 / Usage](#用法-usage)
-- [MCP 工具参考 / MCP Tool Reference](#mcp-工具参考-mcp-tool-reference)
-- [它如何工作 / How It Works](#它如何工作-how-it-works)
-- [配置 / Configuration](#配置-configuration)
-- [常见问题 / FAQ](#常见问题-faq)
-- [安全 / Security](#安全-security)
-- [目录结构 / Directory Structure](#目录结构-directory-structure)
-- [贡献 / Contributing](#贡献-contributing)
-- [免责声明 / Disclaimer](#免责声明-disclaimer)
-- [许可证 / License](#许可证-license)
+- [这项目是什么 / About This Project](#这项目是什么--about-this-project)
+- [能力一览 / At a Glance](#能力一览--at-a-glance)
+- [快速开始 / Quick Start](#快速开始--quick-start)
+- [安装 / Installation](#安装--installation)
+- [用法 / Usage](#用法--usage)
+- [MCP 工具参考 / MCP Tool Reference](#mcp-工具参考--mcp-tool-reference)
+- [它如何工作 / How It Works](#它如何工作--how-it-works)
+- [配置 / Configuration](#配置--configuration)
+- [常见问题 / FAQ](#常见问题--faq)
+- [安全 / Security](#安全--security)
+- [目录结构 / Directory Structure](#目录结构--directory-structure)
+- [贡献 / Contributing](#贡献--contributing)
+- [免责声明 / Disclaimer](#免责声明--disclaimer)
+- [许可证 / License](#许可证--license)
 
 ---
 
@@ -624,7 +624,7 @@ GlassPane 的配置面分两层：引擎一层，每个消费者各一层。没�
 ### 安装
 
 **Gatekeeper 拦住应用/提示 unidentified developer。** 符合预期：产物 ad-hoc 签名且公证暂缓
-（见[安装](#安装-installation)）。在系统设置 → 隐私与安全性里允许后重开。
+（见[安装](#安装--installation)）。在系统设置 → 隐私与安全性里允许后重开。
 
 **我勾了权限，卡片还是红的。** 多半勾错了主体——条目必须是 `GlassPane Daemon`，不是终端也不是
 `GlassPane.app`。卡片会显示它测到的主体；跑 `node installer/cli.js --restore-launchd`

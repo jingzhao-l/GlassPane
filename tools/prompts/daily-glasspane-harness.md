@@ -108,6 +108,7 @@
 - 长时间命令（`fork-diff`、整包构建、`bun install` 4,671 个包）用后台跑并轮询状态，别在前台等超时；超时不等于失败，先看日志再判定。
 - 授权见开头【无人值守：零遗留与全线发布授权】那一节，那一条覆盖本节；这里只留三条不是"决策"而是"别做错"的纪律：`--record` 只用于本轮自己造成的有意变化，`product-surface` 永远不许 `--record`（它没有基线）；覆盖任何远端分支前先逐条证明被覆盖内容不丢；本轮不改主仓产品代码与主仓版本线，也不手改 `node_modules/iterate-kernel/` 或 `kernel/schemas/**` 这类复制品（要动语义就走 canonical 再 pin/同步）。
 - 发现主仓产品面或 canonical 内核的问题时，**不是"列进汇报"或"交给那条线"就完事**：那仍是本轮要修掉的缺陷。修法是你直接在所属那一层改（canonical 侧改完跑它门禁并发版、再升级 fork 的 pin；主仓侧的改动按主仓那条线的口径提交推送并随其发版），并在汇报里给出改了哪层、跑了哪些闸、两侧版本号是多少。写"该由哪条线修"只允许作为**执行路径的说明**，不允许作为不修的出口。
+- **07:30 那条线交接过来的一条（2026-11-05，请按上面那条同一口径修掉）**：`harness/glasspane-harness/README.md` 的锚点 `#license-attribution` 在它指向的标题（`## License & attribution`）下渲染不出。判据是量出来的，不是推测：`npm i github-slugger`（GitHub 渲染用的那一个，本机装的是 2.0.0）实跑 `slug("License & attribution") == "license--attribution"`——`&` 被去掉后留下**两枚**空格，逐枚换成 `-` 就是双连字符；同一批里 `"安装 / Installation" -> 安装--installation`。修法两种任选：把链接写成 `(#license--attribution)`，或把标题改成不含 `&` 的形状（`## License and attribution`），改完两边一致即可。父仓的 `script/check-doc-links.mjs` 本轮起把这一条登记成**会自己过期**的归口条目（`DEFERRED_FINDINGS`，`id: harness-readme-license-anchor`）：你们修好之后父仓那道闸会反过来红并点名"删掉这条豁免"，所以修完请同时在父仓删那条条目（一行），并把这一条从本清单里勾掉。
 
 【最终汇报】
 
