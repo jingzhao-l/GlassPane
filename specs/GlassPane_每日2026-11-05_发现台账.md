@@ -185,3 +185,77 @@ R-17 那条特别说明：单独把 `?? []` 放回去**不会**变红——表�
 `Promise resolution is still pending but the event loop has already resolved`，本机因为旁边还有
 句柄活着而过去了。根因在被测产品的正确设计里（writer 的看门狗计时器 `unref()`，一次 bounded
 report 不该钉住进程），所以改的是夹具（`withLoopAlive` 自己留一环），判据一位没动。
+
+## 7. 收口证据（全部为本机实测，量法随行写明）
+
+- main 收口 HEAD：`070d6ddf`（`git rev-parse HEAD` == `git rev-parse origin/main`，
+  `git rev-list --left-right --count origin/main...main` = `0 0`）。
+  本轮在 main 上的 10 笔（量法：`git log --oneline v1.29.1..HEAD` 去掉带 `[gp]` 前缀的那 6 笔，
+  剩下的就是本线 10 笔）：`67bed64b` 引擎 → `93c48559` 壳 → `3a28feaa` 安装器 →
+  `82759692` scripts/updater/闸 → `1d561d9f` 两条真机冒烟 → `e48c0c11` 空旗标那一组 →
+  `391a1ccb` 正则更正 → `881f4b9e` release → `e73952cc` 面 A 基线 → `070d6ddf` 台账+夹具。
+- `git status --porcelain` 行数：**0**（清理后再数一次仍是 0）。
+- tag：`v1.30.0` = 签名对象 `9d40a4ee` → `070d6ddf`（`git for-each-ref --format="%(objecttype) %(objectname:short) -> %(*objectname:short)"`，
+  objecttype 是 `tag` ⇒ 是签名 tag，不是轻量 tag）。
+- GitHub Release：`isDraft=false`、`latest=v1.30.0`、`targetCommitish=070d6ddf37a5980913d0bd427388c857f7c01ae8`、
+  4 件资产（`GlassPane-1.30.0.tar.gz` 5,041,138 B、`.asc`、`SHA256SUMS-1.30.0.txt` 90 B、`.asc`）。
+  完整性三处相等：API `assets[].digest` = 本机重算 = `SHA256SUMS` 那一行
+  = `43d185efd5db112fed24fff8d293fb35f2bb8acb019a7f303ae9b4271ab6ab77`。
+  签名身份：`SHA256SUMS-1.30.0.txt.asc` 用内置发布公钥在一次性钥匙环里验，
+  `using RSA key 0929EA31DF4F7429F63FC53189D88B1D043A1298` + `Good signature`，
+  与 `installer/cli.js:117 GLASSPANE_SIGNING_KEY_ID`、`updater/lib/signature.js` 的
+  `PINNED_PRIMARY_FINGERPRINT` 逐字相等。
+  归档自证：`node scripts/make-release-archive.mjs --verify` rc=0 ——
+  `823 entries, 5041138 bytes, all 30 declared commands and schemas present, no entry under harness/ / .iterate_decisions.md`；
+  `tar -tzf | grep -cE "(^|/)harness/"` = **0**（数数用 `grep -cE`，不是 `grep -q`），
+  `mcp-shell/dist/index.js` 与 `mcp-shell/schemas/*.json` 命中 9 条。
+- registry：`npm view glasspane-mcp version` = **1.30.0**、`npm view glasspane-install version` = **1.30.0**；
+  点名复读 `npm view glasspane-mcp@1.30.0 version --prefer-online` / 同 install 都回 1.30.0；
+  `versions --json` 尾巴是 `1.29.0, 1.29.1, 1.30.0`。npm 那条链是两次显式 dispatch
+  （`--ref v1.30.0 -f mode=dry` 成功 → `-f mode=publish` 成功，`publish bare names with provenance in 3m45s`，
+  trusted publisher 直发，没有产生 stage 件）。
+- 端到端（发布归档，不是本地工作树）：解包 → 树内 `npm pack` → `npm i -g --prefix <干净前缀>` rc=0
+  → `prefix/bin/glasspane-mcp` 是符号链接（1.12.3 那次的交付形状）→ 用 stdin 打一条 `initialize`
+  回 `{"serverInfo":{"name":"glasspane-mcp","version":"1.30.0"}}`，stderr 空。
+- CI：`070d6ddf` 上 event=push 的 CI run `41953356202` = **success**，12 条 lane 全绿
+  （engine Swift 7m28s、harness rulers 54s、macOS node suites 4m13s、root workspace gate 4m8s…）。
+  `scripts/assert-tag-ready.mjs` 要的就是这一格，所以 tag 是在它之后才打的。
+  Release run `41954624101`、dry `41955893057`、publish `41955967195` 均 success。
+  注：Release 那一步里有两行 `::error::` 是**自测夹具故意造的红**
+  （`Prove the identity gate can go red (self-test)` 用一把 disposable key 喂给身份闸，要求它判红；
+  红话里的 `pinned=…` 才是被钉的那枚 `0929EA31…`）——那道闸自己证明自己能拦，不是这一版没验过。
+
+## 8. 清理盘点（收口后）
+
+`git worktree list` = **3 行**；`git branch -a` = **6 条**（本地 5 + 远端 1 条 `origin/main`，
+另有 `harness/main` 与两个 HEAD 符号引用，同上一条数法一起报）。
+
+| 对象 | 处置 | 判据 |
+|---|---|---|
+| `.worktrees/harness-advisory-20261103` + 分支 `gp-harness-advisory-20261103` | **留**（别的线） | 树内 `git status --porcelain` = 0；`git log main..gp-harness-advisory-20261103` 有未进 main 的 `[gp]` 笔；提示词硬口径"不改 harness/ 内容或版本"，10:30 那条线有自己的任务与取号 |
+| `.worktrees/harness-daily-20261104` + 分支 `gp-harness-daily-20261104` | **留**（别的线在飞） | 树内有 1 条未提交条目（那条线自己的活），本轮不 checkout/reset/stash，也不替它提交 |
+| 分支 `backup-advisory-prerebase` | **留**（别人的保险） | 它是 advisory 那批 rebase 前的唯一回滚点，而那批还没被那条线收口；纪律第 4 条：只在"那批已收口且不再需要回滚点"时删 |
+| 分支 `split/0.14.2` | **留**（发布锚点搬运产物） | `split/*` 内容由 tag 与 split 仓承载，不参与"是否落地 main"的判定 |
+| 远端分支 | 无可删（只有 `origin/main`） | `git branch -r` 实测 |
+| 本轮自建 worktree / 分支 | **0 个**，无需删 | 本轮全程在主工作树上以已提交状态收口，未开分支工作台 |
+| `/var/tmp/glasspane-main-check/20261105*`、`/tmp/gp-*` 快照与临时归档 | 本轮结束时删除（自己的产物） | 内容已全部落在 main + tag `v1.30.0` + registry；快照的使命（唯一回滚点）在提交后结束 |
+| `CHANGELOG.md` 的 `[Unreleased]` | 已归号（本轮条目进 `## [1.30.0]`，那一节改成本版收口说明） | 文件字节 |
+| `specs/` 本轮台账 | 只新增 `specs/GlassPane_每日2026-11-05_发现台账.md`，未改任何历史结论 | `git show --stat` 只有 1 个 A |
+| 开放 PR | `gh pr list --state open` = 空 | 实测 |
+| 悬挂 draft Release | `gh release list` 前 4 条无 Draft，`v1.30.0` `isDraft=false` | 实测 |
+| npm 待批 staged publish | 无法在本机直接列（`npm stage list` 要 token，实测 E401）；判据换成两道：publish job 按设计**不会**在 staged-only 时变绿（1.4.0 那次写进 workflow 注释），而它 3m45s success 且 registry 两包读回 1.30.0 | 补它的确切命令：`npm stage list glasspane-mcp`（需 owner 的 npm 登录） |
+| 进程 | 本轮起的后台命令全部已退出：`pgrep -fl "glasspane-settings\|p4i4_helper\|swift test\|node --test\|gh run watch\|gp-gpg\|quick-gen-key"` 两次都是空命中（rc=1） | 判据是 pgrep 而不是"我执行过 pkill" |
+| 归属不明的长命进程 | `gpg-agent --daemon` 7 枚（etime 15h～12d，homedir 分别是 `~/.gnupg`、`/tmp/gpkey`、两个 `/var/folders/...` 与 `/tmp/gpu-test-pin-anchor-*`） | 全部早于本会话（本会话 07:30 起），且不是本轮起的名字；按纪律不动，只点名 |
+
+## 9. 未观测（只限物理边界）与它的确切补救命令
+
+- **Apple 公证（Developer ID + notarytool）**：owner 未启用付费账号，产品仍不公证——本轮没有把它
+  写成已完成，`SECURITY.md` 那节口径不变。补：注册 Developer ID 后在 `release.yml` 加一步
+  `xcrun notarytool submit … --keychain-profile`（那是范围变更，需要 owner 先决定）。
+- **`npm stage list` 的直接读数**：本机没有 npm token（E401，上面已给替代判据）。补：
+  `npm stage list glasspane-mcp && npm stage list glasspane-install`（owner 登录态下）。
+- **面板 developer-tools 那张卡**：按设计恒"未验证"（TCC 没有查询 API），本轮
+  `--permissions` 的 `verdictExcludes` 原样把这一点发出来，不是缺口，是产品判据。
+- **探针包的 Swift Testing 那一格**：`swift test --package-path engine/probe` 打印
+  `Test run with 0 tests in 0 suites`——探针包只有 XCTest 用例（58 条），那一格是空集而不是绿。
+  补：给 `engine/probe` 写 swift-testing 用例是范围外，本轮只如实记空集。
