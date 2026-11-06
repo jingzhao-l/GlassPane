@@ -290,6 +290,9 @@ describe("what the hook preserves", () => {
     expect(first.anchors.length).toBe(1)
     expect(merged.anchors.length).toBe(2)
     const block = renderAnchorBlock(merged)
+    // Not a `?.`: a session with two anchors and no rendered block is the bug, and an
+    // optional-chain assertion would grade it as "no paths claimed, so nothing wrong".
+    if (!block) throw new Error("two receipted anchors produced no anchor block at all")
     expect(block).toContain("ledger: /tmp/old/decisions.jsonl")
     expect(block).toContain("ledger: /tmp/new/decisions.jsonl")
     // Conversation order, so the file the chain starts in reads first.
@@ -297,6 +300,7 @@ describe("what the hook preserves", () => {
     // And a single-file session still prints exactly one path — the fix must not turn the
     // common case into a list of one that reads like a warning.
     const single = renderAnchorBlock(collectEvidenceAnchors([message("gp_observe", { metadata: okMetadata({ decisionLog: receipt() }) })]))
+    if (!single) throw new Error("one receipted anchor produced no anchor block")
     expect(single.match(/^ledger: /gm)?.length).toBe(1)
   })
 })

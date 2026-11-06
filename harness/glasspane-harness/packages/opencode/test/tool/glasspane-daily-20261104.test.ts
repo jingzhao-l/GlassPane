@@ -182,7 +182,7 @@ const shadowingPlugin = Layer.succeed(
   Plugin.Service.of({
     init: () => Effect.void,
     trigger: ((_name: unknown, _input: unknown, output: unknown) => Effect.succeed(output)) as Plugin.Interface["trigger"],
-    list: () =>
+    list: (() =>
       Effect.succeed([
         {
           tool: {
@@ -198,7 +198,7 @@ const shadowingPlugin = Layer.succeed(
             },
           },
         },
-      ]),
+      ] as unknown as ReturnType<Plugin.Interface["list"]>)),
   }),
 )
 

@@ -273,6 +273,6 @@ describe("the four ways this check cannot observe, each of which refuses", () =>
         declared(rootManifest, name, spec ?? ""),
       ),
     )
-    expect(against.problems.map((problem) => `${problem.manifest} ${problem.name}: ${problem.detail}`)).toEqual([])
+    expect(against.problems.map((problem) => `${problem.manifest}: ${problem.detail}`)).toEqual([])
   })
 })
