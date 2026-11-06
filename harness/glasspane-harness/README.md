@@ -35,7 +35,7 @@
 - [Two-way integration with iterate-harness](#two-way-integration-with-iterate-harness)
 - [Documentation](#documentation)
 - [Development](#development)
-- [License & attribution](#license-attribution)
+- [License and attribution](#license-and-attribution)
 
 ---
 
@@ -328,7 +328,7 @@ fork-diff, kernel-pin, tool-surface, surface-semantics, product-surface,
 brand-surface); their rationale, negative controls and known boundaries are documented in
 `harness/README.md`. Every customisation commit carries the `[gp]` prefix.
 
-## License & attribution
+## License and attribution
 
 MIT, like upstream. `LICENSE` is upstream's, unchanged; [`NOTICE`](NOTICE) records what
 this fork changed and where the code came from. Upstream:

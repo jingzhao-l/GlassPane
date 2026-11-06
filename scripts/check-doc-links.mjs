@@ -115,17 +115,14 @@ export const DOCS = [...MAIN_DOCS, ...FORK_DOCS]
  * `release-artifact` 钉着"已发布 fork tag 的树 == 主干子树"——动一个字节就要那条线重新发号。
  * 所以归口，不在本仓修，也不把判据放宽回去（合并空格那道旧规则会把这一处与另外 15 处
  * 真死链一起重新藏起来：`README.zh-CN.md` 里 15 条双语锚点就是这么被藏住的，本轮已逐条改对）。
+ *
+ * 2026-11-06：那唯一一条 `harness-readme-license-anchor` 已由收件人那条线改掉——fork 的
+ * `README.md` 把标题写成 `## License and attribution`（与 zh-CN 侧的「许可与署名」同形），
+ * 实跑 `github-slugger@2.0.0 slug("License and attribution") == "license-and-attribution"`，
+ * 链接同批改为 `(#license-and-attribution)`。本表因此清空。清空不等于通道退役：四样判据照旧
+ * 成立，进来的每一条仍要每轮打印成 `△`、逐字匹配、并在不再发生时反过来红。
  */
-const DEFERRED_FINDINGS = [
-  {
-    id: 'harness-readme-license-anchor',
-    problem: 'harness/glasspane-harness/README.md: 同文档锚点失效 → #license-attribution',
-    measured: 'github-slugger@2.0.0 slug("License & attribution") == "license--attribution"（本机 npm 实装跑出）',
-    owner: '10:30 那条线（harness fork 本体）',
-    handedTo: 'tools/prompts/daily-glasspane-harness.md',
-    openedOn: '2026-11-05',
-  },
-]
+export const DEFERRED_FINDINGS = []
 
 /** 成对文档：任一侧缺失即漂移（双语约定不能只留一条腿）。 */
 const MIRROR_PAIRS = [
@@ -758,7 +755,7 @@ export function rulerProvenance({ rootDir = ROOT } = {}) {
   return out
 }
 
-export function check({ rootDir = ROOT, docs = DOCS } = {}) {
+export function check({ rootDir = ROOT, docs = DOCS, deferredFindings = DEFERRED_FINDINGS } = {}) {
   const problems = []
   const advisories = []
   const deferredHit = new Set()
@@ -835,7 +832,7 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
         const set = anchors.get(doc) ?? new Set()
         if (!set.has(decodedAnchor.value)) {
           const problem = `${doc}: 同文档锚点失效 → #${rawAnchor}`
-          const deferred = DEFERRED_FINDINGS.find((d) => d.problem === problem)
+          const deferred = deferredFindings.find((d) => d.problem === problem)
           if (deferred) deferredHit.add(deferred.id)
           else problems.push(problem)
         }
@@ -882,7 +879,7 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
   // 那一行当然不会发生——那不能算"那条线修好了"，只能算"这一轮没看那份文件"。不这么分开的话，
   // 这条自过期检查会把每一个合成根的测试都判红（本轮第一次跑就撞上，正是那条既有测试拦住的）。
   const seenDocs = new Set(present);
-  for (const d of DEFERRED_FINDINGS) {
+  for (const d of deferredFindings) {
     const file = d.problem.split(':')[0];
     if (deferredHit.has(d.id)) {
       advisories.push(`归口待修 ${d.id}：${d.problem}｜判据 ${d.measured}｜归 ${d.owner}｜已于 ${d.openedOn} 交接给 ${d.handedTo}`)
