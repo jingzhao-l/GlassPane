@@ -7,7 +7,7 @@ import { Agent } from "@/agent/agent"
 import * as Truncate from "@/tool/truncate"
 import { Effect, Layer, Schema } from "effect"
 
-import { AttachParams, ObserveParams, engineBody, glasspaneDefs, present, refused, requireCapability } from "../../src/tool/glasspane/index"
+import { AttachParams, ObserveParams, engineBody, glasspaneDefs, present, refused, requireCapability, seatReport } from "../../src/tool/glasspane/index"
 import type { Context as ToolContext } from "../../src/tool/tool"
 import { DIMENSION_ID_LIMITS, validateDimension, validateSelector } from "../../src/tool/glasspane/kernel"
 import * as Daemon from "../../src/tool/glasspane/daemon"
@@ -815,6 +815,10 @@ describe("the seat report is read, not asserted", () => {
       expect(probe.ok).toBe(true)
       if (!probe.ok) return
       const seats = probe.report.permissions
+      // This fixture sends a seat map, so `null` here is not a case to tolerate — it is the
+      // reader failing to read one. Named refusal, not a non-null assertion: an `as` would
+      // let the contract field go nullable and this test stay green while doing so.
+      if (seats === null) throw new Error("the seat map came back null although the fixture sent four seats")
       // Every named seat survives — deleting it would make the report claim the engine has fewer
       // seats than it adverted, which is a different false statement, not a lesser one.
       expect(Object.keys(seats).sort()).toEqual(["accessibility", "developerTools", "input", "screenCapture"])
@@ -829,7 +833,96 @@ describe("the seat report is read, not asserted", () => {
       rmSync(peer.dir, { recursive: true, force: true })
     }
   })
+
+  test("a seat map the engine never sent is not the empty seat map", async () => {
+    // `report.permissions ?? {}` folded two different facts together: an older `glasspaned`
+    // whose `permissionsReport` is nil by design (it answers nothing) and a current one that
+    // answers "zero seats measured". The second is a statement about the host's TCC state;
+    // the first is not a statement about the host at all. Both halves have to stay apart in
+    // the contract (`null` vs `{}`) AND in the text the model reads, or the fix is a
+    // half-fix: a nullable field that a renderer still prints as one shared answer.
+    const absent = seatHelloRaw({ version: "1.23.0", protocolVersion: "1", capabilities: ["observe"] })
+    await absent.serve()
+    const previous = process.env.GLASSPANE_SOCKET
+    process.env.GLASSPANE_SOCKET = absent.socket
+    let missingProbe: unknown
+    try {
+      missingProbe = await Effect.runPromise(Daemon.probeCapabilities())
+    } finally {
+      if (previous === undefined) delete process.env.GLASSPANE_SOCKET
+      else process.env.GLASSPANE_SOCKET = previous
+      absent.stop()
+      rmSync(absent.dir, { recursive: true, force: true })
+    }
+    expect(missingProbe).toMatchObject({ ok: true, report: { permissions: null } })
+    if (!isProbeOk(missingProbe)) return
+    expect(missingProbe.report.permissions).toBeNull()
+
+    const empty = seatHelloRaw({ version: "1.23.0", protocolVersion: "1", capabilities: ["observe"], permissions: {} })
+    await empty.serve()
+    process.env.GLASSPANE_SOCKET = empty.socket
+    try {
+      const probe = await Effect.runPromise(Daemon.probeCapabilities())
+      expect(probe).toMatchObject({ ok: true })
+      if (!isProbeOk(probe)) return
+      // Not null, and genuinely empty — the answer to a different question.
+      const answered = probe.report.permissions
+      if (answered === null) throw new Error("an engine that reported an empty seat map was read as one that reported nothing")
+      expect(Object.keys(answered)).toHaveLength(0)
+      // And the two answers must not render the same way to the model.
+      expect(seatReport(answered)).not.toBe(seatReport(missingProbe.report.permissions))
+    } finally {
+      if (previous === undefined) delete process.env.GLASSPANE_SOCKET
+      else process.env.GLASSPANE_SOCKET = previous
+      empty.stop()
+      rmSync(empty.dir, { recursive: true, force: true })
+    }
+  })
+
+  test("each seat answer renders as itself, and the probe head uses that renderer", () => {
+    // The three states, read as text. A null seat report must not be printable as an empty
+    // object (that is the "no seats" fabrication), and an empty report must not be printable
+    // as "not reported" (that would erase a real answer about the host).
+    const notReported = seatReport(null)
+    const noSeats = seatReport({})
+    const populated = seatReport({ accessibility: "granted" })
+    expect(notReported).toStartWith("permissions:")
+    expect(notReported).toContain("not reported")
+    expect(notReported).not.toContain("{}")
+    expect(notReported).not.toContain("0 seats")
+    expect(noSeats).toContain("empty seat map")
+    expect(noSeats).not.toContain("not reported")
+    expect(populated).toContain('"accessibility": "granted"')
+    expect(new Set([notReported, noSeats, populated]).size).toBe(3)
+
+    // The rule is about the call site, not only about the helper: an orphaned `json(...)`
+    // here would re-merge the two answers while every assertion above stayed green.
+    const source = readFileSync(path.join(import.meta.dirname, "..", "..", "src", "tool", "glasspane", "index.ts"), "utf8")
+    expect(source).toContain("${seatReport(caps.report.permissions)}")
+    expect(source).not.toContain("${json(caps.report.permissions)}")
+  })
 })
+
+/** Write a `hello` result verbatim, so a test can leave a field out instead of sending `undefined`. */
+function seatHelloRaw(result: Record<string, unknown>) {
+  const dir = mkdtempSync(path.join(tmpdir(), "gp-m1-seatraw-"))
+  const socket = path.join(dir, "engine.sock")
+  const server = net.createServer((conn) => {
+    conn.once("data", () => {
+      conn.write(`${JSON.stringify({ id: 1, result })}\n`)
+    })
+  })
+  return {
+    dir,
+    socket,
+    serve: () => new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socket, resolve) }),
+    stop: () => server.close(),
+  }
+}
+
+function isProbeOk(probe: unknown): probe is { ok: true; report: Daemon.Capabilities } {
+  return typeof probe === "object" && probe !== null && (probe as { ok?: boolean }).ok === true
+}
 
 describe("bounds the surface puts on itself", () => {
   test("an over-sized engine frame is refused in-band with a remedy — never a raised defect", async () => {
@@ -880,6 +973,33 @@ describe("bounds the surface puts on itself", () => {
       }
     }
   })
+
+  // One test per method, not a loop inside one: each call has to push just over 4 MiB through a
+  // real unix socket before the client's byte loop can refuse it (~4s here, measured), and four
+  // of them in a single 30s budget timed out under load while every assertion was passing.
+  for (const method of ["diagnose", "last_evidence", "attach", "probe_status"]) {
+    test(`a ${method} frame that breaches the ceiling names the engine's failure, not a narrower query`, async () => {
+      // The transport's payload-ceiling remedy used to be one fixed string for every method:
+      // "retry with a narrower query (smaller maxDepth, or a role filter)". `observe` takes both
+      // parameters; these four take neither, so that sentence sent an agent back into the
+      // identical call — advice that cannot change the outcome, for a frame the engine itself
+      // overflowed. Driven over a real socket because the branch reads the method out of the
+      // call, not out of a parameter. The `observe` half of the pair is the test above.
+      // `serve` runs with the request already in hand, so it writes the oversized frame
+      // directly — registering another `conn.once("data")` here never fires, and the call
+      // would sit until its own timeout and report a transport failure instead of the cap.
+      const oversize = (conn: net.Socket) => conn.write(Buffer.alloc(Daemon.MAX_FRAME_BYTES + 64 * 1024, 0x78))
+      const reply = await withDaemonPeer(`oversize-${method}`, oversize, () => Effect.runPromise(Daemon.call(method, {}, 30_000)))
+      expect(reply.ok, `${method} past the frame ceiling must be refused`).toBe(false)
+      if (reply.ok) return
+      expect(reply.error.code).toBe("GP_E_PAYLOAD_TOO_LARGE")
+      expect(reply.error.remedy).not.toContain("narrower")
+      expect(reply.error.remedy).toContain("no maxDepth")
+      expect(reply.error.remedy).toContain(method)
+      expect(reply.error.remedy).toContain("tail -n 20 ~/.glasspane/installer-daemon.log")
+      expect(reply.error.remedy).toContain("do not retry")
+    })
+  }
 
   test("the registry's own visibility filter cannot hide a gp_* tool", () => {
     // Structural, and honestly labelled as such: building the whole registry needs
@@ -1468,14 +1588,16 @@ describe("what a remedy is allowed to say", () => {
    * prose. An agent that is told to "report the line to the maintainers" has been handed a
    * dead end: nobody is reading, and the turn ends with a claim it cannot act on.
    *
-   * Three shapes, because the surface writes remedies in three shapes:
+   * Four shapes, because the surface writes remedies in four shapes:
    *  - `remedy: <literal>` in an error object (kernel.ts, providers.ts, the ledger plugin's
    *    `ledgerFault` note, the inline daemon frame guard),
    *  - the third positional argument of `failure(code, message, remedy)` (daemon.ts builds
    *    every transport remedy that way),
    *  - a staged `const …remedy… = <literal>` where a file assembles its own refusal before
    *    returning it (glasspane-compaction.ts's `const remedy`, index.ts's
-   *    `const CAPABILITY_REMEDY` — neither has a `remedy:` key at all).
+   *    `const CAPABILITY_REMEDY` — neither has a `remedy:` key at all),
+   *  - a literal branch of a ternary in that same third argument (the payload-ceiling refusal
+   *    picks its advice per method, so neither branch is a whole-literal argument).
    * A scanner that read only the first shape measured 1 remedy in daemon.ts where 10 are
    * built, and 0 in the compaction plugin — and the aggregate guard below could not see
    * either file going dark, which is why each file's own count is asserted by name.
@@ -1491,7 +1613,21 @@ describe("what a remedy is allowed to say", () => {
     const positional = callArguments(source, "failure")
       .map((args) => literalText(args[2]))
       .filter((text): text is string => text !== undefined)
-    return { keyed, staged, positional }
+    // A fourth shape exists because a remedy that branches on the method is written as a
+    // ternary, and `literalText` reads only a whole-literal argument: the transport's
+    // payload-ceiling refusal picks its advice per method, so scanning just the three shapes
+    // above left that string out of every quality assertion in this group. An unscanned
+    // remedy is an unmeasured remedy.
+    const conditional = callArguments(source, "failure")
+      .map((args) => args[2])
+      .filter((arg): arg is string => arg !== undefined && literalText(arg) === undefined)
+      // Literals from the branches only: `method === "observe" ? … : …` carries a string in its
+      // condition, and harvesting that would put a non-remedy into the quality set below.
+      // No `?` at all means no ternary, and `indexOf` returning -1 leaves the whole argument.
+      .map((arg) => arg.slice(arg.indexOf("?") + 1))
+      .flatMap((arg) => [...arg.matchAll(/(?:"([^"]*)"|`([^`]*)`)/g)].map((m) => m[1] ?? m[2] ?? ""))
+      .filter((text) => text.length > 0)
+    return { keyed, staged, positional, conditional }
   }
   const remedyLiterals = (file: string) => Object.values(remediesIn(file)).flat()
   const files = [
@@ -1538,6 +1674,17 @@ describe("what a remedy is allowed to say", () => {
       expect(remedyLiterals(file).length, `${file} contributes no remedies to the scan`).toBeGreaterThan(0)
       for (const remedy of remedyLiterals(file)) expect(remedy.length, `${file} yielded an empty remedy`).toBeGreaterThan(0)
     }
+    // The fourth shape must carry weight or it is decoration: `daemon.ts` branches one remedy
+    // on the method name, and if that branch ever stops being harvested the transport is back
+    // to writing strings no assertion reads. Asserted by name rather than inferred from the
+    // aggregate above, which stays green on `keyed` hits alone.
+    const transport = remediesIn("src/tool/glasspane/daemon.ts")
+    expect(transport.conditional.length, "no method-branching remedy was harvested from the transport").toBeGreaterThan(0)
+    // Both branches, by name. A scan that harvested only the narrowing half would still report
+    // a non-zero count while the sentence an agent actually reads for `diagnose` went
+    // unmeasured — so the pair is asserted, not the total.
+    expect(transport.conditional.some((remedy) => remedy.includes("maxDepth, or a role filter")), "the narrowing branch is not in the scan").toBe(true)
+    expect(transport.conditional.some((remedy) => remedy.includes("no maxDepth")), "the breach branch is not in the scan").toBe(true)
   })
 
   test("no remedy sends the agent to a human", () => {

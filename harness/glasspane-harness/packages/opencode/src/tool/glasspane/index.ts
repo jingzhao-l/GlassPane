@@ -280,13 +280,28 @@ export const ProbeStatusTool = Tool.define(
           const probe = yield* Daemon.call("probe_status", {})
           const caps = yield* Daemon.probeCapabilities()
           const head = caps.ok
-            ? `engine ${caps.report.version} / protocol ${caps.report.protocolVersion}\ncapabilities: ${caps.report.capabilities.join(", ")}\npermissions: ${json(caps.report.permissions)}`
+            ? `engine ${caps.report.version} / protocol ${caps.report.protocolVersion}\ncapabilities: ${caps.report.capabilities.join(", ")}\n${seatReport(caps.report.permissions)}`
             : `engine self-report unavailable (${caps.error.code}) — the payload below is all the daemon gave`
           return present("gp_probe_status", "probe_status", probe, (result) => `${head}\n\nprobe_status: ${json(result)}`)
         }),
     }
   }),
 )
+
+/**
+ * Render the engine's permission seats for the model, keeping the three answers
+ * apart. `null` is "hello carried no seat map" — an older `glasspaned` reports
+ * nothing, which says nothing about the host's TCC state; `{}` is "the engine
+ * measured and reported no seats", which does say something; a populated map is
+ * the report itself. `Daemon.Capabilities.permissions` used to fold the first two
+ * together, and printing that folded value here is what let an agent read
+ * "no permission seats" out of an engine that never answered the question.
+ */
+export function seatReport(permissions: Record<string, string> | null): string {
+  if (permissions === null) return 'permissions: not reported (hello carried no seat map; this is not a statement about the host\'s permission state)'
+  if (Object.keys(permissions).length === 0) return "permissions: the engine answered with an empty seat map (0 seats reported)"
+  return `permissions: ${json(permissions)}`
+}
 
 export const AttachParams = Schema.Struct({
   bundleId: Schema.optional(Schema.String.annotate({ description: "CFBundleIdentifier, e.g. com.apple.Notes" })),
