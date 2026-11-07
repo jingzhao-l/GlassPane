@@ -8,6 +8,36 @@
 （draft=false、target=`070d6ddf`、4 件资产、`.asc` 由钉死的 `0929EA31…` 签出）、registry 两个裸名包
 都读 1.30.0，所以本轮没有留下未归号的内容。）
 
+## [1.31.1] — 2026-11-07
+
+**版本判断：patch。** 四条判据（状态文件字段 / 退出码集合 / CLI 参数 / npm 包 `bin` 声明）一条都没碰：
+本版固定的是**错误消息里转述的那句 git 原话的字节**，以及两枚把这条纪律遮住的测试夹具。
+
+**本版不合并未发布号**：`v1.31.0` 已发（tag、Release 非草稿 target=`dc4c5f45`、registry 两包实测
+1.31.0），已发布 tag 一律不动，所以这条只能另取一号——11-01 那条 1.28.1→1.29.0 的同一处置。
+
+### 1. 交给读者的那句 git 原话由操作系统的语言决定（P2，`24949936`）
+
+`install.sh` 的两趟 `git clone` 与 `installer/cli.js` 的 `readCloneFacts` / `advanceExistingClone`
+里那趟 `git fetch --tags --depth 1` 只给 `encoding:'utf8'`，不钉 locale。本机中文 locale 实测：
+`install.sh` 对不存在的分支回 `致命错误：远程分支 nope-nope 在上游 origin 未找到`，
+`advanceExistingClone` 回 `致命错误：无法找到远程引用 nosuchbranch`；而 `clone_failure_text` 与
+那句归因是把 git 的 stderr **原话转述给读者**的，本仓自己的契约（以及 `installer/cli.js` 里
+`verifyEnv` 早就写下的那条理由：判据读英文措辞）都假定一份字节。CI 的 runner 是英文 locale，
+所以这条只在非英文机器上现形——与 #28 那个 `é` 同一族。
+
+修法是一枚环境四处共用（`gitLocalePinnedEnv()`，`verifyEnv` 也从它取，不留两种拼写），
+`install.sh` 两趟 clone 前缀 `LC_ALL=C LANG=C`；措辞与判据本身一个字没动。
+
+两枚夹具跟着改，因为它们各遮住一半：`daily-20261027-clone-ref-resolution.test.mjs` 的 `spawnGit`
+**丢掉第三个实参**，被测那一侧传的 `env` 根本到不了 git（桩替产品把环境吃掉，于是这条只在本机
+恰好是英文 locale 时才绿）；`install-sh.test.mjs` 那趟参照 clone 继承环境，而它对照的产品一侧已钉
+locale——两边不同契约的比较测不到任何东西。
+
+测试：`installer/test/daily-20261107-git-locale-pinned.test.mjs` 3 条，第一条是反空转对照（先用
+同一枚中文 locale 跑裸 `git`，证明这台机器的 git 真会说中文；不说中文则后两条什么都没测，本条
+直接红并说明该换机器还是改契约）。反向破坏：摘掉钉 ⇒ 4 条具名红；恢复后 45/45 复绿。
+
 ## [1.31.0] — 2026-11-05
 
 **版本判断：minor。** 判据还是 1.6.2 写下、此后每一号各自复述过的那一条。本版触碰了两条：
