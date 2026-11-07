@@ -445,14 +445,22 @@ export const ActTool = Tool.define(
           const reply = yield* Daemon.call("act", engineBody(params))
           return present("gp_act", "act", reply, (result) => {
             const out = fields(result)
-            const opId = text(out.operationId, "none")
+            const opId = text(out.operationId, "") || null
+            // `gp_diagnose`'s `operationId` is optional and its description says omitting it
+            // diagnoses the most recent operation. Sending the literal word "none" as the id is
+            // not the same instruction — it is an id the engine has never issued — so the advice
+            // has to branch on whether the engine actually named one. A remedy that re-runs the
+            // identical failing call, or names an argument that cannot work, is the shape this
+            // surface has already been burned on twice (`GP_E_PAYLOAD_TOO_LARGE`, `GP_E_ENGINE_UNREACHABLE`).
             return [
               `action confirmed=${text(out.actConfirmed, "?")} tree changed=${text(out.axChanged, "?")} pixels changed=${text(out.pixelChanged, "?")}`,
-              `operationId=${opId} evidenceId=${text(out.evidenceId, "none")} latencyMs=${text(out.latencyMs, "?")}`,
+              `operationId=${opId ?? "none"} evidenceId=${text(out.evidenceId, "none")} latencyMs=${text(out.latencyMs, "?")}`,
               "",
               json(result),
               "",
-              `If that is not the change you expected, call gp_diagnose with operationId=${opId} before retrying — do not re-click and hope.`,
+              opId
+                ? `If that is not the change you expected, call gp_diagnose with operationId=${opId} before retrying — do not re-click and hope.`
+                : "If that is not the change you expected, call gp_diagnose with no operationId — with none recorded for this call, omitting the argument is what asks about the most recent operation. Do not re-click and hope.",
             ].join("\n")
           }, params.dimension ?? null)
         }),

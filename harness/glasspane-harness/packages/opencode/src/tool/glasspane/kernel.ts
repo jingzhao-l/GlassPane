@@ -117,10 +117,17 @@ export interface LedgerRef {
  * schema froze. The label measured off the wire is returned alongside, because
  * folding it silently would make the harness claim a conformance the bytes do
  * not have (the same B-09 lesson mcp-shell encodes at `tools.ts:780-803`).
+ *
+ * `measuredSchemaVersion` is `null` when the wire carried no label at all. It used
+ * to fall back to the parser's own `pack.schemaVersion` there, which is precisely
+ * the claim this comment forbids: the parser supplies that label for a legacy
+ * archive, so the old return value reported a conformance the bytes never stated.
+ * `null` means "not measured", and a caller that wants the contract's label reads
+ * `pack.schemaVersion` — two different facts, two different fields.
  */
 export function readEvidenceFrame(
   frame: unknown
-): { ok: true; pack: EvidencePack; measuredSchemaVersion: string } | { ok: false; error: KernelRejection } {
+): { ok: true; pack: EvidencePack; measuredSchemaVersion: string | null } | { ok: false; error: KernelRejection } {
   if (typeof frame !== "object" || frame === null || Array.isArray(frame)) {
     return {
       ok: false,
@@ -159,7 +166,7 @@ export function readEvidenceFrame(
   try {
     const pack = parseEvidencePackRead(body)
     const measured = (body as Record<string, unknown>).schemaVersion
-    return { ok: true, pack, measuredSchemaVersion: typeof measured === "string" ? measured : pack.schemaVersion }
+    return { ok: true, pack, measuredSchemaVersion: typeof measured === "string" ? measured : null }
   } catch (error) {
     if (error instanceof KernelSchemaError) {
       return {

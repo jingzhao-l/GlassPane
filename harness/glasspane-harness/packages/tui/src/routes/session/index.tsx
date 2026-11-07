@@ -2769,7 +2769,14 @@ function glasspaneSummary(method: string, result: Record<string, unknown> | unde
     return [app, pid !== undefined ? `pid ${pid}` : undefined].filter(Boolean).join(" · ") || "attached"
   }
   if (method === "last_evidence") {
-    const pack = recordValue(result.evidencePack) ?? result
+    // No fallback to the flat reply. The contract reads this frame as `{evidencePack: {…}}` and
+    // refuses the two other shapes by name (`GP_E_NO_EVIDENCE` when the field is absent,
+    // `GP_E_EVIDENCE_FRAME` when it is not an object — `kernel.ts:118-158`). Reading the top-level
+    // reply as the pack made every lookup miss and then printed the literal label "evidence pack"
+    // under `state: "success"`, which is the renderer answering "what was archived" for a reply
+    // that archived nothing. Absent here is a different fact from empty, and it now reads as one.
+    const pack = recordValue(result.evidencePack)
+    if (!pack) return "no evidence pack in this reply"
     const att = recordValue(pack.attribution)
     const cb = recordValue(pack.circuitBreaker)
     const assertion = recordValue(pack.assertion)

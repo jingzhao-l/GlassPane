@@ -222,7 +222,7 @@ export function trustSocket(
     return {
       code: "GP_E_SOCKET_TRUST",
       message: `this runtime answers no geteuid(), so it cannot say whether the engine socket at ${target} belongs to the account running it`,
-      remedy: `run the harness under node or bun on macOS or Linux (the platforms this product ships on); the product's own installer checks with \`node -e 'console.log(process.geteuid())'\``,
+      remedy: `run the harness under node or bun on macOS — the only platform this product ships (product.json platform.os is ["darwin"] and platform.dropped records linux-* as deliberately un-adapted, so moving to Linux does not get you a supported install); check the runtime with \`node -e 'console.log(process.geteuid())'\`, and if it prints undefined that runtime cannot answer this question, which is why this call is refused rather than trusted`,
     }
   }
 

@@ -65,7 +65,13 @@ export const toolDenialMarkers: readonly string[] = [
   // A string and a number encode differently, which cuts the marker at the sentence
   // boundary rather than carrying `JSON.stringify`'s opening quote into it.
   denialMarker(new PermissionV1.DeniedError({ ruleset: "a" }), new PermissionV1.DeniedError({ ruleset: 0 })),
-  denialMarker(questionRejected, questionRejected),
+  // Two fresh instances, not one instance twice. `QuestionV2.RejectedError` takes no arguments,
+  // so its message is static today and both spellings produce the same prefix — but passing the
+  // SAME object measures nothing: a class that later puts dynamic text in its message (a
+  // timestamp, an id) would keep this control green while the marker it publishes stops being a
+  // prefix of any real rendering, and a human refusal would repaint as an ordinary tool error.
+  // The three markers above already take two distinct instances for exactly this reason.
+  denialMarker(new QuestionV2.RejectedError(), new QuestionV2.RejectedError()),
   new PermissionV1.RejectedError().name,
   new PermissionV1.CorrectedError({ feedback: "a" }).name,
   new PermissionV1.DeniedError({ ruleset: "a" }).name,

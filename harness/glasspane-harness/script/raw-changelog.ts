@@ -3,6 +3,38 @@
 import { $ } from "bun"
 import { parseArgs } from "util"
 
+// READ, not write — the distinction that decides this script's fix. Every GitHub call below is a GET:
+// `/repos/<repo>/releases`, `/repos/<repo>/compare/<base>...<head>`, and `gh release view`, plus local
+// `git log` / `git diff-tree`. Nothing POSTs, PATCHes, closes or labels, so naming a repository here
+// asks its release notes a question rather than writing on someone else's infrastructure. That is why
+// the fix is an explicit printed source and not a block — contrast `script/github/close-issues.ts` and
+// `script/github/close-prs.ts`, which do write and therefore refuse a foreign target unless an
+// operator opts in.
+// The default target is now this product's own repository, because the changelog assembled here joins
+// the remote's commit metadata with LOCAL refs: `git log ${base}..${head}` resolves the tags this tree
+// carries, and those are our `v0.x` tags, not upstream's `v1.18.x`. Reading `anomalyco/opencode` by
+// default therefore asked one repository for its releases and another for its bytes, and printed the
+// intersection. `--repo` (or `GH_REPO`) still reads any repository's public release data, and the
+// output header always names which one was read, so a changelog can never be silent about its source.
+const product = await Bun.file(new URL("../product.json", import.meta.url)).json()
+const ownRepo = requireOwnRepo(product)
+
+const { values: cli } = parseArgs({
+  args: Bun.argv.slice(2),
+  options: {
+    from: { type: "string", short: "f" },
+    to: { type: "string", short: "t", default: "HEAD" },
+    repo: { type: "string" },
+    help: { type: "boolean", short: "h", default: false },
+  },
+})
+
+const repo = cli.repo ?? process.env.GH_REPO ?? ownRepo
+if (!repo.includes("/")) {
+  console.error(`Invalid repo ${JSON.stringify(repo)}; expected owner/name`)
+  process.exit(1)
+}
+
 type Release = {
   tag_name: string
   draft: boolean
@@ -22,15 +54,20 @@ type Diff = {
   message: string
 }
 
-const repo = process.env.GH_REPO ?? "anomalyco/opencode"
 const bot = ["actions-user", "github-actions[bot]", "opencode", "opencode-agent[bot]"]
-const team = [
-  ...(await Bun.file(new URL("../.github/TEAM_MEMBERS", import.meta.url))
-    .text()
-    .then((x) => x.split(/\r?\n/).map((x) => x.trim()))
-    .then((x) => x.filter((x) => x && !x.startsWith("#")))),
-  ...bot,
-]
+// `.github/TEAM_MEMBERS` is upstream's file and is NOT in this tree (measured: `git ls-files | grep
+// -i team_members` answers nothing), so the old unconditional read crashed this script before it
+// printed a line — the defect below could not even be demonstrated. The list only decides which
+// authors are exempt from the "thanks" section, so a missing one is a stated gap in the output, not
+// a safety property: read it when present, say loudly when it is not, and keep the bot exclusions.
+const teamFile = new URL("../.github/TEAM_MEMBERS", import.meta.url)
+const teamNames = (await Bun.file(teamFile).exists())
+  ? await Bun.file(teamFile)
+      .text()
+      .then((x) => x.split(/\r?\n/).map((x) => x.trim()).filter((x) => x && !x.startsWith("#")))
+  : []
+if (!teamNames.length) console.error(`NOTE: no team-exempt list (../.github/TEAM_MEMBERS is absent from this tree), so team members are counted as community contributors in the thanks section`)
+const team = [...teamNames, ...bot]
 const order = ["Core", "TUI", "Desktop", "SDK", "Extensions"] as const
 const sections = {
   core: "Core",
@@ -212,7 +249,15 @@ function format(from: string, to: string, list: Commit[], thanks: string[]) {
     grouped.get(section(commit.areas))!.get(type(commit.message))!.push(`- \`${commit.hash}\` ${commit.message}${attr}`)
   }
 
-  const lines = [`Last release: ${ref(from)}`, `Target ref: ${to}`, ""]
+  const lines = [
+    `Source repository: ${repo} (READ ONLY — this script only GETs releases, compare data and release bodies; it writes nothing anywhere)`,
+    ...(repo === ownRepo
+      ? []
+      : [`Foreign read target: this product's own repository is ${ownRepo}, so this output describes ${repo}'s releases, not ours`]),
+    `Last release: ${ref(from)}`,
+    `Target ref: ${to}`,
+    "",
+  ]
 
   if (list.length === 0) {
     lines.push("No notable changes.")
@@ -249,35 +294,46 @@ function format(from: string, to: string, list: Commit[], thanks: string[]) {
   return lines.join("\n")
 }
 
-if (import.meta.main) {
-  const { values } = parseArgs({
-    args: Bun.argv.slice(2),
-    options: {
-      from: { type: "string", short: "f" },
-      to: { type: "string", short: "t", default: "HEAD" },
-      help: { type: "boolean", short: "h", default: false },
-    },
-  })
+function requireOwnRepo(product: { repo?: unknown }) {
+  const own = typeof product.repo === "string" ? product.repo : ""
+  if (!own.includes("/")) {
+    console.error(
+      `product.json has no usable "repo" (read ${JSON.stringify(product?.repo)}) — this script prints which repository a changelog was read from, so it needs the product's own repository as its default source`,
+    )
+    process.exit(1)
+  }
+  return own
+}
 
-  if (values.help) {
+if (import.meta.main) {
+  if (cli.help) {
     console.log(`
 Usage: bun script/raw-changelog.ts [options]
 
+Builds a changelog from commit metadata. READ ONLY: every GitHub call is a GET (releases, compare,
+release body) and the local calls are \`git log\` / \`git diff-tree\`. Nothing is created, edited or
+closed. The source repository is printed in the output header, because a changelog that does not say
+whose releases it read is a second answer to one question.
+
 Options:
-  -f, --from <version>   Starting version (default: latest non-draft GitHub release)
+  -f, --from <version>   Starting version (default: latest non-draft GitHub release of the source repo)
   -t, --to <ref>         Ending ref (default: HEAD)
+  --repo <owner/name>    Repository to READ from (default: ${ownRepo}, this product's own repository —
+                         the tags \`git log\` resolves here are ours; override only to read another
+                         repository's public release data, e.g. upstream's for lineage)
   -h, --help             Show this help message
 
 Examples:
   bun script/raw-changelog.ts
-  bun script/raw-changelog.ts --from 1.0.200
-  bun script/raw-changelog.ts -f 1.0.200 -t 1.0.205
+  bun script/raw-changelog.ts --from 0.14.1
+  bun script/raw-changelog.ts -f 0.14.1 -t 0.14.2
+  bun script/raw-changelog.ts --repo anomalyco/opencode --from 1.0.200   # reads upstream, says so
 `)
     process.exit(0)
   }
 
-  const to = values.to!
-  const from = values.from ?? (await latest())
+  const to = cli.to
+  const from = cli.from ?? (await latest())
   const list = await commits(from, to)
-  console.log(format(from, to, list, await thanks(from, to, !values.from)))
+  console.log(format(from, to, list, await thanks(from, to, !cli.from)))
 }

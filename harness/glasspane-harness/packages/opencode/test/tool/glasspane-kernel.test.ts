@@ -107,6 +107,88 @@ describe("the installed kernel agrees with canonical about the five real fixture
   })
 })
 
+describe("the label readEvidenceFrame reports is the one the wire carried", () => {
+  // DEFECT pinned: `measuredSchemaVersion` used to fall back to `pack.schemaVersion` whenever
+  // `body.schemaVersion` was not a string. `parseEvidencePackRead` FOLDS a pre-freeze archive's
+  // label onto the frozen const (`iterate-kernel/dist/evidence-pack.js:228-247`
+  // `normalizeEvidencePackForRead`), so that fallback printed the parser's own verdict and called
+  // it a measurement — exactly the claim of conformance the function's own header comment forbids,
+  // and the same B-09 shape the ok-04 test above refuses to accept for a label that IS present.
+  // The field now answers "what did the bytes say" (`string`) or "not measured" (`null`), and
+  // `pack.schemaVersion` stays the contract's answer. Two facts, two fields.
+  const kernelSource = () =>
+    readFileSync(path.join(import.meta.dirname, "..", "..", "src", "tool", "glasspane", "kernel.ts"), "utf8")
+
+  test("a frame whose body HAS a string label returns that exact label — and the fold stays separate", () => {
+    // The legacy archive the read-side parser still accepts, and the frozen one, in one pass: the
+    // measured value is byte-identical to what the body carried, which the OLD code also got right.
+    // What the old code got wrong is the next assertion pair: the parser's folded const is a
+    // DIFFERENT field, and a reader who wanted the contract's answer still has it.
+    for (const [name, wire] of [
+      ["ok-04-legacy-draft", "glasspane.evidence/0.1-draft"],
+      ["ok-01", "glasspane.evidence/0.1"],
+    ] as const) {
+      const read = readEvidenceFrame(frame(name))
+      if (!read.ok) throw new Error(`${name} should read: ${read.error.code} ${read.error.message}`)
+      expect(read.measuredSchemaVersion, `${name}: the wire label is what comes back`).toBe(wire)
+      // The pack still parses, and its own label is the frozen const in both cases — including the
+      // draft, whose bytes said something else. That is the fold, and it is not the measurement.
+      expect(read.pack.schemaVersion).toBe("glasspane.evidence/0.1")
+    }
+    const draft = readEvidenceFrame(frame("ok-04-legacy-draft"))
+    if (!draft.ok) throw new Error("the draft fixture must read")
+    expect(draft.measuredSchemaVersion).not.toBe(draft.pack.schemaVersion)
+  })
+
+  test("a body whose label is not a string is never answered with the parser's own label", () => {
+    // The null half, measured from the reachable side. Deleting `schemaVersion`, setting it to
+    // `undefined`, or stamping it with a number are the three ways the wire can fail to state a
+    // string label; the pinned kernel's read-side schema is `z.literal(EVIDENCE_SCHEMA_VERSION)`
+    // behind the one documented draft fold, so all three are REFUSED before any return value
+    // exists (`KERNEL_E_SCHEMA`), and none of them can come back wearing `pack.schemaVersion`.
+    // That refusal set is what makes `null` the only answer this doorway can give for an
+    // unlabelled archive once a parser accepts one: measured here, not assumed.
+    const ok01 = fixture("ok-01") as Record<string, unknown>
+    const unlabelled: Array<[string, unknown]> = [
+      ["no schemaVersion key at all", (() => { const body = { ...ok01 }; delete body.schemaVersion; return body })()],
+      ["schemaVersion present but undefined", { ...ok01, schemaVersion: undefined }],
+      ["schemaVersion not a string", { ...ok01, schemaVersion: 0.1 }],
+    ]
+    for (const [label, body] of unlabelled) {
+      const read = readEvidenceFrame({ evidencePack: body })
+      expect(read.ok, `${label}: the pinned parser refuses this archive — if that ever stops being true, this line is the one that must say so`).toBe(false)
+      if (read.ok) {
+        // Defensive second half: should a future kernel accept one, the answer must be `null`,
+        // never the parser's folded const. Under the OLD code this branch reported
+        // `pack.schemaVersion`, i.e. `"glasspane.evidence/0.1"`, for bytes that said nothing.
+        expect(read.measuredSchemaVersion, `${label}: an unlabelled archive may only be reported as not measured`).toBeNull()
+        expect(read.measuredSchemaVersion).not.toBe(read.pack.schemaVersion)
+      }
+    }
+  })
+
+  test("and the binding itself keeps the two fields apart, in both its halves", () => {
+    // THE RED CONTROL, in this file's existing house style (see "the summary bound is the kernel's
+    // constant" and "it does not import the kernel barrel" above, which assert on the shipped
+    // binding rather than restating it). Both halves of the fix are load-bearing and neither is
+    // reachable by a runtime input today — the first because the fold makes the two labels
+    // observable only for archives that DO carry a string, the second because the pinned parser
+    // refuses the ones that do not — so the pin has to sit on the doorway's own text. Reverting
+    // either line takes this test red: the return type stops admitting `null`, or the measured
+    // position reads `pack.schemaVersion` again.
+    const binding = kernelSource()
+    expect(binding, "the declared type no longer admits 'not measured'").toContain(
+      "{ ok: true; pack: EvidencePack; measuredSchemaVersion: string | null }",
+    )
+    expect(binding, "the measured label fell back to the parser's own folded const").not.toMatch(
+      /measuredSchemaVersion:\s*typeof measured === "string" \? measured : pack\.schemaVersion/,
+    )
+    expect(binding, "the label the wire never stated is being reported as measured").toContain(
+      'measuredSchemaVersion: typeof measured === "string" ? measured : null',
+    )
+  })
+})
+
 describe("the frame reader refuses shapes it cannot verify, without throwing", () => {
   const cases: Array<[string, unknown]> = [
     ["a null reply", null],

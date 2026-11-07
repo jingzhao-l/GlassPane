@@ -66,14 +66,39 @@ Things worth knowing, because they are the usual way this is set up wrong:
 
 ## Cutting a release
 
-1. **Bump the version** in `product.json` only. `packages/opencode/package.json` follows
-   it (`check-version` fails the build if they disagree, and the build fails if you edit
-   the second one alone). Then update `CHANGELOG.md`.
+1. **Bump the version in both manifests, in the SAME commit**: `product.json` is the source of truth
+   for humans, and `packages/opencode/package.json` must carry the identical number (plus the version
+   header `bun.lock` embeds for that workspace, which a `bun install` refreshes). Then update
+   `CHANGELOG.md`.
+
+   What used to be claimed here — "bump `product.json` only; `check-version` fails the build if they
+   disagree" — is false in this repository in two ways, and `release.yml`'s `version-check` step
+   records the first: `scripts/check-version.mjs` is parent-monorepo tooling that is **not part of the
+   subtree split**, so no lane of the repository that actually publishes ever ran it. And even in the
+   parent it checks a *different* version line — the root `package.json` plus the mcp-shell, installer,
+   updater, engine and README sites it enumerates; it does not read `product.json` or
+   `packages/opencode/package.json` at all. So nothing "follows" anything: keeping the two manifests
+   equal is a convention you satisfy by editing both files, and these are the machines that catch a
+   one-file bump:
+
+   - `harness/tools/product-surface.mjs` rules `manifest-version` and `lock-version` — the parent-side
+     ruler, run from the fork root as `node ../tools/product-surface.mjs` (the command below);
+   - this repository's `ci.yml` step **"Product manifest agrees with the package it ships"** — compares
+     name, version and bins between `product.json` and `packages/opencode/package.json` on every push
+     and PR;
+   - `release.yml`'s **`version-check`** job — compares the *tag* with both manifests and refuses before
+     anything is built, checksummed or GPG-signed; its printed remedy is exactly "bump product.json and
+     packages/opencode/package.json in the SAME commit".
+
+   Only the release lane compares the tag; the two manifest-vs-manifest checks are what make a bump
+   wrong at the commit rather than at the tag — so run the commands below before committing, not after
+   tagging.
 
    ```bash
    # from the fork root
-   $EDITOR product.json CHANGELOG.md
-   node ../tools/product-surface.mjs      # manifest, build, publish, installers, pipelines agree
+   $EDITOR product.json packages/opencode/package.json CHANGELOG.md
+   bun install                          # rewrites the version header bun.lock embeds for packages/opencode
+   node ../tools/product-surface.mjs    # manifest, build, publish, installers, pipelines agree
    node ../../scripts/check-doc-links.mjs
    ```
 
@@ -166,12 +191,25 @@ Things worth knowing, because they are the usual way this is set up wrong:
    bun run script/publish.ts            # platform packages, then the wrapper
    ```
 
+   This local path publishes **without an attestation**: `publish.ts` adds `--provenance` only on the
+   arm that runs when `process.env.CI` is set (its two literal `npm publish` command lines), so the
+   version becomes public but nothing in the registry says which commit or runner produced those
+   bytes — step 6's `verify-published` will then print `FAIL the published wrapper carries a
+   provenance attestation` and exit 1, which is the intended verdict for a non-CI publish, not a
+   broken artifact.
+
 6. **Verify what was published.** The npm registry can serve a stale read replica for a
    few minutes after an accepted publish, so verify with the CLI (which is authoritative),
    and then run the end-to-end check:
 
    ```bash
-   npm view glasspane-harness@0.4.0 version --prefer-online
+   # The registry has to be NAMED on this path, exactly as it is on every other npm path in this
+   # product (`publish.ts` and `verify-published.ts` pass `--registry ${product.registry}`, and
+   # `harness/tools/product-surface.mjs` refuses `publish-registry` if they stop). A bare `npm view`
+   # reads whatever `npm_config_registry` / `~/.npmrc` / a project `.npmrc` points at, so an unpassed
+   # flag can answer "404" or "0.4.0" about a mirror instead of about the release.
+   registry="$(node -p "require('./product.json').registry")"   # https://registry.npmjs.org
+   npm view glasspane-harness@0.4.0 version --registry "$registry" --prefer-online
    cd packages/opencode && bun run script/verify-published.ts
    ```
 

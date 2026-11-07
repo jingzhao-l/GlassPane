@@ -2,7 +2,18 @@
 
 import { parseArgs } from "util"
 
-const defaultRepo = "anomalyco/opencode"
+// WRITE SCRIPT. With `--execute` this POSTs comments, PATCHes pull-request state to closed, and
+// creates a label — on whichever repository it is told to name. It used to default to
+// `anomalyco/opencode`, a repository this product does not own, so the habit of running a fork's own
+// dev script (or an agent following this fork's docs) was enough to write on someone else's
+// infrastructure. The default is now this product's own repository, read from `product.json`'s
+// `repo`, and any other repository requires the explicit `--foreign-repo` opt-in below. No CI job
+// runs this script: upstream's `.github/workflows/close-prs.yml` was deleted in the fork (recorded
+// in `harness/contracts/fork-diff.json`) and grep finds no workflow, package.json script or doc
+// invoking it.
+const product = await Bun.file(new URL("../../product.json", import.meta.url)).json()
+const ownRepo = requireOwnRepo(product)
+const defaultRepo = ownRepo
 const defaultAgeMonths = 1
 const defaultThreshold = 2
 const defaultSleepMs = 20_000
@@ -16,6 +27,7 @@ const { values } = parseArgs({
     execute: { type: "boolean", default: false },
     "dry-run": { type: "boolean", default: false },
     repo: { type: "string", default: defaultRepo },
+    "foreign-repo": { type: "string" },
     threshold: { type: "string", default: String(defaultThreshold) },
     "age-months": { type: "string", default: String(defaultAgeMonths) },
     "max-close": { type: "string" },
@@ -31,6 +43,9 @@ Usage: bun script/github/close-prs.ts [options]
 
 Dry-run is the default. The script only comments and closes PRs when --execute is passed.
 
+This script WRITES (with --execute): it POSTs a comment, PATCHes the PR to closed, and creates the
+"${cleanupLabel}" label on the target repository.
+
 Criteria:
   - PRs created within the last month are untouched
   - PRs older than one month are closed when they have fewer than 2 positive reactions
@@ -39,7 +54,13 @@ Criteria:
 Options:
   --execute              Comment and close matching PRs
   --dry-run              Explicitly run without changing anything
-  --repo <owner/repo>    Repository to clean up (default: ${defaultRepo})
+  --repo <owner/repo>    Repository to clean up. Only this product's own repository is accepted here
+                         (default and maximum: ${defaultRepo}, read from product.json's "repo");
+                         naming anything else is refused — use --foreign-repo for that
+  --foreign-repo <repo>  OPT-IN override naming a repository this product does not own. Use it only
+                         when you act for that repository and have authority over it; the run prints
+                         what it is about to write and to whom before the first write, and no CI job
+                         passes this flag
   --threshold <n>        Positive reaction threshold (default: ${defaultThreshold})
   --age-months <n>       Age cutoff in months (default: ${defaultAgeMonths})
   --max-close <n>        Maximum matching PRs to process
@@ -60,8 +81,38 @@ if (values.execute && values["dry-run"]) {
   process.exit(1)
 }
 
+if (values["foreign-repo"] && values.repo !== defaultRepo) {
+  console.error("Use either --repo or --foreign-repo, not two different targets")
+  process.exit(1)
+}
+
+// `--repo` is no longer a way to reach an arbitrary repository: a flag whose default is safe is only
+// safe while the flag cannot name anything else. Anything other than this product's own repository
+// has to arrive through --foreign-repo, which is self-documented and prints its intent before writing.
+const repoArg = values["foreign-repo"] ?? values.repo
+if (repoArg !== defaultRepo && !values["foreign-repo"]) {
+  console.error(
+    `--repo ${repoArg} is not this product's own repository (${defaultRepo}), and this script writes to whatever it names (comments, PR state, labels). If you act for ${repoArg} with authority over it, pass --foreign-repo ${repoArg} — it prints what will be written and to whom before the first write.`,
+  )
+  process.exit(1)
+}
+
+if (values["foreign-repo"]) {
+  console.log(
+    `FOREIGN REPOSITORY OPT-IN: this run targets ${repoArg}, which is not this product's own repository (${defaultRepo}).`,
+  )
+  console.log(
+    values.execute
+      ? `EXECUTE: it will POST a cleanup comment, PATCH each matching PR to closed, and ensure the "${cleanupLabel}" label on ${repoArg}.`
+      : `DRY RUN: nothing will be written to ${repoArg} unless this run is repeated with --execute.`,
+  )
+  console.log(
+    `Credentials: ${process.env.GITHUB_TOKEN || process.env.GH_TOKEN ? "$GITHUB_TOKEN/$GH_TOKEN" : "`gh auth token` of whoever ran this command"}. All of the above is printed before the first write; the run then proceeds with no further confirmation.`,
+  )
+}
+
 const token = await requireToken()
-const repo = requireRepo(values.repo)
+const repo = requireRepo(repoArg)
 const threshold = requirePositiveInteger("threshold", values.threshold)
 const ageMonths = requirePositiveInteger("age-months", values["age-months"])
 const maxClose =
@@ -340,6 +391,17 @@ function requireRepo(value: string | undefined) {
   const [owner, name] = value.split("/")
   if (!owner || !name) throw new Error(`Invalid repo ${value}; expected owner/name`)
   return { owner, name }
+}
+
+function requireOwnRepo(product: { repo?: unknown }) {
+  const own = typeof product.repo === "string" ? product.repo : ""
+  if (!own.includes("/")) {
+    console.error(
+      `product.json has no usable "repo" (read ${JSON.stringify(product?.repo)}) — this script writes to whatever it names, so its default target must be the product's own repository and not a guessed one`,
+    )
+    process.exit(1)
+  }
+  return own
 }
 
 async function requireToken() {

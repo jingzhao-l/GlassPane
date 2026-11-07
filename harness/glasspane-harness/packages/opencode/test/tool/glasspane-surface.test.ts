@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import net from "node:net"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -1367,6 +1367,96 @@ describe("what the permission plane is handed", () => {
   })
 })
 
+describe("what gp_act's advice says when the engine named no operation", () => {
+  // DEFECT pinned: `const opId = text(out.operationId, "none")` interpolated the WORD "none" into
+  // `call gp_diagnose with operationId=${opId}`, so an agent that had no operation id recorded was
+  // told to pass `operationId=none` — an id the engine never issued — instead of omitting the
+  // optional argument, which is the only spelling that asks about the most recent operation. The
+  // same surface had already been burned twice for remedies that name an argument that cannot
+  // work (`GP_E_PAYLOAD_TOO_LARGE`, `GP_E_ENGINE_UNREACHABLE`).
+  //
+  // Driven through the shipped `gp_act`, so the rendering is `present(...)`'s own — the advice is
+  // the closure `ActTool` hands it, and no copy of that sentence exists here. A test that called
+  // `present` with its own summariser would grade a second implementation, and the old code would
+  // pass it.
+  const OP = "op_0123456789ABCDEFGHJKMNPQRS"
+
+  /** An engine peer that answers `act` with exactly `reply`, advertising only `act`. */
+  function actPeer(reply: Record<string, unknown>) {
+    return (conn: net.Socket, request: string) => {
+      const parsed = JSON.parse(request.trim()) as { id: number; method: string }
+      if (parsed.method === "hello") {
+        conn.write(
+          `${JSON.stringify({ id: parsed.id, result: { version: "1.23.0", protocolVersion: "1", capabilities: ["act"], permissions: {} } })}\n`,
+        )
+        return
+      }
+      conn.write(`${JSON.stringify({ id: parsed.id, result: reply })}\n`)
+    }
+  }
+
+  /** The advice sentences in the model-facing output, i.e. every line that names gp_diagnose. */
+  async function advice(reply: Record<string, unknown>) {
+    const defs = await loadDefs()
+    const act = defs.find((def) => def.id === "gp_act")
+    if (!act) throw new Error("gp_act is not in the surface — a test that cannot find it proves nothing")
+    const context = stubContext()
+    const row = await withDaemonPeer("act-advice", actPeer(reply), () =>
+      Effect.runPromise(act.execute({ selector: { role: "AXButton" }, action: "press" }, context.ctx)),
+    )
+    expect(row.metadata).toMatchObject({ ok: true, method: "act" })
+    const output = row.output as string
+    const sentences = output.split("\n").filter((line) => line.includes("gp_diagnose"))
+    expect(sentences.length, `the reply rendered no advice at all:\n${output}`).toBe(1)
+    return { output, advice: sentences[0]! }
+  }
+
+  test("with an operationId the engine named, the advice cites exactly that id", async () => {
+    const { advice: line } = await advice({
+      operationId: OP,
+      actConfirmed: true,
+      axChanged: true,
+      pixelChanged: false,
+      latencyMs: 12,
+    })
+    expect(line).toContain(`gp_diagnose with operationId=${OP}`)
+    expect(line).not.toContain("operationId=none")
+  })
+
+  test("with none recorded, the advice says to call gp_diagnose with no operationId", async () => {
+    const { output, advice: line } = await advice({ actConfirmed: true, axChanged: true, pixelChanged: false, latencyMs: 12 })
+    // THE OLD TEXT, verbatim, is what these two assertions refuse: `…call gp_diagnose with
+    // operationId=none before retrying…`, an instruction whose argument is a word the engine has
+    // never issued. `not.toContain` on the whole output, not just the sentence, so the fields line
+    // cannot be re-worded into the same lie.
+    expect(line).not.toContain("operationId=none")
+    expect(line).not.toMatch(/operationId=\s*none\b/)
+    expect(line).not.toMatch(/operationId=\S*none\S*\s+before retrying/)
+    // And it must still be an instruction the agent can run: omit the argument.
+    expect(line).toMatch(/gp_diagnose with no operationId/)
+    expect(line).not.toContain(`operationId=${OP}`)
+    // The advice sentence is the one under test; the machine-readable fields line above it keeps
+    // printing `operationId=none` for the absent id, which is a placeholder in a transcript and
+    // not an instruction. Asserting that split is the point of the fix, not an accident of it.
+    const fields = output.split("\n").find((entry) => entry.startsWith("operationId="))
+    expect(fields).toBeDefined()
+    expect(fields).toContain("operationId=none")
+    expect(output.split("\n").filter((entry) => entry.includes("gp_diagnose"))).toHaveLength(1)
+  })
+
+  test("and an empty-string id is treated as no id, not as an id", async () => {
+    // `text("", "x")` returns the empty string, so the fallback alone could not catch it: the old
+    // line rendered `call gp_diagnose with operationId= before retrying`, which is a *syntax*
+    // error in the tool call the agent is being told to make. The fix's `|| null` is what the
+    // assertion below pins; an implementation that only special-cased the string "none" passes
+    // the test above and fails this one.
+    const { advice: line } = await advice({ operationId: "", actConfirmed: true, latencyMs: 12 })
+    expect(line).not.toMatch(/operationId=\s/)
+    expect(line).not.toContain("operationId= ")
+    expect(line).toMatch(/gp_diagnose with no operationId/)
+  })
+})
+
 /** The inside of a string literal, or `undefined` when the text is not one. */
 function literalText(argument: string | undefined): string | undefined {
   const text = (argument ?? "").trim()
@@ -1774,6 +1864,147 @@ describe("what a remedy is allowed to say", () => {
       expect(reply.error.remedy).not.toInclude("maintainers")
       expect(reply.error.remedy).not.toInclude("report the line")
     })
+  })
+
+  /**
+   * The product's platform matrix, read from `product.json` on every run.
+   *
+   * DEFECT pinned: the `GP_E_SOCKET_TRUST` remedy used to read
+   * `run the harness under node or bun on macOS or Linux (the platforms this product ships on)`.
+   * The product ships macOS only — `product.json` `platform.os` is `["darwin"]` and
+   * `platform.dropped` records `linux-*` as "不做适配 (owner 2026-09-25 决定)", which is the same
+   * registry deprecation `test/script/publish-shape.test.ts` and `script/installer-selftest.sh`
+   * §21 refuse to send a reader toward. An agent on Linux was told that moving the harness there
+   * was supported, in the one sentence that decides what it tries next; the remedy now says the
+   * opposite, and this rule is what keeps the next reword from putting the claim back.
+   *
+   * It is a RULE and not a string match, because a one-off match dies the first time the matrix
+   * changes:
+   *  - the harvest is the machinery above (`remediesIn`), over every `src/tool/glasspane/*.ts` the
+   *    directory holds, so a new file or a new refusal is read without anyone re-listing them;
+   *  - the allowed set comes from `product.json` — `platform.os` ∪ the os names in
+   *    `platformTargets`, minus the families `platform.dropped` gave up — so declaring Linux
+   *    supported in that file turns this test's silence about Linux into permission, with no edit
+   *    here;
+   *  - an off-matrix os may still be MENTIONED, but only to say it does not work: every occurrence
+   *    must sit in a clause that already refuses it. That is what the fixed remedy does, and a
+   *    blanket ban would have to delete the honest sentence to satisfy the test.
+   */
+  const OS_SPELLINGS: Record<string, string[]> = {
+    darwin: ["darwin", "macos", "mac os", "mac os x", "os x", "nextstep"],
+    linux: ["linux", "gnu/linux", "linuxbrew", "alpine", "ubuntu", "debian", "fedora", "archlinux", "gentoo", "centos"],
+    windows: ["windows", "win32", "win64", "cygwin", "mingw", "msys"],
+    freebsd: ["freebsd", "openbsd", "netbsd", "dragonfly", "pcbsd"],
+    sunos: ["solaris", "sunos", "illumos"],
+    aix: ["aix"],
+    haiku: ["haiku"],
+    android: ["android"],
+    ios: ["ios"],
+  }
+  /** Words that make an off-matrix mention honest rather than a shipping claim. */
+  const REFUSAL = /\b(?:not|no|never|cannot|can't|refus\w*|declin\w*|dropped|un-?adapted|unsupported|removed|deprecated)\b/i
+
+  const platformMatrix = () => {
+    const file = path.join(import.meta.dir, "..", "..", "..", "..", "product.json")
+    if (!existsSync(file)) throw new Error(`${file} is missing — this rule is about the product's own matrix and cannot fall back to a guess`)
+    const product = JSON.parse(readFileSync(file, "utf8")) as {
+      platform?: { os?: unknown; dropped?: Record<string, string> }
+      platformTargets?: Array<{ os?: unknown } | undefined>
+    }
+    const declared = (value: unknown) => (Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [])
+    const os = new Set([
+      ...declared(product.platform?.os),
+      ...(product.platformTargets ?? []).flatMap((target) => declared(target?.os)),
+    ])
+    // A dropped key named `family-*` gave up the whole family; a specific target such as
+    // `darwin-x64-baseline` gives up one build, not the platform, so it must not shrink the set.
+    const droppedFamilies = Object.keys(product.platform?.dropped ?? {})
+      .filter((name) => name.endsWith("-*"))
+      .map((name) => name.slice(0, -2))
+    for (const family of os) {
+      if (OS_SPELLINGS[family] === undefined) {
+        throw new Error(`product.json declares "${family}" and this rule has no spellings for it — add them to OS_SPELLINGS, or the mention is unscanned`)
+      }
+    }
+    return { os: [...os], allowed: new Set([...os].filter((family) => !droppedFamilies.includes(family))) }
+  }
+
+  /** Every off-matrix os mention in one remedy, unless its own clause refuses it. */
+  function dishonestPlatformClaims(text: string) {
+    const { allowed } = platformMatrix()
+    const lower = text.toLowerCase()
+    const clauses: Array<[number, number]> = []
+    let start = 0
+    for (let index = 0; index < lower.length; index++) {
+      if (/[,;.:()\n]/.test(lower[index]!)) {
+        clauses.push([start, index])
+        start = index + 1
+      }
+    }
+    clauses.push([start, lower.length])
+    const offenders: string[] = []
+    for (const [family, spellings] of Object.entries(OS_SPELLINGS)) {
+      if (allowed.has(family)) continue
+      for (const spelling of spellings) {
+        const escaped = spelling.replace(/[.+*?^${}()|[\]\\/]/g, (ch) => `\\${ch}`)
+        // Word-ish boundaries, so `archlinux` cannot be matched by a stray "arch" and `ios` cannot
+        // be found inside "versions".
+        const pattern = new RegExp(`(?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$)`, "g")
+        for (const match of [...lower.matchAll(pattern)]) {
+          const at = (match.index ?? 0) + match[0].toLowerCase().indexOf(spelling)
+          const clause = clauses.find(([from, to]) => at >= from && at < to)
+          const clauseText = clause ? lower.slice(clause[0], clause[1]) : lower
+          if (!REFUSAL.test(clauseText)) offenders.push(`${family} ("${spelling}") in "${clauseText.trim().slice(0, 80)}"`)
+        }
+      }
+    }
+    return offenders
+  }
+
+  test("the detector fires, so the rule below is not a vacuous pass", () => {
+    // THE CONTROL FOR THE SCAN ITSELF, in the same style as the timeout scan's control: the
+    // aggregate below says "0 offenders" for two different reasons unless the mechanism is shown
+    // to catch the shape it exists to catch.
+    const shipped = dishonestPlatformClaims("run the harness under node or bun on macOS or Linux (the platforms this product ships on)")
+    expect(shipped.length, "the old claim must be an offender or this rule measures nothing").toBeGreaterThan(0)
+    expect(shipped[0]).toContain("linux")
+    // An honest mention of the same off-matrix os is not an offender…
+    expect(dishonestPlatformClaims("platform.dropped records linux-* as deliberately un-adapted")).toEqual([])
+    expect(dishonestPlatformClaims("so moving to Linux does not get you a supported install")).toEqual([])
+    // …and the allowed set really does come from product.json, not from a literal in this file:
+    // whatever the matrix declares today is never an offender, and the matrix has something in it.
+    const { allowed, os } = platformMatrix()
+    expect(os.length).toBeGreaterThan(0)
+    expect(allowed.size).toBeGreaterThan(0)
+    for (const family of allowed) expect(dishonestPlatformClaims(`run the harness on ${family} only`)).toEqual([])
+  })
+
+  test("no remedy names a platform this product does not ship as a place the agent can go", () => {
+    const dir = path.join(import.meta.dir, "../..", "src", "tool", "glasspane")
+    const files = readdirSync(dir)
+      .filter((name) => name.endsWith(".ts"))
+      .sort()
+      .map((name) => `src/tool/glasspane/${name}`)
+    // The scan has to be reading something, and by name: an empty directory read would satisfy
+    // "no offenders" the same way a deleted file list once did.
+    for (const expected of ["src/tool/glasspane/daemon.ts", "src/tool/glasspane/index.ts", "src/tool/glasspane/kernel.ts"]) {
+      expect(files, `${expected} is missing from the harvested set`).toContain(expected)
+    }
+    let harvested = 0
+    for (const file of files) {
+      for (const remedy of remedyLiterals(file)) {
+        harvested += 1
+        expect(dishonestPlatformClaims(remedy), `${file}: a remedy ships a platform product.json does not declare: ${remedy.slice(0, 160)}`).toEqual([])
+      }
+    }
+    expect(harvested, "the remedy scan harvested nothing from src/tool/glasspane, so nothing was checked").toBeGreaterThan(10)
+    // And the one remedy this rule was written for still says the true thing out loud, so a
+    // reword that only removes the offending words (and the explanation with them) is caught.
+    // Matched on the harvest's own shape: the keyed scan reads a template literal up to its first
+    // escaped backtick, so the `geteuid` half of the sentence is not in the harvested text at all.
+    const trust = remedyLiterals("src/tool/glasspane/daemon.ts").filter((remedy) => remedy.includes("run the harness under node or bun"))
+    expect(trust.length, "the socket-trust runtime remedy is no longer where the scan reads it — the anchor moved").toBe(1)
+    expect(trust[0], "the runtime remedy no longer says which single platform it means").toContain("the only platform this product ships")
   })
 })
 

@@ -44,6 +44,10 @@
 set -euo pipefail
 
 KEYCHAIN_SERVICE="${GP_SIGNING_SERVICE:-gpg-signing}"
+# A 64-bit keyid (the low 16 hex of GLASSPANE_HARNESS_SIGNING_FPR). It is a SELECTOR for gpg keyring
+# lookups (--export-secret-keys, --list-secret-keys), NOT an identity: two keys can share these low
+# bits, so "the selector matched" never proves "this is our key". Identity is proven only by the
+# full 40-hex fingerprint read back from the keyring and compared to the pin in scripts/install.sh.
 KEY_GRIP_HINT="89D88B1D043A1298"   # jingzhao-l (sign-github) <ET_lin@outlook.com>
 
 # repo|local checkout|environment holding the secrets ("" = repo level).
@@ -64,6 +68,65 @@ bad()  { printf '  MISS  %s\n' "$*"; }
 warn() { printf '  warn  %s\n' "$*"; }
 
 need() { command -v "$1" >/dev/null 2>&1 || { say "error: $1 not found in PATH"; exit 127; }; }
+
+# The single trust anchor for signing identity: the 40-hex GLASSPANE_HARNESS_SIGNING_FPR pinned in
+# scripts/install.sh — the same constant install.sh's own verify step compares a produced signature
+# against (its `[ "$fpr" = "$GLASSPANE_HARNESS_SIGNING_FPR" ]`). gpg-signing.sh must resolve identity
+# against THAT, never against the 64-bit selector, or a colliding low-16 key passes the health check.
+# GP_SIGNING_INSTALL_SH redirects only the selftest fixture; unset it reads the real script.
+pinned_signing_fpr() {
+  local src install fpr
+  if [ -n "${GP_SIGNING_INSTALL_SH:-}" ]; then
+    install="$GP_SIGNING_INSTALL_SH"
+  else
+    src="${BASH_SOURCE[0]:-$0}"
+    install="$(cd "$(dirname "$src")/../scripts" >/dev/null 2>&1 && printf '%s/install.sh' "$(pwd)")" || install=""
+  fi
+  if [ -z "${install:-}" ] || [ ! -f "$install" ]; then
+    say "error: cannot read the pinned signing fingerprint — scripts/install.sh not found at '${install:-<unresolved>}' (this is not a pass)"
+    return 1
+  fi
+  fpr="$(grep -oE 'GLASSPANE_HARNESS_SIGNING_FPR="[0-9A-Fa-f]{40}"' "$install" | head -1 | sed -E 's/.*"([0-9A-Fa-f]{40})".*/\1/')"
+  if [ -z "$fpr" ]; then
+    say "error: scripts/install.sh carries no 40-hex GLASSPANE_HARNESS_SIGNING_FPR — the signing identity has no trust anchor to compare against"
+    return 1
+  fi
+  printf '%s\n' "$fpr" | tr '[:lower:]' '[:upper:]'
+}
+
+# Pure over a `gpg --with-colons --list-secret-keys` listing on stdin. Echoes the secret-key PRIMARY
+# fingerprints (uppercase, one per line) and returns a three-way verdict — the deliberate separation
+# the file's whole doctrine asks for (compare `published()` in publish.ts, verify's UNVERIFIABLE):
+#   0 PROVEN      exactly one secret primary FPR and it equals $1.
+#   1 MISMATCH    a secret key carried the 64-bit selector, but its FPR(s) do not uniquely equal $1 —
+#                 a low-16 collision or a different key. A refusal, never a pass.
+#   2 UNRESOLVED  no secret primary FPR in the listing — "cannot be proven from here", not upgraded.
+signing_identity_verdict() {
+  local pinned primary count=0 hits=0 line
+  pinned="$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]')"
+  primary="$(awk -F: '$1=="sec"{want=1;next} $1=="fpr"{if(want){print $10;want=0}} $1=="ssb"||$1=="uid"||$1=="sub"||$1=="crv"{want=0}' | tr '[:lower:]' '[:upper:]')"
+  [ -n "$primary" ] || return 2
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    count=$((count + 1))
+    if [ "$line" = "$pinned" ]; then hits=$((hits + 1)); fi
+  done <<< "$primary"
+  printf '%s\n' "$primary"
+  if [ "$count" -eq 1 ] && [ "$hits" -eq 1 ]; then return 0; fi
+  return 1
+}
+
+# The proven full fingerprint, or non-zero. cmd_local uses this for `user.signingkey` — a signing
+# identity must never be pinned to a 64-bit selector that another key could collide with.
+proven_signing_fpr() {
+  local pinned listing resolved rc=0
+  pinned="$(pinned_signing_fpr)" || return 2
+  if [ "${pinned: -16}" != "$KEY_GRIP_HINT" ]; then return 2; fi
+  listing="$(gpg --batch --with-colons --list-secret-keys "$KEY_GRIP_HINT" 2>/dev/null)" || listing=""
+  resolved="$(printf '%s\n' "$listing" | signing_identity_verdict "$pinned")" || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  printf '%s\n' "$resolved"
+}
 
 targets_filtered() {
   if [ $# -eq 0 ]; then printf '%s\n' "${TARGETS[@]}"; return; fi

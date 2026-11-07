@@ -517,7 +517,7 @@ describe("what the hook refuses to invent", () => {
     expect(collected).toEqual({ calls: 0, anchors: [], withoutDecision: 0, declaredWithoutAnchor: 0 })
   })
 
-  test("a receipt whose pack no longer parses keeps the kernel's fields and no invented operationId", () => {
+  test("a receipt whose pack no longer parses keeps the kernel's fields and names the refusal", () => {
     const broken = okMetadata({
       decisionLog: receipt(),
       result: { evidencePack: { ...(pack("ok-01") as object), attribution: { level: "telepathic", contaminated: false } } },
@@ -526,7 +526,10 @@ describe("what the hook refuses to invent", () => {
     expect(collected.anchors.length).toBe(1)
     expect(collected.anchors[0].operationId).toBeUndefined()
     const block = renderAnchorBlock(collected)
-    expect(block).toContain("- observe · outcome pass · ledger seq 0")
+    // This line used to read `- observe · outcome pass · ledger seq 0` and the one below it
+    // (`not.toContain("op ")`) was the whole claim: the block left a blank where the reason for
+    // the blank belongs. See the "which blank the block prints" block for the fixed point.
+    expect(block).toContain("- observe · pack unreadable (KERNEL_E_SCHEMA) · outcome pass · ledger seq 0")
     expect(block).not.toContain("op ")
   })
 
@@ -907,4 +910,97 @@ describe("which anchors the cap drops (scenario 2, the compression half)", () =>
   })
 })
 
+describe("which blank the block prints, and what it says about it", () => {
+  // DEFECT pinned: `EvidenceAnchor.packUnreadable` did not exist, so
+  // `collectEvidenceAnchors` folded two different facts into one `operationId: undefined` —
+  // "the kernel's read-side parser refused this call's frame" (a Swift/TypeScript drift, C35, or
+  // an archive with no evidence at all) and "this readable pack simply carries no id". The reader
+  // saw the same `- observe · outcome pass · ledger seq 0 …` line for both, so a contract failure
+  // was silently re-labelled as an optional field. The code now travels with the blank and
+  // `renderAnchorBlock` prints it as its own bit.
+  //
+  // THE OLD BEHAVIOUR CANNOT SATISFY THE THREE ASSERTIONS BELOW, and each fails for a different
+  // reason: (1) `anchors[0].packUnreadable` was `undefined` for an unreadable pack, so every
+  // `toBe(code)` below is red; (2) the block printed no `pack unreadable (…)` bit at all, so the
+  // `toContain(code)` is red; (3) with one blank for two facts, the readable-no-id line and the
+  // unreadable line were byte-identical, so `not.toBe(anchorLine(plain))` is red. The receipt-side
+  // assertions (outcome / seq / hash) are the counterweight: the fix must not lose the chain.
+  const anchorLine = (block: string | undefined) => {
+    if (block === undefined) throw new Error("an anchor was collected and no block rendered")
+    const lines = block.split("\n").filter((line) => line.startsWith("- ") && line.includes("ledger seq"))
+    expect(lines.length, `the block renders one anchor line, got: ${JSON.stringify(block)}`).toBe(1)
+    return lines[0]!
+  }
 
+  test("a readable pack with an operationId prints op and no refusal", () => {
+    const collected = collectEvidenceAnchors([message("gp_observe", { metadata: okMetadata({ decisionLog: receipt() }) })])
+    expect(collected.anchors[0].operationId).toBe(OP_OK)
+    expect(collected.anchors[0].packUnreadable).toBeUndefined()
+    const line = anchorLine(renderAnchorBlock(collected))
+    expect(line).toContain(`op ${OP_OK}`)
+    expect(line).not.toContain("pack unreadable")
+  })
+
+  test("a readable pack without one prints no op and still no refusal", () => {
+    // The blank that means "this pack carries no id". Built as a rendered anchor rather than
+    // collected: the pinned kernel's read-side schema requires `operationId`
+    // (`schemas/evidence-pack.schema.json` required list), so no archive the parser accepts can
+    // arrive without one today — while the transcript shape (`EvidenceAnchor.operationId?`) is
+    // optional and is what `renderAnchorBlock` reads. The point of the case is the ABSENCE of
+    // `pack unreadable`, which is exactly what the old block could not distinguish.
+    const line = anchorLine(
+      renderAnchorBlock({
+        calls: 1,
+        anchors: [{ method: "observe", outcome: "pass", ledgerSequence: 0, ledgerHash: HASH, ledgerPath: "/tmp/gp-ledger/decisions.jsonl" }],
+        withoutDecision: 0,
+      }),
+    )
+    expect(line).not.toContain("op ")
+    expect(line).not.toContain("pack unreadable")
+    expect(line).toContain("outcome pass")
+    expect(line).toContain("ledger seq 0")
+  })
+
+  test("an unreadable pack prints the code the parser answered with", () => {
+    // Both ways the read side fails, and they are different codes for different reasons: a body
+    // that is an object the contract refuses, and a reply that carries no body at all.
+    const cases: Array<[string, unknown, string]> = [
+      ["an empty body", { evidencePack: {} }, "KERNEL_E_SCHEMA"],
+      ["no evidencePack key at all", { somethingElse: 1 }, "GP_E_NO_EVIDENCE"],
+      ["an evidencePack that is not an object", { evidencePack: "x" }, "GP_E_EVIDENCE_FRAME"],
+    ]
+    const lines: string[] = []
+    for (const [label, result, code] of cases) {
+      const collected = collectEvidenceAnchors([message("gp_observe", { metadata: okMetadata({ decisionLog: receipt(), result }) })])
+      expect(collected.anchors.length, label).toBe(1)
+      expect(collected.anchors[0].operationId, label).toBeUndefined()
+      expect(collected.anchors[0].packUnreadable, `${label}: the refusal code is the fact the block needs`).toBe(code)
+      const line = anchorLine(renderAnchorBlock(collected))
+      lines.push(line)
+      expect(line, `${label}: the block names the code`).toContain(`pack unreadable (${code})`)
+      // The receipt still chains: only the reason for the blank is added, nothing is lost.
+      expect(line).toContain("outcome pass")
+      expect(line).toContain("ledger seq 0")
+      expect(line).toContain(`entry sha256 ${HASH.slice(0, 16)}…`)
+      expect(line).not.toContain(`op ${OP_OK}`)
+    }
+    // The three refusals are three different codes, so the block's three lines differ by them.
+    expect(new Set(lines).size).toBe(lines.length)
+  })
+
+  test("and the two blanks are textually different sentences", () => {
+    // THE IDENTITY OF THE OLD DEFECT, asserted directly: one readable pack with no id, one pack
+    // that could not be read, same receipt, same method. Under the old renderer both lines read
+    // `- observe · outcome pass · ledger seq 0 · entry sha256 aaaaaaaaaaaaaaaa…`.
+    const readableNoId = anchorLine(
+      renderAnchorBlock({ calls: 1, anchors: [{ method: "observe", outcome: "pass", ledgerSequence: 0, ledgerHash: HASH }], withoutDecision: 0 }),
+    )
+    const unreadable = anchorLine(
+      renderAnchorBlock(collectEvidenceAnchors([message("gp_observe", { metadata: okMetadata({ decisionLog: receipt(), result: { somethingElse: 1 } }) })])),
+    )
+    expect(unreadable).not.toBe(readableNoId)
+    expect(unreadable).toContain("pack unreadable (GP_E_NO_EVIDENCE)")
+    expect(readableNoId).not.toContain("pack unreadable")
+    expect(`${readableNoId}|${unreadable}`).not.toContain("none")
+  })
+})

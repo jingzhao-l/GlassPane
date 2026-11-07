@@ -3,7 +3,7 @@ import { $ } from "bun"
 import pkg from "../package.json"
 import product from "../../../product.json"
 import { Script } from "@opencode-ai/script"
-import { validatePackageIdentity } from "./publish-shape"
+import { validateExecBit, validatePackageIdentity } from "./publish-shape"
 import { npmAnswer } from "./registry-readiness"
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -192,20 +192,11 @@ async function validateTarball(dir: string, name: string, version: string, tarba
     // recorded mode, in symbolic form on both GNU and BSD tar, so the nine permission bits are
     // read off the string rather than parsed as an octal number.
     const listing = (await $`tar -tvzf ${tarball}`.text()).split("\n").filter((line) => line.length > 0)
-    const symbolic = (bits: string) => {
-      let mode = 0
-      for (const [index, flag] of ["r", "w", "x", "r", "w", "x", "r", "w", "x"].entries()) {
-        if (bits[index] === flag) mode |= 1 << (8 - index)
-      }
-      return mode
-    }
-    const modeOf = (member: string) => {
-      const line = listing.find((entry) => entry.endsWith(` ${member}`))
-      if (!line) return undefined
-      const field = line.trim().split(/\s+/)[0]
-      return field.length >= 10 ? symbolic(field.slice(1, 10)) : undefined
-    }
-    const statMode = async (file: string) => modeOf(path.relative(root, file))
+    // The exec bit of every shipped member is read through `publish-shape.ts`'s `validateExecBit`
+    // — a pure function over this `listing`, so a fixture can drive the refusal (see
+    // test/script/publish-exec-bit.test.ts). It used to be read by an inline `modeOf` returning
+    // `undefined`, paired with a `mode !== undefined &&` guard at each site; an empty or garbled
+    // listing then made the assertion vanish and the run printed "packs cleanly".
     const manifest = (await Bun.file(path.join(pkgRoot, "package.json")).json()) as Record<string, any>
     const declaredTargets = (truth.platformTargets ?? []).map((target) => platformPackageName(target))
     const problemsIdentity = validatePackageIdentity({
@@ -230,8 +221,9 @@ async function validateTarball(dir: string, name: string, version: string, tarba
       for (const file of scripts) {
         if (!existsSync(file)) continue
         const label = path.relative(pkgRoot, file)
-        const mode = await statMode(file)
-        if (mode !== undefined && (mode & 0o111) === 0) problems.push(`${label} is not executable in the tarball (mode ${(mode & 0o777).toString(8)}) — the command would answer "permission denied" instead of its remedy`)
+        problems.push(
+          ...validateExecBit({ label, member: path.relative(root, file), tarball, listing, reason: 'the command would answer "permission denied" instead of its remedy' }),
+        )
         const first = (await Bun.file(file).text()).split("\n", 1)[0]
         if (!first.startsWith("#!")) problems.push(`${label} has no shebang (first line is ${JSON.stringify(first)}) — a launcher that execs it without a shell gets ENOEXEC and no message`)
         // The remedy has to be actionable from wherever the reader is standing, which is the
@@ -271,8 +263,7 @@ async function validateTarball(dir: string, name: string, version: string, tarba
       const binary = product.bins[0]
       if (!existsSync(path.join(pkgRoot, "bin", binary))) problems.push(`bin/${binary} is missing from the tarball`)
       if (!existsSync(path.join(pkgRoot, "README.md"))) problems.push("README.md is missing — the npm page would render as a bare version string")
-      const mode = await statMode(path.join(pkgRoot, "bin", binary))
-      if (mode !== undefined && (mode & 0o111) === 0) problems.push(`bin/${binary} is not executable in the tarball (mode ${(mode & 0o777).toString(8)})`)
+      problems.push(...validateExecBit({ label: `bin/${binary}`, member: path.relative(root, path.join(pkgRoot, "bin", binary)), tarball, listing }))
     }
   } finally {
     rmSync(root, { recursive: true, force: true })

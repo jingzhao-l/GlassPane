@@ -83,6 +83,15 @@ export type EvidenceAnchor = {
    */
   dimension?: string
   operationId?: string
+  /**
+   * The code the kernel's read-side parser answered with when this call's frame could not be
+   * read at all (`GP_E_NO_EVIDENCE`, `GP_E_EVIDENCE_FRAME`, a `KernelSchemaError` code). Absent
+   * means the pack was read. This used to be indistinguishable from "the pack has no
+   * operationId": a Swift/TypeScript drift (C35) produced the same blank as a legacy archive
+   * that legitimately carries no id, so the block silently re-labelled a contract failure as an
+   * optional field. The receipt still chains; only the reason for the blank is now recorded.
+   */
+  packUnreadable?: string
   outcome?: string
   ledgerLine?: number
   /**
@@ -206,12 +215,15 @@ export function collectEvidenceAnchors(messages: unknown): AnchorCollection {
       }
 
       // operationId is the only field read from the pack itself; optional because
-      // the receipt can outlive a body the kernel's read-side parser rejects.
+      // the receipt can outlive a body the kernel's read-side parser rejects. The rejection
+      // code travels with the blank, so a reader can tell "no id in a readable pack" from
+      // "the pack could not be read" — see `EvidenceAnchor.packUnreadable`.
       const read = readEvidenceFrame(metadata.result)
       anchors.push({
         method,
         dimension,
         operationId: read.ok ? read.pack.operationId : undefined,
+        packUnreadable: read.ok ? undefined : read.error.code,
         outcome: text(note.outcome),
         ledgerLine: numberOf(note.line),
         ledgerSequence: numberOf(note.sequence),
@@ -401,6 +413,9 @@ export function renderAnchorBlock(collected: AnchorCollection, plan: PlanRead = 
     const bits = [
       anchor.method,
       anchor.operationId ? `op ${anchor.operationId}` : undefined,
+      // Its own bit, and never merged into the `op` line: the two blanks mean different things,
+      // and the reader needs the code to know which one they are looking at.
+      anchor.packUnreadable ? `pack unreadable (${anchor.packUnreadable})` : undefined,
       anchor.outcome ? `outcome ${anchor.outcome}` : undefined,
       anchor.ledgerSequence !== undefined
         ? `ledger seq ${anchor.ledgerSequence}`
@@ -516,5 +531,3 @@ function describeSdkError(error: unknown): string {
   const message = isRecord(error) ? text(error.message) : undefined
   return `the host rejected the message pull: ${message ?? text(error) ?? "no message in the error payload"}`
 }
-
-

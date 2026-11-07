@@ -357,23 +357,92 @@ function installPackage(name) {
       console.error(`the package this run fetched is ${fetched.name}@${fetched.version}, not ${name}@${version} — refusing it`)
       return false
     }
-    copyBinary(path.join(packageDir, "bin", sourceBinary), targetBinary)
-    return true
+    // The placement, not `true`: the caller has to be able to undo exactly what this line did.
+    return copyBinary(path.join(packageDir, "bin", sourceBinary), targetBinary)
   } finally {
     fs.rmSync(temp, { recursive: true, force: true })
   }
 }
 
+/**
+ * Place the resolved bytes at `target`, and hand back what THIS run can undo.
+ *
+ * Two measured hazards live in these lines.
+ *
+ * The leaf (measured 2026-11-06): `fs.existsSync` answers FALSE for a dangling symlink, so the old
+ * `existsSync → unlinkSync` guard left a stale link in place; `linkSync` then threw EEXIST, the
+ * catch's `copyFileSync` wrote THROUGH the link to whatever it points at, and `chmodSync` chmodded
+ * that file too. This project's own installer already refuses that class (`installer/cli.js`,
+ * "chmod 不许穿过叶子链接"), so the decision is made from `lstatSync`, on the leaf itself, and only an
+ * existing REGULAR file may be replaced.
+ *
+ * The undo (measured the same day, and the reason this returns something): `main()` placed first
+ * and verified after, and when the check failed it moved on with the unverified bytes still sitting
+ * at `targetBinary` — the command the user then ran was exactly the build this run had declared
+ * wrong. `undo()` removes only the file this run placed and, by rename rather than by rewriting,
+ * puts back the regular file that was here before, so a refused install leaves no executable behind
+ * without destroying what this run did not create. `commit()` drops that backup once a check has
+ * passed.
+ */
 function copyBinary(source, target) {
   if (!fs.existsSync(source)) throw new Error(`Binary not found at ${source}`)
   fs.mkdirSync(path.dirname(target), { recursive: true })
-  if (fs.existsSync(target)) fs.unlinkSync(target)
+  refuseLeaf(target)
+  const backup = fs.existsSync(target) ? `${target}.previous-install` : null
+  if (backup !== null) fs.renameSync(target, backup)
   try {
     fs.linkSync(source, target)
   } catch {
     fs.copyFileSync(source, target)
   }
   fs.chmodSync(target, 0o755)
+  return { undo: () => undoPlacement(target, backup), commit: () => commitPlacement(backup) }
+}
+
+/**
+ * Anything at `target` that `lstat` cannot call a regular file is refused before one byte is
+ * written or chmodded, because both operations follow a link out of the tree. No later candidate
+ * can work around this: `targetBinary` is the same path for every name.
+ */
+function refuseLeaf(target) {
+  let leaf
+  try {
+    leaf = fs.lstatSync(target)
+  } catch (error) {
+    if (error.code === "ENOENT") return
+    throw new Error(
+      `${target} has no readable leaf (${error instanceof Error ? error.message : String(error)}): it cannot be shown not to be a symbolic link, so nothing was written and nothing was chmod-ed`,
+    )
+  }
+  if (leaf.isFile()) return
+  const where = leaf.isSymbolicLink() ? `a symbolic link to ${readLink(target)}` : "not a regular file"
+  throw new Error(`${target} is ${where} — refusing to write or chmod through it; nothing was written and nothing was removed`)
+}
+
+function readLink(target) {
+  try {
+    return fs.readlinkSync(target)
+  } catch {
+    return "a target that cannot be read"
+  }
+}
+
+function undoPlacement(target, backup) {
+  // Never follow a leaf swapped in after the placement: `unlink` on the link would be a removal this
+  // run did not make, so only a regular file this run created is removed.
+  let leaf
+  try {
+    leaf = fs.lstatSync(target)
+  } catch {
+    leaf = null
+  }
+  if (leaf !== null && leaf.isFile()) fs.unlinkSync(target)
+  if (backup !== null) fs.renameSync(backup, target)
+}
+
+function commitPlacement(backup) {
+  if (backup === null) return
+  fs.rmSync(backup, { force: true })
 }
 
 /**
@@ -417,16 +486,27 @@ function main() {
   // What each candidate actually answered, kept so the final refusal can name the observation
   // instead of blaming the package manager for something it may have delivered correctly.
   const seen = []
+  // Every placement is undone when the check that follows it fails: `targetBinary` is the command
+  // the user runs next, so bytes this run refused must not be sitting on it.
   for (const name of names) {
     try {
-      copyBinary(resolveBinary(name), targetBinary)
+      const placement = copyBinary(resolveBinary(name), targetBinary)
       const check = verifyBinary(expected)
-      if (check.ok) return
+      if (check.ok) {
+        placement.commit()
+        return
+      }
+      placement.undo()
       seen.push(`${name}: ${check.detail}`)
     } catch (error) {
-      if (installPackage(name)) {
+      const placement = installPackage(name)
+      if (placement) {
         const check = verifyBinary(expected)
-        if (check.ok) return
+        if (check.ok) {
+          placement.commit()
+          return
+        }
+        placement.undo()
         seen.push(`${name}: ${check.detail}`)
       } else {
         seen.push(`${name}: not installable here (${error instanceof Error ? error.message : "unknown failure"})`)

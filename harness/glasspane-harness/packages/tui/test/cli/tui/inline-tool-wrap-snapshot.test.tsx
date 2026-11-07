@@ -518,6 +518,40 @@ describe("TUI inline tool wrapping", () => {
     expect(row.line).toBe("attribution strong contaminated=true · cb 2 · assertion.passed=false")
   })
 
+  test("glasspaneRow says there was no evidence pack instead of reading the flat reply as one", () => {
+    // DEFECT pinned: `recordValue(result.evidencePack) ?? result` fell back to the top-level reply
+    // when the frame carried no `evidencePack` — the shape the contract refuses by name
+    // (`GP_E_NO_EVIDENCE`, `kernel.ts:146-155`). Every lookup then missed, `bits` came back empty,
+    // and the row printed the bare label `evidence pack` under `state: "success"`, which is the
+    // renderer answering "what was archived" for a reply that archived nothing.
+    // The old line is asserted absent, not merely different: it is the exact string the fallback
+    // produced, and a reword that kept it as a prefix would keep the lie.
+    const lastEvidence = (result: Record<string, unknown>) =>
+      glasspaneRow({ tool: "gp_last_evidence", status: "completed", metadata: { ok: true, method: "last_evidence", result } })
+
+    for (const [label, result] of [
+      ["no evidencePack key at all", {}],
+      ["a flat reply that carries engine fields", { operationId: "op9", actConfirmed: true, latencyMs: 12 }],
+      ["an evidencePack that is not an object", { evidencePack: "x" }],
+    ] as const) {
+      const row = lastEvidence(result)
+      expect(row.line, label).toBe("no evidence pack in this reply")
+      expect(row.line, label).not.toBe("evidence pack")
+      expect(row.line.startsWith("evidence pack"), label).toBe(false)
+      // Absent is not the same fact as "an empty pack", and neither one is a verdict: the row
+      // claims nothing about the engine's judgement.
+      expect(row.state, label).toBe("success")
+      expect(row.line, label).not.toContain("attribution")
+      expect(row.line, label).not.toContain("assertion")
+    }
+
+    // The other side of the same branch, so the new line cannot become the default rendering:
+    // a frame that does carry the pack prints the engine's own fields, field name and all.
+    const packed = lastEvidence({ evidencePack: { attribution: { level: "weak", contaminated: false }, assertion: { passed: true } } })
+    expect(packed.line).toBe("attribution weak contaminated=false · assertion.passed=true")
+    expect(packed.line).not.toContain("no evidence pack")
+  })
+
   test("glasspaneRow transcribes the assertion field instead of naming its verdict", () => {
     const line = (assertion: unknown, attribution: unknown) =>
       glasspaneRow({

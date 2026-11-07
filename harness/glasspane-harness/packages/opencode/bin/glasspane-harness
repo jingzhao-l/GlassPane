@@ -93,6 +93,18 @@ const binary = platform === "windows" ? "glasspane-harness.exe" : "glasspane-har
 // the matrix's only surviving copy there. A foreign product.json reached the same way is
 // rejected by the name check, never obeyed.
 const wrapperManifestPath = path.join(scriptDir, "..", "package.json")
+// Read once: a repo checkout has `packages/opencode/package.json` (whose name matches
+// product.json's), an installed wrapper has the sealed manifest, and neither read is guaranteed.
+// An unreadable one is the empty object, so it cannot prove any name installable — the refusal
+// text then says plainly that no build is declared instead of pointing at packages that may not
+// exist — and every rule below that needs a claim out of it fails closed.
+const wrapperManifest = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(wrapperManifestPath, "utf8"))
+  } catch {
+    return {}
+  }
+})()
 const declaredNames = (() => {
   const namesFromMatrix = (product) =>
     product.platformTargets.map((target) =>
@@ -109,25 +121,21 @@ const declaredNames = (() => {
   try {
     const parsed = JSON.parse(fs.readFileSync(path.join(scriptDir, "..", "..", "..", "product.json"), "utf8"))
     if (Array.isArray(parsed.platformTargets) && parsed.platformTargets.length > 0) {
-      let wrapperName = null
-      try {
-        wrapperName = JSON.parse(fs.readFileSync(wrapperManifestPath, "utf8")).name
-      } catch {
-        // no readable wrapper manifest — the product.json here is the repo root's own
-      }
+      const wrapperName = wrapperManifest.name
       if (!wrapperName || parsed.name === wrapperName) return namesFromMatrix(parsed)
     }
   } catch {
     // not in a repo checkout — fall through to the sealed manifest
   }
-  try {
-    return Object.keys(JSON.parse(fs.readFileSync(wrapperManifestPath, "utf8")).optionalDependencies ?? {})
-  } catch {
-    // An unreadable manifest cannot prove any name installable; the refusal text then says
-    // plainly that no build is declared instead of pointing at packages that may not exist.
-    return []
-  }
+  return Object.keys(wrapperManifest.optionalDependencies ?? {})
 })()
+
+// The version this wrapper seals for each declared platform package. script/publish.ts writes this
+// map and its --dry-run refuses a wrapper whose list disagrees, so it is the claim npm resolved for
+// THIS install — the same one script/postinstall.mjs's `resolveBinary()` checks a candidate's own
+// manifest against. A name with no sealed version has nothing to check against, so no copy of it
+// can be loaded here either.
+const sealedVersions = wrapperManifest.optionalDependencies ?? {}
 
 function supportsAvx2() {
   if (arch !== "x64") return false
@@ -247,26 +255,134 @@ const machine = (() => {
 
 const names = machine.installable
 
-function findBinary(startDir) {
-  let current = startDir
-  for (;;) {
-    const modules = path.join(current, "node_modules")
-    if (fs.existsSync(modules)) {
-      for (const name of names) {
-        const candidate = path.join(modules, name, "bin", binary)
-        if (fs.existsSync(candidate)) return candidate
+// What this launcher may exec, under the rule script/postinstall.mjs's `resolveBinary()` already
+// applies. Its comment block above `installTrees()` records the measured hazard: the search that
+// walked every `node_modules` ABOVE the wrapper — out of the project, through the home directory,
+// to `/` — let a planted package satisfy it, and the only statement then made about the bytes was a
+// `--version` string equality a 3-line shell script answers. That fix stopped at the installer and
+// left this shim, the other half of the same channel (it is what execs the bytes for every
+// `glasspane-harness` command), with the weak walk. Two statements, neither self-reported by the
+// candidate:
+//  1. the directory is inside this wrapper's own install tree — its nested `node_modules`, or the
+//     boundary `node_modules` of the wrapper's realpath — and nothing above it,
+//  2. the directory's own manifest names this platform package at the exact version this wrapper
+//     seals, which is a claim about the package made by the manifest npm resolved here.
+// Every copy that is skipped is recorded with the statement it failed, so the reader can tell "not
+// installed" from "this launcher refused a planted copy". The install-record third statement is the
+// installer's half; this shim ships no reader for it and is bounded by these two.
+const refused = []
+
+function installTrees(own) {
+  const nestedTree = path.join(own, "node_modules")
+  const segments = own.split(path.sep)
+  let boundary = null
+  for (let index = 1; index < segments.length; index++) {
+    if (segments[index] === "node_modules") boundary = segments.slice(0, index + 1).join(path.sep)
+  }
+  return { nestedTree, boundary }
+}
+
+function candidateDirs(wrapperDir, name) {
+  const dirs = [path.join(wrapperDir, "node_modules", name)]
+  const parent = path.dirname(wrapperDir)
+  if (path.basename(parent) === "node_modules") dirs.push(path.join(parent, name))
+  return dirs
+}
+
+function findBinary(wrapperDir) {
+  const { nestedTree, boundary } = installTrees(wrapperDir)
+  for (const name of names) {
+    const sealed = sealedVersions[name]
+    for (const dir of candidateDirs(wrapperDir, name)) {
+      if (!fs.existsSync(dir)) continue
+      let real
+      try {
+        real = fs.realpathSync(dir)
+      } catch (error) {
+        refused.push(`${dir}: unreadable (${readReason(error)})`)
+        continue
       }
+      const inside = (tree) => tree !== null && (real === tree || real.startsWith(tree + path.sep))
+      if (!inside(boundary) && !inside(nestedTree)) {
+        refused.push(`${real} is not inside this install (${boundary ?? nestedTree})`)
+        continue
+      }
+      if (sealed === undefined) {
+        refused.push(`${real}: this wrapper seals no version for ${name} in its optionalDependencies`)
+        continue
+      }
+      let manifest
+      try {
+        manifest = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"))
+      } catch (error) {
+        refused.push(`${real}: no readable package.json (${readReason(error)})`)
+        continue
+      }
+      if (manifest.name !== name) {
+        refused.push(`${real}: its package.json names ${JSON.stringify(manifest.name)}, not ${name}`)
+        continue
+      }
+      if (manifest.version !== sealed) {
+        refused.push(`${real} is ${manifest.name}@${manifest.version}, this wrapper seals ${sealed}`)
+        continue
+      }
+      const candidate = path.join(dir, "bin", binary)
+      if (!fs.existsSync(candidate)) {
+        refused.push(`${real} has no bin/${binary}`)
+        continue
+      }
+      return candidate
     }
-    const parent = path.dirname(current)
-    if (parent === current) {
-      return
-    }
-    current = parent
   }
 }
 
-const resolved = envPath || (fs.existsSync(cached) ? cached : findBinary(scriptDir))
+/**
+ * The environment names a file to exec directly, so it gets the same kind of screen — four
+ * statements, none of them answered by the file itself: an absolute path, a leaf that `lstat` (not
+ * `stat`, which follows the link exactly as the exec does) calls a REGULAR file, owned by this
+ * process's uid where a uid is knowable, and not writable by group or world. Measured 2026-11-06:
+ * a group-writable path is one write by anyone in that class away from being someone else's bytes,
+ * and a pre-positioned symlink moves every claim here onto the file at its other end. Both the
+ * product's own name and the legacy spelling go through this one screen, so the legacy spelling
+ * gains nothing it did not already have.
+ */
+function overrideRefusal(value) {
+  if (!path.isAbsolute(value)) return "is not an absolute path"
+  let leaf
+  try {
+    leaf = fs.lstatSync(value)
+  } catch (error) {
+    return `has no readable leaf (${readReason(error)})`
+  }
+  if (leaf.isSymbolicLink()) return `is a symbolic link to ${linkTarget(value)}; nothing is followed through it`
+  if (!leaf.isFile()) return `is not a regular file`
+  if (typeof process.geteuid === "function" && leaf.uid !== process.geteuid()) {
+    return `is owned by uid ${leaf.uid}, not uid ${process.geteuid()}`
+  }
+  if ((leaf.mode & 0o022) !== 0) return `is writable by group or world (mode ${(leaf.mode & 0o777).toString(8)})`
+}
+
+function readReason(error) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function linkTarget(value) {
+  try {
+    return fs.readlinkSync(value)
+  } catch (error) {
+    return `a target that cannot be read (${readReason(error)})`
+  }
+}
+
+const override = envPath === undefined ? undefined : overrideRefusal(envPath)
+if (override !== undefined) {
+  console.error(`glasspane-harness refuses the binary its environment names: ${envPath} ${override}. Nothing was executed.`)
+  process.exit(1)
+}
+
+const resolved = envPath ?? (fs.existsSync(cached) ? cached : findBinary(path.dirname(scriptDir)))
 if (!resolved) {
+  for (const reason of refused) console.error(`refused: ${reason}`)
   if (names.length === 0) {
     // Nothing on this machine is installable: state that plainly and name the supported set,
     // instead of the old text that told the reader to manually install packages this product

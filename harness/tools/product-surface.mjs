@@ -676,6 +676,85 @@ check("installer-urls", (product.install?.curl ?? "").includes(`raw.githubuserco
     check("installer-curl-pinned", !text.includes("glasspane-harness/main/scripts/install.sh"), `${doc} still shows a branch-pinned curl | bash one-liner`)
   }
 }
+
+// ---- the fork-diff line the READMEs claim to quote "verbatim, against the golden"
+// WHY. README.md and README.zh-CN.md each print a fenced block introduced as "that line, verbatim,
+// against the golden" and then repeat the same counts in prose. That line is `fork-diff.mjs`'s own
+// console output: `fork-diff vs <tag>: <identical>/<total> byte-identical, <edited> edited, <added>
+// added, <deleted> deleted`. Its denominator is `total = ref.size + added.length`, and ref.size is
+// identical + edited + deleted — fork-diff's four buckets are a partition of `ref` (every upstream
+// file is identical, edited, or deleted; the fork-only files are `added`), so the printed
+// denominator equals identical + edited + added + deleted. Both copies move every time the golden is
+// re-recorded, and NOTHING read them: this lane stayed green while "verbatim, against the golden"
+// pointed at numbers the golden no longer held — the same class every other rule in this file exists
+// to refuse, a doc asserting an agreement no code compared.
+//
+// The rule derives the line FROM `harness/contracts/fork-diff.json` (it never re-runs fork-diff.mjs,
+// which needs the reference clone), so it reads only the golden, harness/upstream.json (the tag
+// fork-diff prints) and the two READMEs. If any cannot be read this is a CANNOT OBSERVE exit (2),
+// not a pass — a doc-claim gate that reports agreement when it could not open the doc is exactly the
+// failure this repository keeps being burned by. `GLASSPANE_FORK_DIFF_GOLDEN` and
+// `GLASSPANE_FORK_DIFF_README_DIR` redirect ONLY the fixture/selftest path (this file has no baseline
+// and must never be `--record`ed; these let the rule be proven to fire against an off-by-one README
+// and a disagreeing golden); unset they resolve to the strict real paths below.
+{
+  const goldenRel = "harness/contracts/fork-diff.json"
+  const goldenAbs = process.env.GLASSPANE_FORK_DIFF_GOLDEN ?? path.join(repoRoot, goldenRel)
+  const readmeDir = process.env.GLASSPANE_FORK_DIFF_README_DIR ?? forkRoot
+  if (!existsSync(goldenAbs)) die(2, `${goldenRel} is unreadable${process.env.GLASSPANE_FORK_DIFF_GOLDEN ? ` (fixture override ${goldenAbs})` : ""} — the READMEs' "verbatim, against the golden" claim cannot be compared against the golden it names. That is CANNOT OBSERVE, not agreement.`)
+  let golden
+  try {
+    golden = JSON.parse(readFileSync(goldenAbs, "utf8"))
+  } catch (error) {
+    die(2, `${goldenRel} is not readable JSON (${error.message.split("\n")[0]}) — the fork-diff counts the READMEs restate cannot be re-derived. CANNOT OBSERVE, not agreement.`)
+  }
+  const counts = golden.counts ?? {}
+  for (const key of ["identical", "edited", "added", "deleted"]) {
+    if (!Number.isInteger(counts[key])) die(2, `${goldenRel} counts.${key} is ${JSON.stringify(counts[key])}, not an integer — the fork-diff line needs all four buckets to be re-derived. CANNOT OBSERVE, not agreement.`)
+  }
+  const [identical, edited, added, deleted] = [counts.identical, counts.edited, counts.added, counts.deleted]
+  const refSize = identical + edited + deleted
+  const total = refSize + added
+  // fork-diff prints its tag from harness/upstream.json and refuses to run unless the golden's
+  // baseTag equals it, so the line's tag comes from the pin and the golden's baseTag is asserted to
+  // agree with it — one fact, two answers, which is the drift this whole file exists to catch.
+  const upstreamAbs = path.join(repoRoot, "harness", "upstream.json")
+  if (!existsSync(upstreamAbs)) die(2, `harness/upstream.json is unreadable — the fork-diff line names the tag from here, so it cannot be re-derived. CANNOT OBSERVE, not agreement.`)
+  const upstreamTag = JSON.parse(readFileSync(upstreamAbs, "utf8")).tag
+  if (typeof upstreamTag !== "string" || upstreamTag === "") die(2, `harness/upstream.json carries no readable "tag" (read ${JSON.stringify(upstreamTag)}) — fork-diff prints \`vs <tag>\` from this field, so the README line cannot be assembled. CANNOT OBSERVE, not agreement.`)
+  check("fork-diff-readme", golden.baseTag === upstreamTag, `${goldenRel} records baseTag ${JSON.stringify(golden.baseTag)} while harness/upstream.json pins ${JSON.stringify(upstreamTag)} — fork-diff.mjs refuses to print a line across two bases (its own golden check dies on exactly this), so a README line built from these describes nothing. Re-record the golden against the pinned tag; do not edit the pin to chase the golden.`)
+  const expectedLine = `fork-diff vs ${upstreamTag}: ${identical}/${total} byte-identical, ${edited} edited, ${added} added, ${deleted} deleted`
+  const parseNum = (s) => Number(s.replace(/,/g, ""))
+  // Per-file prose anchors: the sentences that restate the counts outside the fenced block. The
+  // identical/edited counts and the derived ref.size ("N files") are the prose restatements; added
+  // and deleted live only inside the block, so they are covered by the verbatim assertion.
+  const proseSpecs = {
+    "README.md": [
+      { re: /([\d,]+)\s+of its\s+([\d,]+)\s+files\b/, label: "the '<identical> of its <files> files' sentence", pairs: [[1, identical], [2, refSize]] },
+      { re: /([\d,]+)\s+edits\b/, label: "the '<edited> edits' sentence", pairs: [[1, edited]] },
+    ],
+    "README.zh-CN.md": [
+      { re: /([\d,]+)\s*个文件里\s*([\d,]+)\s*个/, label: "「<files> 个文件里 <identical> 个」句", pairs: [[1, refSize], [2, identical]] },
+      { re: /改动（\s*([\d,]+)\s*个?）/, label: "「改动（<edited> 个）」句", pairs: [[1, edited]] },
+    ],
+  }
+  for (const doc of ["README.md", "README.zh-CN.md"]) {
+    const abs = path.join(readmeDir, doc)
+    if (!existsSync(abs)) die(2, `${doc} is unreadable${process.env.GLASSPANE_FORK_DIFF_README_DIR ? ` (fixture override ${abs})` : ""} — the rule cannot check that it quotes the fork-diff line. CANNOT OBSERVE, not agreement.`)
+    const text = readFileSync(abs, "utf8")
+    check("fork-diff-readme", text.includes(expectedLine), `${doc} does not carry fork-diff.mjs's line, re-derived from ${goldenRel} (recorded ${JSON.stringify(golden.observedAt)}), verbatim. The block introduces itself as "that line, verbatim, against the golden"; the line that golden produces is:\n          ${expectedLine}\n        Regenerate the fenced block AND the prose from ${goldenRel} in the same change — never edit the golden to chase the doc (this file has no baseline and must not be recorded).`)
+    const prose = text.replace(/```[\s\S]*?```/g, "")
+    for (const spec of proseSpecs[doc]) {
+      const m = spec.re.exec(prose)
+      check("fork-diff-readme", m !== null, `${doc}: ${spec.label} was not found outside the fenced block — the prose restatement of the fork-diff counts changed shape (or was dropped) while the block still claims to be "verbatim, against the golden". Re-anchor this rule to the new wording deliberately; a restatement the gate cannot read is not an agreement.`)
+      if (!m) continue
+      for (const [group, value] of spec.pairs) {
+        check("fork-diff-readme", parseNum(m[group]) === value, `${doc}: ${spec.label} states ${parseNum(m[group])} where the golden says ${value} — the prose and the re-derived fork-diff line disagree; regenerate both from ${goldenRel} in the same change.`)
+      }
+    }
+  }
+}
+
 check("installer-urls", (product.install?.npm ?? "").includes(product.name), "product.json install.npm does not install the product package")
 check("installer-urls", sh.includes("releases/download") && sh.includes(product.repo), "install.sh does not point at the product's release assets (repo + /releases/download)")
 check("installer-urls", sh.includes('npm install -g --registry "$NPM_REGISTRY" "$NPM_SPEC"'), "install.sh does not install the npm package through the pinned registry (npm must be the primary lane, named registry included)")

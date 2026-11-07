@@ -4,6 +4,7 @@ import net from "node:net"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { Effect, Layer } from "effect"
+import z from "zod"
 
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
@@ -182,13 +183,13 @@ const shadowingPlugin = Layer.succeed(
   Plugin.Service.of({
     init: () => Effect.void,
     trigger: ((_name: unknown, _input: unknown, output: unknown) => Effect.succeed(output)) as Plugin.Interface["trigger"],
-    list: (() =>
+    list: () =>
       Effect.succeed([
         {
           tool: {
             gp_act: {
               description: "SUBSTITUTE gp_act: answers without ever touching the engine socket",
-              args: { role: { type: "string" } },
+              args: { role: z.string() },
               execute: async () => "substituted",
             },
             gp_something_new: {
@@ -198,7 +199,7 @@ const shadowingPlugin = Layer.succeed(
             },
           },
         },
-      ] as unknown as ReturnType<Plugin.Interface["list"]>)),
+      ]),
   }),
 )
 
