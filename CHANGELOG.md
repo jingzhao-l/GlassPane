@@ -11,7 +11,8 @@
 ## [1.31.1] — 2026-11-07
 
 **版本判断：patch。** 四条判据（状态文件字段 / 退出码集合 / CLI 参数 / npm 包 `bin` 声明）一条都没碰：
-本版固定的是**错误消息里转述的那句 git 原话的字节**，以及两枚把这条纪律遮住的测试夹具。
+本版固定的是**错误消息里转述的那句 git 原话的字节**、两枚把这条纪律遮住的测试夹具，以及新加的一道
+**只在 tag 之前跑**的发布闸（它给的是拒绝与理由，不改任何对外命令的取值）。
 
 **本版不合并未发布号**：`v1.31.0` 已发（tag、Release 非草稿 target=`dc4c5f45`、registry 两包实测
 1.31.0），已发布 tag 一律不动，所以这条只能另取一号——11-01 那条 1.28.1→1.29.0 的同一处置。
@@ -37,6 +38,27 @@ locale——两边不同契约的比较测不到任何东西。
 测试：`installer/test/daily-20261107-git-locale-pinned.test.mjs` 3 条，第一条是反空转对照（先用
 同一枚中文 locale 跑裸 `git`，证明这台机器的 git 真会说中文；不说中文则后两条什么都没测，本条
 直接红并说明该换机器还是改契约）。反向破坏：摘掉钉 ⇒ 4 条具名红；恢复后 45/45 复绿。
+
+### 2. 一条我自己踩出来的坑，和为它补的那道闸（P2，`5796ca31` + `609d9bfa`）
+
+`set-version 1.31.1` 改了 15 份文件，而 `release: 1.31.1` 那一笔逐路径 `git add` 时列了 14 份，
+漏掉 `installer/cli.js` —— 被推上去的那枚 commit 里 `RELEASE_VERSION` 仍是 `1.31.0`。本机
+`node scripts/check-version.mjs` 照样回 "OK：版本线一致（1.31.1）"，因为它量的是**工作树**；
+CI 量的是那枚 commit，于是 version line、root workspace gate（两条一键入口对同一个 `--repo`
+用法错的逐字节对照里 ref 一个是 v1.31.1 一个是 v1.31.0）、macOS node suites 三条一起红。
+
+补的不是"再手动抹一遍这一次的空位"，而是让**tag 之前**就有一道闸去读 commit 自己那份字节：
+`scripts/assert-tag-ready.mjs` 新增 `committedSiteDrift(version, textOf)`（逐枚位点取
+`git show HEAD:<file>`，缺失/命中数不是 1/值不等于本版都算漂移，`line: true` 的段位点按
+`expectedFor` 折算，lock 的每个非 link 条目各自比），`judgeTagReady` 的输入多一个 `siteDrift`，
+非空即拒绝打 tag 并把漂移逐行带到理由里。测试
+`updater/test/daily-20261107-tag-commit-sites.test.mjs` 4 条（真 HEAD 自证、段位点按段比、
+四种漂移各自点名且干净字节不报、判定侧不放行）。反向破坏：把 `committedSiteDrift` 短路成
+`return []` ⇒ "四种漂移各自点名"具名红；恢复 `diff -q` 无输出，与本文件 11-03 那 8 条一起复绿。
+
+教训也如实记：**`diff -q` 只证明"与备份一致"，不证明"与修好的那份一致"**——本轮做反向破坏时
+恢复源拿的是修补**前**的快照，install.sh 的 locale 钉因此被抹掉，靠"恢复后再跑一次具名用例"
+（45/45 之前先出现 2/3 红）才发现。
 
 ## [1.31.0] — 2026-11-05
 
