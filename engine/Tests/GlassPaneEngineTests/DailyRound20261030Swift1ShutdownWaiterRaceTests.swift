@@ -169,6 +169,18 @@ final class DailyRound20261030Swift1ShutdownWaiterRaceTests: XCTestCase {
         reader.start()
         swapper.start()
 
+        // 在途窗口由"调度运气"变成"至少这么久"（2026-11-07 记账）。
+        //
+        // 这条用例下面那两把"夹具失效不是通过"的对照（`observed` / `readIds` 不许为空）在本机
+        // 负载高的时候会红：读者线程抢不到那一次 act 在途的几微秒，`readIds` 就是空 —— 于是
+        // 一个证明"什么都没测"的守卫，自己变成了只在负载下倒的计时断言，而那正是本仓记过账的
+        // 坏对照形状（"只在负载下红的计时断言是坏对照：改判据，不加超时"）。
+        // 这里改的是**窗口**而不是判据：`onPerformAction` 在 act 的在途期间被调用（同一接缝
+        // 上面 `testStoredCoreIsTheOneTheWaiterReads` 就在用它），让它持住 1ms，三条不变量
+        // （读到的是被写进去过的那一个核心 / 号是真跑过的号 / 形状完整）一个字没动，
+        // 而守卫重新有了意义：把在途写入摘掉，`readIds` 照样会空，那条对照照样红。
+        busy.onPerformAction = { _ = usleep(2_000) }
+
         let selector = Selector(role: "AXButton", title: "Submit")
         for _ in 0..<120 {
             let result = try coreA.act(selector: selector, action: .press)
