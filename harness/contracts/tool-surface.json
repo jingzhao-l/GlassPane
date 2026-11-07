@@ -35,7 +35,7 @@
       }
     },
     "fork": {
-      "loc": 14021,
+      "loc": 14032,
       "files": [
         {
           "file": "packages/opencode/script/dependency-floors.ts",
@@ -145,7 +145,7 @@
         {
           "file": "script/kernel-conformance.mjs",
           "kind": "added",
-          "lines": 861
+          "lines": 872
         },
         {
           "file": "script/kernel-pin.mjs",
@@ -1223,7 +1223,7 @@
           "lines": 36
         }
       ],
-      "ratio": 0.2313,
+      "ratio": 0.2314,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
@@ -1239,7 +1239,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 27041,
+  "totalToolSurfaceLoc": 27052,
   "note": null,
   "carried": null
 }
