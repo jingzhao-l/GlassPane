@@ -98,14 +98,14 @@ That is a measured claim, not a promise. The fork tracks upstream
 [anomalyco/opencode](https://github.com/anomalyco/opencode) at a pinned tag, and
 `harness/tools/fork-diff.mjs` compares every file in this tree against that tag on every
 change. The ruler prints its own line — this is that line, verbatim, against the golden
-recorded 2026-10-18:
+recorded 2026-11-07:
 
 ```
-fork-diff vs v1.18.32: 4645/6724 byte-identical, 282 edited, 92 added, 1705 deleted
+fork-diff vs v1.18.32: 4630/6765 byte-identical, 294 edited, 133 added, 1708 deleted
 ```
 
-Most of what upstream ships is still byte-for-byte upstream — 4,645 of its 6,632 files. The
-282 edits are concentrated in config/paths/branding, the `gp_*` tool surface, the kernel
+Most of what upstream ships is still byte-for-byte upstream — 4,630 of its 6,765 files. The
+294 edits are concentrated in config/paths/branding, the `gp_*` tool surface, the kernel
 binding, the compaction hook, and the packaging scripts. The deleted files are upstream's own
 publish plumbing for channels this product does not use (ghcr images, AUR, a Homebrew tap, a
 hosted console account) — plus, in 0.4.0, the first-party account surface described below.

@@ -2,6 +2,89 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+
+## 2026-11-07（第二十九次会话）· 取号 0.14.3：上一轮的活不在分支上、在三个没人收的工作树里，而"CI 转不了绿"的真因是一条冻结安装
+
+本轮开工先说一件与"发现问题"无关但决定本轮形状的事：**这个会话本身从 11-01 挂到 11-06 才醒**，
+它带进来的指令是 11-01 那一份（要我补 0.13.0 的发布、清算 31 条待办）。逐项回字节重量之后：
+0.13.0 三包都在 registry（`npm view glasspane-harness@0.13.0` = 0.13.0），31 条里的 1–9、11、14、15
+在 11-03 那轮就修完了（`harness/tools/*.mjs` 与 `daemon.ts` 的修复点带着 `2026-11-03` 的行内说明）。
+所以本轮的"上一轮没收口"不是那份清单，而是下面这三件当时还活着的事。
+
+### 一、没收口的活长在什么形状里（每条都有量法）
+
+1. **12 笔提交不在 main 上**：`gp-harness-daily-20261106` 相对 main `ahead=12 behind=0`，
+   且它的 merge-base 就是 main HEAD（`dc4c5f45`）——普通 fast-forward 就能收。
+   `gp-harness-daily-20261104` 是 `ahead=8 behind=4`，把它**引入**的文件集（对 merge-base 作差，
+   不是对 main 作差）与 11-06 的并集比对：`ONLY-11-04` 为空集 ⇒ 11-04 是 11-06 的真子集，不重放、
+   不带它的旧基线。判据 `git diff --name-only $(git merge-base main <b>)..<b>`。
+2. **30 个文件不在任何提交里**：`.worktrees/harness-daily-20261106` 的未提交批次（+1357/−190 与
+   6 个新文件）。逐文件 `git hash-object` 对 `git rev-parse <tip>:<path>`：与 11-04/11-05 两批的
+   同名文件比，既有 IDENTICAL（那部分是已提交系列的早期形态）也有 DIFFERS；DIFFERS 的那批
+   全部是发布链与新测试，**不存在于任何分支的任何一个提交里**。它的会话最后写盘是 11-06 12:17，
+   本轮 15:36 起按归属筛 `pgrep` 判明无人在跑（且 15 分钟内全仓零写入），因此它是本线的待办，
+   不是别人的在飞批次——按【先找上一轮没收口的活】收进来，不 checkout、不 stash、不动那个树。
+3. **一枚号被举起了两次**：`gp-harness-close-20261105` 的树里 `product.json` = 0.14.3（未推、未 tag、
+   registry 无此号），11-06 那条线停在 0.14.2。本轮取 0.14.3 一次带走，不产生第四枚号。
+   那 2 笔提交（`1d5e88f1` 文档锚点 / `0ee553f3` 金样跟笔）判为**被取代**，证据是内容不是分支名：
+   锚点那一处两条线各修一版，11-06 的版本把标题改成 `License and attribution` 并实测
+   `github-slugger@2.0.0` 的 slug，`check-doc-links.mjs` 的 `DEFERRED_FINDINGS` 那半 11-06 是 1d5e88f1
+   的严格超集（多一条 11-06 说明与 `export`）；版本号与金样本来就要由本轮的发布重记。
+   它唯一该带走的成果是 `fdd54754` 那 58 行收尾读数（11-05 会话对 0.14.2 三格与三条安装通道的实测），
+   本轮按 patch 原样并进台账——**那是别人未落地的成果，不是要覆盖的东西**。
+
+### 二、"CI 转不了绿"这格的真因
+
+上一轮把它写成"macos-14 拿不到执行位"（三次 CI 都在同一个 macOS job 上 cancelled、无日志）。本轮
+先量再判：`ci.yml:55` 与父仓 `ci.yml:367` 跑的都是 `bun install --frozen-lockfile`，而 11-06 那 12 笔
+在抬 `glob` 地板时**没有重解析锁**——本机实测 `frozen_rc=1`、`error: lockfile had changes, but lockfile
+is frozen`。也就是说这条 lane 的红不需要任何 runner 稀缺就能解释：装不上，后面每一步都不执行。
+`bun install`（非冻结）重解析后 `frozen_rc=0`（"no changes"，1641 包/1500 安装）。
+另一半是 `ci.yml:23` 的 `concurrency: cancel-in-progress: true` 按 ref 分组——同一 ref 上连发三次
+CI，前两次是被第三次**自己取消**的，这就是上一轮看到"cancelled 且无日志"的机制。本轮不放宽判据、
+不加超时代价，只把安装修回去；那 12 笔的红因此是**时序 + 一条真缺陷**，不是环境不足。
+
+### 三、本轮量到的数字（每条后面是量法）
+
+- `fork-diff`：**4630/6765 byte-identical, 294 edited, 133 added, 1708 deleted**（`--record` 于干净树上；
+  上一记 `4633/6759, 291/126/1708`）。增的三处 added 是本轮新落的脚本/测试，edited 与 identical 的移动
+  随 `bun.lock` 重解析与 README 重生成。参照克隆 `.external/opencode` 本轮在集成工作树里是**独立拷贝**
+  （221 MB，`describe` == pin `v1.18.32`、`fsck` 无错、工作树干净）——两把 sweep 共享一份可写参照会撞车，
+  这条 10-23 就记过。
+- `tool-surface`：面 A **13020 LOC / 21.48%**（16 文件覆盖不变）；面 B **14021 LOC / 23.13%**（233 文件）。
+  面 B 相对金样 +179→重记；两面的 10% 文档上限仍是既成超量（棘轮只挡进一步增长，本轮如实重记并写在这里）。
+  测试不计入面 B：**59 文件 / 9854 行**（尺子自己打印的口径）。
+- `brand-surface`：26 product + 2 doc，1323 shipped-code，**0 hit**，血缘 **9646 / 3348 文件**
+  （上一记 9637 / 3341；+7 文件是本轮新增的脚本与测试，+9 出现是 `[gp]` 之外的上游血缘字样随文件计数走）。
+- `product-surface`：修 README 之前 **6632 一致 / 6 问题**（全部指向同一条 `fork-diff-readme`），
+  重生成两份 README 之后目标为 0 问题。**无基线、无 `--record`**，本轮没碰这条纪律。
+- `surface-semantics`：0 命中 / 23 文件（mcpShell 16 + fork 7），三条规则都仍发射。
+- `hook-liveness`：21 钩子无漂移，bound 2/2。
+- `kernel-pin`：**iterate-kernel@0.1.10** 未动，lock integrity + 26 个契约文件逐条 sha256 通过；
+  `kernel-conformance` **16 条 fixture** 全对上。`--probe` 没跑（漂移是给人看的发现，不是 CI 失败）。
+- 固定点：`bun test` **269 条 / 0 失败 / 10 文件**（含本轮 4 个新发布链文件 34 条）；TUI **40 条 / 0 失败 / 2 文件**。
+- `typecheck`：`opencode / tui / sdk/js / plugin` 各 **rc=0**。本轮修掉的那条 cast 之前，`opencode` 恒 rc=2。
+- `publish.ts --dry-run`：rc=0（pack 形状、bins、wrapper optionalDependencies == `product.json` 矩阵、三道 gate）。
+- 父仓公共闸：`check-workflows` rc=0、`check-doc-links` rc=0。
+- 三条尺子的**拒绝行为实测有效**：本轮亲自在"金样已改、源码未提交"的脏树上跑 `--record`，
+  `fork-diff`/`tool-surface`/`brand-surface` 都拒绝并说"golden would carry uncommitted lines from another lane"
+  ——这条保护本轮真实拦住了我自己，不是文档上的主张。
+
+### 四、本轮我替你做了哪些决定（依据与回滚）
+
+1. **取号 0.14.3（patch）**。依据：产品面/CLI/目标矩阵/方法表零变化，全是修复；且这枚号已被
+   `gp-harness-close-20261105` 举起过但从未发布，带走它比再开一枚新号少留一格空号。
+   回滚：`git revert` 版本那一笔即可，tag 未发之前不消耗任何东西。
+2. **11-04 那条分支判为真子集、不重放**（`ONLY-11-04` 空集）。回滚判据：
+   `git diff --name-only $(git merge-base main gp-harness-daily-20261104)..gp-harness-daily-20261104`
+   重跑一次，非空就说明这条判据当时读错了。
+3. **`gp-harness-close-20261105` 的 2 笔判为被取代，只带走它的 58 行收尾读数**。依据写在第一节第 3 条。
+   回滚：那 2 笔仍在本地分支上；要恢复其文字，`git show 1d5e88f1 -- harness/glasspane-harness/README.md`。
+4. **面 A/面 B/血缘三把棘轮同批 `--record`**。依据：面 B 的 +179 与 added +3 是本轮落地的发布链脚本与
+   新测试自身的行；没有语义外移，也没删注释换绿。回滚：`git checkout` 那两个金样文件是**不允许**的
+   （它们与本节第 5 条的 README 重生成同批），要改变判只有"由下一个号覆盖"。
+5. **README 的 fork-diff 句子按金样现推重生成，而不是改金样去追文档**。依据：`product-surface` 无基线，
+   这条判据本身就是本轮要成立的东西。
 ## 2026-11-03（第二十八次会话）· 取号 0.14.2：两条公开告警活在生产依赖里，一条被取消的 npm 腿把一个号永远留在半发布，以及一个挂起三十小时的会话怎么收
 
 **本会话的形状要先记，因为它决定了下面每一条的可信度。** 这一轮是 11-02 10:30 那条定时任务开的一个会话，

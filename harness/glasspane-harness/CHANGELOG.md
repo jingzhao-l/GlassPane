@@ -12,6 +12,46 @@ contract does not).
 
 （空。本轮收口后没有未归号的条目。）
 
+## [0.14.3] — 2026-11-07
+
+**版本判断：patch。** 产品面、CLI 形状、`product.json` 的目标矩阵、`gp_*` 方法表一字未动；本版全部是
+"发布链与工具面在自己看不见的时候答了通过"这一族的修复，加两条在产依赖的锁重解析。判据按本文件口径写在条目开头。
+
+取号说明：0.14.3 这枚号在两个地方被分别举起过——`gp-harness-close-20261105` 的一棵树里 `product.json` 已是
+0.14.3（未提交到任何远端、未打 tag、registry 上没有 0.14.3），本线取号时把它一起带走，因此不产生第四枚号，
+也不覆盖任何已经发出去的东西。
+
+- **`fork-diff` 四桶按本轮实测重记**：`4630/6765 byte-identical, 294 edited, 133 added, 1708 deleted`。
+  两份 README 里那句照抄的数字原本还停在 11-05 金样（`4645/6724 … 282 … 92 …`），正文句子与金样不同数——
+  这条现在由 `product-surface` 的新判据 `fork-diff-readme` 抓住（它把数字从 `contracts/fork-diff.json` 现推，
+  句子与尺子行必须同数），不是靠人记得去改文档。
+- **发布链四条"看不见当通过"**：tag 身份（`workflow_dispatch` 那条 npm 腿此前从不问"这枚 tag 是谁举起的"，
+  任何持 `contents: write` 的 actor 都能把一枚没被我们的钥匙签过的 tag 派上架）；pack 的 exec 位断言在
+  `tar -tvzf` 列表空或读坏时短路成 PASS 还打 "packs cleanly"；`postinstall` 的 `existsSync` 对悬空符号链接答
+  false，于是 catch 分支**穿过链接写字节并 chmod 链接指向的目标**（父仓 `installer/cli.js` 早修过同一形，
+  这是 npm 通道上漏的那半）；随产品发布的 launcher `findBinary()` 一路向上搜到 `/`，把搜到的任何文件直接
+  `spawn`，`GLASSPANE_HARNESS_BIN_PATH` / `OPENCODE_BIN_PATH` 对字节不作任何陈述。每条都有点名能红的固定点
+  （`test/script/tag-identity.test.ts`、`publish-exec-bit.test.ts`、`postinstall-placement-undo.test.ts`、
+  `launcher-install-tree.test.ts`，共 34 条用例），且都用真 `gpg`/真 `git`/真 tar 驱动，不是桩。
+- **上游 dev 工具不再能绕过发布闸**：`script/github/close-issues.ts`、`close-prs.ts`。
+- **TUI 的拒绝标记**按稳定标识匹配（`tool-denial.ts` + `routes/session/index.tsx`），一次拒绝在两处渲染成
+  两种文案的那个口子关上；配 `tool-denial-marker-stability.test.tsx`。
+- **`bun.lock` 是真重解析而不是改字段**：`glob` 13.0.5→14.0.2 的地板抬上去之后，冻结安装此前恒红
+  （`lockfile had changes`，rc=1），而 `ci.yml:55` 与父仓 `harness-rulers` 那一步跑的正是这条命令——
+  这就是那 12 笔提交带着"CI 转不了绿"的原因。现在 `bun install --frozen-lockfile` 实测 rc=0（"no changes"）。
+- **本轮主代理自己审出并修掉四处**：① `test/tool/glasspane-daily-20261104.test.ts` 的 `list:` 被
+  `as unknown as` 罩住，真实类型是 `Effect<Effect<Hooks[]>>` 且 `args` 写的是 JSON Schema 形状——
+  `bun test` 不做类型检查所以它 5 条全绿而 `bun run typecheck` 恒红（rc=2），也就是说这个包的构建
+  红绿灯一直是坏的而测试套件看不出来；② `tag-identity` 的 `afterAll` 只删 keyring，`gp-tagid-repo-*`
+  （bare 仓 + 工作树 + 带导出公钥的假 installer）每跑一次留一份，本机实测积了 4 份，现在两个都删且
+  `expect(existsSync(...)).toBe(false)`——清理失败就具名变红；③ 同文件两处 `spawnSync` 没有上限，负载下
+  124s 之后报的是一条 `(unnamed)`，说不出哪一步挂了，各加 60s；④ 补丁在 `glasspane-compaction.ts` 与其
+  测试文件尾部留下多余空行（`}\n\n\n`），这两个文件的字节由金样钉着，规整为 `}\n`。
+
+读数：`bun test` 十文件 **269 条 / 0 失败**；TUI 两文件 **40 条 / 0 失败**；`typecheck` 四包各 rc=0；
+`kernel-pin` rc=0（`iterate-kernel@0.1.10` + 26 个契约文件）；`kernel-conformance` 16/16；
+`surface-semantics` 0 命中 / 23 文件；`hook-liveness` 21 钩子无漂移、bound 2/2；`publish.ts --dry-run` rc=0。
+
 ## [0.14.2] — 2026-11-03
 
 **版本判断：patch。** 本版是两条在产依赖的安全升级加一批"文档/闸说的和自己做的不一致"的修复：
