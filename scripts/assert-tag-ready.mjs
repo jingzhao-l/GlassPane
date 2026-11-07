@@ -32,6 +32,7 @@ import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 import { judgeCiGreen } from './assert-ci-green.mjs'
+import { LOCKFILES, SITES, expectedFor } from './version-sites.mjs'
 
 export const WORKFLOW_DEFAULT = 'ci.yml'
 
@@ -87,7 +88,7 @@ export function runsForSha(payload, sha) {
  * @param {{version: string, headSha: string, originMainSha: string, existingTags: string[],
  *          ciPayload: {workflow_runs?: object[]}|null, workflow?: string}} facts
  */
-export function judgeTagReady({ version, headSha, originMainSha, existingTags = [], ciPayload, workflow = WORKFLOW_DEFAULT }) {
+export function judgeTagReady({ version, headSha, originMainSha, existingTags = [], ciPayload, workflow = WORKFLOW_DEFAULT, siteDrift = [] }) {
   const want = `v${version}`
   if (!tagShapeOk(version)) {
     return { ok: false, reason: `版本号形状不是 X.Y.Z：${JSON.stringify(version)}。tag 名由它拼出来，形状不对就连"发的是哪一版"都说不清。` }
@@ -116,6 +117,18 @@ export function judgeTagReady({ version, headSha, originMainSha, existingTags = 
         + 'registry 与 Release 的字节就没有任何一条 CI 运行为它背书；先推 main，或在 main 上重新走一遍。',
     }
   }
+  // 版本号必须在那枚 commit 的字节里成立，不是在工作树里。`set-version` 之后漏 add 一枚位点，
+  // 本机 check-version 仍会绿（它读工作树），而 tag 一旦打下去，registry 与 Release 钉的就是那枚
+  // 少了一位的树。判据取自 commit：见 `committedSiteDrift` 头上那段。
+  if (siteDrift.length > 0) {
+    return {
+      ok: false,
+      reason: `v${version} 的那枚 commit 里，版本线位点不自洽（共 ${siteDrift.length} 处）：\n`
+        + siteDrift.map((line) => `      · ${line}`).join('\n')
+        + `\n——这一枚不能被签成 tag：发布物与主干的版本号必须由 commit 自己证明，不能由工作树证明。`,
+    }
+  }
+
   const scopedRuns = runsForSha(ciPayload, headSha)
   const dropped = (Array.isArray(ciPayload?.workflow_runs) ? ciPayload.workflow_runs : []).length - scopedRuns.length
   const ci = judgeCiGreen({ workflow_runs: scopedRuns }, { workflow, sha: headSha })
@@ -165,6 +178,62 @@ export function remoteMainSha(cwd) {
   return sha
 }
 
+/**
+ * 位点值取自**被 tag 的那枚 commit 的字节**，不取自工作树。
+ *
+ * 为什么需要它（2026-11-07 本机实测的自伤）：`set-version 1.31.1` 改了 15 份文件，而发布提交只
+ * `git add` 了 14 份——被推上去的那枚 commit 里 `installer/cli.js` 的 `RELEASE_VERSION` 还是
+ * `1.31.0`。`check-version.mjs` 本机照样回"OK（1.31.1）"，因为它量的是工作树；CI 量的是那枚
+ * commit，于是三条 job 红。版本号一旦被签成 tag，"发布物 == 主干 == 位点表"这三件事就只能靠
+ * commit 自己的字节来证——所以这道闸在放行 tag 之前，逐枚位点去读 HEAD 的那一份。
+ *
+ * `textOf` 是接缝：测试把"从 commit 读"注入进来，判定本体保持纯函数。
+ */
+export function committedSiteDrift(version, textOf) {
+  const drift = []
+  for (const site of SITES) {
+    const text = textOf(site.file)
+    const want = expectedFor(site, version)
+    if (text === null || text === undefined) {
+      drift.push(`${site.file}：被 tag 的那枚 commit 里读不到这份文件（位点在表上而树上没有）`)
+      continue
+    }
+    if (want === null) {
+      drift.push(`${site.file}：版本 ${version} 取不出 major.minor 段，而这一位记的就是段——不猜`)
+      continue
+    }
+    const flags = site.regex.flags.includes('g') ? site.regex.flags : `${site.regex.flags}g`
+    const hits = [...text.matchAll(new RegExp(site.regex.source, flags))]
+    if (hits.length !== 1) {
+      drift.push(`${site.file}：位点正则在那枚 commit 的字节里命中 ${hits.length} 次（应为 1 次）`)
+      continue
+    }
+    if (hits[0][2] !== want) {
+      drift.push(`${site.file}：commit 里是 ${hits[0][2]}，本版要发的是 ${want}`)
+    }
+  }
+  for (const lock of LOCKFILES) {
+    const text = textOf(lock.file)
+    if (text === null || text === undefined) {
+      drift.push(`${lock.file}：被 tag 的那枚 commit 里读不到这份 lock`)
+      continue
+    }
+    let data
+    try { data = JSON.parse(text) } catch {
+      drift.push(`${lock.file}：commit 里的那一份不是合法 JSON，版本无从判断`)
+      continue
+    }
+    for (const key of lock.keys) {
+      const entry = data.packages?.[key]
+      if (!entry || entry.link || !entry.version) continue
+      if (entry.version !== version) {
+        drift.push(`${lock.file} packages[${JSON.stringify(key === '' ? '(root)' : key)}]：commit 里是 ${entry.version}，本版是 ${version}`)
+      }
+    }
+  }
+  return drift
+}
+
 export function main(argv, { cwd = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'), readTip = remoteMainSha } = {}) {
   const version = argv[0]
   if (!version) {
@@ -200,7 +269,11 @@ export function main(argv, { cwd = path.resolve(path.dirname(fileURLToPath(impor
         { cwd, encoding: 'utf8' })
       ciPayload = JSON.parse(json)
     }
-    facts = { version, headSha, originMainSha, existingTags: [...new Set([...localTags, ...remoteTags])], ciPayload, workflow }
+    const committedText = (file) => {
+      try { return git(['show', `HEAD:${file}`], cwd) } catch { return null }
+    }
+    const siteDrift = committedSiteDrift(version, committedText)
+    facts = { version, headSha, originMainSha, existingTags: [...new Set([...localTags, ...remoteTags])], ciPayload, workflow, siteDrift }
   } catch (error) {
     process.stderr.write(`assert-tag-ready: 问不到必要的事实（${error?.message ?? String(error)}）——"读不到"不是"可以打"，判 2。\n`)
     return 2
