@@ -93,7 +93,7 @@ function runMainInProcess({ cwd, stub, argv }) {
   process.stderr.write = (chunk) => { err.push(String(chunk)); return true }
   let rc = -1
   try {
-    rc = main(argv, { cwd })
+    rc = main(argv, { cwd, siteDrift: [] })
   } finally {
     process.stdout.write = realOut
     process.stderr.write = realErr

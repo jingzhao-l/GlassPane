@@ -98,6 +98,61 @@ test('四种漂移各自点名，且干净的一份字节不报任何东西', ()
   assert.deepEqual(committedSiteDrift(version, real), [], '干净的一份字节不该报任何东西')
 })
 
+test('接线：main() 真的把 commit 的位点读进判定——其它两档都放行时它仍拒绝', async () => {
+  // 这一条是本轮的"修在跑不到的路径上"对照：把 `facts` 里的 siteDrift 摘掉，上面三条**全都还绿**
+  // （实测过），也就是说闸本体活着而没人调用它。这里让 tip 那一档与 CI 那一档都成立，
+  // 唯一不成立的是位点，于是拒绝必须来自位点那一档。
+  const { execFileSync: ex } = await import('node:child_process')
+  const fsp = await import('node:fs/promises')
+  const os = await import('node:os')
+  const { main } = await import('../../scripts/assert-tag-ready.mjs')
+  const root = await fsp.mkdtemp(path.join(await fsp.realpath(os.tmpdir()), 'gp-site-wiring-'))
+  const savedPath = process.env.PATH
+  const savedSha = process.env.GP_STUB_SHA
+  const out = []
+  const err = []
+  const realOut = process.stdout.write.bind(process.stdout)
+  const realErr = process.stderr.write.bind(process.stderr)
+  try {
+    const g = (...a) => ex('git', a, { cwd: root, encoding: 'utf8' })
+    ex('git', ['init', '-q', root])
+    await fsp.writeFile(path.join(root, 'README.txt'), 'tree\n')
+    g('add', '-A')
+    g('-c', 'user.email=t@t.test', '-c', 'user.name=t', 'commit', '-q', '-m', 'tree')
+    const sha = g('rev-parse', 'HEAD').trim()
+    // 桩 gh：tag 不存在、CI 在这枚 sha 上是 push 通道的 success ⇒ 只剩位点拦得住。
+    const bin = path.join(root, 'bin')
+    await fsp.mkdir(bin, { recursive: true })
+    await fsp.writeFile(path.join(bin, 'gh'), `#!/bin/sh
+case "$2" in
+  *matching-refs/tags/*) printf '' ;;
+  */runs*) printf '{"workflow_runs":[{"id":1,"head_sha":"%s","event":"push","status":"completed","conclusion":"success","created_at":"2026-11-07T00:00:00Z","html_url":"https://x/1"}]}\n' "$GP_STUB_SHA" ;;
+  *) printf '' ;;
+esac
+`, { mode: 0o755 })
+    process.env.PATH = `${bin}${path.delimiter}${savedPath}`
+    process.env.GP_STUB_SHA = sha
+    process.stdout.write = (c) => { out.push(String(c)); return true }
+    process.stderr.write = (c) => { err.push(String(c)); return true }
+    let rc = -1
+    try {
+      rc = main(['9.9.9', '--repository', 'o/r'], { cwd: root, readTip: () => sha })
+    } finally {
+      process.stdout.write = realOut
+      process.stderr.write = realErr
+    }
+    const text = out.join('') + err.join('')
+    assert.equal(rc, 1, `那枚 commit 里根本没有位点表，main 必须拒绝：rc=${rc}｜${text.slice(0, 220)}`)
+    assert.match(text, /位点不自洽/, `拒绝必须来自位点那一档，不是 tip 也不是 CI：${text.slice(0, 260)}`)
+    assert.doesNotMatch(text, /不是 origin\/main|不是绿的/, `理由串档了：${text.slice(0, 260)}`)
+  } finally {
+    process.env.PATH = savedPath
+    if (savedSha === undefined) delete process.env.GP_STUB_SHA
+    else process.env.GP_STUB_SHA = savedSha
+    await fsp.rm(root, { recursive: true, force: true })
+  }
+})
+
 test('判定侧：漂移存在就不放行 tag，理由里带着那几行', () => {
   const sha = 'a'.repeat(40)
   const base = { version: '9.9.9', headSha: sha, originMainSha: sha, existingTags: [], ciPayload: { workflow_runs: [] } }

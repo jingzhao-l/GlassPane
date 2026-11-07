@@ -234,7 +234,7 @@ export function committedSiteDrift(version, textOf) {
   return drift
 }
 
-export function main(argv, { cwd = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'), readTip = remoteMainSha } = {}) {
+export function main(argv, { cwd = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'), readTip = remoteMainSha, siteDrift: siteDriftIn = undefined } = {}) {
   const version = argv[0]
   if (!version) {
     process.stderr.write('usage: node scripts/assert-tag-ready.mjs <X.Y.Z> [--repository owner/name] [--workflow ci.yml]\n')
@@ -269,10 +269,12 @@ export function main(argv, { cwd = path.resolve(path.dirname(fileURLToPath(impor
         { cwd, encoding: 'utf8' })
       ciPayload = JSON.parse(json)
     }
-    const committedText = (file) => {
+    // 位点取自被 tag 的那枚 commit。`siteDrift` 这一枚接缝只给"专测 tip 那一档"的临时夹具用
+    // （那棵树里没有本仓的位点表）：两档判据各测各的，不许互相顶包——真树的自证走默认那一条，
+    // 见 updater/test/daily-20261107-tag-commit-sites.test.mjs。
+    const siteDrift = siteDriftIn ?? committedSiteDrift(version, (file) => {
       try { return git(['show', `HEAD:${file}`], cwd) } catch { return null }
-    }
-    const siteDrift = committedSiteDrift(version, committedText)
+    })
     facts = { version, headSha, originMainSha, existingTags: [...new Set([...localTags, ...remoteTags])], ciPayload, workflow, siteDrift }
   } catch (error) {
     process.stderr.write(`assert-tag-ready: 问不到必要的事实（${error?.message ?? String(error)}）——"读不到"不是"可以打"，判 2。\n`)

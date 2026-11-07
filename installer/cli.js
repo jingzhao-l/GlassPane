@@ -1845,7 +1845,7 @@ export function tagVerifyDecision({ sig, pinRef, repoDir, acceptUnverified = fal
 
 /** 仓库里是否存在指定 tag ref（IO 探测，纯判定）。 */
 export function repoHasRef(repoDir, ref, { spawn = spawnSync } = {}) {
-  return spawn('git', ['-C', repoDir, 'rev-parse', '--verify', `refs/tags/${ref}`], { stdio: 'ignore' }).status === 0
+  return spawn('git', ['-C', repoDir, 'rev-parse', '--verify', `refs/tags/${ref}`], { stdio: 'ignore', env: gitLocalePinnedEnv() }).status === 0
 }
 
 /**
@@ -1857,12 +1857,12 @@ export function repoHasRef(repoDir, ref, { spawn = spawnSync } = {}) {
  * 签名与产物之间这层对应关系一旦断，绿字就成了对没签过的字节作保。
  */
 export function tagTreeAgreement({ repoDir, ref, spawn = spawnSync } = {}) {
-  const head = spawn('git', ['-C', repoDir, 'rev-parse', '--verify', 'HEAD'], { encoding: 'utf8' })
-  const tagged = spawn('git', ['-C', repoDir, 'rev-parse', '--verify', `${ref}^{commit}`], { encoding: 'utf8' })
+  const head = spawn('git', ['-C', repoDir, 'rev-parse', '--verify', 'HEAD'], { encoding: 'utf8', env: gitLocalePinnedEnv() })
+  const tagged = spawn('git', ['-C', repoDir, 'rev-parse', '--verify', `${ref}^{commit}`], { encoding: 'utf8', env: gitLocalePinnedEnv() })
   if (head.status !== 0 || tagged.status !== 0) {
     return { ok: false, same: false, changed: null, head: null, tagCommit: null }
   }
-  const work = spawn('git', ['-C', repoDir, 'status', '--porcelain'], { encoding: 'utf8' })
+  const work = spawn('git', ['-C', repoDir, 'status', '--porcelain'], { encoding: 'utf8', env: gitLocalePinnedEnv() })
   const changed = String(work.stdout ?? '').split('\n').filter((line) => line !== '').length
   const headSha = String(head.stdout ?? '').trim()
   const tagSha = String(tagged.stdout ?? '').trim()
@@ -3090,7 +3090,7 @@ function canonicalPath(p) {
 
 /** 问一次「这一带最近的仓库根在哪」，把答案作为数据交回去（不判定）。 */
 export function readRepoToplevel({ dir, spawn = spawnSync } = {}) {
-  const res = spawn('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' })
+  const res = spawn('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', env: gitLocalePinnedEnv() })
   const answer = String(res?.stdout ?? '').trim()
   if (res?.status !== 0 || answer === '') {
     return { read: false, toplevel: null }
