@@ -4749,6 +4749,3 @@ owner 2026-09-25："那几个配套产品面还是需要的" + "README 等基础
 | **不删**：`.worktrees/harness-daily-20261104`、`.worktrees/harness-daily-20261105` 与同名两条分支、主树里那 8 条未提交文件 | 保持原状并点名 | 那是本线另两次 10:30 会话的在飞批次。与本轮改动的重叠判断：它们碰 `packages/opencode/src/tool/glasspane/daemon.ts`、`engine/**`、`mcp-shell/**`、`installer/**`、根 `.github/workflows/ci.yml`、`tools/release-signing-gate.sh`——本笔一处都没碰（我只动 `harness/glasspane-harness/**` 与 `harness/tools/{product-surface,release-artifact}.mjs`），所以没有需要替它们收尾的缺陷；他们未提交的东西里若含缺陷，归他们那一轮 |
 | 进程 | 本会话起的后台命令全部退出 | 判据是两次 `pgrep`（不是"我执行过 pkill"）：`pgrep -fl "e2e.sh\|bun install --frozen\|gates.sh\|record.sh\|final.sh"` 起前非空、收口后必须空命中；`bun add -g` 的 postinstall 与 `verify-published` 起的临时前缀进程随命令结束自然退出 |
 | 遗留未追踪件 | 0 | 变异用的 `release-artifact.mjs` 备份、`my-synclog.md`、金样基线 sha 都在 `/var/tmp`，随上面那条一起删；仓库树里没有本会话留下的未追踪文件（`git status --porcelain` 中属于本线的为 0 行） |
-
-
-
