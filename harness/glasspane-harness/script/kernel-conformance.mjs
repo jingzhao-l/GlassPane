@@ -820,6 +820,17 @@ for (const file of files) {
 }
 
 if (golden && mode === "check") {
+  // The golden stamps which kernel produced it, and check mode was not reading
+  // that stamp: `kernel-pin --check` proves the installed bytes are the pinned
+  // bytes, and the digest comparison proves the answers did not move, but nothing
+  // proved that the record a reader is trusting was recorded against *this*
+  // version. A golden left stamped at an older kernel is provenance rot — it makes
+  // the file say the contract was answered by a version nobody has installed.
+  if (golden.kernel?.version !== kernelVersion) {
+    failures.push(
+      `the golden was recorded against iterate-kernel@${golden.kernel?.version ?? "<no stamp>"} while the pin resolves to ${kernelVersion} — re-record so the provenance stamp names the bytes actually compared`
+    )
+  }
   const undriven = readdirSync(fixturesDir).filter((f) => f.endsWith(".json") && !kindOf(f))
   for (const f of undriven) {
     if (f === "manifest.json") continue
