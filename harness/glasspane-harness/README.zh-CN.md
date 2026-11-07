@@ -93,7 +93,7 @@ SDK 与 plugin API。为了塞下内核，没有任何功能被砍掉。
 fork-diff vs v1.18.32: 4630/6765 byte-identical, 294 edited, 133 added, 1708 deleted
 ```
 
-上游发来的 6,765 个文件里 4,630 个仍逐字节保持上游原样。改动（294 个）集中在 config/paths/品牌、
+上游发来的 6,632 个文件里 4,630 个仍逐字节保持上游原样。改动（294 个）集中在 config/paths/品牌、
 `gp_*` 工具面、内核绑定、压缩钩子和打包脚本；删掉的是上游**自己的**发布管道（ghcr 镜像、AUR、
 Homebrew tap、托管 console 账号）——外加 0.4.0 里下面说的第一方账号面。
 

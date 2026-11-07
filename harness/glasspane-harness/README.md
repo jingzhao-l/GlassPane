@@ -104,7 +104,7 @@ recorded 2026-11-07:
 fork-diff vs v1.18.32: 4630/6765 byte-identical, 294 edited, 133 added, 1708 deleted
 ```
 
-Most of what upstream ships is still byte-for-byte upstream — 4,630 of its 6,765 files. The
+Most of what upstream ships is still byte-for-byte upstream — 4,630 of its 6,632 files. The
 294 edits are concentrated in config/paths/branding, the `gp_*` tool surface, the kernel
 binding, the compaction hook, and the packaging scripts. The deleted files are upstream's own
 publish plumbing for channels this product does not use (ghcr images, AUR, a Homebrew tap, a

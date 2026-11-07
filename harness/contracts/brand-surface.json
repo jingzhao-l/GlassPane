@@ -1,5 +1,5 @@
 {
-  "observedAt": "2026-11-04",
+  "observedAt": "2026-11-07",
   "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
   "rules": [
     {
@@ -43,7 +43,34 @@
       "why": "an upstream tree this product deleted must not be referenced again"
     }
   ],
-  "productFiles": 26,
+  "productFiles": [
+    "product.json",
+    "packages/opencode/package.json",
+    "packages/opencode/bin/glasspane-harness",
+    "packages/opencode/script/build.ts",
+    "packages/opencode/script/publish.ts",
+    "packages/opencode/script/postinstall.mjs",
+    "scripts/install.sh",
+    "packages/core/src/global.ts",
+    "packages/opencode/src/installation/index.ts",
+    "packages/opencode/src/server/auth.ts",
+    "packages/opencode/src/server/mdns.ts",
+    "packages/opencode/src/cli/cmd/upgrade.ts",
+    "packages/opencode/src/cli/cmd/uninstall.ts",
+    "packages/opencode/src/cli/cmd/serve.ts",
+    "packages/opencode/src/cli/cmd/tui.ts",
+    "packages/opencode/src/cli/cmd/attach.ts",
+    "packages/opencode/src/cli/cmd/run.ts",
+    "packages/opencode/src/cli/cmd/pr.ts",
+    "packages/opencode/src/cli/cmd/providers.ts",
+    "packages/opencode/src/cli/cmd/web.ts",
+    "packages/opencode/src/cli/cmd/debug/index.ts",
+    "packages/tui/src/context/theme.tsx",
+    "packages/tui/src/context/editor.ts",
+    "packages/tui/src/routes/session/index.tsx",
+    "packages/tui/src/util/presentation.ts",
+    "packages/tui/src/component/dialog-provider.tsx"
+  ],
   "docFiles": [
     "README.md",
     "README.zh-CN.md"
@@ -53,10 +80,10 @@
     "packages/core/src/plugin/skill/customize-harness.md"
   ],
   "lineage": {
-    "occurrences": 9637,
-    "filesScanned": 3341
+    "occurrences": 9647,
+    "filesScanned": 3348
   },
   "shippedFiles": 1323,
   "shippedSrc": 5,
-  "lineageNote": "2026-11-03: 9632 -> 9638 (+6 over 8 files)，增量全部落在本轮新增的拒绝型测试语料里（postinstall 的祖先目录/NODE_PATH 劫持夹具、upstream-dev-mutators 的旁路脚本、models-and-keys 的分享通道宣称、tree-anchor / assert-ci-green / workflow-gates / cli-copy 的夹具与注释）——它们点名上游名是为了证明自己的判据能拒； shipped 产品字节未变，血缘只许减不许增的棘轮在这里由归属说明承担。"
+  "lineageNote": "2026-11-07: 9637 -> 9647 (+10 over 7 files). 落点：拒绝型测试语料点名它要拒的上游名（launcher-install-tree +2、tool-denial-marker-stability +3）；一处随产品发布的字节 packages/opencode/bin/glasspane-harness(+1) 必须继续读 OPENCODE_BIN_PATH，只认自家名字就等于对\"上一个名字仍生效\"作无陈述；文档/台账/CI 文本 docs/release.md(+5)、SYNCLOG.md(+3)、CHANGELOG.md(+1)、release.yml(+1)、raw-changelog.ts(+1) 在说该边界被摘掉；bun.lock(-2) 在减少那一侧。逐文件量法：对 3923264d 与 HEAD 各跑 grep -oiE opencode 取差（我这个口径数到 +15，尺子口径 +10，两个都记）。hits 仍 0，26 product + 2 doc 未变。"
 }
