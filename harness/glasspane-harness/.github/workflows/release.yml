@@ -850,8 +850,8 @@ jobs:
 
       - name: The tagged tree must be the tree trunk vouches for
         # The version number in `product.json` and the ref name agreed above are both *self*-consistent:
-        # they say "this checkout is what v0.14.3 points at". Nothing in the dispatch chain asked the
-        # other question — does v0.14.3's tree equal trunk's `harness/glasspane-harness` subtree, or is
+        # they say "this checkout is what v0.14.4 points at". Nothing in the dispatch chain asked the
+        # other question — does v0.14.4's tree equal trunk's `harness/glasspane-harness` subtree, or is
         # it a tag raised off some branch that carries a different product? `v0.13.0` is the shape this
         # gap produces: half a release, with each lane internally consistent and no lane asking across.
         # This is the same `script/tree-anchor.mjs` the push chain runs (with the same one measured

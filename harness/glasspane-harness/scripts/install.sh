@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # glasspane-harness one-click installer
 #
-#   curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.14.3/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.14.4/scripts/install.sh | bash
 #   bash scripts/install.sh                 # install (npm first, GitHub release asset as fallback)
 #   bash scripts/install.sh --dry-run       # print the plan, touch nothing
 #   bash scripts/install.sh --version 0.1.0 # pin a version
@@ -77,7 +77,7 @@ pin_installer_url() {
 # The immutable anchor for a command that re-runs THIS script.
 #
 # `pin_installer_url` names the installer by its tag, and a tag is only as immutable as whoever can
-# `git tag -f` it: re-pointing `v0.14.3` swaps the verifier AND the signing key embedded in it, so a
+# `git tag -f` it: re-pointing `v0.14.4` swaps the verifier AND the signing key embedded in it, so a
 # tag URL is the right ENTRY coordinate (product.json's `install.curl` and the `installer-curl-pinned`
 # gate both require it) but it is not an immutable one, and prose in the release lane that "a tag that
 # shipped never moves" is a habit, not a machine. When this script prints a command to fetch itself

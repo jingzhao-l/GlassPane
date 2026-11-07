@@ -12,7 +12,17 @@ contract does not).
 
 （空。本轮收口后没有未归号的条目。）
 
-## [0.14.3] — 2026-11-07
+## [0.14.4] — 2026-11-07
+
+**0.14.3 是一枚有解释的空号。** 它的签名 tag 已打、已推到搬运仓（`v0.14.3` → `d22fde46`，`git verify-tag`
+报完好的签名），而那棵树上 CI 是红的：`script/tag-identity.sh` 在 2026-11-06 把 tag 身份那段判定从
+`release.yml` 的内联 bash 抽成文件，好让 npm 那条链也跑得到同一条实现，而 `test/script/workflow-gates.test.ts`
+的 `tagIdentityBody()` 还在按 step 标题切那段已经搬走的文本——四条断言因此对着"实现不在这儿"打红
+（本机按 CI 自己 `patterns=(...)` 反推的 35 文件复跑：518 跑 4 红，与 CI 逐条同名同数，是确定性红不是环境红）。
+红在 `install, typecheck, fixed points` 那一格之后，GitHub 的 fail-fast 把同矩阵里那格 `macos-14` 取消掉——
+这才是上一轮"三次 cancelled、没有日志"的真机制，不是执行位稀缺。于是 `create-release`、两条 binaries、
+npm 三条 job 全部 skipped，没有任何字节上架。本仓规矩是已发布的 tag 绝不移动（推出去的签名 tag 也是锚点），
+所以这一格用让号收：本版取 0.14.4，`v0.14.3` 留在 tag 空间里带着这段说明。
 
 **版本判断：patch。** 产品面、CLI 形状、`product.json` 的目标矩阵、`gp_*` 方法表一字未动；本版全部是
 "发布链与工具面在自己看不见的时候答了通过"这一族的修复，加两条在产依赖的锁重解析。判据按本文件口径写在条目开头。

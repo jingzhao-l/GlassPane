@@ -580,9 +580,16 @@ describe("the release goes public only behind an installer-shaped verification",
     // the job shot itself, and the release stayed a draft. Key material now lives in a `mktemp -d` of
     // its own, and the scan set is untouched — this test pins both halves.
     const text = await Bun.file(path.join(REAL_ROOT, ".github/workflows/release.yml")).text()
-    expect(text.match(/> "\$keys\/signer\.asc"/g)?.length).toBe(2)
+    // Two implementation sites since the tag-identity extraction: the workflow's own flip step and
+    // `script/tag-identity.sh`. Counting only the workflow read 2 → 1 and would have called a move a
+    // loss; counting only the total would miss a site that regressed. Both numbers are pinned here.
+    const identity = await Bun.file(path.join(REAL_ROOT, "script/tag-identity.sh")).text()
+    expect((text.match(/> "\$keys\/signer\.asc"/g) ?? []).length).toBe(1)
+    expect((identity.match(/> "\$keys\/signer\.asc"/g) ?? []).length).toBe(1)
     expect(text).not.toMatch(/> signer\.asc$/)
-    expect(text.match(/import < "\$keys\/signer\.asc"/g)?.length).toBe(2)
+    expect(identity).not.toMatch(/> signer\.asc$/)
+    expect((text.match(/import < "\$keys\/signer\.asc"/g) ?? []).length).toBe(1)
+    expect((identity.match(/import < "\$keys\/signer\.asc"/g) ?? []).length).toBe(1)
     // The orphan scan itself must stay two-directional — a fix that quiets the scan is worse than the bug.
     const job = await publishReleaseJob()
     expect(job).toContain('for f in ./*.asc; do')
@@ -674,15 +681,23 @@ describe("the tree anchor is a measured judgement, not an inline equality", () =
  * `VALIDSIG` status line's first field is what `scripts/install.sh` pins.
  */
 describe("a tag this lane cannot attribute is not this product's tag", () => {
+  // The judgement moved out of the workflow's inline bash into `script/tag-identity.sh` on 2026-11-06,
+  // precisely so the npm chain could run the same code the push chain ran. Measuring the step body
+  // therefore measures `bash script/tag-identity.sh` and every assertion below would go red for a
+  // refactor that made the guarantee STRONGER — so this reads the implementation now, and the test
+  // after it holds the workflow to the extraction: the file must be there, and both chains must call it.
   async function tagIdentityBody(): Promise<string> {
-    const text = await Bun.file(path.join(REAL_ROOT, ".github/workflows/release.yml")).text()
-    const start = text.indexOf("      - name: The tag itself must be a signed tag made by the key the installer names")
-    expect(start).toBeGreaterThan(-1)
-    // This is the last step of its job, so the slice has to stop at the next job header too — otherwise
-    // it swallows `create-release` and every count below measures somebody else's bytes.
-    const ends = [text.indexOf("\n      - name: ", start + 10), text.indexOf("\n  create-release:", start)].filter((i) => i > start)
-    return text.slice(start, Math.min(...ends))
+    return Bun.file(path.join(REAL_ROOT, "script/tag-identity.sh")).text()
   }
+
+  test("the workflow delegates to that file, and the delegation is wired into both chains", async () => {
+    const text = await Bun.file(path.join(REAL_ROOT, ".github/workflows/release.yml")).text()
+    const calls = text.match(/^\s+bash script\/tag-identity\.sh$/gm) ?? []
+    // One call would mean one chain still asks WHO raised the ref; the whole point of the extraction
+    // was that `publish-gate` (workflow_dispatch, the npm half) asks too.
+    expect(calls.length).toBeGreaterThanOrEqual(2)
+    expect(text).toContain("bash script/tag-identity.sh")
+  })
 
   test("the key and the fingerprint are read from the installer, never hardcoded here", async () => {
     const body = await tagIdentityBody()
@@ -695,7 +710,7 @@ describe("a tag this lane cannot attribute is not this product's tag", () => {
   test("lightweight, unsigned and unverifiable each stop the lane, and only the pinned key passes", async () => {
     const body = await tagIdentityBody()
     expect(body).toContain('[ "$OBJECT_TYPE" != "tag" ]')
-    expect(body).toContain("[ ! -s tag.sig ]")
+    expect(body).toContain('[ ! -s "$work/tag.sig" ]')
     expect(body).toContain("GOODSIG")
     expect(body).toContain("VALIDSIG")
     // Each refusal is an exit, not a warning: a gate whose "refuse" branch falls through is a log line.
