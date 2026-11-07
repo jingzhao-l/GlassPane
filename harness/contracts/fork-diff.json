@@ -3809,7 +3809,7 @@
     },
     {
       "file": "contracts/kernel-conformance.json",
-      "forkHash": "9cd80f0949259575e90ffb245f1a8e134a4306fa"
+      "forkHash": "65616da79911a521f82a0a72baab025cce4f2de3"
     },
     {
       "file": "contracts/kernel-pin.json",
@@ -4129,7 +4129,7 @@
     },
     {
       "file": "script/kernel-conformance.mjs",
-      "forkHash": "e52030cd8cbc9784d41d1f13748b2a241f4b4cc1"
+      "forkHash": "d49d5389b142ba3ebeea32ec17740c81256dbb44"
     },
     {
       "file": "script/kernel-pin.mjs",
