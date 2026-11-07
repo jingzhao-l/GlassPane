@@ -60,6 +60,47 @@ CI 量的是那枚 commit，于是 version line、root workspace gate（两条�
 恢复源拿的是修补**前**的快照，install.sh 的 locale 钉因此被抹掉，靠"恢复后再跑一次具名用例"
 （45/45 之前先出现 2/3 红）才发现。
 
+### 3. 上面那道闸自己"修在跑不到的路径上"（P2）
+
+第 2 节那道 `committedSiteDrift` 写完之后，把 `facts` 里的 `siteDrift` 整个摘掉——`main()` 不再
+调用它，而当时 7 条用例**全绿**。这正是本仓反复记过账的形状：判据在文件里，接线没人管。
+补了一条按行为倒的接线对照：临时仓库里 tip 与 CI 两档都成立、只有位点档不成立（HEAD 里没有位点表），
+`main()` 必须以"位点不自洽"拒绝。测试：`updater/test/daily-20261107-tag-commit-sites.test.mjs`
+第 4 条「接线：main() 真的把 commit 的位点读进判定——其它两档都放行时它仍拒绝」。
+反向破坏：再次摘掉接线 ⇒ 这条具名红（4 pass / 1 fail），恢复 5/5 复绿。
+
+### 4. locale 那条钉只钉了两趟 git，另有 5 趟没钉＝半修（P2）
+
+第 1 节的修法落在 `readCloneFacts` / `advanceExistingClone` 两趟上；`installer/cli.js` 里另有
+`rev-parse --show-toplevel`、两处 `rev-parse --verify`、`status --porcelain` 与那趟 tag 探测
+仍然不钉。同一枚判据、两个答案，取决于调用方走到哪一支——就是本仓定义的"改了 A 面而 B 面还指着
+旧行为"。7 趟全部走同一枚 `gitLocalePinnedEnv()`（`verifyEnv` 也从它取）。
+测试：`installer/test/daily-20261107-git-locale-pinned.test.mjs` 的
+「结构：cli.js 里每一趟 git spawn 都带着钉过的环境」——清单由源码扫出来（不点名行号），
+下限 ≥8 趟。**这条结构腿自己就是把 5 处抓出来的过程**：第一版直接报
+`这趟 git 没收到 LC_ALL=C：{"args":["-C","/tmp/whatever","rev-parse","--show-toplevel"]}`。
+
+### 5. 第 1 节的测试在 CI 上不可判，拆成两腿（P2）
+
+①行为腿要求"本机 git 会说中文"，英文 runner 上那条反空转对照按设计红（CI `not ok 219`）；
+②`install.sh` 的 clone 支在非 macOS 上根本走不到（平台闸排在动树之前，CI `not ok 221`）。
+改成：结构腿（扫源码 + 记录型假 spawn 接住 options）任何机器都跑；行为腿在造不出另一语言或非
+darwin 时**具名 skip 并写明缺什么、补它的那条命令**（先例是 #29 的"按平台问哪一支该跑"）。
+`install.sh` 侧那条「每一趟真 clone 都带钉，且 clone 执行点总数就是那个数」把
+`pinned.length == executing.length` 钉死——这条在英文 runner 上也红，所以判据没有因为拆腿而变松。
+本机 54/54（0 skipped，中文可用）。
+
+### 6. 一条"什么都没测就不许算通过"的守卫，自己只在负载下红（P2）
+
+`testConcurrentStoreAndReadNeverTearsTheCore` 末尾那两把反空转对照（`observed` 与 `readIds` 不许
+为空）在 load 20+ 的机器上红：120 次 act 的在途窗口只有几微秒，读者线程抢不到，`readIds` 就空。
+产品没撕引用，是这条计时断言成了它自己要抓的那个坏对照形状。按既定纪律**改窗口，不改判据，
+也不加超时**：`ScriptedChannel.onPerformAction` 在 act 在途期间持住 2ms（用的正是
+`testStoredCoreIsTheOneTheWaiterReads` 本来就在读的同一枚接缝），三条不变量一字未动。
+读数：`vm.loadavg` 22.57 下 `--filter DailyRound20261030Swift1ShutdownWaiterRaceTests` 连跑两次各 6 tests / 0 failures。
+反向破坏：`DaemonCoreHolder.inFlightOperationId()` 短路成恒 nil ⇒ 2 条具名红（:119 与 :198 那一格）；
+`/bin/cp` 恢复后 `diff -q` 无输出。
+
 ## [1.31.0] — 2026-11-05
 
 **版本判断：minor。** 判据还是 1.6.2 写下、此后每一号各自复述过的那一条。本版触碰了两条：

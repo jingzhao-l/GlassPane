@@ -1,4 +1,4 @@
-# 每日审查 2026-11-06/11-07（承接 11-05 第二条会话）· 发现台账（发现 10 / 修复 10 / 未修 0）
+# 每日审查 2026-11-06/11-07（承接 11-05 第二条会话）· 发现台账（发现 11 / 修复 11 / 未修 0）
 
 > 真源提示词：`tools/prompts/daily-glasspane-main.md`。范围＝主仓产品面；`harness/` 不审查不修改
 > （10:30 那条线），例外只有 `tool-surface.mjs --record` 这一次基线补记（见第 4 节决定 3）。
@@ -19,7 +19,7 @@
   （`ce3b16a2`/`ff617f9f`/`f9d458ab`）在远端 main 上；判据是 `git rebase` 的 skip 与
   `git log origin/main..main` 只剩 4 笔，不是提交信息。
 
-## 1. 本轮发现 → 修复 → 具名测试（10 条；#1-#5 随 1.31.0 发出，#6-#10 随 1.31.1 发出）
+## 1. 本轮发现 → 修复 → 具名测试（11 条；#1-#5 随 1.31.0 发出，#6-#11 随 1.31.1 发出）
 
 | # | 发现（触发输入 → 错误行为） | 修在哪 | 具名测试 | 反向破坏 |
 |---|---|---|---|---|
@@ -33,6 +33,7 @@
 | 8 | **#7 那道闸自己"修在跑不到的路径上"**：接线测试缺失——把 `facts` 里的 `siteDrift` 整个摘掉，`main()` 不再调用它，而当时 7 条用例全绿 | 加一条按行为倒的接线对照：临时仓库里 tip 与 CI 两档都成立、只有位点档不成立（HEAD 里没有位点表），`main()` 必须以"位点不自洽"拒绝 | 同上第 4 条「接线：main() 真的把 commit 的位点读进判定——其它两档都放行时它仍拒绝」 | 实测：再次摘掉接线 ⇒ 这条具名红（4 pass / 1 fail）；恢复 5/5 复绿。这条就是它自己存在的理由 |
 | 9 | #6 的钉只覆盖了两趟 git spawn，`installer/cli.js` 里另有 **5 趟**（`rev-parse --show-toplevel`、两处 `rev-parse --verify`、`status --porcelain`、tag 探测）仍不钉 locale——半修：A 面钉了，B 面把 stderr 交给操作系统语言 | 5 趟全部走同一枚 `gitLocalePinnedEnv()`（`verifyEnv` 也从它取，一份事实一个出处） | `installer/test/daily-20261107-git-locale-pinned.test.mjs`「结构：cli.js 里每一趟 git spawn 都带着钉过的环境」——清单由源码扫出来（不点名行号），下限 ≥8 趟，`verifyEnv(…)` 作为委托拼写算合法 | 这条对照**自己就是被抓出来的过程**：结构腿第一版直接报 `这趟 git 没收到 LC_ALL=C：{"args":["-C","/tmp/whatever","rev-parse","--show-toplevel"]}`，据此补齐 5 处；把任一处退回不钉 ⇒ 该条点名红 |
 | 10 | 我第一版 #6 的测试在 CI 上不可判：①行为腿要求"本机 git 会说中文"，英文 runner 上那条反空转对照按设计红（CI not ok 219）；②`install.sh` 的 clone 支在非 macOS 上根本走不到（平台闸排在动树之前）⇒ CI not ok 221 | 拆成两腿：结构腿（任何机器都跑，扫源码 + 记录型假 spawn 接住 options）永远可判；行为腿在造不出另一语言/非 darwin 时**具名 skip 并写明缺什么与补它的那条命令**（先例：#29 的"按平台问哪一支该跑"） | 同文件 5 条（2 结构 + 2 行为 + 1 计数下限）；结构腿的安装器侧「每一趟真 clone 都带钉，且 clone 执行点总数就是那个数」把 `pinned == executing` 钉死 | 本机 54/54（0 skipped，中文可用）；CI 那一侧的判据是结构腿必须自己活着——把任一 clone 前的 `LC_ALL=C LANG=C ` 去掉 ⇒ `pinned.length != executing.length` 红 |
+| 11 | 那把"什么都没测就不许算通过"的反空转对照，自己成了它要抓的那个形状：`testConcurrentStoreAndReadNeverTearsTheCore` 末尾两条守卫（`observed` 与 `readIds` 不许为空）在 load 20+ 的机器上红——120 次 act 的在途窗口只有几微秒，读者线程抢不到，`readIds` 就空。产品没撕引用，是这条计时断言**只在负载下才红**（本仓记过账的坏对照形状） | 改窗口，不改判据也不加超时：`ScriptedChannel.onPerformAction` 在 act 在途期间持住 2ms——用的正是 `testStoredCoreIsTheOneTheWaiterReads` 本来就在读的同一枚接缝；三条不变量（读到的是被写进去过的那一个核心／号是真跑过的号／形状完整）一字未动 | `DailyRound20261030Swift1ShutdownWaiterRaceTests` 6 条，`vm.loadavg` 22.57 下连跑两次各 6 tests / 0 failures（本轮开工时同一条在负载下是红的） | 把 `DaemonCoreHolder.inFlightOperationId()` 短路成恒 nil ⇒ **2 条具名红**（`testStoredCoreIsTheOneTheWaiterReads` :119 与这条并发用例 :198 那一格）；`/bin/cp` 恢复后 `diff -q` 无输出 |
 
 ## 2. 判为不成立 / 决定不做的（各附证据）
 
@@ -40,12 +41,17 @@
   残渣形状放宽成"任何像被删过的句子"会误红人话——这道闸的第一版就是这么误红了
   `harness/glasspane-harness/SYNCLOG.md:684` 那句带引号的中文句子（11-01 台账记的）。本轮只补
   可核事实，不为四行注释加一条按形状猜的闸。
-- **(b) 面板六页 AX 走查本轮不重跑，不是省事。** 本轮改的那条命令在面板里唯一的读者是
-  `SettingsModel.swift:799` → `DeveloperToolsCapability.parse`（`PermissionStatus.swift:595-606`），
+- **(b) 面板六页 AX 走查：本轮改为"只走这一张卡"，并且走完了**（先前这里写的是"本轮不重跑"，
+  后来在发布物上做了，结论以实测为准）。字节层面的理由仍然成立——本轮改的那条命令在面板里唯一的
+  读者是 `engine/Sources/glasspane-settings/SettingsModel.swift:799` → `DeveloperToolsCapability.parse`
+  （`engine/Sources/GlassPaneEngine/PermissionStatus.swift:596-606`），
   它要求的四个键（`capability` / `launch.state` / `attach.state` / `granted`）一个没动，本版只
-  **新增**字段；卡片判据 `status`（`PermissionStatus.swift:564-568`）本来就是三档
-  （denied / granted / unverifiable）。也就是说 GUI 那一面早就是对的，本轮补的是 CLI 那一面。
-  补它的那条命令写在 `engine/smoke.md` 本轮那一节的第 4 条。
+  **新增**字段；卡片判据 `status` 吃的三档词表（`PermissionStatus.swift:18-21` 的
+  `granted` / `denied` / `unverifiable`）本来就是三档，#1 只是把 CLI 那一面补齐到同一个词表。
+  但"字节没动"只证明"不会坏"，不证明"新档位真到了 GUI"。所以补的是窄走查：被测对象是**发布
+  归档 `GlassPane-1.31.0.tar.gz` 解开后自己构建的** `glasspane-settings` 与 `glasspaned`（不是工作树），
+  读数在第 5 节 c 段。全六页走查（88 枚控件、4 枚读不到 `AXEnabled`）是 11-05 那一轮的账，本轮没重做，
+  因为本轮没有任何一处改动落在其余五页的读路径上。
 - **(c) `harness/` 一行没动**（除 4 节决定 3 的那一次基线补记）。10:30 那条线今晨还在推
   `[gp]` 前缀的提交（`fdd54754`、`5f7fb02d`），本轮碰它就是撞车。
 
@@ -86,7 +92,83 @@
 
 ## 5. 收口
 
-<!--GATE-READINGS-->
+### a. 门禁逐字命令复跑（跑在 `3a5d7cc8`＝本轮改动已进入的那枚主干 tip 上，本机）
+
+| 命令（逐字） | rc | 实际计数 |
+|---|---|---|
+| `npm ci` | 0 | `added … packages`，两条 `install-scripts` 提示（esbuild/sharp 的 postinstall 未自动跑，`npm run bundle` 随后实测能跑＝二进制在位，本轮没有把它读成缺陷） |
+| `npm run build` | 0 | 根 + `glasspane-mcp`（tsc）+ 其余 workspace 全过 |
+| `npm test --workspaces --if-present` | 0 | 壳 762 tests / 762 pass / 0 fail；安装器 353 tests / 350 pass / 3 skipped / 0 fail；更新器 818 tests / 818 pass / 0 fail——合计 1933，红 0 |
+| `node scripts/check-version.mjs` | 0 | `OK：版本线一致（1.31.1）` |
+| `node scripts/check-doc-links.mjs` | 0 | 文档 32 份／仓库内链接 274 条／外链 44 条／markdown 表 479 张（扫 129 份，按 `MD_SKIP_ROOTS` 另跳 69 份） |
+| `node scripts/check-workflows.mjs --self-test` | 0 | 48 条各自验证为会失败：28 个必须被抓的变异 + 20 个必须保持沉默的合法形状 |
+| `node scripts/check-workflows.mjs` | 0 | 5 份工作流文件干净 |
+| `swift build --package-path engine` | 0 | `Build complete! (1.47s)`（增量） |
+| `swift test --package-path engine` | 0 | XCTest 1612 executed / 1607 passed / 5 skipped / 0 failures；Swift Testing 76 tests in 8 suites passed——合计 1688，红 0 |
+| `swift test --package-path engine/probe` | 0 | XCTest 58 executed / 1 skipped / 0 failures；Swift Testing 0 tests（该包按设计没有 swift-testing 用例，这句是读数不是推断） |
+| `python3 -m pytest -q bridge` | 0 | 223 passed, 1 skipped in 17.31s |
+| `sh -n install.sh` | 0 | 无输出 |
+| `cd engine && python3 .signal_smoke.py .build/debug/glasspaned` | 0 | `SIGNAL SMOKE OK：SIGTERM / SIGINT 均自行退出（码 0）且 socket 文件被 unlink`（三次起停各自跑在点名的隔离状态根里） |
+| `cd mcp-shell && npm run bundle && npm pack --dry-run` | 0 | 包 `glasspane-mcp-1.31.1.tgz`，31 个文件，369.1 kB，shasum `badd00e8a9b86912b376405644e3fc39a5f93894` |
+
+`swift test` 那 5 枚 skipped 是按设计的 opt-in 真机项（`--filter` 点名可跑），本轮没为了让它绿而删断言；
+负载那一格（#11）在 `vm.loadavg` 22.57 下另跑过一次对照，见第 1 节第 11 行。
+
+### b. 反向验证（本轮新做的，全部具名变红后字节核回）
+
+- #11：`DaemonCoreHolder.inFlightOperationId()` 短路成恒 nil ⇒ 2 条具名红；恢复 `diff -q` 无输出。
+- #7/#8：`committedSiteDrift` 短路成 `return []` ⇒ "四种漂移各自点名"红（3 pass / 1 fail）；
+  再把 `facts` 里的接线摘掉 ⇒ 第 4 条「main() 真的把 commit 的位点读进判定」红（4 pass / 1 fail）。
+- #10：把 `install.sh` 任一 clone 前的 `LC_ALL=C LANG=C ` 摘掉 ⇒ 结构腿按
+  `pinned.length != executing.length` 点名红（这一条在英文 runner 上同样能红，正是拆两腿的理由）。
+- 教训一条（先前在这里写过"恢复用 `diff -q` 证明字节一致"就完了）：`diff -q` 只证明"与备份一致"，
+  不证明"与修好的那份一致"——本轮第一次恢复拿的是修补**前**的快照，install.sh 的钉因此丢了。
+
+### c. 真机读数（全部跑在**发布归档**解出的字节上，不是工作树）
+
+被测对象：`GlassPane-1.31.0.tar.gz`（4 件资产里的那件，本地 sha256 `0cd2bd26…47a5a1` 与
+GitHub `assets[].digest` 逐字相等）解到 `/var/tmp/…/e2e/tree/GlassPane-1.31.0`，再
+`swift build --package-path engine -c debug`（`Build complete! (249.51s)`）。
+
+- `glasspaned --state-dir <隔离根> --permissions` ⇒ 退 0，
+  `verdict: granted`，`permissions` 三席 granted 且 `developer-tools: unverifiable`，
+  `verdictExcludes` 明写那一席由 `--check-developer-tools` 回答、`judgedByThisCommand: false`；
+  stderr 那句 note 明写这一趟没读状态、`--state-dir` 那个根没被 consulted。
+- `glasspaned --state-dir <隔离根> --check-developer-tools` ⇒ 退 **1**（不是 5），
+  `verdict: denied`、`launch.state`/`attach.state` 双 `denied`，`next` 指向系统设置里那一席并
+  按真路径 quote 了这枚二进制。这一条把 #1 的三档判决在真 hardware 上答成了 **denied** 那一档；
+  `unverifiable` 那一档本机造不出场（见第 4 节），仍然只由注入层的用例量到。
+- 面板窄走查（`gp-ax-walk`，按 `gp-*` 标识）：同一隔离根起 daemon 后
+  `glasspane-settings --state-dir <同一根>` 读到 31 枚 `gp-*` 标识，其中
+  `gp-perm-{accessibility,input-monitoring,screen-recording}-granted` +
+  `gp-perm-developer-tools-unverifiable`（daemon 自报那一枚，未被覆盖、未被代测）。
+  按 `gp-verify-developer-tools` ⇒ `err=0`，在途新增 `gp-devtools-pending` 且该按钮
+  `AXEnabled=0`；探测跑完新增 `gp-devtools-denied` 与 `gp-perm-developer-tools-measured-denied`
+  （合计 36 枚标识）。GUI 读到的 `denied` 与 CLI 同字节实测的 `verdict: denied` 是同一件事，
+  两个来源两个标识——这正是 10-21 那节 C6 冒烟会被骗的那个形状。
+- 收尾进程核对：这两个 pid（53178 daemon／53295 面板）`kill` 之后 `pgrep -fl gp-1310-panel`
+  两次各空命中；在跑的真 daemon（`~/Applications/GlassPane Daemon.app`，pid 40549）一行没动。
+
+### d. 端到端（发布归档 → 干净前缀 → MCP）
+
+- 解归档 → 树内 `npm pack`：`glasspane-mcp-1.31.0.tgz`（369 094 字节）与
+  `glasspane-install-1.31.0.tgz`（107 691 字节）两枚都产得出来。
+- 装进干净前缀（`npm install --prefix <空目录>`）：`added 4 packages`，`node_modules/.bin/` 里
+  `glasspane-mcp`、`glasspane-http`、`glasspane-install`、`glasspane` 四枚符号链接在位。
+- stdin 打一条 `initialize`（三条腿）：
+  ① 直接喂 `node_modules/glasspane-mcp/dist/index.js` ⇒ `serverInfo.name = glasspane-mcp`、
+  `version = 1.31.0`、`protocolVersion = 2024-11-05`；
+  ② 喂 `node_modules/.bin/glasspane-mcp` 那枚符号链接 ⇒ 同一条回包，且 `realpath` 落在 ①那个文件
+  （1.12.3 那枚"bin 是符号链接就 0 字节退 0"的 P0 在发布物上实测已不复现）；
+  ③ 直接执行 `.bin/glasspane-mcp`（用户那种跑法）⇒ stdout 一条完整回包、stderr 0 字节。
+- 安装器两枚入口经符号链接跑：`glasspane-install --help` ⇒ 退 0、stdout 6599 字节、stderr 0 字节；
+  `glasspane --help` ⇒ 退 0、757 字节；`glasspane-install --version`（不存在的旗标）⇒ 退 2 且
+  把用法打出来，不是 0 字节。
+
+### e. 发布三线与 CI（本版）
+
+<!--RELEASE-LINES-->
+
 
 ## 6. 清理盘点（收口后）
 
