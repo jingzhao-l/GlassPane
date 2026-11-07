@@ -52,8 +52,32 @@
   归档 `GlassPane-1.31.0.tar.gz` 解开后自己构建的** `glasspane-settings` 与 `glasspaned`（不是工作树），
   读数在第 5 节 c 段。全六页走查（88 枚控件、4 枚读不到 `AXEnabled`）是 11-05 那一轮的账，本轮没重做，
   因为本轮没有任何一处改动落在其余五页的读路径上。
-- **(c) `harness/` 一行没动**（除 4 节决定 3 的那一次基线补记）。10:30 那条线今晨还在推
-  `[gp]` 前缀的提交（`fdd54754`、`5f7fb02d`），本轮碰它就是撞车。
+- **(c) `harness/` 一行没动**（除 3 节决定 3 的那一次基线补记 `dc4c5f45`）。判据是字节不是前缀：
+  本轮这一半的 9 笔（`24949936`、`266a2f75`、`5796ca31`、`609d9bfa`、`b609f0a9`、`f6f1cf88`、
+  `1af85031`、`2555aebc`、`75bb8c48`）逐笔 `git show --stat` 读过，路径集合里没有一条以 `harness/` 开头。
+  10:30 那条线同期在推 `[gp]` 前缀的提交（`e82b6e4b`、`3a5d7cc8`、`4615aafc` 等），本轮碰它就是撞车。
+- **(d) 不替那条线提交它工作树里的旧稿；但它的后果本轮量出来了，收件人也点名了。**
+  清理盘点时发现 `.worktrees/harness-daily-20261105` 有一处**落在父仓**的未提交改动：
+  `scripts/check-doc-links.mjs`。它与 main 的同名文件 `diff --no-index` 只差一行——
+  `export const DEFERRED_FINDINGS = []` 少了 `export`（其余字节逐字相同）。那一行不是装饰：
+  `updater/test/daily-20261105-deferred-findings.test.mjs:36` 正是 `import { check, DOCS, DEFERRED_FINDINGS }`，
+  第 120 行还 `assert.deepEqual(DEFERRED_FINDINGS, [])`。两腿实测（变异落在 main 上、用自带备份核回）：
+  - 腿 A（main 字节）：`node --test updater/test/daily-20261105-deferred-findings.test.mjs` ⇒ rc=0，5 tests / 5 pass / 0 fail。
+  - 腿 B（把那一处 `export ` 摘掉，`grep -n` 证明落地，`diff -q` 证明与那条线的缓冲区**逐字节相同**）：
+    同一条命令 ⇒ rc=1，`SyntaxError: The requested module … does not provide an export named 'DEFERRED_FINDINGS'`，
+    读数 `tests 1 / pass 0 / fail 1`——那 5 条具名用例一条都没跑起来。
+  - 对照（证明这不是"变异把文件改坏了"那种假红）：同一份字节 `node --check` ⇒ rc=0（它是合法 JS），
+    `node scripts/check-doc-links.mjs` ⇒ rc=0（**拥有这个文件的那道闸自己看不见这个缺陷**）。
+    红的是跨 workspace 的导出契约，不是语法。
+  - 恢复：`node …/mutate.mjs restore` 后 `diff -q` 无输出、sha256 回到
+    `418a1c7969749f943e26ad4c09f24d187dbe0309419586fb5c7001be1a0c7103`（与变异前备份逐字相等），
+    腿 A 复跑 5/5，`git status --porcelain` 只剩本台账一条。
+  **结论与判据**：main 侧不成立——正确字节（`export` + 同批测试）已由那条线自己的 `1ef2338f` 落在 main，
+  本轮没有产品字节可改；成立的是他们工作树里那份**被 main 取代的旧稿**，若原样提交就会让上面那枚具名
+  测试文件整体加载失败。该由 10:30 那条线自己收（判据就是腿 B 那条命令），本轮按清理规则第 3 步的
+  例外保持原状、不替别人提交。**收件人存在且会跑**：`npm test --workspaces --if-present` 覆盖 updater，
+  CI 的 `root workspace gate (installer + all workspaces)` 这一 job 在 `75bb8c48` 上实测 success，
+  所以这不是"交接给一个不存在的闸"。与本轮改动的重叠判断：本轮 9 笔一条也没动这个文件，无重叠。
 
 ## 3. 本轮我替你做了哪些决定（依据 / 回滚）
 
@@ -80,19 +104,49 @@
    install.sh 的 locale 钉因此被抹掉；靠"恢复后再跑一次具名用例"（45/45 之前先出现 2/3 红）才发现，
    重新落上后 `grep -c` 与 `sh -n` 各量一次。依据：`diff -q` 只证明"与备份一致"，不证明"与修好的那份一致"。
    回滚：不涉及产品。
+7. **没替 10:30 那条线重记 `tool-surface` 金样，也没为绕开它动 `assert-tag-ready` 的判据**。
+   依据：`harness rulers` 在 `3a5d7cc8` 上红的那一条是 `surface B (fork, ours) grew: 14021 recorded
+   → 14032 LOC (+11)`，挪的是 `harness/glasspane-harness/script/kernel-conformance.mjs`——他们
+   `e82b6e4b` 自己的有意增长；提示词允许的 `--record` 只覆盖"本次 `mcp-shell/src` 或 `engine` 的
+   有意增长"，替别人记就是本仓点名禁止的"洗掉非本轮造成的红"。放宽 tag 闸同理：那道闸钉的就是
+   "发布物==主干==CI 在那枚 sha 上真绿"。落地：等它自己记（`4615aafc` 确实是那条线自己补的），
+   本轮其余 14 条门禁全在 `75bb8c48` 复跑过。回滚：不涉及产品字节。
+8. **真机项做窄的一圈，不做全六页**。依据：本轮唯一进 GUI 的事实是 #1 新增的三个键，读者只有
+   `DeveloperToolsCapability.parse` 一处（见第 2 节 b 的重新实测引用）；全六页 88 枚控件那一圈是
+   11-05 的账，本轮没有改动落在其余五页读路径上。代价写清楚：其余五页本版**未观测**，
+   补法＝`engine/smoke.md` 里那条 `gp-ax-walk` 换成不带 `grep` 的整树走查（同一枚辅助器，
+   11-05 用过），发布物解出后 `swift build --package-path engine` 起 `glasspane-settings --state-dir <临时根>`。
+   回滚：不涉及产品字节。
+
 ## 4. 未观测（只限物理边界）
+
 
 - **`unverifiable` 那一档的真实现场本机造不出**：探测走绝对路径 `/usr/bin/xcrun`，这台机器 CLT
   在位且会答。补它的动作：在一台没有 Command Line Tools 的 mac 上跑
   `glasspaned --state-dir <临时根> --check-developer-tools`，预期 `verdict: unverifiable` 且退 5。
   这一档由注入层 `DebugCapabilityProbe.Running` 量到（那 5 条用例），不是"没测"。
 - **Apple 公证**：需要付费开发者账号，owner 未启用；文档没有写成已完成（既有事实，本轮未触碰）。
-- `npm stage approve`：本轮预期不需要（1.30.0 走 trusted publisher 直发成功）；若这次被 staged-only
-  拒，补救命令是 `npm stage approve <stage-id>`，需要 owner 的 2FA。
+- **`npm stage list` 本机枚举不了**：实测 `npm stage list` ⇒ `npm error code E401 … your authentication
+  token seems to be invalid`（本机 npm 未登录；发布走 CI 的 OIDC trusted publisher，不需要本机凭据）。
+  注意那条命令的管道退出码是 `head` 的 0，**不是判决**，判决取 npm 自己打的 E401。
+  本轮能证的一半已证：11-07 那次 `mode=publish`（run `42352260708`）两包各答
+  `published and confirmed on the registry`，走的是直发分支而不是 `npm stage publish` 分支
+  （后者会打 `::error::… 是 staged 而不是 published` 并 exit 1），且 registry 两包都读 1.31.0。
+  补上剩下那一半的确切动作：owner 跑 `npm login` 后 `npm stage list`；若有待批项，
+  `npm stage approve <stage-id>` 需要 owner 的 2FA——这是本轮两件物理上做不到的人工动作之一。
 
 ## 5. 收口
 
-### a. 门禁逐字命令复跑（跑在 `3a5d7cc8`＝本轮改动已进入的那枚主干 tip 上，本机）
+### a. 门禁逐字命令复跑（本机，跑在 `2555aebc` 的树工作状态下）
+
+跑完之后主干又前进两笔（`e82b6e4b`、`3a5d7cc8`、`4615aafc` 三笔 `[gp]`，全在 `harness/` 内）与我这一笔
+台账（`75bb8c48`，只动 `CHANGELOG.md` 与本文件）。判据不是提交信息而是字节：
+`git diff --stat 2555aebc..75bb8c48 -- engine mcp-shell updater installer scripts bridge install.sh`
+输出为空——被测面一字未动，所以上表不需要为重跑而重跑；`check-doc-links` 与
+`node harness/tools/tool-surface.mjs --check` 在 `75bb8c48` 上另跑过，各 rc=0（表格数从 479 张
+变 480 张就是这一笔台账加的那张）。本笔（第 2 节 (d)、第 5 节 e、第 6 节）写完后再跑一次
+`node scripts/check-doc-links.mjs` ⇒ rc=0，表格 **482** 张（多的两张就是 e 段与第 6 节那两张），
+`node scripts/check-version.mjs` ⇒ rc=0，20 个位点全为 1.31.1。
 
 | 命令（逐字） | rc | 实际计数 |
 |---|---|---|
@@ -167,9 +221,95 @@ GitHub `assets[].digest` 逐字相等）解到 `/var/tmp/…/e2e/tree/GlassPane-
 
 ### e. 发布三线与 CI（本版）
 
-<!--RELEASE-LINES-->
+**1.31.0（#1–#5 的载体）三线齐，全部实测：**
+
+| 线 | 实测值 |
+|---|---|
+| tag | `v1.31.0` → `dc4c5f45995c4e6084045d20f69fb4bed80d36ed`（`git rev-list -n1`） |
+| Release | `isDraft=false`、`targetCommitish=dc4c5f45…`、4 件资产；归档 `GlassPane-1.31.0.tar.gz` 5 059 240 字节，本机 `shasum -a 256` = `0cd2bd26…47a5a1` 与 API `assets[].digest` 逐字相等；两枚 `.asc` 各 833 字节在架 |
+| 归档自证 | `node scripts/make-release-archive.mjs --verify <archive> 1.31.0` ⇒ rc=0，`826 entries, 5059240 bytes, all 30 declared commands and schemas present, no entry under harness/`；另数 `tar -tzf … \| grep -cE "(^\|/)harness/"` ⇒ **0** |
+| CI（被 tag 那笔） | `ci.yml` run `42129160148` @ `dc4c5f45` ⇒ completed **success** |
+| release.yml | push run `42130249795` ⇒ success（归档 job）；`--ref v1.31.0 -f mode=dry` run `42130614125` ⇒ success（日志第 288 行自报 `mode=dry`，不写 registry）；`--ref v1.31.0 -f mode=publish` run `42352260708`（本轮 11-07 07:40Z 派发）⇒ success，两包各答 `published and confirmed on the registry`，provenance logIndex `3732591487` / `3732629425` |
+| registry | `npm view glasspane-mcp version --prefer-online` ⇒ `1.31.0`；`npm view glasspane-install version --prefer-online` ⇒ `1.31.0` |
+
+**1.31.1（#6–#11 的载体）修复已进 main，tag 这一格被别的线的等式按住——如实记为未发出：**
+
+- 版本线：`node scripts/check-version.mjs` ⇒ `OK：版本线一致（1.31.1）`；`release: 1.31.1` = `266a2f75`，
+  漏掉的那枚位点由 `5796ca31` 补上（#9）。收口 HEAD = `75bb8c48`，`origin/main` 同 sha。
+- 三线实测：`git tag -l v1.31.1` ⇒ 空；`gh release view v1.31.1` ⇒ `release not found`；
+  `npm view glasspane-mcp@1.31.1 version --prefer-online` ⇒ `E404 No match found for version 1.31.1`。
+  **没有把任何一格写成已完成。**
+- 为什么没打 tag（判据在代码里，不是我的偏好）：`scripts/assert-tag-ready.mjs` 的 `judgeTagReady`
+  要求 `ci.yml` 在该 sha 的 `event=push` 通道最新一条 `completed && success`。实测 run `42360652081`
+  @ `75bb8c48` ⇒ completed **failure**，10 个 job 里 **9 success / 1 failure**，唯一红的是
+  `harness rulers (divergence, surfaces, branding, kernel provenance)`；该 job 里唯一红的步骤是
+  `release-artifact`。同一形状在 `2555aebc`／`3a5d7cc8`／`4615aafc` 三笔上各红一次（runs
+  `42358961701`／`42360028118`／`42360563775`），红的都不是本轮产品面。
+- `release-artifact` 的本机读数（`node harness/tools/release-artifact.mjs --check` ⇒ rc=1）：
+  `0 agreement(s) held, 0 tolerated lag(s), 2 problem(s) [trunk 653e2ce1…]`；
+  `split-main` 与 `artifact`（已发布 `v0.14.4`）两侧都是 `b5ce0a94…`，与主干子树 `653e2ce1…` 不等；
+  差异 2 个路径，均在 fork 本体内且**都不是台账**：`contracts/kernel-conformance.json`
+  （+1 已发布侧独有行 / −1 主干独有行）、`script/kernel-conformance.mjs`（+0 / −11）；
+  工具自己打了 `⚠ RE-SPLIT RISK`：已发布字节里有 1 行是主干今天没有的，直接 split 会覆盖它。
+- 等待不是出路（实测，不是推断）：轮询 8 次，21:56:54 → 22:09:57 每次 rc=1，其间每次
+  `git fetch origin --prune` 后 `origin/main` 恒为 `75bb8c48`；22:11 再跑一次仍 rc=1、主干仍同一 sha。
+  该轮询进程已停，停后 `pgrep -fl "release-artifact|assert-tag-ready|ra-poll"` **两次各空命中**。
+
+**结论（按提示词第 109 行要求给出，不只列发现）：这一条该由 10:30 那条 harness 线修，判据有三条。**
+① 两个差异路径都在 `harness/glasspane-harness/` 内且非台账，`release-artifact` 的豁免只给
+`SYNCLOG.md`/`CHANGELOG.md`，所以没有 allowance 可用；② 造成缺口的是那条线自己的 `e82b6e4b`
+（在 `v0.14.4` 打完之后改了 fork 侧），工具给的原话 remedy 就是「reconcile trunk → `git subtree split`
+→ fast-forward push → cut the next patch」；③ 提示词第 45/46 行与本轮任务口令都明确禁止本线改
+`harness/` 内容或版本，第 46 行还写明「只有 owner 明确授权你碰的时候」才许动——本轮没有这份授权。
+因此本轮**没有** `--record` 洗掉非本轮造成的红（那 +11 行是 `4615aafc` 自己记的），
+**没有**放宽 `assert-tag-ready`，**没有**移动任何已发布 tag。
+
+owner 侧补上它的确切动作（按序，全部在那条线的授权范围内）：
+
+```
+# 1. 先把已发布侧独有的那 1 行落回主干（否则 split 会覆盖它）
+node harness/tools/release-artifact.mjs --check          # 读它列出的 published-only 行
+# 2. 主干追平后重切并快进推 split 仓 main
+git subtree split --prefix=harness/glasspane-harness -b split/glasspane-harness
+git push harness split/glasspane-harness:main            # 必须快进；不是快进就停下核对
+# 3. 取下一个 harness 号（0.14.5），只改 product.json + packages/opencode/package.json
+#    不要用 scripts/set-version.mjs（那是父仓统一器，会抹掉父仓版本线）
+# 4. 打 tag → Release → npm，再回父仓核等式
+node harness/tools/release-artifact.mjs --check          # 期望 rc=0
+# 5. 等式绿了之后本线的 1.31.1 才发得动（下面这四步是本线的，届时可直接跑）
+node scripts/assert-tag-ready.mjs 1.31.1
+git tag -s v1.31.1 -m "1.31.1" && git push origin v1.31.1
+gh workflow run release.yml --repo jingzhao-l/GlassPane --ref v1.31.1 -f mode=dry
+gh workflow run release.yml --repo jingzhao-l/GlassPane --ref v1.31.1 -f mode=publish
+```
 
 
 ## 6. 清理盘点（收口后）
 
-<!--CLEANUP-->
+九步逐条做过，读数如下。**收口后计数**：`git worktree list` **6 行**、`git branch -a` **17 条**
+（本地 13 + 远端 4，其中 2 条是 `HEAD ->` 符号引用）、tag **98 枚**（一枚未删）、stash **3 条**（一条未动）。
+`git worktree prune` ⇒ rc=0，行数仍 6；`.worktrees/` 下 5 个目录与注册表一一对应，**无已 remove 的残留**。
+
+| 对象 | 处置 | 去向与判据 |
+|---|---|---|
+| 本轮我建的 worktree / 分支 | **0 个** | 本轮 9 笔全部直接落在 `main` 并推 `origin/main`，没开工作台分支，所以没有可删的 |
+| `.worktrees/harness-close-20261105`（分支 `gp-harness-runner-label-20261107`，tip `75bb8c48`） | 留 | 别的线（10:30 harness）；`status --porcelain` **0 行**＝干净但仍是那条线的活跃工作台，不替别人 remove |
+| `.worktrees/harness-integrate-20261107`（tip `f1e650d5`） | 留 | 同上，`status --porcelain` **0 行** |
+| `.worktrees/harness-daily-20261104`（tip `09ec93d7`） | 留 | **别人正在飞的未提交批次：12 个文件**，全在 `harness/glasspane-harness/` 内（CHANGELOG/README 两侧/bun.lock/product.json/install.sh 与 5 枚测试） |
+| `.worktrees/harness-daily-20261105`（tip `2ff18a90`） | 留 | **在飞未提交批次：6 个文件**，5 个在 fork 内 + 1 个父仓 `scripts/check-doc-links.mjs`；那一处已按第 2 节 (d) 两腿量过并给出结论 |
+| `.worktrees/harness-daily-20261106`（tip `3923264d`） | 留 | **在飞未提交批次：30 个文件**（24 改 + 6 新增），29 个在 fork 内 + `harness/tools/product-surface.mjs`；全在本轮禁动范围 |
+| 本地 `gp-harness-*` 7 条、`split/0.14.2`／`0.14.2b`／`0.14.3`／`0.14.4` 4 条 | 留 | 前 7 条是那条线的活跃分支（其中 5 条正被 worktree  checkout，`git branch -d` 会拒）；`split/*` 按第 2 步不参与落地判定，其内容由 tag 与 split 仓承载 |
+| 本地 `backup-advisory-prerebase` | 留 | 第 4 步的快照例外，读数不含糊：tip `eb660bb2`（2026-11-04 16:25，`[gp] chore(harness): fork-diff 跟一笔——台账改的是 SYNCLOG.md 自己的字节`），`git log --oneline main..backup-advisory-prerebase` ⇒ **4 笔不在 main**（`eb660bb2`/`70f8381a`/`49ee831a`/`dc05ec3e`，全是 `[gp]`）＝那条线 rebase 前的保险。本轮没有任何证据说明这 4 笔的内容已被 main 取代（要证就得逐路径 `git diff main <b>`，而那是 `harness/` 内的字节，本轮禁动），也不是本轮造的 ⇒ **不删** |
+| 远端 `origin/main`、`harness/main`（+2 符号引用） | 留 | 发布锚点；远端没有本轮建的分支，所以 `git push origin --delete` 一次也没执行 |
+| 98 枚 tag、3 条 stash | 留 | 第 7 步：tag 是 `install.sh`/updater 钉的发布锚点，一枚不许删；3 条 stash 分别记着 `wip-console-and-other-20260923`、并行会话 21:59 的 bridge 中间稿、P6+TCC 合并前副本，全部早于本轮多个会话 |
+| `/var/tmp/glasspane-main-check{,-20261103,-20261105,-20261107}` | **删** | 本线往轮与本轮的快照/日志/归档（17M + 7.8M + 4.1M + 214M）；删前 `ps -eo …` 与 `pgrep -fl` 各一次空命中＝无进程在用；读数已全部写进第 5 节 |
+| `/var/tmp/gp-1310-panel`、`gp-1310-smoke-state`、`gp-e2e-1107-a`、`gp-e2e-1107-b` | **删** | 本轮真机与 e2e 的隔离状态根；里面只剩 `daemon.out`/`panel.out`/`panel.pid`，`ps -p 53178,53295` 空＝两枚进程早已退出，无 socket 残留 |
+| `/var/tmp/gp space-BaRkIc` | **删** | `updater/test/cli.test.mjs:98` 的 mktemp 遗留（11-06 07:23，里面只有 `updater` 一份拷贝）；该测试第 109 行本来就在 `finally` 里 `rmSync`，所以这是**一次被中断的套件跑**留下的，不是代码缺陷 |
+| `/var/tmp/glasspane-harness`、`/var/tmp/gp1107`、`/var/tmp/gp-vp-selftest-*.log` | 留 | 那条线的 scratch：`gp1107` 里是 `changelog-0143.md`/`1106-batch.patch`（0.14.x 是他们的版本线），`gp-vp-selftest-*` 钉的是 `0_14_2`；`glasspane-harness` 的 mtime 是 **22:14**＝本轮收口时仍在被写 |
+| `/var/tmp/glasspane-lane-backups` | 留 | 11-03 的 `install.sh.orig`/`installer-selftest.sh.orig`/`product.json.orig`＋`mine/`＝回滚保险，归属不明且不是本轮造的，按第 4/7 步不动 |
+| `CHANGELOG.md` 的 `[Unreleased]` | 已空 | 逐字读过：只有一段声明"空"的说明，没有未归号条目；1.31.1 的六件事都在 `## [1.31.1] — 2026-11-07` 下 |
+| 开放 PR / 悬挂 draft Release | **各 0** | `gh pr list --state open` ⇒ `[]`；`gh release list --limit 30` 里 `isDraft==true` 的筛选 ⇒ `[]` |
+| npm 待批 staged publish | 本轮那两包**没有**；全量枚举未观测 | 判据见第 4 节那一条（本机 E401；publish run 走的是直发分支并已回 registry 核实） |
+| CI 最新一条 | **failure（如实记）** | run `42360652081` @ `75bb8c48`：9 job success / 1 failure，唯一红是 `harness rulers` 里的 `release-artifact`，归属与 remedy 见第 5 节 e 段。**没有为了让这一格变绿而放宽任何判据** |
+| 本轮自起的后台进程 | **全部已退出** | 轮询任务 `bdr2bzzc9` 已 stop；停后 `pgrep -fl "release-artifact\|assert-tag-ready\|ra-poll"` **两次各空命中**，`ps -p 2873,2876` 也空；`pgrep -fl "node .*glasspane-main-check"` 空 |
+| 归属不明 / 别的会话的长命进程 | **不动，点名** | ① pid 40549 `~/Applications/GlassPane Daemon.app/…/glasspaned --socket-path ~/.glasspane/engine.sock`（ppid 1，已跑 4h46m）＝owner 装好的真 daemon，本轮真机走查用的是隔离根，没碰它；② pid 78587 `/Volumes/Eng-Dev/Zynthara AI/vm/.venv/bin/python -m pytest tests/ -q`＝另一个仓的套件；③ pid 85496 由 **Trae CN**（另一个 IDE，`TERM_PROGRAM=vscode`/`TRAE_BRAND_NAME=Trae CN`）起的 `swift build --build-tests` 于 `/private/tmp/zynthara-regression-base/host`＝既不是本会话后代也不是本仓路径。三者都按第 8 步"归属不明一律不动"保留 |
