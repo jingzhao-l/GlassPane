@@ -195,7 +195,11 @@ test('install.sh: 多个远端而没有 origin 时拒，且说的是"该从哪�
 
 /* --------------------------------------------------------- installer/cli.js（真 git，npx 那一侧） */
 
-const spawnGit = (bin, args) => spawnSync(bin, args, { encoding: 'utf8' })
+// 这枚桩从前把第三个实参整个丢掉（`{encoding:'utf8'}` 写死），于是被测那一侧传的
+// `env: gitLocalePinnedEnv()` 根本到不了 git —— 桩替产品把环境"吃掉"，测试就只能在本机
+// 恰好是英文 locale 时才绿（2026-11-07 那条中文 locale 的实测红就是这么来的）。
+// 现在原样转发调用方给的所有选项：产品传什么，git 就收到什么。
+const spawnGit = (bin, args, options = {}) => spawnSync(bin, args, { encoding: 'utf8', ...options })
 
 test('advanceExistingClone: 同一个 main 在 npx 入口上也必须走得通（两条入口同一个答案）', () => {
   const repo = makeBranchClone('cli-main')

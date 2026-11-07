@@ -714,7 +714,7 @@ if [ -z "$REPO" ]; then
     clone_err=$(mktemp "${TMPDIR:-/tmp}/glasspane-clone-stderr.XXXXXX" 2>/dev/null || true)
     clone_status=0
     if [ -n "$clone_err" ]; then
-      git clone --branch "$REF" --depth 1 -- "$REPO_URL" "$CLONE_DIR" 2>"$clone_err" || clone_status=$?
+      LC_ALL=C LANG=C git clone --branch "$REF" --depth 1 -- "$REPO_URL" "$CLONE_DIR" 2>"$clone_err" || clone_status=$?
       clone_stderr=$(cat "$clone_err" 2>/dev/null || true)
       rm -f "$clone_err"
       if [ "$clone_status" -ne 0 ]; then
@@ -725,7 +725,7 @@ if [ -z "$REPO" ]; then
         printf '%s\n' "$clone_stderr" >&2
       fi
     else
-      git clone --branch "$REF" --depth 1 -- "$REPO_URL" "$CLONE_DIR" || clone_status=$?
+      LC_ALL=C LANG=C git clone --branch "$REF" --depth 1 -- "$REPO_URL" "$CLONE_DIR" || clone_status=$?
       [ "$clone_status" -eq 0 ] || fail "$(clone_failure_text "$REF" "$clone_status" "$CLONE_DIR" '')"
     fi
     REPO="$CLONE_DIR"

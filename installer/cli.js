@@ -1900,8 +1900,17 @@ export function tagVerifyAgainstTree({ verdict, tree, pinRef, repoDir }) {
  *    在这里用命令行旗标压住，树自己选不了。（`GNUPGHOME` 仍指向一次性钥匙环：用户的
  *    `~/.gnupg` 既不是判据来源，也不该被这次运行读写。） */
 const GIT_VERIFY_PINNED_CONFIG = ['-c', 'gpg.program=gpg', '-c', 'gpg.format=openpgp']
+/** 需要**稳定措辞**的 git/gpg 子进程共用的那一枚环境（本仓唯一的拼写）。
+ *  判据读的是英文句子，而散文跟着操作者的语言走：中文 locale 下本机实测同一趟 git fetch 回的是
+ *  `致命错误：无法找到远程引用 nosuchbranch`，而 `advanceExistingClone` 那句归因与
+ *  `install.sh` 的 `clone_failure_text` 都把这行原话转述给读者——两条入口对同一个失败因此给出
+ *  两种语言的字节，而它们的用例（本仓的契约）只认一种。2026-11-07 记账。 */
+function gitLocalePinnedEnv() {
+  return { ...process.env, LC_ALL: 'C', LANG: 'C' }
+}
+
 function verifyEnv(gnupgHome = null) {
-  const env = { ...process.env, LC_ALL: 'C', LANG: 'C' }
+  const env = gitLocalePinnedEnv()
   if (gnupgHome !== null) env.GNUPGHOME = gnupgHome
   return env
 }
@@ -3241,7 +3250,7 @@ export function readCloneFacts({ targetDir, ref, spawn = spawnSync, fetchHead = 
   if (toplevelProblem) {
     return { head: null, tagCommit: null, blocking: [], shallow: null, toplevelProblem, toplevel: top.toplevel }
   }
-  const read = (args) => spawn('git', ['-C', targetDir, ...args], { encoding: 'utf8' })
+  const read = (args) => spawn('git', ['-C', targetDir, ...args], { encoding: 'utf8', env: gitLocalePinnedEnv() })
   const sha = (what) => {
     const res = read(['rev-parse', '--verify', what])
     return res.status === 0 ? String(res.stdout ?? '').trim() : null
@@ -3321,7 +3330,7 @@ export function advanceExistingClone({ repoDir, ref, spawn = spawnSync } = {}) {
       text: toplevelRefuseText({ targetDir: repoDir, problem: toplevelProblem }),
     }
   }
-  const read = (args) => spawn('git', ['-C', repoDir, ...args], { encoding: 'utf8' })
+  const read = (args) => spawn('git', ['-C', repoDir, ...args], { encoding: 'utf8', env: gitLocalePinnedEnv() })
   const remoteNames = () => {
     const res = read(['remote'])
     return res.status === 0 ? String(res.stdout ?? '').split('\n').filter((line) => line !== '') : null

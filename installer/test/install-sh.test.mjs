@@ -640,8 +640,15 @@ test('install.sh: clone 失败交出 git 的原话，那句归因与 cli.js 的 
   try {
     // 参照跑：同一条 git 命令行、同一个目标目录，先拿到 git 自己的退出码与原话。
     // （git 在失败时会把它建的目录收掉，所以 install.sh 随后仍能看到"目标不存在"。）
+    //
+    // 这一枚 env 是 2026-11-07 补的：参照必须与被测那一侧**同一份契约**。`install.sh` 的 clone
+    // 现在钉 `LC_ALL=C LANG=C`（与 `installer/cli.js` 的 `gitLocalePinnedEnv` 同一个理由——归因
+    // 那句要把原话转述给读者，措辞不能由操作系统的语言决定），而这趟参照从前继承环境，
+    // 于是在中文 locale 的机器上参照自己先变成中文：断言只有英文机器才过得去，
+    // 而这正是它要防的那件事（同一形状的先例：#28 的 `é`、`verifyEnv` 那段注释）。
     const reference = spawnSync('git', ['clone', '--branch', missingRef, '--depth', '1', '--', `file://${repo.src}`, cloneDir], {
       encoding: 'utf8',
+      env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
     })
     assert.equal(reference.status, 128, `前提：真 git 对不存在的分支应退 128，实得 ${reference.status}｜${reference.stderr}`)
     assert.match(reference.stderr, /Remote branch nope-nope not found in upstream origin/, reference.stderr)
