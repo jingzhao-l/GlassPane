@@ -3,6 +3,76 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-08（第三十一次会话）· 取号 0.14.6：给 GPG 身份判决补固定点电池，一条 delta 落在并行线已发的 0.14.5 之上
+
+### 一、开工对表：origin 已被并行线走到 0.14.5，本轮 delta 只剩一块
+
+本轮 `.worktrees/gp-gpg-battery-20261108` 起于 origin/main `d50245f4`（第三十次会话那批 v0.14.5 的
+收口 commit）。对表发现**上一轮我这条线自己的工作（含九条缺陷修复 + fork-diff-readme 新规则）已被
+并行会话作为 v0.14.4 落进 origin**，origin 现已走到 v0.14.5（签名 tag / Release / registry 三格齐）。
+逐文件核对本工作树 vs origin：唯一真正的 delta 是 **`script/gpg-signing.sh` 里那 33 行
+`signing_identity_verdict` 固定点电池**（origin 版 0 条 `identity verdict:` 断言，我的 6 条）。
+fork-diff-readme 规则 origin 已有（product-surface.mjs 4 处），无需重落。故本轮不 rebase、不
+checkout、不 stash，在干净的 origin 工作树上重放这一块。
+
+### 二、改动面数字
+
+fork-diff 桶数与上一记完全一致，battery 落在一个 **added**（fork 独有）文件上，只挪它的 fork 侧
+blob 哈希、不动桶：
+
+`fork-diff vs v1.18.32: 4630/6769 byte-identical, 294 edited, 137 added, 1708 deleted`
+（`script/gpg-signing.sh` 金样钉进带电池的 blob `d4da29de…`）
+
+tool-surface：面 B（fork，ours）14302 → **14335 LOC（+33，即电池本身）**、23.48% → 23.53%，
+棘轮已 `--record` 并随本批提交；面 A 的 crossing check 早已花掉（基线本就在 10% 上限之上），
+继续盯 LOC 棘轮，无新增行。
+
+### 三、缺陷与固定点测试（反向控制实测）
+
+`signing_identity_verdict`（0.14.3 落地）此前**没有自己的固定点测试**，三种判决全靠 install.sh 的
+自测间接覆盖。本轮在 `gpg-signing.sh selftest` 末尾加三格 `--with-colons` 夹具直驱判决函数：
+
+| 判决 | 输入 | 期望 |
+|---|---|---|
+| PROVEN | 钉住的完整指纹命中 | rc=0 且回显该指纹 |
+| MISMATCH | 低 16 位碰撞（选择器命中、完整指纹不同） | rc=1，绝不判成过 |
+| UNRESOLVED | 无 secret 主指纹 | rc=2，绝不升级成过 |
+
+反向控制：把 `gpg-signing.sh` 回退到 origin 版（0 条 identity-verdict 断言）→ 三条具名 ok 全部
+消失（grep 计数 0），我的版本 6 条。电池自己 guard 在 `pinned_signing_fpr()` 读不到指纹时拒绝
+跑（`GP_SIGNING_INSTALL_SH=/dev/null` 会让电池自报 FAILED——那是**电池在拒绝瞎跑**，不是红）。
+
+### 四、闸与套件实测数字
+
+- typecheck **21/21** rc=0（28m20s，机器负载 100+ 时隔夜跑完）
+- product-surface **6640 agreements / 0 problems**（0.14.6 manifest+build+publish+installer+pipeline 齐）
+- fork-diff --check 绿（上方数字）；tool-surface --check 绿（无超基线增长）；brand-surface 血缘
+  9647/3352 无漂移；surface-semantics **0 hit / 23 files**；hook-liveness **21 hooks no drift**
+- 父仓 check-workflows **5 workflow file(s) clean**；check-doc-links **32 docs / 275 仓内链接 / 46 外链** 全绿
+- gpg-signing selftest **31/31**（含电池 3 格）
+- workflow-gates **68/68**（`bun test --timeout 30000`，真仓路径）
+
+### 五、两条排查为「非缺陷」的假红（写下来免得下轮再查一遍）
+
+1. **`--self-test exits 2` 用例的 `not.toContain("clean")` 会咬到临时目录自己的名字**：我在
+   `/tmp/origin-clean` 起了干净对照工作树，那条断言把消息里回显的**路径字符串**里的 "clean"
+   当成「打印了 clean 那行」而变红。真仓路径（`.worktrees/...`）不含 "clean"，68/68 全绿。
+   缺陷在对照环境命名，不在产品。已删该对照工作树。
+2. **npm-leg 那格 `afterAll(rmSync)` 偶发超时**：bun 的 `--timeout` 只抬**测试**超时，
+   **钩子（afterEach/afterAll）另有 5s 默认**且不被 `--timeout` 抬高。那格 teardown 删的临时树
+   大、负载高时会偶发超 5s，报成一条无名的 `(fail) (unnamed)`。隔离单跑（-t 过滤、只留那一格）
+   在 30s 下 5/5 全过。CI `bun test --timeout 30000` 同样不抬钩子默认，属潜在偶发假红——
+   记在这里，本轮不动它（非本批引入、不在本批范围，动它要单独取号）。
+
+### 六、本轮替用户做的决定
+
+1. **取号 0.14.6（patch）**：电池是纯修复（只加固定点测试，不改产品/CLI 形状），按 pre-1.0 规则
+   取 patch。回滚：`git revert 59202854 5e42add6`。
+2. **不 rebase 并行线的 15 笔**：origin 已发 0.14.4/0.14.5，rebase 会把已发布 tag 倒回去。
+   改为在 origin/main 上重放唯一 delta（电池）。回滚：电池这 2 笔 commit revert 即可，不影响并行线。
+3. **两条工作流未改**：本批零工作流改动，release.yml / ci.yml 原样。
+
+
 ## 2026-11-08（第三十次会话）· 取号 0.14.5：退役的 runner 标签不是红是静默，两枚空号把"CI 转不了绿"的原因写成机器读得回的契约
 
 本轮开工先按【先找上一轮没收口的活】把 origin 重新 fetch 并与 `origin/main` 对表：本轮分的是 `75bb8c48`
