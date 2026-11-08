@@ -612,8 +612,11 @@ private func printUsage() {
                                  arm measured ok — the seat this flag answers for is
                                  "can a debugger attach to a process", so a launch-only
                                  success is reported as a measurement of the launch arm
-                                 and no grant. Exit 1 for a refusal and for an arm that
-                                 never reached a verdict.
+                                 and no grant. Exit 1 for a refusal; exit 5 for an arm
+                                 that never reached a verdict (the toolchain is missing
+                                 or the probe timed out) — an unmeasured run is not a
+                                 refusal, so it does not share exit code 1. The
+                                 `verdict` field says which arm said what.
                                  The only human step is the System Settings
                                  checkbox; verification is machine-owned.
         --no-c33             Disable C33 input monitoring (degrade to pure

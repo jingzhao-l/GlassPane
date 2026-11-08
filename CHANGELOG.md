@@ -101,6 +101,25 @@ darwin 时**具名 skip 并写明缺什么、补它的那条命令**（先例是
 反向破坏：`DaemonCoreHolder.inFlightOperationId()` 短路成恒 nil ⇒ 2 条具名红（:119 与 :198 那一格）；
 `/bin/cp` 恢复后 `diff -q` 无输出。
 
+### 7. `--check-developer-tools` 的 OPTIONS 文档仍许诺老退出码（P2）
+
+1.31.0 把"这一趟没量到"从 exit 1 挪到 **exit 5**（`DebugCapabilityProbe.verdict` 三档
+`granted|denied|unverifiable` → `granted:0 / denied:1 / default:5`）。EXIT CODES 那张表（705 行）
+跟着改对了，但 OPTIONS 里 `--check-developer-tools` 那一格还写着
+`Exit 1 for a refusal and for an arm that never reached a verdict`——同一个文件两处文档各说各话：
+只读那一格的读者（以及照它写脚本的 agent）拿到的仍是老契约，一次没跑成的探测被许诺成"被拒"。
+产品唯一的红线就是不许把没量到的写成量到的，文档许诺也不例外。
+
+修法只动那一格的文字：`Exit 1 for a refusal; exit 5 for an arm that never reached a verdict
+（工具链不在位或探测超时）`，并点名 `verdict` 字段说清是哪一臂没答。退出码集合、`exit()` 三档、
+CLI 参数、`bin` 声明一字未动——仍属 patch，并入本版 1.31.1。
+
+测试：`DailyRound20261105DeveloperToolsVerdictTests.testTheFlagBlockItselfNamesExitFiveForAnUnmeasuredArm`
+（新增第 6 条）。反向破坏：把那一格改回 `Exit 1 for a refusal and for an arm that never reached a
+verdict` ⇒ 这一条两条断言同时具名红；恢复后 6/6 复绿。它抓的是 OPTIONS 那一格本身——既有的
+`testTheExitCodeHasThreeArmsNotTwo`（钉 `exit()` 三档与 EXIT CODES 表）与
+`DaemonExitCodeTests`（钉"表里没码不放行"）**都不读 OPTIONS 那一格**，所以这次漂移能绿着藏到今天。
+
 ## [1.31.0] — 2026-11-05
 
 **版本判断：minor。** 判据还是 1.6.2 写下、此后每一号各自复述过的那一条。本版触碰了两条：
