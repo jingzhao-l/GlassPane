@@ -277,7 +277,9 @@ describe("assert-ci-green: why a cancelled run was cancelled", () => {
 
   test("the brownout wording the parent lane captured is the same judgement", () => {
     const jobs = captured("jobs.json")
-    const annotations = [{ ...captured("annotations.json")[0], message: "This job failed because of a scheduled macOS 14 runner image brownout" }]
+    // The captured annotations payload is a bare JSON array, so the object-typed `captured` helper has to
+    // be routed through `unknown` before it is read as a list — a direct cast to Record[] is refused.
+    const annotations = [{ ...(captured("annotations.json") as unknown as Record<string, unknown>[])[0], message: "This job failed because of a scheduled macOS 14 runner image brownout" }]
     const got = ask([run({ id: 42357845872, run_number: 139, conclusion: "cancelled" })], "brownout", [
       { match: "*/actions/runs/*/jobs*", file: evidenceFile("brownout-jobs", jobs) },
       { match: "*/check-runs/128359753896/annotations", file: evidenceFile("brownout-ann", annotations) },
