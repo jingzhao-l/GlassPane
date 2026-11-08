@@ -3573,7 +3573,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "3cfc004a83a833d2a20b0a53fc8b14632478b12c"
+      "forkHash": "246d7436876f5e35dbcb32f33304a3003a23f753"
     },
     {
       "file": "script/beta.ts",
@@ -3801,7 +3801,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "3ab8ff308f38a4c05f4d21478516dd7856d82859"
+      "forkHash": "b4bc859a832e1626edd5f2367c53a2a1ce0e4a93"
     },
     {
       "file": "contracts/dependency-floors.json",
@@ -3993,7 +3993,7 @@
     },
     {
       "file": "packages/opencode/test/script/assert-ci-green.test.ts",
-      "forkHash": "92a904ee970fe24ab79b22efdb35d5c2389e0cbc"
+      "forkHash": "9bbd161ca5eb697e9a464e569b8292680c9c8761"
     },
     {
       "file": "packages/opencode/test/script/build-native-install-locked.test.ts",
@@ -4133,7 +4133,7 @@
     },
     {
       "file": "README.zh-CN.md",
-      "forkHash": "f8415293286f581e3f3627b9757be5501f7e3d7a"
+      "forkHash": "0ff7bd6a28233a43c194df559a4debbc25ca2f92"
     },
     {
       "file": "script/assert-ci-green.mjs",
@@ -4173,7 +4173,7 @@
     },
     {
       "file": "SYNCLOG.md",
-      "forkHash": "befb99f79fa697c7e9cf2f68c1d2806493b1deb7"
+      "forkHash": "85758d8b3e4eeecfe52679cfa080ecfacf4d9fde"
     }
   ]
 }
