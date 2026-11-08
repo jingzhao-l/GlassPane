@@ -722,6 +722,39 @@ STUBAUDITABSENT
   else bad "the stored value did not read back as what went in: '$got_back'"; fails=1; fi
   rm -f "$sec_log" "$sec_store"
 
+  # The identity verdict is the file's whole doctrine in one function: the 64-bit KEY_GRIP_HINT is a
+  # SELECTOR, never an identity, so only the full 40-hex fingerprint read back from the keyring and
+  # compared to the pin may pass. Three answers, all three asserted (a verdict that can only answer
+  # "proven" is the silent-green shape this file exists to kill):
+  #   (a) one secret primary whose FPR equals the pin  -> PROVEN, echoes that FPR
+  #   (b) the selector matched but the FPR differs (low-16 collision) -> MISMATCH, never a pass
+  #   (c) no secret primary fingerprint in the listing -> UNRESOLVED, not upgraded to either green
+  # Fixtures are `--with-colons` listings, the exact shape the function is documented over.
+  local PINNED COLLIDING listing out rc=0
+  PINNED="$(pinned_signing_fpr)" || { bad "selftest could not read a pinned fingerprint to test the verdict against"; fails=1; }
+  if [ -n "${PINNED:-}" ]; then
+    COLLIDING="$(printf '%s%s' "$(printf '%0.40d' 0 | tr '0' 'A' | cut -c1-24)" "${PINNED: -16}")"
+    [ "${#COLLIDING}" -eq 40 ] || COLLIDING="AAAAAAAAAAAAAAAAAAAAAAAA${PINNED: -16}"
+    # (a) match
+    listing="$(printf 'sec:::2048:1:%s:0:::::::scESC:::::::\nfpr:::::::::%s::\nssb:::2048:1:BBBBBBBBBBBBBBBB:0::::::e::::::\n' "${PINNED: -16}" "$PINNED")"
+    out="$(printf '%s\n' "$listing" | signing_identity_verdict "$PINNED")" && rc=0 || rc=$?
+    if [ "$rc" -eq 0 ] && [ "$(printf '%s' "$out" | tr '[:lower:]' '[:upper:]')" = "$PINNED" ]; then
+      ok "identity verdict: the pinned fingerprint is PROVEN and echoed"
+    else bad "identity verdict: a matching fingerprint did not pass (rc=$rc, got '${out:-empty}')"; fails=1; fi
+    # (b) low-16 collision: the selector matched, the fingerprint did not
+    listing="$(printf 'sec:::2048:1:%s:0:::::::scESC:::::::\nfpr:::::::::%s::\n' "${PINNED: -16}" "$COLLIDING")"
+    out="$(printf '%s\n' "$listing" | signing_identity_verdict "$PINNED")" && rc=0 || rc=$?
+    if [ "$rc" -eq 1 ]; then
+      ok "identity verdict: a low-16 collision is refused (MISMATCH), not passed"
+    else bad "identity verdict: a colliding fingerprint was NOT refused (rc=$rc)"; fails=1; fi
+    # (c) no key
+    listing="$(printf 'pub:::2048:1:%s:0:::::::scESC:::::::\n' "${PINNED: -16}")"
+    out="$(printf '%s\n' "$listing" | signing_identity_verdict "$PINNED")" && rc=0 || rc=$?
+    if [ "$rc" -eq 2 ]; then
+      ok "identity verdict: no secret primary fingerprint is UNRESOLVED, not upgraded"
+    else bad "identity verdict: an absent key was NOT held as unresolved (rc=$rc)"; fails=1; fi
+  fi
+
   [ "$fails" -eq 0 ] && printf '\nselftest passed\n' || { printf '\nselftest FAILED\n'; exit 1; }
 }
 

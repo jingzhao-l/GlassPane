@@ -8,9 +8,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
-## [Unreleased]
+## [0.14.6] — 2026-11-08
 
-（空。本轮收口后没有未归号的条目。）
+### Fixed — GPG 身份判决有电池
+
+`signing_identity_verdict`（0.14.3 那笔落进 `script/gpg-signing.sh`）此前没有自己的固定点测试——
+函数的三种判决（PROVEN / MISMATCH / UNRESOLVED）全靠调用方 `install.sh` 的自测间接覆盖，而那条
+自测把 `GP_SIGNING_INSTALL_SH` 设成 `/dev/null` 时拿不到钉住的指纹，电池自己的 guard 会先拒。
+本轮在 `gpg-signing.sh selftest` 末尾加了三格 `--with-colons` 夹具直驱判决函数：钉住的指纹命中
+→ PROVEN 且回显；低 16 位碰撞（选择器命中、完整指纹不同）→ MISMATCH（rc=1），绝不判成过；
+无 secret 主指纹 → UNRESOLVED（rc=2），绝不升级。反向控制实测：把电池回退到 origin 版（0 条
+identity-verdict 断言）三条具名 ok 全部消失。本轮 selftest 31 格全绿。
 
 ## [0.14.5] — 2026-11-08
 
