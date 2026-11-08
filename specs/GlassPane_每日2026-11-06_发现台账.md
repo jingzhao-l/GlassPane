@@ -307,9 +307,15 @@ CI 的活结论在汇报里按交付那一刻给。
 
 ## 6. 清理盘点（收口后）
 
-九步逐条做过，读数如下。**收口后计数**：`git worktree list` **6 行**、`git branch -a` **17 条**
-（本地 13 + 远端 4，其中 2 条是 `HEAD ->` 符号引用）、tag **98 枚**（一枚未删）、stash **3 条**（一条未动）。
-`git worktree prune` ⇒ rc=0，行数仍 6；`.worktrees/` 下 5 个目录与注册表一一对应，**无已 remove 的残留**。
+九步逐条做过，读数如下。**收口后计数（2026-11-07 22:30 实测）**：`git worktree list` **6 行**、
+`git branch -a` **17 条**（本地 13 + 远端 4，其中 2 条是 `HEAD ->` 符号引用）、tag **98 枚**（一枚未删）、
+stash **3 条**（一条未动）。`git worktree prune` ⇒ rc=0，行数仍 6；`.worktrees/` 下 5 个目录与注册表
+一一对应，**无已 remove 的残留**。
+（**11-08 16:06 交付时再看，那条线自己动过**：worktree **5 行**、`git branch -a` **11 条**、本地 **6**、
+tag **99 枚**（多的一枚是它的 `v0.14.5`）、stash **3**、远端多了 `split/main`——它清掉
+`harness-close-20261105` worktree 与 `gp-harness-runner-label-20261107`／`backup-advisory-prerebase` 等分支。
+本轮**一枚 tag 未删、一条分支/worktree/stash 未动**，差额全部是那条线自己的整理，不是本轮清的。
+下面的表按 11-07 22:30 那一刻写。）
 
 | 对象 | 处置 | 去向与判据 |
 |---|---|---|
