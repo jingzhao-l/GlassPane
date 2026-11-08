@@ -283,6 +283,27 @@ gh workflow run release.yml --repo jingzhao-l/GlassPane --ref v1.31.1 -f mode=dr
 gh workflow run release.yml --repo jingzhao-l/GlassPane --ref v1.31.1 -f mode=publish
 ```
 
+**补记（2026-11-08 16:04，按当时字节写，之后不追）：** 上面 e 段是 11-07 22:11 那一刻的实测。
+11-08 上午这条 harness 线在我的收口台账 `2c44a979` 之后又落了四笔 `[gp]`（`72e7e213`、`7017c634`、
+`808bbad8`、`16bda1b4`）并**取了 0.14.5**。按当时状态复跑：
+
+- `release-artifact` **转绿**：`node harness/tools/release-artifact.mjs --check` ⇒ rc=0，
+  `glasspane-harness@0.14.5 — split main and the released v0.14.5 are both trunk's
+  harness/glasspane-harness tree`，两侧都是 `704c5c0f`。它做的正是我上面 remedy 里写的那一套。
+  所以上面 "rc=1 / `653e2ce1` vs `b5ce0a94` / RE-SPLIT RISK" 是**当时**的读数，已被吸收，不是错报。
+- 但 tag 仍不放行，**原因换了**：`fork-diff` 现在红，`node harness/tools/fork-diff.mjs --check` ⇒
+  `the fork's actual divergence no longer matches harness/contracts/fork-diff.json`，5 个文件
+  `our own file moved`：`README.md`、`README.zh-CN.md`、`CHANGELOG.md`、`SYNCLOG.md`、
+  `packages/opencode/test/script/assert-ci-green.test.ts`，要那条线 `--record` 重记金样。
+  收口 HEAD `710e4d99` 的 run `42460762308` 实测 completed **failure**，9 job success、
+  唯一 failure 仍是 `harness rulers`；本笔只动 `specs/` 那一个文件
+  （`git diff --stat 2c44a979..710e4d99` ⇒ 只有台账一处），被测面逐字相同，
+  所以这是那条线自己的旧稿，不是本轮造成的。
+
+本轮到此停手：不再追着一条在飞的表改台账（每一笔 docs-only 提交都会触发新 run，把"最新一条"
+变成追不上的移动目标）。owner 侧现在只剩 fork-diff 的 `--record` 那一步，之后按上面 e 段那串命令走；
+CI 的活结论在汇报里按交付那一刻给。
+
 
 ## 6. 清理盘点（收口后）
 
