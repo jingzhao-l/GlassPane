@@ -8,7 +8,7 @@
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
   "observedAt": "2026-11-08",
-  "engineLoc": 33575,
+  "engineLoc": 33578,
   "engineFiles": 67,
   "surfaces": {
     "mcpShell": {
@@ -1223,14 +1223,14 @@
           "lines": 36
         }
       ],
-      "ratio": 0.2349,
+      "ratio": 0.2348,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
       },
       "testsExcluded": {
         "files": 65,
-        "lines": 11889
+        "lines": 11891
       },
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {
