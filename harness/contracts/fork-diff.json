@@ -2188,7 +2188,7 @@
     {
       "file": "bun.lock",
       "upstreamHash": "7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c",
-      "forkHash": "9c87aef5b2837c0e5b09aa24849909cb20e1346b"
+      "forkHash": "ed7d9bcba2e577325cbc87d9eb32af363026a1ad"
     },
     {
       "file": "bunfig.toml",
@@ -2803,7 +2803,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "54e459d72ed107b6e4e9c02bc01d62e4bc6c1a07"
+      "forkHash": "ce440d44c74b01aef09acb50c0c5f7a5904dd7ad"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -3573,7 +3573,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "246d7436876f5e35dbcb32f33304a3003a23f753"
+      "forkHash": "549b541044a6a0c0a9c27fbbee4b4b7f74756770"
     },
     {
       "file": "script/beta.ts",
@@ -3801,7 +3801,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "b4bc859a832e1626edd5f2367c53a2a1ce0e4a93"
+      "forkHash": "a054c4785fa80a3e591113ac7e4828790aae332e"
     },
     {
       "file": "contracts/dependency-floors.json",
@@ -3837,7 +3837,7 @@
     },
     {
       "file": "docs/install.md",
-      "forkHash": "746c3524bc8ac41c7a71510972fe6979c46875d9"
+      "forkHash": "2b91332bd75da28b6f5d5621762d6e330b83e328"
     },
     {
       "file": "docs/kernel-integration.md",
@@ -4129,11 +4129,11 @@
     },
     {
       "file": "product.json",
-      "forkHash": "9f8612154e8e1fb6c8290f0d1c6b5dbd142bf114"
+      "forkHash": "483cc5e3cb7137be01e01d991ace1f87472bf700"
     },
     {
       "file": "README.zh-CN.md",
-      "forkHash": "0ff7bd6a28233a43c194df559a4debbc25ca2f92"
+      "forkHash": "9f5d99803de15b6ffb97f7b38459576c8d054c36"
     },
     {
       "file": "script/assert-ci-green.mjs",
@@ -4145,7 +4145,7 @@
     },
     {
       "file": "script/gpg-signing.sh",
-      "forkHash": "6b1b55694795b224e11e671cda6d1473db884f68"
+      "forkHash": "d4da29de08d7cd445108de432a430789d5f31fea"
     },
     {
       "file": "script/kernel-conformance.mjs",
@@ -4169,7 +4169,7 @@
     },
     {
       "file": "scripts/install.sh",
-      "forkHash": "9b4b470288230a82d7dfa5236fa522c7f51106e8"
+      "forkHash": "cfb90bc41e158b3e3038a08cba7640f399ce208e"
     },
     {
       "file": "SYNCLOG.md",

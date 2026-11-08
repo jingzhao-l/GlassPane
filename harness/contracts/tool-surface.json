@@ -14,7 +14,7 @@
     "mcpShell": {
       "loc": 13020,
       "files": 16,
-      "ratio": 0.2138,
+      "ratio": 0.2137,
       "byFile": {
         "mcp-shell/src/tools.ts": 3168,
         "mcp-shell/src/engine-client.ts": 2278,
@@ -35,7 +35,7 @@
       }
     },
     "fork": {
-      "loc": 14302,
+      "loc": 14335,
       "files": [
         {
           "file": "packages/opencode/script/dependency-floors.ts",
@@ -140,7 +140,7 @@
         {
           "file": "script/gpg-signing.sh",
           "kind": "added",
-          "lines": 736
+          "lines": 769
         },
         {
           "file": "script/kernel-conformance.mjs",
@@ -1223,7 +1223,7 @@
           "lines": 36
         }
       ],
-      "ratio": 0.2348,
+      "ratio": 0.2353,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
@@ -1239,7 +1239,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 27322,
+  "totalToolSurfaceLoc": 27355,
   "note": null,
   "carried": null
 }
