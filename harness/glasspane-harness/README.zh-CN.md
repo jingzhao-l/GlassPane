@@ -87,10 +87,10 @@ SDK 与 plugin API。为了塞下内核，没有任何功能被砍掉。
 这句话是**量出来的**，不是承诺。分叉锚定上游
 [anomalyco/opencode](https://github.com/anomalyco/opencode) 的某个 tag，
 `harness/tools/fork-diff.mjs` 每次改动都会把本树与那个 tag 逐文件对比。那把尺子自己打出的就是
-下面这一行——原样照抄，对着 2026-11-07 记录的金样：
+下面这一行——原样照抄，对着 2026-11-08 记录的金样：
 
 ```
-fork-diff vs v1.18.32: 4630/6765 byte-identical, 294 edited, 133 added, 1708 deleted
+fork-diff vs v1.18.32: 4630/6769 byte-identical, 294 edited, 137 added, 1708 deleted
 ```
 
 上游发来的 6,632 个文件里 4,630 个仍逐字节保持上游原样。改动（294 个）集中在 config/paths/品牌、

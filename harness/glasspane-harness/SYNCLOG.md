@@ -3,7 +3,109 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
-## 2026-11-07（第二十九次会话）· 取号 0.14.3：上一轮的活不在分支上、在三个没人收的工作树里，而"CI 转不了绿"的真因是一条冻结安装
+## 2026-11-08（第三十次会话）· 取号 0.14.5：退役的 runner 标签不是红是静默，两枚空号把"CI 转不了绿"的原因写成机器读得回的契约
+
+本轮开工先按【先找上一轮没收口的活】把 origin 重新 fetch 并与 `origin/main` 对表：本轮分的是 `75bb8c48`
+（那时 origin 的 HEAD），`origin/main` 已走到 `2c44a979`。delta 逐文件列出来只有
+`specs/GlassPane_每日2026-11-06_发现台账.md`，`git diff --name-only 75bb8c48..origin/main -- harness/glasspane-harness`
+= **0** ⇒ 冲突风险区为空，本线 `--ff-only origin/main` 快进到 `2c44a979`、未提交批次原样带过来，不 rebase、
+不 checkout、不 stash。
+
+### 一、上一轮没收口的活 = 发布格被两枚空号结构性堵死（每条都有量法）
+
+`v0.14.3`（peel `d22fde46`）与 `v0.14.4`（`be43379d` → peel `0633825b`）都是**签名 tag 已推到搬运仓、
+一个字节没上架**：
+
+| 格 | 0.14.3 | 0.14.4 | 量法 |
+|---|---|---|---|
+| tag 在搬运仓 | 有（签名完好） | 有（签名完好） | `git ls-remote --tags` |
+| Release | 无 | 无（`release not found`） | `gh release view v0.14.4` |
+| registry | 无 | 无（latest 仍 `0.14.2`） | `npm view glasspane-harness version --prefer-online` |
+
+**真因不在我们的树里。** GitHub 2026-11-02 退役全部 macOS 14 runner 镜像
+（actions/runner-images#15226）。钉在死标签上的 job **不是红，是静默**：排队阶段就被取消，
+拿不到 runner ⇒ 零步骤、`runner_name` 空、无日志，run 结论 `cancelled` 而非 `failure`。那枚 tag 自己的
+`.github/workflows/ci.yml:250` 写的正是 `runs-on: macos-14`。而 `assert-ci-green` 当时给的补救是
+`gh run rerun` —— 对这种取消**物理上无效**（没有 runner 可重派）。派发的工作流读的是**被派发那个 ref
+上的 YAML**，已推的 tag 不移动 ⇒ main 上的修复解不开旧 tag，只能让号。
+
+### 二、修了什么（改动面数字）
+
+- **四处死标签 → 在服标签**：`ci.yml installer-selftest`、`release.yml` 两条 binaries 矩阵腿
+  （darwin-arm64 / darwin-x64）、`verify-published`。arm64 钉 `macos-15`、x64 钉 `macos-15-intel`，
+  两条都不骑 `-latest`：发布物的架构必须被点名，不是被默认值挑的。
+- **新契约 `contracts/runner-images.json`**：10 个在服标签及架构、`observedAt 2026-11-07`、
+  `observedWith`（那条真的 `gh api` 命令）、退役日期与公告链接、本次事故观测证据
+  （run `42357845872` / job `128359753896`）。**镜像 NAME ≠ LABEL**（`macos-15-arm64` 不是标签）单独记着。
+- **新守卫 `check-workflows.mjs` 规则 5**：读 `runs-on` 字面量与矩阵 `runner`/`target` 对，逐个对契约判
+  已退役 / 不是标签 / 架构不符，各给不同补救；契约读不出、坏 JSON、空标签集一律 exit 2（坏尺子不是发现）。
+  **修前基线 rc=1 四条具名问题（就是那四处），修后 rc=0**；真树扫描量 `files 3, jobs 12, refs 23,
+  bodies 48, multi 36, npm 3, macos 6, runnerExprs 2`，其中 `macos`/`runnerExprs` 有计数地板 —— 反向变异
+  实测把 macos 6→2、problems 0、exit 0，正是被地板抓住。
+- **`assert-ci-green` 改为读原因**：`jobs` 端点取被取消的 job（标签/runner_name/步骤数），再逐个读
+  `check-runs/<id>/annotations`；七个认知分支各给不同补救（UNKNOWN / 读失败 / 镜像退役 / 部分读到 /
+  其它注解 / 全零步骤 / runner 已启动）。`release.yml version-check` 补第三个 scope `checks: read`
+  （job 级 permissions **替换**而非叠加 workflow 级）。**判决对着真 API 跑过**：拿 `0633825b` 实跑 rc=1，
+  逐字引出 `The configuration 'macos-14-arm64-us-default' is not supported`，打印
+  "CANNOT help … take a NEW version number"。
+- **第四份安装入口拷贝点此前无闸**：`scripts/install.sh:4` 自称是 `product.json` 的 `install.curl`，
+  而 `installer-curl-pinned` 只比对三份文档。取号实测闸 rc=1 **只报三条**、表头仍在发 v0.14.4。
+  修：install.sh 纳入文件集（表头是注释，走原文而非 `stripComments`），:80 拿具体 tag 举例的散文改成
+  不点版本。读数 **6638/3 → 6640/0**。父仓两条 CONTRIBUTING 的 `publish-gate-selftest` 行按实测
+  `macos-latest` 对齐。
+
+### 三、跑了哪些闸、结果如何（真源都是自己数的那条）
+
+| 闸 | 结果 |
+|---|---|
+| 全电池（CI 自己 `patterns` 反推的 35 文件） | **545 pass / 0 fail / 2616 expect / 236.11s**，globs 集合 == `git ls-files` |
+| `assert-ci-green.test.ts` | **24 条**（假 gh 从回显桩改成路由器；夹具是 run `42357845872` 逐字节 API 捕获，sha256 记在文件头） |
+| `workflow-gates.test.ts` | **68 条**（含规则 5 的 12 条：三种 exit 2、`retired:[]` 负对照、矩阵两条腿） |
+| `rulers-selftest` | **30 ok / 0 MISS**（修前 rc=1、两条 MISS，见【本轮另修】） |
+| `product-surface`（永不 --record） | **6640 / 0** |
+| `surface-semantics` | 0 命中 / 23 文件，正对照 3/3 |
+| `brand-surface` | 0 命中，血缘 9647 / 3348→3352（本轮新交 4 份 tracked 文件），正对照 8/8 |
+| `hook-liveness` | 21 钩子无漂移，bound 2/2 |
+| `kernel-pin` / `kernel-conformance` | `iterate-kernel@0.1.10`；16/16 |
+| 反向变异 | 四处各具名红，每处自带 `cp` 备份 + `shasum -a 256` 核回（禁 `git checkout`/`stash`） |
+
+**没跑的部分照实写**：本轮未跑 `installer-selftest.sh` 全量（macOS-only 175 条，走 CI 那条 job），
+未跑 `publish.ts --dry-run` 与 `verify-published`（属发布格，本条只写"取号"这半边）。
+
+### 四、re-split 不丢字节（量出来的，不是推的）
+
+搬运仓 main（`0633825b`）的树与父仓 main 的 subtree 只差**两个文件**，两处都是父仓更新更全：
+`contracts/kernel-conformance.json` stamp `0.1.9` vs 父仓 `0.1.10`；`script/kernel-conformance.mjs`
+少父仓那 11 行来源核验。对父仓 main 重跑 `git subtree split` 得 `b6a845b6`，
+`git merge-base --is-ancestor 0633825b b6a845b6` **成立** ⇒ 快进，搬运仓上没有任何独有内容被取代。
+
+### 五、本轮我替你做的决定 → 依据 → 回滚命令
+
+1. **父仓 `scripts/assert-ci-green.mjs:92` 的 `&event=push` 判为不同形、不动它。**
+   依据：父仓 `ci.yml` 无 `workflow_dispatch`/`schedule` 触发器，一次 rerun 保留 `event=push`，那个过滤
+   不会把最新 run 滤掉；且它被三条测试**故意**钉着（`updater/test/scripts-assert-ci-green.test.mjs:164`、
+   `qoder-20261024-release-chain.test.mjs:50-53`、`qoder-20261024-rel-tag-ready-sha.test.mjs:69-72`），
+   父仓 `.github/` 里也已无退役标签。改它等于放宽一条被钉住的判据。
+   回滚（若要动）：改该行去掉 `&event=push`，并同步放宽上面三条测试——**不建议**。
+2. **让 0.14.3 / 0.14.4 两枚号留在 tag 空间，不移动、不删除。**
+   依据：已推的签名 tag 是锚点，搬运仓有 `published-tags-immutable` ruleset 强制；且派发读 ref 上的 YAML，
+   main 修复解不开旧 tag。回滚：不需要也不该回滚；两枚号带着 CHANGELOG 里的说明留在原地。
+3. **`product-surface` 的 `installer-curl-pinned` 纳入第四份拷贝点**（`scripts/install.sh`）。
+   依据：取号时实测闸只报三条而表头仍在发旧号 ⇒ 表头是无人读的拷贝点。回滚：把该文件名从规则的
+   doc 列表里删掉（`harness/tools/product-surface.mjs`），同时删 `rulers-selftest` 的 21/21b 两条控制。
+
+### 六、本轮另修（不属本轮改动、但闸一跑就现形）
+
+`rulers-selftest` 修前 rc=1、两条 MISS，都不是本轮代码引起，而是两条固定点**早就形状过期**：
+`brand-surface` 的 golden `productFiles` 早已从计数升成名字列表，而控制 1 的变异仍写 `g.productFiles - 1`
+⇒ 数组减一得 NaN ⇒ JSON 写成 null ⇒ 触发的是 :779 那条"cannot be compared"（类型丢失），不是它声称的
+"scan set moved"（按名字比对）——退 1 但没具名。控制 13 的因果对照还在找已不存在的
+`if (golden.productFiles !== observed.productFiles) {` marker ⇒ 自报"would prove nothing"，因果那半边
+根本没证。修后 30 ok / 0 MISS（控制 1 改 slice(1) 掉一个真名字 + `mustNot cannot be compared` 钉住分支；
+控制 13 的 marker 换成真正的判据 `if (leftProducts.length || joinedProducts.length)`，注释说明为什么不能
+neuter Array.isArray 那一行，restore 补 sha256 核回，标签号 11→13 与块注释对齐）。
+
+
 
 本轮开工先说一件与"发现问题"无关但决定本轮形状的事：**这个会话本身从 11-01 挂到 11-06 才醒**，
 它带进来的指令是 11-01 那一份（要我补 0.13.0 的发布、清算 31 条待办）。逐项回字节重量之后：

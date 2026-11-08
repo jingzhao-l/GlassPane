@@ -77,12 +77,16 @@ main 上的修复解不开一枚已推的 tag：这一格只能用让号收，�
 出现 ⇒ `--budget 20m` 被静默忽略、`--budget 5` 靠真等 2000ms 通过；改成覆盖参数前置后，pending 那条用例
 从 2120ms 降到 160ms——它此前测的不是它声称的东西。
 
-尺子读数：`tool-surface` 面 B **14032 → 14298 LOC（+266）**，逐条归属只有本轮自己动的两个文件
-（`script/assert-ci-green.mjs` +162、`script/check-workflows.mjs` +104），面 A 的 LOC 未动而比率
-21.48% → 21.38% 是同一个分母被这 +266 挪的；两面都仍高于文档写的 10% 上限， crossing 判据早已花掉，
-现在挡它们的是 LOC 棘轮，本轮按"自己的有意增长且与代码同批"重记。`surface-semantics` 0 命中 / 23 文件、
-正对照 3/3；`brand-surface` 0 命中、血缘 9647 / 3348 文件未动、正对照 8/8；`hook-liveness` 21 钩子无漂移、
-bound 2/2；`product-surface` 6640 / 0（**永不 --record**）。
+尺子读数：`tool-surface` 面 B **14032 → 14302 LOC（+270）**，逐条归属只有本轮自己动的三个文件
+（`script/assert-ci-green.mjs` +162、`script/check-workflows.mjs` +104、`scripts/install.sh` 的表头注释
++4），面 A 的 LOC 未动而比率
+21.48% → 21.38% 是同一个分母被这 +270 挪的；两面都仍高于文档写的 10% 上限， crossing 判据早已花掉，
+现在挡它们的是 LOC 棘轮，本轮按"自己的有意增长且与代码同批"重记。`fork-diff` 随本轮 +137 added
+（契约 + 三个 API 夹具）与 install.sh 自己挪动重记：`4630/6769 byte-identical, 294 edited, 137 added,
+1708 deleted`，两份 README 那行照抄的读数由 `product-surface` 的 `fork-diff-readme` 逼着同步
+（它把句子从金样现推，不是靠人记得去改文档）。`surface-semantics` 0 命中 / 23 文件、
+正对照 3/3；`brand-surface` 0 命中、血缘 9647 / 3348→3352 文件（本轮新交的 4 份 tracked 文件）、正对照 8/8；
+`hook-liveness` 21 钩子无漂移、bound 2/2；`product-surface` 6640 / 0（**永不 --record**）。
 
 **re-split 不丢字节，这条是量出来的不是推的。** 搬运仓 main（`0633825b`）的树与父仓 main 的 subtree 只差
 两个文件，且两处都是父仓更新更全（`contracts/kernel-conformance.json` 的 stamp `0.1.9` vs 父仓 `0.1.10`；

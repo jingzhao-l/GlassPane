@@ -7,14 +7,14 @@
     "fork": "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted, and one deleted line excuses at most one re-added line (pairing is one-to-one, so 40 copies of a rebranded line bill 39)",
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
-  "observedAt": "2026-11-07",
+  "observedAt": "2026-11-08",
   "engineLoc": 33575,
   "engineFiles": 67,
   "surfaces": {
     "mcpShell": {
       "loc": 13020,
       "files": 16,
-      "ratio": 0.2148,
+      "ratio": 0.2138,
       "byFile": {
         "mcp-shell/src/tools.ts": 3168,
         "mcp-shell/src/engine-client.ts": 2278,
@@ -35,7 +35,7 @@
       }
     },
     "fork": {
-      "loc": 14032,
+      "loc": 14302,
       "files": [
         {
           "file": "packages/opencode/script/dependency-floors.ts",
@@ -130,12 +130,12 @@
         {
           "file": "script/assert-ci-green.mjs",
           "kind": "added",
-          "lines": 212
+          "lines": 374
         },
         {
           "file": "script/check-workflows.mjs",
           "kind": "added",
-          "lines": 334
+          "lines": 438
         },
         {
           "file": "script/gpg-signing.sh",
@@ -170,7 +170,7 @@
         {
           "file": "scripts/install.sh",
           "kind": "added",
-          "lines": 868
+          "lines": 872
         },
         {
           "file": "packages/app/src/components/dialog-connect-provider.stories.tsx",
@@ -1223,14 +1223,14 @@
           "lines": 36
         }
       ],
-      "ratio": 0.2314,
+      "ratio": 0.2349,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
       },
       "testsExcluded": {
         "files": 65,
-        "lines": 11519
+        "lines": 11889
       },
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {
@@ -1239,7 +1239,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 27052,
+  "totalToolSurfaceLoc": 27322,
   "note": null,
   "carried": null
 }
