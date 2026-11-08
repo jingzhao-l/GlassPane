@@ -1,0 +1,31 @@
+{
+  "_comment": "The macOS runner labels GitHub still serves, recorded so a workflow cannot pin an image that no longer exists. This is a measured external fact, not a preference: on 2026-11-07 every CI run of this repository had its macOS job cancelled two seconds in, with no runner assigned and no steps, and the release lane refused because assert-ci-green could never see a green run. The annotation GitHub attached to that job is quoted below verbatim. Read by script/check-workflows.mjs (rule 5); the arch column is what keeps a darwin-arm64 target from being built on an Intel image.",
+  "source": "actions/runner-images README, the macOS image table (rows 'macOS 26', 'macOS 26 Arm64', 'macOS 15', 'macOS 15 Arm64', 'macOS 14') and its retirement note",
+  "sourceUrl": "https://github.com/actions/runner-images/blob/main/README.md",
+  "observedAt": "2026-11-07",
+  "observedWith": "gh api repos/actions/runner-images/contents/README.md --jq .content | base64 -d",
+  "labels": {
+    "macos-15": "arm64",
+    "macos-15-xlarge": "arm64",
+    "macos-15-intel": "x64",
+    "macos-15-large": "x64",
+    "macos-26": "arm64",
+    "macos-26-xlarge": "arm64",
+    "macos-26-intel": "x64",
+    "macos-26-large": "x64",
+    "macos-latest": "arm64",
+    "macos-latest-large": "x64"
+  },
+  "latestNote": "`macos-latest` and `macos-latest-large` are moving labels: the README says the -latest migration happens gradually over 1-2 months. Their arch is what the table maps them to on observedAt. The two build legs pin an explicit image (macos-15 / macos-15-intel) so the arm64 and x64 binaries are produced on the same macOS generation rather than drifting apart mid-migration.",
+  "retired": [
+    {
+      "image": "macos-14",
+      "prefix": "macos-14",
+      "retiredOn": "2026-11-02",
+      "announcement": "https://github.com/actions/runner-images/issues/15226",
+      "sourceSentence": "All macOS 14 images retired from GitHub Actions on November 2, 2026. macOS 14 Intel images remain available only in Azure DevOps until November 23, 2026. This extension does not apply to Arm64 images.",
+      "observed": "jingzhao-l/glasspane-harness CI run 42357845872 (ref v0.14.4), job 128359753896 'install.sh fallback channel (offline, stubbed)': started_at 2026-11-07T09:00:28Z, completed_at 2026-11-07T09:00:28Z, runner_name empty, zero steps, conclusion cancelled. Annotation: \"The configuration 'macos-14-arm64-us-default' is not supported\". The same shape on runs 42357616142 and 42355925815; the last run whose macOS job succeeded was 41800820942 on 2026-11-04.",
+      "consequence": "A cancelled job is not a red one, so every other lane can be green while the run's conclusion is cancelled. assert-ci-green refuses the release, and `gh run rerun` cannot help: the dispatched workflow reads the YAML at the tag, and a pushed tag is never moved. The number has to be let go (v0.14.4 is the second empty number this produced, after v0.14.3)."
+    }
+  ]
+}

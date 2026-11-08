@@ -247,7 +247,13 @@ jobs:
   # 每一步都会红。用 `if: runner.os == 'macOS'` 跳过等于没跑——本仓库明令禁止那种修法。
   installer-selftest:
     name: install.sh fallback channel (offline, stubbed)
-    runs-on: macos-14
+    # 与发布链两条 build 腿同一个显式镜像（release.yml 的 matrix）。这里从前钉的是 `macos-14`，
+    # GitHub 于 2026-11-02 退役了它（actions/runner-images#15226）：本 job 在开跑两秒内被 cancelled，
+    # 没有 runner、没有步骤、没有日志，于是整条 CI 的结论是 cancelled 而不是 red——另一格全绿也救不回来，
+    # 而 `assert-ci-green` 要的就是这条 ci.yml 在被 tag 那笔 sha 上 success。v0.14.3 与 v0.14.4 两枚号
+    # 因此打了 tag 却发不出去。受支持的标签集记在 `contracts/runner-images.json`，由
+    # `script/check-workflows.mjs` 第 5 条读；换机器不等于放宽判据，macOS 这一侧仍然是**测量**。
+    runs-on: macos-15
     # The lane is stubbed and offline: measured 17.01s wall for 175 named checks on this machine (re-timed after the lane was final; an earlier 15.42s reading was taken while two checks were failing, i.e. before the work finished — a fast selftest is not automatically a correct one)
     # (`/usr/bin/time -p bash packages/opencode/script/installer-selftest.sh`). 20 minutes is that
     # number with room for a loaded runner — and naming any ceiling at all is the point, because

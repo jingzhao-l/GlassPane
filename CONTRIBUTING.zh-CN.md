@@ -47,7 +47,7 @@ GlassPane 是 **macOS 上给 AI 编程代理用的 GUI 测试与验证层**：�
 | `version-line` | ubuntu-latest | 每个版本位点与根 manifest 是否一致 |
 | `docs` | ubuntu-latest | 对外文档体检，一个脚本六类判据：相对链接可达、页内/跨页锚点存在、双语两侧都在位、可复算主张与真源一致、每张 markdown 表格每行格数一致、安装落点不是 world-writable 目录里的固定名字、正文里不许残留被贴进去的 shell/JS 语句（先 `node scripts/check-doc-links.mjs --self-test`，再 `node scripts/check-doc-links.mjs`——电池跑在正查之前，因为一条没人见它红过的判据不算判据） |
 | `harness-rulers` | ubuntu-latest | `harness/` 那套已记录基线：fork 分歧度、工具面与产品面、品牌漂移、pinned 上游 tag 上的扩展点存活、内核出处（`node harness/tools/*.mjs --check`）。这一条读的是 `harness/**`，而发布归档里从不带它 |
-| `publish-gate-selftest` | macos-14 | 发布闸自身的固定点测试：`verify-published.ts` 必须给出三个不同的答案（good / 错误页 / 永不 listening）。产品是 macOS-only——这道闸在 Linux 上会 exit 2「什么都没验」——所以它跑在 macOS runner 上，此刻是真的在测量 |
+| `publish-gate-selftest` | macos-latest | 发布闸自身的固定点测试：`verify-published.ts` 必须给出三个不同的答案（good / 错误页 / 永不 listening）。产品是 macOS-only——这道闸在 Linux 上会 exit 2「什么都没验」——所以它跑在 macOS runner 上，此刻是真的在测量 |
 | `workflow-lint` | ubuntu-latest | workflow 文件本身：`node scripts/check-workflows.mjs` 拒掉 GitHub 根本不会加载的写法（重名 job、`if:` 里引用 `secrets`、未加引号的 `value: `、指向不存在脚本的步骤、未声明就使用的 `workflow_dispatch` 输入） |
 
 运行时接受的命令是 [iterate.config.yaml](./iterate.config.yaml) → `validation.commands` 里的封闭清单，**逐字**匹配：加参数或换目录都会被拒绝。

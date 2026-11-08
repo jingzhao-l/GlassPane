@@ -57,8 +57,22 @@ Things worth knowing, because they are the usual way this is set up wrong:
   bypasses 2FA gets `403` on trust endpoints, which is why this is an owner step and not
   an automated one.
 - Connections cannot be edited: delete and recreate. Up to 10 per package.
-- Cloud-hosted runners only (ours are `macos-14` for darwin-arm64, `macos-15-intel` for darwin-x64
-  and `ubuntu-latest` — fine; `macos-13` is retired on GitHub's side and no lane uses it).
+- Cloud-hosted runners only (ours are `macos-15` for darwin-arm64, `macos-15-intel` for darwin-x64
+  and `ubuntu-latest`). Both macOS legs pin an explicit macOS 15 label rather than riding
+  `macos-latest`, so the two binaries cannot drift onto different OS generations mid-migration.
+  The served set is recorded in [`contracts/runner-images.json`](../contracts/runner-images.json)
+  and enforced by `script/check-workflows.mjs` rule 5 — including that a matrix leg's image
+  architecture matches the target it ships under.
+- **A retired label does not go red, it goes silent.** GitHub removed every macOS 14 image on
+  2026-11-02 ([runner-images#15226](https://github.com/actions/runner-images/issues/15226)); a job
+  still pinned to `macos-14` is *cancelled* at queue time with no runner, no steps and no log. Every
+  other lane can be green while the run's conclusion is `cancelled`, which `assert-ci-green` refuses
+  — and `gh run rerun` cannot help, because a dispatched workflow reads the YAML at the dispatched ref
+  and a pushed tag is never moved. That cost this product two version numbers (v0.14.3, v0.14.4).
+  The remedy is to pin a served label, let CI go green on that commit, and take a NEW number.
+  `macos-13` is likewise retired and no lane uses it. An image *name* is not a *label*:
+  `macos-15-arm64` names the image whose label is `macos-15`, and pinning the name is cancelled just
+  as silently.
 - Until this is configured, publishing from CI is not possible; publish from a machine
   with `npm login` and a granular access token, or add the environment secrets and skip
   the OIDC path.

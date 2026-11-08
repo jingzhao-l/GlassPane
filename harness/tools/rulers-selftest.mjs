@@ -532,6 +532,59 @@ mustGoRed(
   ["totalToolSurfaceLoc"],
 )
 
+// 21. product-surface's `installer-curl-pinned` reads FOUR copy sites, and the fourth is the
+// installer's own usage header. Until 2026-11-08 the list held three docs, so taking 0.14.5 turned
+// those three red by name while `scripts/install.sh:4` went on handing readers v0.14.4 and the lane
+// reported exactly three problems. The header's comment claims it "is product.json's install.curl";
+// this control makes that claim comparable. The wrong tag is DERIVED from the manifest, not
+// hardcoded, so the control does not rot at the next release.
+const headerCurl = () => JSON.parse(readFileSync(path.join(fork, "product.json"), "utf8")).install.curl
+const breakHeader = (text) => {
+  const curl = headerCurl()
+  // A no-op mutation would let an already-red header satisfy this control while measuring nothing.
+  if (!text.includes(curl)) bad("21: the installer header does not carry product.json's install.curl BEFORE the mutation — the control would prove nothing")
+  return text.replace(curl, curl.replace(/\/v[^/]+\//, "/v0.0.0-not-this-release/"))
+}
+mustGoRed(
+  "harness/glasspane-harness/scripts/install.sh",
+  "product-surface: the installer's own usage header is a copy site too",
+  breakHeader,
+  "harness/tools/product-surface.mjs",
+  ["--check"],
+  1,
+  ["[installer-curl-pinned] scripts/install.sh does not carry product.json's pinned install line verbatim"],
+)
+
+// 21b. causality: with the fourth site dropped from the list, the SAME header mutation is green.
+// This is the difference between "the lane happens to be red" and "this edit is what makes it red" —
+// and it is also the reproduction of the defect as it shipped, not a description of it.
+{
+  const toolPath = "harness/tools/product-surface.mjs"
+  const abs = path.join(repoRoot, toolPath)
+  const source = readFileSync(abs)
+  const neuteredFile = "harness/tools/rulers-selftest-neutered-curl.mjs"
+  const neuteredAbs = path.join(repoRoot, neuteredFile)
+  const marker = `for (const doc of ["README.md", "README.zh-CN.md", "docs/install.md", "scripts/install.sh"]) {`
+  if (!source.toString("utf8").includes(marker)) bad("21b: the copy-site list cannot be located in product-surface.mjs — this control would prove nothing")
+  else {
+    const headerAbs = path.join(fork, "scripts", "install.sh")
+    const original = readFileSync(headerAbs)
+    const before = sha(original)
+    try {
+      writeFileSync(neuteredAbs, source.toString("utf8").replace(marker, `for (const doc of ["README.md", "README.zh-CN.md", "docs/install.md"]) {`))
+      writeFileSync(headerAbs, breakHeader(original.toString("utf8")))
+      const got = run(neuteredFile, ["--check"])
+      if (got.text.includes("scripts/install.sh does not carry")) bad("21b: the neutered copy still reads the header, so the control is not neutered")
+      else ok("21b control live: dropping the fourth site makes the same header mutation green — that is the defect as it shipped")
+    } finally {
+      writeFileSync(headerAbs, original)
+      if (sha(readFileSync(headerAbs)) !== before) bad(`21b: RESTORE FAILED — scripts/install.sh is not the byte sequence this control found (${before.slice(0, 12)} → ${sha(readFileSync(headerAbs)).slice(0, 12)})`)
+      rmSync(neuteredAbs, { force: true })
+      if (existsSync(neuteredAbs)) bad(`21b: the neutered copy was not removed (${neuteredFile})`)
+    }
+  }
+}
+
 if (git("status", "--porcelain").split("\n").filter((l) => l && !l.startsWith("??")).length > 0) {
   bad("closure: the battery left tracked files modified in the worktree:\n" + git("status", "--porcelain"))
 } else ok("closure: no tracked file left modified")

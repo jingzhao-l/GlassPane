@@ -662,15 +662,22 @@ const sh = stripComments(read("scripts/install.sh"))
 check("installer-urls", (product.install?.curl ?? "").includes(`raw.githubusercontent.com/${product.repo}/`), "product.json install.curl does not point at the product's own raw script URL")
 // The installer is the thing that verifies the binary, so the URL it is handed out by cannot
 // live on a moving branch: whoever can push `main` of the split repository would otherwise pick
-// the verifier for every reader of the docs. Pinned to this version's tag, and the three places a
+// the verifier for every reader of the docs. Pinned to this version's tag, and the FOUR places a
 // human copies it from have to say the same string — a per-release rewrite nobody remembers is
 // exactly how the previous `/main/` line survived while `release.yml` claimed the installers pin
 // the tag.
+//
+// The fourth place is the installer's own usage header, and it was the one nobody read. Its comment
+// says "it is product.json's `install.curl`" — a claim of agreement with no code behind it, which is
+// the class every rule in this file exists to refuse. Measured 2026-11-08: taking 0.14.5 moved the
+// manifest and this lane reported exactly THREE problems (both READMEs and docs/install.md) while
+// `scripts/install.sh:4` still handed readers v0.14.4. The header is a comment, so it is read raw
+// here rather than through `readCode`/`stripComments` — the copy a human pastes IS the comment.
 {
   const curl = product.install?.curl ?? ""
   check("installer-curl-pinned", curl.includes(`/v${product.version}/`), `product.json install.curl is not pinned to this release (expected /v${product.version}/, got "${curl}") — the entry point that hands out the verifier must name a tag`)
   check("installer-curl-pinned", !curl.includes("/main/"), `product.json install.curl still points at the branch: ${curl}`)
-  for (const doc of ["README.md", "README.zh-CN.md", "docs/install.md"]) {
+  for (const doc of ["README.md", "README.zh-CN.md", "docs/install.md", "scripts/install.sh"]) {
     const text = read(doc)
     check("installer-curl-pinned", text.includes(curl), `${doc} does not carry product.json's pinned install line verbatim — a reader following the docs gets a different ref than the manifest declares`)
     check("installer-curl-pinned", !text.includes("glasspane-harness/main/scripts/install.sh"), `${doc} still shows a branch-pinned curl | bash one-liner`)

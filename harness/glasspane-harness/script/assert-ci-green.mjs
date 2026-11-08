@@ -39,6 +39,14 @@
  * documented remedy then dispatches another CI run, which is invisible to the same filter, so the
  * lane could not be unblocked by following its own instructions.
  *
+ * A CANCELLED RUN'S REASON IS READ, NOT ASSUMED. "Cancelled" is not "the runner was busy": when GitHub
+ * retired the macOS 14 images on 2026-11-02 the jobs pinned to that label were cancelled at queue time
+ * with zero steps, and `gh run rerun` could never help because a dispatched workflow reads the YAML at
+ * the dispatched ref and a pushed tag is never moved. Two version numbers were lost while this file
+ * printed "nothing about the tree is wrong … re-run THAT run". So a cancelled latest now costs two more
+ * API questions (the run's jobs, then each cancelled job's check-run annotations) and the remedy is
+ * chosen from what they answer. An unread reason is reported as unread, never as transient.
+ *
  * DELIBERATELY NOT DONE: no `--force`, no skip when `GH_TOKEN` is absent, no reading "no record" as
  * success. Releasing anyway means editing this file, which is where the trace is left.
  */
@@ -49,10 +57,10 @@ import { fileURLToPath } from 'node:url'
 
 /**
  * @param {{workflow_runs?: object[]}} payload GitHub `…/actions/workflows/<file>/runs` response body
- * @param {{workflow: string, sha: string, repository?: string}} asked what was asked, carried into the refusal text
+ * @param {{workflow: string, sha: string, repository?: string, cancellation?: object|null}} asked what was asked, carried into the refusal text
  * @returns {{ok: boolean, pending?: boolean, reason: string, run?: object}}
  */
-export function judgeCiGreen(payload, { workflow, sha, repository = '' }) {
+export function judgeCiGreen(payload, { workflow, sha, repository = '', cancellation = null }) {
   const runs = Array.isArray(payload?.workflow_runs) ? payload.workflow_runs : []
   if (runs.length === 0) {
     return {
@@ -78,20 +86,162 @@ export function judgeCiGreen(payload, { workflow, sha, repository = '' }) {
       .filter((r) => r.status === 'completed' && r.conclusion !== 'success')
       .map((r) => `#${r.run_number ?? '?'} ${r.conclusion ?? 'unknown'} (${r.event ?? 'unknown event'}) ${r.html_url ?? ''}`)
       .join('; ')
-    // A cancelled run is not a failing one, and the difference is the whole remedy: nothing about the
-    // tree is wrong, the runner never got a slot. Naming the rerun command is what makes this refusal
-    // executable instead of a description of a dead end.
     const remedy = latest?.conclusion === 'cancelled'
-      ? `It was cancelled, not failed${latest?.id ? ` — re-run THAT run: \`gh run rerun ${latest.id}${repository ? ` --repo ${repository}` : ''}\`, then re-trigger this release.` : '. Re-run it, then re-trigger this release.'} `
-      : 'Fix the red run before shipping; '
+      ? cancelledRemedy(latest, cancellation, repository)
+      : 'Fix the red run before shipping. '
     return {
       ok: false,
       run: latest,
       reason: `${workflow} is ${latest.conclusion ?? 'unknown'} on commit ${sha}: ${failed || `#${latest.run_number} ${latest.html_url ?? ''}`}. `
-        + `${remedy}loosening this step is how an unverified tree gets a signed release.`,
+        + `${remedy}Loosening this step is how an unverified tree gets a signed release.`,
     }
   }
   return { ok: true, run: latest, reason: `${workflow} #${latest.run_number ?? '?'} (${latest.event ?? 'unknown event'}) is success on commit ${sha} (${latest.id})` }
+}
+
+/**
+ * A cancelled run is not a failing one — but "cancelled" alone does not say WHY, and the remedy is
+ * entirely different per reason. This used to assert "nothing about the tree is wrong, the runner
+ * never got a slot" and prescribe `gh run rerun <id>` unconditionally. On 2026-11-07 that sentence
+ * was false and that command was a dead end: GitHub retired every macOS 14 image on 2026-11-02, so
+ * the four jobs pinned to `macos-14` were cancelled at queue time with zero steps and an empty
+ * `runner_name`, and re-running them re-read the SAME YAML (a dispatched workflow runs the file at
+ * the dispatched ref, and a pushed tag is never moved). Two version numbers were lost to it
+ * (v0.14.3, v0.14.4) while the gate kept printing an instruction that could not be followed.
+ *
+ * So the reason is READ, from the two endpoints that actually carry it, and the remedy is chosen by
+ * what was read. An unread reason is never reported as a transient one.
+ */
+function cancelledRemedy(latest, cancellation, repository) {
+  const runId = latest?.id ?? null
+  const repoFlag = repository ? ` --repo ${repository}` : ''
+  const rerun = runId ? `\`gh run rerun ${runId}${repoFlag}\`` : 're-run that run'
+  const readIt = runId
+    ? `\`gh api ${jobsApiPath({ repository: repository || '<owner/repo>', runId })}\` and, per cancelled job, \`gh api ${annotationsApiPath({ repository: repository || '<owner/repo>', jobId: '<job id>' })}\``
+    : 'the run\'s jobs and their check-run annotations'
+  if (!cancellation) {
+    return `It was cancelled, not failed, and no cancellation evidence was read, so the reason is UNKNOWN. `
+      + `Read ${readIt} before choosing a remedy. `
+  }
+  if (cancellation.error) {
+    return `It was cancelled, not failed, and the reason could not be read: ${cancellation.error} `
+      + 'An unread reason is not evidence that the cancel was transient, so no rerun is prescribed here. '
+      + 'This job needs `actions: read` AND `checks: read` (the annotations endpoint is a check-run). ';
+  }
+  const quoted = cancellation.annotations.map((a) => `job "${a.jobName}" (${a.jobId}) ${a.level}: "${a.message}"`)
+  // Only the two wordings GitHub was actually observed to produce for an image that no longer exists.
+  // Anything else is quoted verbatim and left unclassified rather than matched by an invented pattern.
+  const image = cancellation.annotations.find((a) => IMAGE_CANCEL.test(`${a.title} ${a.message}`))
+  if (image) {
+    return `It was cancelled because the runner image is gone, not because of this tree: ${quoted[0]}. `
+      + `${rerun} CANNOT help — the job is cancelled before it gets a runner (zero steps, empty runner_name), `
+      + 'and a dispatched workflow reads the YAML at the dispatched ref while a pushed tag is never moved. '
+      + 'Change `runs-on:`/`runner:` to a label GitHub still serves (the served set and the retirement are '
+      + 'recorded in contracts/runner-images.json, which script/check-workflows.mjs rule 5 enforces), let '
+      + 'ci.yml go green on THAT commit, then take a NEW version number — that is letting this number '
+      + 'go, not loosening the gate. '
+  }
+  if (cancellation.errors.length) {
+    return `It was cancelled, not failed, and the reason was only partly read: ${cancellation.errors.join('; ')}. `
+      + `${quoted.length ? `What was read: ${quoted.join('; ')}. ` : ''}`
+      + 'An unread reason is not evidence that the cancel was transient, so no rerun is prescribed here. '
+      + 'This job needs `actions: read` AND `checks: read`. '
+  }
+  if (quoted.length) {
+    return `It was cancelled, not failed, and GitHub recorded why: ${quoted.slice(0, 3).join('; ')}`
+      + `${quoted.length > 3 ? ` (+${quoted.length - 3} more)` : ''}. Read those before re-running: `
+      + `${rerun} repeats whatever they describe. `
+  }
+  const neverRan = cancellation.jobs.filter((j) => j.steps === 0)
+  if (cancellation.jobs.length && neverRan.length === cancellation.jobs.length) {
+    return `It was cancelled, not failed, and GitHub recorded no annotation for it — but `
+      + `${neverRan.map((j) => `job "${j.name}" (${j.id}) asked for [${j.labels.join(', ')}], got runner_name "${j.runnerName}" and ran ${j.steps} steps`).join('; ')}. `
+      + `A job that never got a runner is the shape of a label GitHub no longer serves: check those labels `
+      + `against contracts/runner-images.json before ${rerun}, because re-running re-reads the same YAML. `
+  }
+  if (!cancellation.jobs.length) {
+    return `It was cancelled, not failed, and no job in run ${runId ?? '?'} is itself cancelled, so the reason `
+      + `is not in the jobs payload. Read ${readIt} before choosing a remedy. `
+  }
+  const ran = cancellation.jobs.map((j) => `"${j.name}" ran ${j.steps} step(s)`).join('; ')
+  return `It was cancelled, not failed, after the runner had started (${ran}), and GitHub recorded no `
+    + `annotation against it — that is the transient shape, so re-run THAT run: ${rerun}, then re-trigger this release. `
+}
+
+/**
+ * The two annotation wordings measured for a macOS 14 job that never got a runner:
+ *   - "The configuration 'macos-14-arm64-us-default' is not supported"
+ *     (this repository, run 42357845872 / job 128359753896, 2026-11-07, after the retirement);
+ *   - "This job failed because of a scheduled macOS 14 runner image brownout"
+ *     (the parent repository's ci.yml, during the brownout windows before it).
+ * Both name the image rather than the code, which is what makes "rerun cannot help" a fact.
+ */
+const IMAGE_CANCEL = /is not supported|runner image brownout/i
+
+export function jobsApiPath({ repository, runId }) {
+  return `repos/${repository}/actions/runs/${runId}/jobs?per_page=100`
+}
+
+export function annotationsApiPath({ repository, jobId }) {
+  return `repos/${repository}/check-runs/${jobId}/annotations`
+}
+
+/**
+ * Why the latest run was cancelled, read from the API instead of assumed. Every failure to read is
+ * carried back as an error rather than dropped: a gate that cannot ask must not answer "transient".
+ */
+export function fetchCancellation({ repository, runId, ghBin = 'gh' }) {
+  const ask = (apiPath) => {
+    const got = spawnSync(ghBin, ['api', apiPath], { encoding: 'utf8' })
+    if (got.error) return { error: `could not run ${ghBin} (${got.error.message}) asking ${apiPath}` }
+    if (got.status !== 0) {
+      return { error: `${ghBin} api answered ${got.status} asking ${apiPath}: ${String(got.stderr ?? '').trim().slice(0, 200) || '(no stderr)'}` }
+    }
+    try {
+      return { payload: JSON.parse(got.stdout) }
+    } catch (error) {
+      return { error: `${apiPath} is not JSON (${error.message}): ${String(got.stdout).slice(0, 120)}` }
+    }
+  }
+  const jobsPath = jobsApiPath({ repository, runId })
+  const jobsAsked = ask(jobsPath)
+  if (jobsAsked.error) return { error: jobsAsked.error }
+  if (!Array.isArray(jobsAsked.payload?.jobs)) {
+    return { error: `${jobsPath} carries no "jobs" array, so no job in the run could be examined` }
+  }
+  const jobs = jobsAsked.payload.jobs
+    .filter((j) => String(j.conclusion ?? '') === 'cancelled')
+    .map((j) => ({
+      id: j.id,
+      name: String(j.name ?? '?'),
+      labels: Array.isArray(j.labels) ? j.labels.map(String) : [],
+      runnerName: String(j.runner_name ?? ''),
+      steps: Array.isArray(j.steps) ? j.steps.length : 0,
+    }))
+  const annotations = []
+  const errors = []
+  for (const job of jobs) {
+    const apiPath = annotationsApiPath({ repository, jobId: job.id })
+    const asked = ask(apiPath)
+    if (asked.error) {
+      errors.push(asked.error)
+      continue
+    }
+    if (!Array.isArray(asked.payload)) {
+      errors.push(`${apiPath} is not an array of annotations`)
+      continue
+    }
+    for (const a of asked.payload) {
+      annotations.push({
+        jobId: job.id,
+        jobName: job.name,
+        level: String(a.annotation_level ?? ''),
+        title: String(a.title ?? ''),
+        message: String(a.message ?? ''),
+      })
+    }
+  }
+  return { runId, jobs, annotations, errors }
 }
 
 function arg(name, fallback) {
@@ -162,7 +312,8 @@ export function main({ env = process.env, ghBin = 'gh', sleep = (ms) => Atomics.
       code: 1,
       text: 'no GH_TOKEN/GITHUB_TOKEN in this environment, so the Actions runs API cannot be asked whether CI '
         + `is green for ${sha || 'the tagged commit'}. This is a refusal, not a skip: give the step `
-        + '`GH_TOKEN: ${{ github.token }}` and the job `actions: read`.',
+        + '`GH_TOKEN: ${{ github.token }}` and the job `actions: read` plus `checks: read` (a cancelled '
+        + "run's reason lives in its jobs' check-run annotations).",
     }
   }
   if (!sha) return { code: 1, text: 'no commit to ask about: neither --sha nor GITHUB_SHA is set. No object, no pass.' }
@@ -174,6 +325,17 @@ export function main({ env = process.env, ghBin = 'gh', sleep = (ms) => Atomics.
     const fetched = fetchRuns({ repository, workflow, sha, ghBin })
     if (fetched.error) return { code: 1, text: fetched.error }
     last = judgeCiGreen(fetched.payload, { workflow, sha, repository })
+    // A cancelled run's remedy depends entirely on WHY it was cancelled, so the reason is read before
+    // the refusal is printed. Re-judging with the evidence keeps "which run is latest" decided in one
+    // place instead of sorting the payload a second time out here.
+    if (!last.ok && !last.pending && last.run?.conclusion === 'cancelled' && last.run?.id) {
+      last = judgeCiGreen(fetched.payload, {
+        workflow,
+        sha,
+        repository,
+        cancellation: fetchCancellation({ repository, runId: last.run.id, ghBin }),
+      })
+    }
     if (last.ok || !last.pending) return { code: last.ok ? 0 : 1, text: last.reason }
     if (Date.now() - started >= budgetMs) {
       return {

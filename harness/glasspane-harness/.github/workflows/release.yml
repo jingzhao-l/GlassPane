@@ -107,9 +107,15 @@ jobs:
     # scope, and it is the one the CI-green question needs: `gh api
     # repos/<repo>/actions/workflows/ci.yml/runs` answers 403 without it, and the parent lane learned
     # that a scope left unnamed makes the question fail closed rather than pass quietly.
+    # `checks: read` is the third scope, and it is not redundant with `actions: read`: when the latest
+    # run is cancelled, assert-ci-green reads WHY from `repos/<repo>/check-runs/<job id>/annotations`,
+    # which is a check-run endpoint. Without it the reason comes back 403 and the gate has to refuse
+    # with "the reason could not be read" — which is honest, but it is the outage this lane just had:
+    # a retired runner image cancelled the job and the refusal prescribed a rerun that could not work.
     permissions:
       contents: read
       actions: read
+      checks: read
     steps:
       # Pinned to a 40-hex SHA like every other `actions/*` ref in this file. The exemption that
       # used to keep the linter away from the fork subtree (`check-workflows.mjs` passing
@@ -311,11 +317,20 @@ jobs:
           # `macos-13` was the only x64 label for years and GitHub has retired it:
           # the darwin-x64 job sat queued forever with no runner, so a release
           # could never assemble. `macos-15-intel` is the current x64 image.
+          # The arm64 leg then paid the SAME bill, and this comment is the second
+          # time it is written here: `macos-14` retired 2026-11-02
+          # (actions/runner-images#15226), its job was cancelled two seconds in —
+          # no runner, no steps, no log — so the run's conclusion was `cancelled`,
+          # `assert-ci-green` refused, and v0.14.3/v0.14.4 were tagged but could
+          # not be published. Both legs now pin an explicit macOS 15 image so they
+          # cannot drift apart while `-latest` migrates; the served set and the
+          # retirement are recorded in `contracts/runner-images.json`, which
+          # `script/check-workflows.mjs` rule 5 reads.
           # Both targets are required — product.json's platformTargets lists
           # darwin/arm64 and darwin/x64, and the wrapper's postinstall picks
           # between the two platform packages.
           - { target: darwin-x64, runner: macos-15-intel }
-          - { target: darwin-arm64, runner: macos-14 }
+          - { target: darwin-arm64, runner: macos-15 }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -1052,11 +1067,20 @@ jobs:
           # `macos-13` was the only x64 label for years and GitHub has retired it:
           # the darwin-x64 job sat queued forever with no runner, so a release
           # could never assemble. `macos-15-intel` is the current x64 image.
+          # The arm64 leg then paid the SAME bill, and this comment is the second
+          # time it is written here: `macos-14` retired 2026-11-02
+          # (actions/runner-images#15226), its job was cancelled two seconds in —
+          # no runner, no steps, no log — so the run's conclusion was `cancelled`,
+          # `assert-ci-green` refused, and v0.14.3/v0.14.4 were tagged but could
+          # not be published. Both legs now pin an explicit macOS 15 image so they
+          # cannot drift apart while `-latest` migrates; the served set and the
+          # retirement are recorded in `contracts/runner-images.json`, which
+          # `script/check-workflows.mjs` rule 5 reads.
           # Both targets are required — product.json's platformTargets lists
           # darwin/arm64 and darwin/x64, and the wrapper's postinstall picks
           # between the two platform packages.
           - { target: darwin-x64, runner: macos-15-intel }
-          - { target: darwin-arm64, runner: macos-14 }
+          - { target: darwin-arm64, runner: macos-15 }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -1391,7 +1415,7 @@ jobs:
     name: install the published bytes and run them
     if: success() && github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && inputs.confirm == true
     needs: publish-wrapper
-    runs-on: macos-14
+    runs-on: macos-15
     # Ceiling, not ceremony: GitHub's default is 360 minutes, and this job runs on a runner from the hosted pool. The registry-readiness wait inside verify-published.ts carries its own 20-minute budget (REGISTRY_READINESS_BUDGET_MS), and this job then installs the published tarball on a macOS runner and runs it. (45m.)
     timeout-minutes: 45
     environment: release

@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { execFileSync, spawnSync } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
@@ -28,14 +28,14 @@ const REAL_ROOT = path.join(import.meta.dir, "../../../..")
 
 type Reading = { code: number; totals: Record<string, number> | null; out: string }
 
-function run(dir: string): Reading {
+function run(dir: string, gate = GATE): Reading {
   // Two passes over the same fixture: `--json` for the counts a floor can be asserted against, and
   // the plain report for the wording an assertion can quote. The JSON form escapes every `"` inside
   // a problem line, which makes a `toContain('job "verify" …')` assertion fail for a reason that has
   // nothing to do with the rule — and a test that reds on its own formatting teaches the next person
   // to weaken the rule instead of the test.
-  const json = invoke(dir, ["--json"])
-  const plain = invoke(dir, [])
+  const json = invoke(dir, ["--json"], gate)
+  const plain = invoke(dir, [], gate)
   let totals: Record<string, number> | null = null
   try {
     totals = JSON.parse(json.stdout).totals ?? null
@@ -45,9 +45,9 @@ function run(dir: string): Reading {
   return { code: plain.code, totals, out: `${plain.stdout}${plain.stderr}` }
 }
 
-function invoke(dir: string, flags: string[]): { code: number; stdout: string; stderr: string } {
+function invoke(dir: string, flags: string[], gate = GATE): { code: number; stdout: string; stderr: string } {
   try {
-    const stdout = execFileSync("node", [GATE, "--dir", dir, ...flags], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })
+    const stdout = execFileSync("node", [gate, "--dir", dir, ...flags], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })
     return { code: 0, stdout, stderr: "" }
   } catch (error) {
     const e = error as { status?: number; stdout?: string; stderr?: string }
@@ -127,6 +127,12 @@ describe("the workflow gate measures the fork's real lanes", () => {
     expect(read.totals.refs).toBeGreaterThanOrEqual(18)
     expect(read.totals.bodies).toBeGreaterThanOrEqual(36)
     expect(read.totals.multi).toBeGreaterThanOrEqual(23)
+    // Rule 5's own floor. 6 macOS labels + 2 `runs-on:` expressions is what the real lanes measure
+    // here (release.yml's two build legs and two npm platform legs come from matrices, ci.yml's
+    // installer-selftest and release.yml's verify-published name their label directly). A scan that
+    // stopped reading `runner:` would report 2 and still exit 0 — this floor is what reds it.
+    expect(read.totals.macos).toBeGreaterThanOrEqual(6)
+    expect(read.totals.runnerExprs).toBeGreaterThanOrEqual(2)
   })
 })
 
@@ -242,6 +248,173 @@ describe("rule 4 — the npm pin has exactly one definition", () => {
 
   test("a file with no npm step is not this rule's business", () => {
     withFixture({ "a.yml": CLEAN.replace('      - name: folded gates\n        run: |\n          set -euo pipefail\n          npm install -g "npm@$NPM_PUBLISH_VERSION"\n          echo "npm here: $(npm --version)"\n', '      - run: |\n          set -euo pipefail\n          bun test\n          echo ok\n') }, (dir) => expect(run(dir).code).toBe(0))
+  })
+})
+
+describe("rule 5 — a macOS runner label must be one GitHub still serves", () => {
+  // The outage this rule was written for, in one line: GitHub retired every macOS 14 image on
+  // 2026-11-02, four pins in this fork still said `macos-14`, and those jobs were CANCELLED at queue
+  // time — no steps, no log, nothing red — so the whole run's conclusion was cancelled while every
+  // other lane was green. assert-ci-green then refused every release of the tree, and `gh run rerun`
+  // could not help because a dispatched workflow reads the YAML at the dispatched ref and a pushed
+  // tag is never moved. v0.14.3 and v0.14.4 were both lost to it. Nothing in either repository asked
+  // these two files whether the machine they name still exists.
+  const MATRIX = `name: matrix
+on: { push: { branches: [main] } }
+permissions: { contents: read }
+jobs:
+  build:
+    runs-on: \${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: darwin-arm64, runner: macos-15 }
+          - { target: darwin-x64, runner: macos-15-intel }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - run: bun install --frozen-lockfile
+`
+
+  test("a retired label is named with its retirement date, its silence, and why rerun cannot help", () => {
+    withFixture({ "a.yml": CLEAN.replace("runs-on: ubuntu-latest", "runs-on: macos-14") }, (dir) => {
+      const read = run(dir)
+      expect(read.code).toBe(1)
+      expect(read.out).toContain('runner image "macos-14" is retired')
+      expect(read.out).toContain("2026-11-02")
+      expect(read.out).toContain("CANCELLED before it gets a runner")
+      expect(read.out).toContain("cannot help")
+      expect(read.out).toContain("a pushed tag is never moved")
+      // the remedy has to be executable: it names a label that is actually in the served set
+      expect(read.out).toContain("Pin a served label:")
+      expect(read.out).toContain("macos-15")
+    })
+  })
+
+  test("an image NAME that is not a LABEL is refused too, because it is cancelled just as silently", () => {
+    withFixture({ "a.yml": CLEAN.replace("runs-on: ubuntu-latest", "runs-on: macos-15-arm64") }, (dir) => {
+      const read = run(dir)
+      expect(read.code).toBe(1)
+      expect(read.out).toContain('runner image "macos-15-arm64" is not a label GitHub publishes')
+      expect(read.out).toContain("An image NAME is not a LABEL")
+      expect(read.out).not.toContain("is retired")
+    })
+  })
+
+  test("a served label on a job is clean", () => {
+    withFixture({ "a.yml": CLEAN.replace("runs-on: ubuntu-latest", "runs-on: macos-15") }, (dir) => {
+      const read = run(dir)
+      expect(read.code).toBe(0)
+      expect(read.totals?.macos).toBe(1)
+    })
+  })
+
+  test("a non-macOS label is not this rule's business", () => {
+    withFixture({ "a.yml": CLEAN }, (dir) => {
+      const read = run(dir)
+      expect(read.code).toBe(0)
+      expect(read.totals?.macos).toBe(0)
+    })
+  })
+
+  test("the matrix legs are counted even though runs-on is an expression", () => {
+    withFixture({ "a.yml": MATRIX }, (dir) => {
+      const read = run(dir)
+      expect(read.code).toBe(0)
+      // A scan that stopped at `runs-on:` would see one expression and zero labels, and call the two
+      // publishing legs clean without having read either of them.
+      expect(read.totals?.macos).toBe(2)
+      expect(read.totals?.runnerExprs).toBe(1)
+    })
+  })
+
+  test("a matrix leg whose image architecture contradicts its target is named", () => {
+    withFixture({ "a.yml": MATRIX.replace("- { target: darwin-x64, runner: macos-15-intel }", "- { target: darwin-x64, runner: macos-15 }") }, (dir) => {
+      const read = run(dir)
+      expect(read.code).toBe(1)
+      expect(read.out).toContain('builds "darwin-x64" on "macos-15", which is an arm64 image')
+      expect(read.out).toContain("smoke-test bytes on the wrong architecture")
+    })
+  })
+
+  test("a retired label inside a matrix is found, not hidden by the expression", () => {
+    withFixture({ "a.yml": MATRIX.replace("- { target: darwin-arm64, runner: macos-15 }", "- { target: darwin-arm64, runner: macos-14 }") }, (dir) => {
+      const read = run(dir)
+      expect(read.code).toBe(1)
+      expect(read.out).toContain('runner image "macos-14" is retired')
+    })
+  })
+
+  // Rule 5's input is a recorded external fact, so its refusals are tested against a COPY of the gate
+  // beside a contract this test controls. The product tree's own contract is never mutated: a test
+  // that edits it can leave a broken ruler behind if it dies halfway, which is the same reason every
+  // other fixture here goes through `--dir`.
+  const REAL_CONTRACT = path.join(REAL_ROOT, "contracts", "runner-images.json")
+  function gateBeside(contract: string | null): string {
+    const dir = mkdtempSync(path.join(tmpdir(), "gp-runner-contract-"))
+    dirs.push(dir)
+    mkdirSync(path.join(dir, "script"), { recursive: true })
+    mkdirSync(path.join(dir, "contracts"), { recursive: true })
+    const gate = path.join(dir, "script", "check-workflows.mjs")
+    copyFileSync(GATE, gate)
+    if (contract !== null) writeFileSync(path.join(dir, "contracts", "runner-images.json"), contract)
+    return gate
+  }
+
+  test("no contract at all is exit 2, not a clean scan", () => {
+    const gate = gateBeside(null)
+    withFixture({ "a.yml": CLEAN.replace("runs-on: ubuntu-latest", "runs-on: macos-14") }, (dir) => {
+      const read = run(dir, gate)
+      expect(read.code).toBe(2)
+      expect(read.out).toContain("cannot read")
+      expect(read.out).toContain("it will not call that a pass")
+    })
+  })
+
+  test("a contract that is not JSON is exit 2", () => {
+    const gate = gateBeside("{ this is not JSON")
+    withFixture({ "a.yml": CLEAN }, (dir) => {
+      const read = run(dir, gate)
+      expect(read.code).toBe(2)
+      expect(read.out).toContain("is not JSON")
+    })
+  })
+
+  test("an empty served set is exit 2: a broken ruler is not a finding", () => {
+    const gate = gateBeside(JSON.stringify({ ...JSON.parse(readFileSync(REAL_CONTRACT, "utf8")), labels: {} }))
+    withFixture({ "a.yml": CLEAN }, (dir) => {
+      const read = run(dir, gate)
+      expect(read.code).toBe(2)
+      expect(read.out).toContain('records no "labels" object')
+      expect(read.out).toContain("a broken ruler rather than a finding")
+    })
+  })
+
+  test("the retirement story comes from the contract, not a pattern hardcoded in the gate", () => {
+    // Negative control: with the `retired` list removed, the same label is still refused (it is not
+    // in the served set) but the gate can no longer claim to know it was retired. If the date and the
+    // "rerun cannot help" sentence survived this mutation they would be invented, not recorded.
+    const parsedContract = JSON.parse(readFileSync(REAL_CONTRACT, "utf8"))
+    const gate = gateBeside(JSON.stringify({ ...parsedContract, retired: [] }))
+    withFixture({ "a.yml": CLEAN.replace("runs-on: ubuntu-latest", "runs-on: macos-14") }, (dir) => {
+      const read = run(dir, gate)
+      expect(read.code).toBe(1)
+      expect(read.out).toContain("is not a label GitHub publishes")
+      expect(read.out).not.toContain("is retired")
+      expect(read.out).not.toContain("2026-11-02")
+    })
+  })
+
+  test("the real contract records where the served set was read from and when", () => {
+    const recorded = JSON.parse(readFileSync(REAL_CONTRACT, "utf8")) as { sourceUrl: string; observedAt: string; observedWith: string; labels: Record<string, string>; retired: { prefix: string; retiredOn: string }[] }
+    expect(recorded.sourceUrl).toContain("actions/runner-images")
+    expect(recorded.observedAt).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    expect(recorded.observedWith).toContain("gh api")
+    // both legs of the release matrix must be resolvable, and to DIFFERENT architectures
+    expect(recorded.labels["macos-15"]).toBe("arm64")
+    expect(recorded.labels["macos-15-intel"]).toBe("x64")
+    expect(recorded.retired.some((e) => e.prefix === "macos-14" && e.retiredOn === "2026-11-02")).toBe(true)
   })
 })
 
