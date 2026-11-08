@@ -98,15 +98,22 @@ const json = (text, edit) => {
 console.log("rulers-selftest — each guard is driven once, named, and restored by sha256")
 
 // 1. brand-surface: the remembered product-file list must have a reader.
+// The mutation drops a NAME, not a count. `productFiles` used to be a number and this control said
+// `g.productFiles - 1`; the field was later upgraded to the list itself (a count cannot tell a
+// same-count substitution from an unchanged list), and the control was not upgraded with it. Measured
+// 2026-11-08: array minus one is NaN, JSON writes that as null, and the ruler answered with
+// "product-file scan set cannot be compared" — a red about a LOST TYPE, not about a moved scan set.
+// The control exited 1 and still missed, which is the shape it exists to catch in others. `mustNot`
+// pins the branch: the by-name judgement must be what fires, not the type guard in front of it.
 mustGoRed(
   "harness/contracts/brand-surface.json",
   "brand-surface: product-file scan set moved is red",
-  (text) => json(text, (g) => (g.productFiles = g.productFiles - 1)),
+  (text) => json(text, (g) => (g.productFiles = g.productFiles.slice(1))),
   "harness/tools/brand-surface.mjs",
   ["--check"],
   1,
-  ["product-file scan set moved"],
-  ["no unrecorded brand drift"],
+  ["product-file scan set moved by NAME"],
+  ["no unrecorded brand drift", "product-file scan set cannot be compared"],
 )
 
 // 2. brand-surface: the README pair is compared by name now, not only counted.
@@ -286,25 +293,31 @@ mustGoRed(
   const source = readFileSync(abs)
   const neuteredFile = "harness/tools/rulers-selftest-neutered.mjs"
   const neuteredAbs = path.join(repoRoot, neuteredFile)
-  const marker = "if (golden.productFiles !== observed.productFiles) {"
+  // The marker has to be the JUDGEMENT, not the type guard in front of it. This control used to look
+  // for `if (golden.productFiles !== observed.productFiles) {`, a comparison that no longer exists:
+  // the field became a name list and the guard became Array.isArray + a by-name set difference.
+  // Measured 2026-11-08: the marker was not found, so the control reported "would prove nothing"
+  // instead of proving causality. Neutering the Array.isArray line would NOT work either — its else
+  // branch is where the by-name judgement lives, so that edit leaves the guard fully armed.
+  const marker = "if (leftProducts.length || joinedProducts.length)"
   const cut = source.indexOf(marker)
-  if (cut === -1) bad("11: the product-file guard cannot be located in brand-surface.mjs — this control would prove nothing")
+  if (cut === -1) bad("13: the product-file guard cannot be located in brand-surface.mjs — this control would prove nothing")
   else {
+    const goldenAbs = path.join(repoRoot, "harness", "contracts", "brand-surface.json")
+    const original = readFileSync(goldenAbs)
+    const before = sha(original)
     try {
-      writeFileSync(neuteredAbs, source.toString("utf8").replace(marker, "if (false) {"))
-      const goldenAbs = path.join(repoRoot, "harness", "contracts", "brand-surface.json")
-      const original = readFileSync(goldenAbs)
-      try {
-        writeFileSync(goldenAbs, json(original.toString("utf8"), (g) => (g.productFiles = g.productFiles - 1)))
-        const got = run(neuteredFile, ["--check"])
-        if (got.text.includes("product-file scan set moved")) bad("11: the neutered copy still reports the guard, so the control is not neutered")
-        else ok("11 control live: removing the guard makes the same mutation green — the red in control 1 comes from this code")
-      } finally {
-        writeFileSync(goldenAbs, original)
-      }
+      writeFileSync(neuteredAbs, source.toString("utf8").replace(marker, "if (false)"))
+      // Same mutation as control 1, so "the same mutation goes green" is literally the same bytes.
+      writeFileSync(goldenAbs, json(original.toString("utf8"), (g) => (g.productFiles = g.productFiles.slice(1))))
+      const got = run(neuteredFile, ["--check"])
+      if (got.text.includes("product-file scan set moved")) bad("13: the neutered copy still reports the guard, so the control is not neutered")
+      else ok("13 control live: removing the guard makes the same mutation green — the red in control 1 comes from this code")
     } finally {
+      writeFileSync(goldenAbs, original)
+      if (sha(readFileSync(goldenAbs)) !== before) bad(`13: RESTORE FAILED — brand-surface.json is not the byte sequence this control found (${before.slice(0, 12)} → ${sha(readFileSync(goldenAbs)).slice(0, 12)})`)
       rmSync(neuteredAbs, { force: true })
-      if (existsSync(neuteredAbs)) bad(`11: the neutered copy was not removed (${neuteredFile})`)
+      if (existsSync(neuteredAbs)) bad(`13: the neutered copy was not removed (${neuteredFile})`)
     }
   }
 }
