@@ -510,9 +510,16 @@ export function noRemedyFallback(method: string | null): string {
  *
  * 这份清单由 daemon 从 `EngineMethod` 派生（`FrameCodec.capabilityWireNames`），可此前
  * **没有任何一方读它**：面板的解析器只取 version/protocolVersion/pid/identity/permissions，
- * 这一层只比 protocolVersion。没有读者就等于没有镜像——三处真源（kernel schema、daemon 方法表、
- * 本壳的 TOOL_SPECS）漂了也不会有人说一句，而"清单存在但没人核"正是这份代码在别处反复拒绝的
+ * 这一层只比 protocolVersion。没有读者就等于没有镜像——**两边**（daemon 方法表、本壳的
+ * TOOL_SPECS）漂了也不会有人说一句，而"清单存在但没人核"正是这份代码在别处反复拒绝的
  * 那种自证。返回 null 表示无话可说（两边一致），否则给出要说的那句话。
+ *
+ * 注意"两边"不是"三边"：`kernel/schemas/**`（以及它的字节副本 `mcp-shell/schemas/**`）承载的是
+ * recipe/evidence 的**步骤词表**（`act|observe|assert|diagnose`），**早已不含 `gp_*` 工具表**——那张表
+ * 随 `iterate-kernel` 发布进了 npm 包（`scripts/bundle-kernel-schemas.mjs`），仓库里的 `kernel/schemas`
+ * 只是它的镜像。把 kernel schema 当工具表第三真源去对账的读者会在那里一无所获；真正钉住工具面
+ * 数目的是 `test/tools.test.mjs`（16）与 `test/shell-2026-defects.test.mjs`（forwarded 集合对
+ * `FrameCodec` 派生清单的交叉核对），不是某份 schema。
  */
 export function describeCapabilityDrift(
   advertised: readonly string[] | null,

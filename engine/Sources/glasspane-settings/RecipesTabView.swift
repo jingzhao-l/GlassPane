@@ -186,6 +186,11 @@ struct RecipesTabView: View {
                     Label(isValidating ? "校验中……" : "校验", systemImage: "checkmark.shield")
                 }
                 .disabled(isValidating)
+                // 忙碌态变灰也要给读屏一句"为什么/下一步"：校验要走 daemon 的
+                // --recipe-validate，通常几秒，但键盘/VoiceOver 用户只听得见"已禁用"。
+                .accessibilityHint(isValidating
+                    ? "上一趟校验还在跑，等它回话再按"
+                    : "把编辑器里的配方交给后台服务校验")
                 .accessibilityIdentifier("gp-recipe-validate")
 
                 Button {

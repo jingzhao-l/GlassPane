@@ -657,6 +657,13 @@ struct PermissionCardView: View {
                     }
                     .controlSize(.small)
                     .accessibilityIdentifier(PermissionGuide.verifyCapabilityIdentifier)
+                    // 这枚按钮是全代码库里唯一在忙碌态变灰却没有 hint 的 sibling：
+                    // VoiceOver 只会说"已禁用"，听不到为什么、也听不到下一步（其余 18 处
+                    // 变灰控件都带一句）。忙碌通常 <60s，卡片下方那行 reason 也说了，但
+                    // hint 得自己带——键盘/VoiceOver 走的是这条，不走 reason 行。
+                    .accessibilityHint(capabilityBusy
+                        ? "上一趟验证还在跑，等它回话再按"
+                        : "实测这台机器的调试能力，约一分钟")
                     .disabled(capabilityBusy)
                 }
                 // 已授权时用次要样式，未授权时用主行动样式；两种 ButtonStyle
