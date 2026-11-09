@@ -164,16 +164,31 @@ Things worth knowing, because they are the usual way this is set up wrong:
    record of its own release, and the same comparison showed trunk had silently lost a line the
    split still held.
 
-4. **Tag** the same tree that is on `main` — the tag *is* the release identity:
+4. **Tag** the same tree that is on `main` — the tag *is* the release identity.
+   **The tag must be a signed tag (`git tag -s`), never a lightweight one.** The split
+   repo's `tag-identity.sh` gate refuses a tag with no signature behind it ("a pointer
+   with no signature is not provenance: it can be re-pointed by any actor with write
+   access and nothing here would notice"). Sign it on the split commit *before* pushing,
+   with the key the installer pins (`GLASSPANE_HARNESS_SIGNING_FPR`):
+
+   ```bash
+   git tag -s v0.14.8 -m "glasspane-harness 0.14.8" <split-commit-sha>
+   git tag -v v0.14.8        # must report a good signature from the pinned key
+   ```
+
+   Then push the *signed tag object*. **Get this right the first time:** the split repo's
+   `published-tags-immutable` ruleset (id 26423927, `enforcement: active`,
+   `current_user_can_bypass: never`, empty bypass set) makes every `refs/tags/v*`
+   immutable the moment it lands — delete, update and non-fast-forward are all rejected
+   server-side, and admin `bypass-actors` returns 404. A lightweight tag pushed by mistake
+   cannot be corrected or removed; the release fails and the number is burned. Advance the
+   version and re-tag signed (measured 2026-11-09, when a lightweight `v0.14.7` was burned
+   this way and the batch moved to `0.14.8`).
 
    ```bash
    git push https://github.com/jingzhao-l/glasspane-harness.git \
-     split/glasspane-harness:refs/tags/v0.4.0
+     refs/tags/v0.14.8:refs/tags/v0.14.8
    ```
-
-   The tag push fires `release.yml`, which builds the two macOS targets, checksums them,
-   and (only for a `workflow_dispatch`, dry by default) publishes. Asset publishing is a
-   separate manual dispatch.
 
 5. **Publish to npm** — either let the workflow do it:
 

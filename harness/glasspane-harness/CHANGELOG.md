@@ -8,7 +8,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
-## [0.14.7] — 2026-11-09
+## [0.14.8] — 2026-11-09
+
+> **取号说明**：`0.14.7` 这个号被烧掉了。第一次给本批打 tag 时我按 `docs/release.md` 的字面
+> `git push <split-url> …:refs/tags/v0.14.7` 推了一个**轻量 tag**（lightweight, objecttype=commit），
+> Release 的 `tag-identity.sh` 闸随后判它红——"轻量 tag 无签名可归属，任何有写权限的人都能把它重指向
+> 而无人察觉"。但那时号已经落在**永远不可变**的 tag 上了：split 仓的 `published-tags-immutable`
+> ruleset（id 26423927，`enforcement: active`、`current_user_can_bypass: never`、bypass 集为空）
+> 对 `refs/tags/v*` 拒绝 update、deletion、non_fast_forward 三种操作——我实测删除与强制更新都被
+> 服务端拒（`Cannot delete this tag` / `Cannot update this protected ref`），连以 admin 身份
+> `PUT .../bypass-actors` 也是 404。所以 `v0.14.7` 既发不出去也删不掉，只能让号：本批内容跟到
+> **0.14.8**，由一个**签名** tag（`git tag -s`，本地密钥 `0929EA31DF4F…1298`，与 installer 钉的
+> `GLASSPANE_HARNESS_SIGNING_FPR` 同一把）承载。**程序缺陷**：`docs/release.md` 与父仓的
+> 【执行流程 4f】此前只写"打 tag 并推"，从未写 tag 必须**签名**——闸能红，但号已经烧在不可变
+> 之上了才红，等于事后才知道。本轮把这条程序缺口补进 `docs/release.md`（第 4f 步写明 `git tag -s`）。
 
 ### Fixed — 全局配置目录里老名字不再压过产品名字
 

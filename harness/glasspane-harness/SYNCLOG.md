@@ -3,7 +3,18 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
-## 2026-11-09（第三十二次会话）· 取号 0.14.7：全局配置目录里老名字不再压过产品名字 + 一条停在信任闸之前的老断言
+## 2026-11-09（第三十二次会话）· 取号 0.14.8（0.14.7 烧号）：全局配置目录里老名字不再压过产品名字 + 一条停在信任闸之前的老断言 + 发布程序"tag 必须签名"缺口
+
+### 〇、烧掉 0.14.7 这个号：程序缺陷，本轮修在 docs/release.md
+
+按 release 程序 4f 的字面给本批推了一个**轻量 tag**（`git push …:refs/tags/v0.14.7`，没写 `git tag -s`）。
+Release run `42555908460` 的 `tag-identity.sh` 闸判红："轻量 tag 无签名可归属"。但号已经落在**永远不可变**
+的 tag 上了——`published-tags-immutable` ruleset（id 26423927，`enforcement: active`、
+`current_user_can_bypass: never`、bypass 集空）拒 update/deletion/non_fast_forward 三种操作，实测删除与
+强制更新都被服务端拒，admin `PUT .../bypass-actors` 回 404。**闸能红，但号已经烧在不可变之上才红，等于
+事后才知道。** 程序缺陷：`docs/release.md` 第 4 步与父仓【执行流程 4f】只写"打 tag 并推"，从未写 tag 必须
+**签名**。本轮把它补进 `docs/release.md`（第 4 步写明 `git tag -s` + `git tag -v` 验签 + 不可变 ruleset
+的"第一次就要对"警告），内容跟到 0.14.8、由签名 tag 承载。
 
 ### 一、开工对表与两条旧分支的清理判定
 
@@ -17,7 +28,7 @@
 `fork-diff vs v1.18.32: 4630/6769 byte-identical, 294 edited, 137 added, 1708 deleted`（桶数与上一记一致；改的是 `edited` 文件 `config.ts` 的 blob，不动桶）。
 
 tool-surface：面 B（fork，ours）14335 → **14340 LOC（+5）**，即全局加载顺序修复上那条"为什么必须产品后读"的非显然约束注释；棘轮已 `--record` 并随本批提交。面 A 无新增。
-brand-surface：血缘 occurrences 9647 → **9657（+10，本轮）**，即同一条注释里必须点名的那两个配置文件名字面（7）+ CHANGELOG 0.14.7 条目同样引用（3）；按既有先例 `--record --lineage-note` 记为说明性引用、非新增产品面。**另**：`filesScanned` 3348 → 3352（+4 份）是**本轮开工前就存在**的（开工基线那一次 `--check` 就报 "recorded 3348 → now 3352 (grew 4 file(s))"，在我任何改动之前），属前一轮交进主干的 tracked 文件，本轮按既有口径一并 `--record` 收进金样。
+brand-surface：血缘 occurrences 9647 → **9657（+10，本轮）**，即同一条注释里必须点名的那两个配置文件名字面（7）+ CHANGELOG 0.14.8 条目同样引用（3）；按既有先例 `--record --lineage-note` 记为说明性引用、非新增产品面。**另**：`filesScanned` 3348 → 3352（+4 份）是**本轮开工前就存在**的（开工基线那一次 `--check` 就报 "recorded 3348 → now 3352 (grew 4 file(s))"，在我任何改动之前），属前一轮交进主干的 tracked 文件，本轮按既有口径一并 `--record` 收进金样。
 
 ### 三、缺陷与固定点测试（反向控制实测）
 
@@ -29,7 +40,7 @@ brand-surface：血缘 occurrences 9647 → **9657（+10，本轮）**，即同�
 - `config.test.ts`：110 pass / 0 fail（含两条新 precedence 测试 + 两条重写的 plugin 测试）
 - `glasspane-project-plugin-trust.test.ts`：3 pass / 0 fail
 - `packages/opencode` typecheck：clean（tsgo --noEmit）
-- product-surface：6640 条一致 / 0 条问题（0.14.7）
+- product-surface：6640 条一致 / 0 条问题（0.14.8）
 - kernel-pin --check：绿；kernel-conformance：16 夹具全对
 - fork-diff / tool-surface / brand-surface / surface-semantics / hook-liveness：全绿（计数见上）
 - check-workflows --self-test 48 例 / check-workflows 5 workflows clean / check-doc-links 32 份文档无死链
