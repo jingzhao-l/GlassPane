@@ -2,11 +2,56 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
-## [Unreleased]
+## [1.31.2] — 2026-11-09
 
-（空。2026-11-05 这一轮的条目已归进 `## [1.30.0]`——tag `v1.30.0` 已打、GitHub Release 已对外
-（draft=false、target=`070d6ddf`、4 件资产、`.asc` 由钉死的 `0929EA31…` 签出）、registry 两个裸名包
-都读 1.30.0，所以本轮没有留下未归号的内容。）
+**版本判断：patch。** 四条判据一条没碰：本轮修的两条都是 P2，改的是 SwiftUI 控件的
+`.accessibilityHint`（面板内部读屏文案，非 CLI 参数、非对外 `gp_*` 返回形状）、一条
+`engine-client.ts` 的**注释**、以及一道新增面板闸（`engine/Tests/`，不进 engine src 分母、
+不改对外命令取值）。状态文件字段、退出码集合、CLI 参数、npm 包 `bin` 声明一字未动。
+
+**不合并未发布号**：`v1.31.1` 已发（tag/Release 非草稿/registry 两包均 1.31.1），已发布 tag
+一律不动，所以本轮另取一号——与 11-01 那条 1.28.1→1.29.0、11-07 那条同族处置。
+
+### 1. 两枚只在忙碌态变灰的按钮不给读屏理由（P2，`346ff388`）
+
+`SettingsPanelView` 的"验证调试能力"与 `RecipesTabView` 的"校验"两枚按钮，忙碌时靠
+`.disabled(busy)` 变灰，但**既无 `.help` 也无 `.accessibilityHint`**——键盘/VoiceOver 用户按下去
+只听得见"已禁用"，听不到为什么、也听不到下一步。本机量到 17 处 `.disabled(`，修复前只有这两枚
+裸着，其余 15 处都带 hint：说明"禁用 ⇒ 读屏给理由"是产品本来的约定，这两枚是漏网。各补
+忙碌/可用两种措辞的 hint（"上一趟还在跑，等它回话再按" / 正常那一句）。
+
+既有 11-04 那道闸（`DailyRound20261104PanelReasonAndPathTests`）钉的是"有 `.disabled` **且有
+`.help`** ⇒ 要 hint"，判据要求悬停理由先存在；对这两枚 never-had-a-help 的站点它**自始空转**，
+这正是它们能绿着藏到今天的原因。新增 `DailyRound20261109DisabledA11yTests` 用更宽判据
+"有 `.disabled` ⇒ 要 `.accessibilityHint` 或 `.help`"堵住这一类，链取法比 11-04 那份多处理
+两个盲区（`.accessibilityHint(\n  ? …\n  : …)` 的多行实参续行、hint 与 `.disabled` 之间隔的说明注释）。
+反向破坏：摘掉 recipe 校验按钮的 hint ⇒ `testEveryDisabledControlTellsAXWhy` 具名红点名
+`RecipesTabView.swift:188`；恢复后 2/2 复绿。engine XCTest 1613→1615（新增 2 条）。
+
+### 2. 一句把读者指错地方的过时注释（P2，`346ff388`）
+
+`mcp-shell/src/engine-client.ts` 的 `describeCapabilityDrift` 头注释说 `hello.capabilities`
+有三处真源（kernel schema、daemon 方法表、本壳 `TOOL_SPECS`），漂了不会有人说。实测
+`kernel/schemas/**` **零 `gp_` 枚举**（工具表随 `iterate-kernel` 发布进了 npm 包，仓库里那份只是
+镜像），把 kernel schema 当第三真源去对账的读者会在那里一无所获。改为说清"两边不是三边"，
+并点名工具面数目真由哪些测试钉住（`test/tools.test.mjs` 钉 16、`test/shell-2026-defects.test.mjs`
+交叉核对 forwarded 集合）。纯注释改动，无行为变化。
+
+### 3. 两条经复核**否证**的审查发现（记下免得下一轮当"已知未修"重捞）
+
+- **"engine.sock 无 peer 鉴权、缺成文 invariant"**（安全代理）——否证。`errors.ts` 与 `SECURITY.md`
+  已有成文 invariant "same uid = full authority"，`GP_E_SOCKET_TRUST` 是壳侧信任根判据；探针的
+  peer auth（`ProbeSocketServer.helloRejectionReason`，`getpeereid`+`LOCAL_PEERPID` fail-closed）
+  是**额外的纵深**，不是 engine socket 缺失的判据。两者不冲突。
+- **"registry 隔离要等下次 daemon 启动才修 0700"**（安全代理）——否证。`saveProjects` 每次写都跑
+  `tightenMode(dir, 0700)` + `nearestExistingAncestor` 的 owner/world-writable 检查
+  （`project-registry.ts:940`、`:1621-1637`），不是"等修"。
+
+无 P0/P1：GUI 控件↔daemon 能力无缺口、CLI 32 开关与退出码表与 `exit()` 站点全对、更新器三道
+consent 门各自给得出动作、工具面三处计数一致（daemon 11 = 壳转发 11，壳总 16）。
+
+门禁逐字复跑全绿（见本轮台账）；`tool-surface --check` 因本轮有意增长转红，已按唯一许可路径
+`--record` 重记并单独一条提交（`083ca4aa`）。
 
 ## [1.31.1] — 2026-11-07
 
