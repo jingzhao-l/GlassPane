@@ -3,6 +3,43 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-09（第三十二次会话）· 取号 0.14.7：全局配置目录里老名字不再压过产品名字 + 一条停在信任闸之前的老断言
+
+### 一、开工对表与两条旧分支的清理判定
+
+本地 main `1fdb9ca2`，整树干净，`.external/opencode` describe == pin `v1.18.32`，bun 1.3.14，
+盘余 13.1 GiB。两条往轮分支按内容（非分支名）判定：
+- `gp-harness-integrate-20261107`：`main..b` 为 0、tip 即 merge-base → **已完全落地**，删除。
+- `gp-harness-daily-20261106`：`git cherry` 12 条落地、3 条标 `+`，但逐文件字节比对（`tag-identity.test.ts`/`release.yml`/`docs/release.md` 在 main 已走到更新版本，`runner-images.json` 已退役、测试已合并瘦身）证明 main 是**权威且已发布**侧（split main == 已发布 tag，registry == 0.14.6）；分支工作树里那条未提交的 `gpg-signing.sh` 改动是**删掉 main 已有的身份判决电池**（`git show main:` 里 12 处、分支里要删 33 行）——是陈旧回退不是待办。判定**已被取代**，删除（含其 worktree）。
+
+### 二、改动面数字
+
+`fork-diff vs v1.18.32: 4630/6769 byte-identical, 294 edited, 137 added, 1708 deleted`（桶数与上一记一致；改的是 `edited` 文件 `config.ts` 的 blob，不动桶）。
+
+tool-surface：面 B（fork，ours）14335 → **14340 LOC（+5）**，即全局加载顺序修复上那条"为什么必须产品后读"的非显然约束注释；棘轮已 `--record` 并随本批提交。面 A 无新增。
+brand-surface：血缘 occurrences 9647 → **9657（+10，本轮）**，即同一条注释里必须点名的那两个配置文件名字面（7）+ CHANGELOG 0.14.7 条目同样引用（3）；按既有先例 `--record --lineage-note` 记为说明性引用、非新增产品面。**另**：`filesScanned` 3348 → 3352（+4 份）是**本轮开工前就存在**的（开工基线那一次 `--check` 就报 "recorded 3348 → now 3352 (grew 4 file(s))"，在我任何改动之前），属前一轮交进主干的 tracked 文件，本轮按既有口径一并 `--record` 收进金样。
+
+### 三、缺陷与固定点测试（反向控制实测）
+
+1. **全局配置目录里老名字压过产品名字（半修）**：`config.ts` 全局加载把产品名排在 legacy 前，`mergeDeep` 后读胜 ⇒ 遗留 `opencode.json(c)` 压掉 `glasspane-harness.json(c)`，与目录侧既修方向相反。修法：全局顺序对齐目录侧（legacy 先、产品后）。新固定点测试先红后绿；第一版**假绿**（全局目录与实例目录同指一个 tmpdir，项目分支在全局后又合并一遍，修没修都读到产品的值）——改成两个独立 tmpdir 后才对旧源码红。测试文件 sha256 核回。
+2. **停在信任闸之前的老断言**：`loads auto-discovered local plugins as file urls` 在 main 上恒红，断言的是 `[gp]` 信任闸（`GLASSPANE_HARNESS_TRUST_PROJECT_PLUGINS` 默认 false）刻意拒绝的行为。信任闸本身有独立电池且是对的，老断言停在闸之前的形状。拆成两半：默认运行断言已发现的插件**被拒**、置信任开关断言同一文件**被装**为 `file://`；拔掉信任开关 trusted 那半转红。
+
+### 四、闸与测试数字
+
+- `config.test.ts`：110 pass / 0 fail（含两条新 precedence 测试 + 两条重写的 plugin 测试）
+- `glasspane-project-plugin-trust.test.ts`：3 pass / 0 fail
+- `packages/opencode` typecheck：clean（tsgo --noEmit）
+- product-surface：6640 条一致 / 0 条问题（0.14.7）
+- kernel-pin --check：绿；kernel-conformance：16 夹具全对
+- fork-diff / tool-surface / brand-surface / surface-semantics / hook-liveness：全绿（计数见上）
+- check-workflows --self-test 48 例 / check-workflows 5 workflows clean / check-doc-links 32 份文档无死链
+
+### 五、未观测（物理边界）
+
+真 TUI 观感、真模型轮次、`gp_*` 需 `glasspaned` 在跑的端到端（本会话未起 daemon）、musl/baseline 目标（无对应 CI lane）——照实未观测，非本轮缺陷。
+
+---
+
 ## 2026-11-08（第三十一次会话）· 取号 0.14.6：给 GPG 身份判决补固定点电池，一条 delta 落在并行线已发的 0.14.5 之上
 
 ### 一、开工对表：origin 已被并行线走到 0.14.5，本轮 delta 只剩一块

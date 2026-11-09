@@ -1,5 +1,5 @@
 {
-  "observedAt": "2026-11-07",
+  "observedAt": "2026-11-09",
   "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
   "rules": [
     {
@@ -80,10 +80,10 @@
     "packages/core/src/plugin/skill/customize-harness.md"
   ],
   "lineage": {
-    "occurrences": 9647,
-    "filesScanned": 3348
+    "occurrences": 9657,
+    "filesScanned": 3352
   },
   "shippedFiles": 1323,
   "shippedSrc": 5,
-  "lineageNote": "2026-11-07: 9637 -> 9647 (+10 over 7 files). 落点：拒绝型测试语料点名它要拒的上游名（launcher-install-tree +2、tool-denial-marker-stability +3）；一处随产品发布的字节 packages/opencode/bin/glasspane-harness(+1) 必须继续读 OPENCODE_BIN_PATH，只认自家名字就等于对\"上一个名字仍生效\"作无陈述；文档/台账/CI 文本 docs/release.md(+5)、SYNCLOG.md(+3)、CHANGELOG.md(+1)、release.yml(+1)、raw-changelog.ts(+1) 在说该边界被摘掉；bun.lock(-2) 在减少那一侧。逐文件量法：对 3923264d 与 HEAD 各跑 grep -oiE opencode 取差（我这个口径数到 +15，尺子口径 +10，两个都记）。hits 仍 0，26 product + 2 doc 未变。"
+  "lineageNote": "2026-11-09: config.ts 全局配置加载顺序修复的那条注释（说明 glasspane-harness.json(c) 必须后读、opencode.json(c) 是 legacy 只为兼容而读）+ CHANGELOG 0.14.7 条目引用同样两个文件名字面——都是 attribution/说明性引用，不是新增产品面"
 }

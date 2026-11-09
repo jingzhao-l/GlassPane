@@ -35,7 +35,7 @@
       }
     },
     "fork": {
-      "loc": 14335,
+      "loc": 14340,
       "files": [
         {
           "file": "packages/opencode/script/dependency-floors.ts",
@@ -865,7 +865,7 @@
         {
           "file": "packages/opencode/src/config/config.ts",
           "kind": "edited",
-          "lines": 67
+          "lines": 72
         },
         {
           "file": "packages/opencode/src/config/managed.ts",
@@ -1230,7 +1230,7 @@
       },
       "testsExcluded": {
         "files": 65,
-        "lines": 11891
+        "lines": 11946
       },
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {
@@ -1239,7 +1239,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 27362,
+  "totalToolSurfaceLoc": 27367,
   "note": null,
   "carried": null
 }
