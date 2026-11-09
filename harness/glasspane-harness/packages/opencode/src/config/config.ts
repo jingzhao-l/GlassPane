@@ -287,11 +287,16 @@ const layer = Layer.effect(
         }
       }
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "config.json"), env))
-      // [gp] Product: product-named files first, upstream-named ones as legacy fallbacks.
-      result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "glasspane-harness.json"), env))
-      result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "glasspane-harness.jsonc"), env))
+      // [gp] Product: merge order is precedence order (the later file wins — same rule the
+      // project-directory block below obeys). Product-named files must load LAST so a stale
+      // upstream-named `opencode.json(c)` in the same global dir cannot override them; legacy
+      // names are read for compatibility, not to win. This used to load product first, legacy
+      // last, which let `opencode.json` beat `glasspane-harness.json` — the opposite of what
+      // product.json's `compatReadDirs` claims and of the project-dir fix.
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "opencode.json"), env))
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "opencode.jsonc"), env))
+      result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "glasspane-harness.json"), env))
+      result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "glasspane-harness.jsonc"), env))
 
       const legacy = path.join(Global.Path.config, "config")
       if (existsSync(legacy)) {

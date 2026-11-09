@@ -353,6 +353,34 @@ it.effect("the product's own global config file beats the legacy name in the sam
   }),
 )
 
+it.effect("the product's global config file beats the legacy name in the same GLOBAL dir", () =>
+  Effect.gen(function* () {
+    // The GLOBAL config dir (Global.Path.config, no OPENCODE_CONFIG_DIR) routes through a
+    // different merge loop than the project-directory branch the test above covers. That
+    // loop had the same product-first/legacy-last list, so a leftover `opencode.json(c)`
+    // in the global dir silently beat `glasspane-harness.json(c)`. Product must win here too.
+    //
+    // The conflicting files live ONLY in the global dir; the instance dir is a separate,
+    // config-less tmpdir. If they shared a dir the project branch (which also reads it,
+    // product-last) would merge after global and win regardless — the first version of this
+    // test did exactly that and passed against the un-fixed source.
+    const globalDir = yield* tmpdirScoped()
+    const instanceDir = yield* tmpdirScoped()
+    yield* writeConfigEffect(globalDir, schemaConfig({ username: "from-legacy" }), "opencode.jsonc")
+    yield* writeConfigEffect(globalDir, schemaConfig({ username: "from-product" }), "glasspane-harness.jsonc")
+    yield* withGlobalConfigDir(
+      globalDir,
+      Effect.gen(function* () {
+        const info = yield* Config.use
+          .get()
+          .pipe(provideInstanceEffect(instanceDir))
+          .pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(LayerNode.compile(CrossSpawnSpawner.node)))
+        expect(info.username).toBe("from-product")
+      }),
+    )
+  }),
+)
+
 it.effect("does not create global config when OPENCODE_CONFIG_DIR is set", () =>
   Effect.gen(function* () {
     const custom = yield* tmpdirScoped()
@@ -1970,20 +1998,46 @@ describe("deduplicatePluginOrigins", () => {
     expect(result).toEqual(["a-plugin@1.0.0", "b-plugin@1.0.0", "c-plugin@1.0.0"])
   })
 
-  it.effect("loads auto-discovered local plugins as file urls", () =>
-    withConfigTree(
-      { global: { plugin: ["my-plugin@1.0.0"] } },
-      Effect.gen(function* () {
+  it.effect("loads a declared global plugin and refuses an untrusted auto-discovered one", () =>
+    withConfigTree({ global: { plugin: ["my-plugin@1.0.0"] } }, Effect.gen(function* () {
+      // A plugin named in a config file's "plugin" list is always loaded. A plugin nobody
+      // named but sitting in the project's `.opencode/plugin(s)` dir is arbitrary code with the
+      // engine's permissions attached, so the trust gate (config.ts :: projectPluginPlan,
+      // default-untrusted) refuses it — it must NOT appear in the merged plugin list. The
+      // pre-gate version of this test asserted the discovered file DID load as a file:// spec,
+      // which is exactly the code-execution the gate exists to stop.
+      const test = yield* TestInstance
+      yield* FSUtil.use.writeWithDirs(
+        path.join(test.directory, ".opencode", "plugin", "my-plugin.js"),
+        "export default {}",
+      )
+
+      const plugins = (yield* Config.use.get()).plugin ?? []
+      expect(plugins.some((p) => ConfigPlugin.pluginSpecifier(p) === "my-plugin@1.0.0")).toBe(true)
+      expect(
+        plugins.some((p) => ConfigPlugin.pluginSpecifier(p).startsWith("file://")),
+        "an untrusted auto-discovered project plugin must be refused, not loaded",
+      ).toBe(false)
+    })),
+  )
+
+  it.effect("a trusted run loads an auto-discovered local plugin as a file url", () =>
+    withProcessEnv("GLASSPANE_HARNESS_TRUST_PROJECT_PLUGINS", "true",
+      withConfigTree({ global: { plugin: [] } }, Effect.gen(function* () {
+        // The opt-in other half: with GLASSPANE_HARNESS_TRUST_PROJECT_PLUGINS set, the same
+        // discovered file the default run refused is now loaded as a file:// spec.
         const test = yield* TestInstance
         yield* FSUtil.use.writeWithDirs(
-          path.join(test.directory, ".opencode", "plugin", "my-plugin.js"),
+          path.join(test.directory, ".opencode", "plugin", "trusted-plugin.js"),
           "export default {}",
         )
 
         const plugins = (yield* Config.use.get()).plugin ?? []
-        expect(plugins.some((p) => ConfigPlugin.pluginSpecifier(p) === "my-plugin@1.0.0")).toBe(true)
-        expect(plugins.some((p) => ConfigPlugin.pluginSpecifier(p).startsWith("file://"))).toBe(true)
-      }),
+        expect(
+          plugins.some((p) => ConfigPlugin.pluginSpecifier(p).startsWith("file://")),
+          "a trusted run must load the auto-discovered project plugin as a file url",
+        ).toBe(true)
+      })),
     ),
   )
 })

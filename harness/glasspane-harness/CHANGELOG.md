@@ -8,6 +8,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.14.7] — 2026-11-09
+
+### Fixed — 全局配置目录里老名字不再压过产品名字
+
+`packages/opencode/src/config/config.ts` 的**全局**配置加载（`Global.Path.config`，无
+`OPENCODE_CONFIG_DIR` 时走的那条）把 `glasspane-harness.json(c)` 排在 `opencode.json(c)`
+**前面**。合并方向是"后读的赢"（`mergeDeep(target, source)` 的 source 胜出），于是同一个
+全局目录里一份遗留的 `opencode.json(c)` 会静默压掉产品自己的 `glasspane-harness.json(c)`。
+这与**项目目录**那条分支（`config.ts` 的 directory 循环）的既修方向正好相反——那条早已改成
+"legacy 先读、产品最后读"，且注释里写着"legacy 只为兼容而读，不为赢"。**这是一处半修**：
+同一份产品契约在两条加载路径上行为分裂，目录侧守住了，全局侧还在漏。
+
+修法是把全局加载顺序改成与目录侧一致：legacy 先、产品后。**反向控制实测**（判据是"新测试
+必须先红后绿"，不是"跑通了就行"）：
+
+- 把源码改回旧顺序（product-first/legacy-last），新加的
+  `the product's global config file beats the legacy name in the same GLOBAL dir`
+  **转红**（`username` 读到 `from-legacy`）；恢复修复后转绿。测试文件本身 sha256 核回。
+- 第一版这条测试**是假绿**：它把全局目录和实例目录指向同一个 tmpdir，于是项目分支（也读
+  那个目录、产品最后）在全局之后又合并了一遍，无论源码修没修都读到产品的值。改成两个独立
+  tmpdir（冲突文件只在全局目录、实例目录无配置）后，测试才对旧源码红得起来。这一条记下来，
+  因为"跑通了但测不到"正是本仓反复重学的那类失败。
+
+同批第二处：`test/config/config.test.ts` 的
+`loads auto-discovered local plugins as file urls` 此前在 main 上恒红——它断言"项目目录里
+自动发现的插件会作为 `file://` 规范装进来"，而那正是 `[gp]` 信任闸
+（`GLASSPANE_HARNESS_TRUST_PROJECT_PLUGINS`，默认 `false`，`projectPluginPlan`）刻意拒绝的
+行为：没人点名的项目插件是"带引擎权限的任意代码"，默认不装。信任闸本身有独立电池
+（`glasspane-project-plugin-trust.test.ts`）且是对的；**老断言停在闸之前的形状**，与闸
+矛盾。把它拆成两半：默认运行断言已发现的插件**被拒**（不出现在合并后的清单），置
+`GLASSPANE_HARNESS_TRUST_PROJECT_PLUGINS=true` 的运行断言同一个文件**被装**为 `file://`。
+两条都配反向控制：拔掉信任开关，trusted 那半转红。
+
+### Version — 0.14.6 → 0.14.7
+
+取 **patch**：两处都是纯修复（行为对齐既有契约，没有新增 CLI 参数、工具面或产品形状）。
+两处版本线（`product.json` + `packages/opencode/package.json`）与 `bun.lock` 的
+`packages/opencode` 头、curl 入口钉的 tag、两份 README 与 `docs/install.md` 的安装命令
+同批跟到 `v0.14.7`，`product-surface --check` 报「6640 条一致 / 0 条问题」。
+
 ## [0.14.6] — 2026-11-08
 
 ### Fixed — GPG 身份判决有电池
