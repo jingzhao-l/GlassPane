@@ -178,9 +178,13 @@ const layer = Layer.effect(
       ? []
       : yield* fs
           .up({
-            // [gp] Legacy dir first, product dir second — the same measured
-            // later-wins merge as v1 makes the product dir win when both exist.
-            targets: [".opencode", ".glasspane-harness", ...names.toReversed()],
+            // [gp] Product dir first, legacy second — this array is NOT the merge order.
+            // `up` pushes targets in list order per level and the result is `.toReversed()`
+            // below, so the name listed *first* here lands *last* there and wins the
+            // later-wins merge. Listing legacy first (as this did) handed a cloned repo's
+            // `.opencode/opencode.json` the final say over the product's own config.
+            // Pinned behaviourally by opencode/test/config/glasspane-config-precedence.test.ts.
+            targets: [".glasspane-harness", ".opencode", ...names.toReversed()],
             start: location.directory,
             stop: location.project.directory,
           })

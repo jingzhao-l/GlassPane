@@ -137,15 +137,22 @@ runs:
         python3 -c 'import sys; print("native-build interpreter:", sys.version.split()[0], "->", sys.executable)'
 
     - name: Install dependencies
+      env:
+        # Never interpolate `inputs.*` into a run block: a caller-supplied value would be
+        # shell-evaluated (a value like `; curl … | sh` runs). No workflow passes this input
+        # today (measured 2026-11-10), but the action stays usable — the flags arrive as an
+        # environment string and are passed quoted, so a future caller cannot turn the input
+        # into a command line.
+        INSTALL_FLAGS: ${{ inputs.install-flags }}
       run: |
         set -euo pipefail
         # Workaround for patched peer variants
         # e.g. ./patches/ for standard-openapi
         # https://github.com/oven-sh/bun/issues/28147
         if [ "$RUNNER_OS" = "Windows" ]; then
-          bun install --linker hoisted ${{ inputs.install-flags }}
+          bun install --linker hoisted ${INSTALL_FLAGS:+$INSTALL_FLAGS}
         else
-          bun install ${{ inputs.install-flags }}
+          bun install ${INSTALL_FLAGS:+$INSTALL_FLAGS}
         fi
       shell: bash
 

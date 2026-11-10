@@ -91,12 +91,20 @@ const RULES = [
 
 /** Field-vs-value comparisons, with the value in hand so presence checks (`undefined`/`null`) can be excluded honestly. */
 function countEvidenceCompare(text) {
+  // Both operand orders. The same lesson `threshold-comparison` was widened for: a
+  // surface could write `0.5 <= pack.changedPixelRatio` and hide the comparison behind
+  // nothing but an operand swap, while this rule — whose whole purpose is to say that
+  // comparing an evidence field moves its interpretation into the shell — reported 0.
+  // The first alternative is the field on the left; the second is the field on the
+  // right (`0.5 <= pack.changedPixelRatio`). The capture keeps the value on hand so the
+  // presence-check exclusion still works in both orders.
   const re =
-    /(?:changedPixelRatio|pixelDiff|pixelChanged|actConfirmed|axChanged|attribution|circuitBreaker|confidence|outcome)\s*(?:[<>]=?|={2,3}|!={1,2})\s*([^\n;,)]*)/g
+    /(?:changedPixelRatio|pixelDiff|pixelChanged|actConfirmed|axChanged|attribution|circuitBreaker|confidence|outcome)\s*(?:[<>]=?|={2,3}|!={1,2})\s*([^\n;,)]*)|(?:[<>]=?|={2,3}|!={1,2})\s*([^\n;,)]*)\s*(?:changedPixelRatio|pixelDiff|pixelChanged|actConfirmed|axChanged|attribution|circuitBreaker|confidence|outcome)/g
   let count = 0
   let match
   while ((match = re.exec(text)) !== null) {
-    if (/^(?:undefined|null)\b/.test(match[1].trim())) continue
+    const value = (match[1] ?? match[2] ?? "").trim()
+    if (/^(?:undefined|null)\b/.test(value)) continue
     count++
   }
   return count
@@ -182,7 +190,15 @@ const surfaces = {
 const CONTROLS = [
   { id: "threshold-comparison", judgement: "const ready = coverageRatio > 0.9" },
   { id: "verdict-synthesis", judgement: 'const label = ok ? "passed" : "failed"' },
-  { id: "evidence-field-compare", judgement: "if (pack.changedPixelRatio >= 0.5) return" },
+  {
+    id: "evidence-field-compare",
+    // Both operand orders, pinned as two controls: the field-on-left form that used to be the
+    // only one, and the value-on-left form (`0.5 <= pack.changedPixelRatio`) that widening this
+    // rule to the sibling's caliber exists to catch. A control that only names one order would
+    // prove the rule could fire and still let the other order stay a silent 0.
+    judgement: "if (pack.changedPixelRatio >= 0.5) return",
+    judgements: ["if (0.5 <= pack.changedPixelRatio) return"],
+  },
 ]
 
 /**
@@ -205,13 +221,16 @@ function assertRulesCanFire() {
     const control = CONTROLS.find((candidate) => candidate.id === rule.id)
     if (!control)
       die(2, `positive control: rule "${rule.id}" carries no known-judgement sample — nothing has shown it can fire`)
-    const { code, arithmetic } = prepare(control.judgement)
-    const fired = rule.count(rule.scope === "code" ? code : arithmetic)
-    if (fired === 0)
-      die(
-        2,
-        `positive control: rule "${rule.id}" does not fire on ${JSON.stringify(control.judgement)} — a rule that cannot go red cannot clear anything`,
-      )
+    const samples = [control.judgement, ...(control.judgements ?? [])]
+    for (const sample of samples) {
+      const { code, arithmetic } = prepare(sample)
+      const fired = rule.count(rule.scope === "code" ? code : arithmetic)
+      if (fired === 0)
+        die(
+          2,
+          `positive control: rule "${rule.id}" does not fire on ${JSON.stringify(sample)} — a rule that cannot go red cannot clear anything`,
+        )
+    }
     // The control must ALSO survive the anti-control: the same sample wrapped in a comment must NOT
     // fire, because production strips comments before any rule reads the bytes. Without this half a
     // rule whose pattern ignores comment markers would report hits on a `[gp]` note that only

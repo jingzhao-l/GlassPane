@@ -98,6 +98,32 @@ export function describeDimensionCoverage(context: DimensionContext): string {
   return formatDimensionContext(context)
 }
 
+/**
+ * The coverage line for a run that recorded decisions against dimensions nobody
+ * planned. The kernel refuses `planned: []` as an *input* ("I reviewed nothing"
+ * is not a valid context — pinned by `kernel/test/dimension-context.test.mjs`),
+ * but its *output* schema admits the zero-planned shape and its formatter renders
+ * it. So this helper builds exactly that shape — every recorded id is unplanned by
+ * definition — and lets the kernel format it. The arithmetic stays the kernel's;
+ * only the input refusal is bypassed, and only for the one case the kernel's own
+ * contract says a run with decisions but no plan has to be able to say out loud.
+ */
+export function zeroPlannedCoverage(recorded: Record<string, { decisions: number }>): string {
+  const ids = Object.keys(recorded).sort()
+  const context: DimensionContext = {
+    planned: [],
+    unplanned: ids.map((id) => ({ id, status: "unplanned", evidence: { decisions: recorded[id].decisions } })),
+    totals: {
+      planned: 0,
+      verified: 0,
+      unverified: 0,
+      unplanned: ids.length,
+      decisions: ids.reduce((sum, id) => sum + recorded[id].decisions, 0),
+    },
+  }
+  return formatDimensionContext(context)
+}
+
 /** The three-field failure shape every tool surface in this repo already uses. */
 export interface KernelRejection {
   readonly code: string
@@ -319,13 +345,16 @@ function resolveLinksOnce(candidate: string): string {
  * runtime, so "correct under the runtime these tests happen to use" is not a defence.
  *
  * The folded test therefore refuses a candidate that differs from the engine's root by case
- * ALONE, on every volume and in both directions (a `GLASSPANE_SOCKET` under the capitalised
- * spelling and a lowercase ledger are the same tree too). The cost is a refusal on a genuinely
- * case-sensitive volume, where `.GlassPane` and `.glasspane` are two directories — accepted
- * deliberately, because this guard's failure direction is a second writer in the engine's tree
- * (audit findings B-1/A-15) and a user who means the other directory can name it with a
- * different word. `test/tool/glasspane-kernel.test.ts` pins both halves: the refusal, and that
- * a name differing by MORE than case stays writable.
+ * ALONE, on every volume and in the one direction this guard cares about — a candidate that is
+ * the root or sits under it. The single caller (`insideStateRoot`) always asks "is THIS
+ * candidate inside the engine's tree", never the converse, so "both directions" would be a
+ * claim about a direction nobody checks; what is actually tested is candidate-under-root, and
+ * a `GLASSPANE_SOCKET` under the capitalised spelling or a lowercase ledger are the same tree
+ * too. The cost is a refusal on a genuinely case-sensitive volume, where `.GlassPane` and
+ * `.glasspane` are two directories — accepted deliberately, because this guard's failure
+ * direction is a second writer in the engine's tree (audit findings B-1/A-15) and a user who
+ * means the other directory can name it with a different word. `test/tool/glasspane-kernel.test.ts`
+ * pins both halves: the refusal, and that a name differing by MORE than case stays writable.
  */
 function insideStateRoot(candidate: string, state: string): boolean {
   if (candidate === state || candidate.startsWith(state + path.sep)) return true

@@ -1,6 +1,6 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 
-import { describeDimensionCoverage, dimensionCoverage, readEvidenceFrame, readRunPlan } from "../tool/glasspane/kernel"
+import { describeDimensionCoverage, dimensionCoverage, readEvidenceFrame, readRunPlan, zeroPlannedCoverage } from "../tool/glasspane/kernel"
 import type { KernelRejection, RunPlanRef } from "../tool/glasspane/kernel"
 
 /** What `readRunPlan` answered for this session: a plan, no plan, or a refusal. */
@@ -343,6 +343,18 @@ export function renderDimensionCoverage(
     return `dimension coverage NOT computed — ${plan.error.code}: ${plan.error.message} (remedy: ${plan.error.remedy})`
   }
   if (planned.length === 0 && Object.keys(recorded).length === 0) return undefined
+  if (planned.length === 0) {
+    // The kernel refuses to compute a context for a run that declared no dimensions
+    // ("I reviewed nothing" is not a valid context — pinned by the kernel's own
+    // `dimension-context.test.mjs`). But a session that recorded decisions against a
+    // dimension nobody planned is exactly the drift the kernel's `unplanned` status
+    // exists to surface, so this fork builds that shape itself — every recorded id is
+    // unplanned by definition — and lets the kernel format it. The arithmetic stays
+    // the kernel's (`formatDimensionContext`); only the refusal is bypassed, and only
+    // for the one case the kernel's own output schema admits (`planned: []`).
+    const line = zeroPlannedCoverage(recorded)
+    return plan.ok && plan.plan ? `${line} [plan ${plan.plan.digest} @ ${plan.plan.path}]` : line
+  }
 
   const context = dimensionCoverage({
     planned: planned.map((id) => ({ id })),

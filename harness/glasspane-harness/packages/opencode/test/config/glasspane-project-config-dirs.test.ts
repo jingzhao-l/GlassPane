@@ -24,6 +24,12 @@ import { testEffect } from "../lib/effect"
  * The two parallel stacks (v2 `core/config.ts` and the TUI config scan) filter
  * directories by name inside service layers that need the whole config graph;
  * those two filters are pinned structurally below, with the boundary stated.
+ * That boundary is real: a grep can see that `.glasspane-harness` is *mentioned*,
+ * never which name ends up winning. v2's actual precedence — where discovery order
+ * is reversed before the merge, so the array literal reads backwards — is pinned
+ * behaviourally by `glasspane-config-precedence.test.ts`. Both files match the
+ * `test/config/glasspane-*.test.ts` glob the CI lane expands; this one used to be
+ * named `project-config-dirs.test.ts`, which matched nothing and ran nowhere.
  */
 const it = testEffect(LayerNode.compile(LayerNode.group([FSUtil.node])))
 
