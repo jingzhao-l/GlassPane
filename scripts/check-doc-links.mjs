@@ -437,6 +437,15 @@ function kernelCorpusCount(rootDir = ROOT) {
   if (!corpus) return null
   return Array.isArray(corpus) ? corpus.length : Object.keys(corpus).length
 }
+function kernelConformanceStamp(rootDir = ROOT) {
+  const file = path.join(rootDir, 'harness', 'glasspane-harness', 'contracts', 'kernel-conformance.json')
+  if (!fs.existsSync(file)) return null
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'))?.kernel?.version ?? null
+  } catch {
+    return null
+  }
+}
 function brandSurfaceGolden(rootDir = ROOT) {
   const file = path.join(rootDir, 'harness', 'contracts', 'brand-surface.json')
   if (!fs.existsSync(file)) return null
@@ -555,6 +564,19 @@ export const CLAIMS = [
     only: ['harness/README.md'],
   },
   {
+    id: '内核语料出处戳记',
+    // 这一句过去引的是 `"version": "0.1.9"` / pin `0.1.10` 一对具体数字，用来说明"戳记不是判据"。
+    // 那对数字早已不成立（字段真名是 kernel.version，2026-11-10 实测 0.1.12），而当时没有任何
+    // 判据认得这句话，于是它带着两个过期版本号绿了很久。现在数字本身被钉住：真源取金样自己的
+    // kernel.version，不是 pin —— 戳记允许落后于 pin，落后的说明由正文承担，数字不许说谎。
+    en: /\x60kernel\.version\x60 provenance stamp of \x60(\d+\.\d+\.\d+)\x60/g,
+    zh: /\x60kernel\.version\x60 provenance stamp of \x60(\d+\.\d+\.\d+)\x60/g,
+    unit: '内核语料出处戳记',
+    truth: kernelConformanceStamp,
+    norm: (token) => token,
+    only: ['harness/glasspane-harness/docs/kernel-integration.md'],
+  },
+  {
     id: '随包契约语料条数',
     en: /随包 (\d+) 个契约文件/g,
     zh: /随包 (\d+) 个契约文件/g,
@@ -597,6 +619,9 @@ const CLAIM_DOCS = [
   'ITERATE.md',
   'engine/smoke.md',
   'harness/README.md',
+  // 这一页的可复算主张此前完全没有判据：它引用的一对内核版本号过期后照样绿（见「内核语料出处戳记」）。
+  // 链接与锚点一直在扫它（FORK_DOCS），主张这一面却漏了——两个集合不是同一个。
+  'harness/glasspane-harness/docs/kernel-integration.md',
 ]
 
 const isZhDoc = (doc) => doc.endsWith('.zh-CN.md')

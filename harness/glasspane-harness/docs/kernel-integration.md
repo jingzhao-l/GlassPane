@@ -198,8 +198,10 @@ for any R40 scenario; every one of them was blocked on kernel API work first.
   between the two implementations is the sha256-pinned corpus (`tests/kernel_fixtures/manifest.json`,
   whose own comment says it is deliberately NOT generated from the kernel but a copy pinned by sha256),
   not a run of both. One more reading to keep honest: `contracts/kernel-conformance.json` carries
-  `"version": "0.1.9"` while the dependency pin is `0.1.10` — that field is a provenance stamp of
-  where the fixtures came from, not a version judgment; the judgment is the per-fixture digest.
+  a `kernel.version` provenance stamp of `0.1.12`, recording which published kernel produced these
+  answers, not a version judgment; the judgment is the per-fixture digest. The stamp may lag the
+  dependency pin after a bump and that is not a failure — but this sentence quoting a stale pair is,
+  which is why the number above is measured against that field on every doc run.
 - **Both former API blockers are gone.** `dimensionContext` is in the dependency and the fork
   consumes it (`kernel.ts` → `dimensionCoverage` → `src/plugin/glasspane-compaction.ts`), so
   the sentence this page used to carry — "`dimensionContext` does not exist at the pinned
