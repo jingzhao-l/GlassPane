@@ -58,7 +58,7 @@
     "ai-agents"
   ],
   "dependencies": {
-    "iterate-kernel": "0.1.10",
+    "iterate-kernel": "0.1.12",
     "zod": "4.6.7"
   },
   "devDependencies": {

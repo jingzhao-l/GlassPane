@@ -1,12 +1,12 @@
 {
   "_comment": "Provenance of the iterate-kernel dependency this fork ships. Written by script/kernel-pin.mjs --record when the version is deliberately bumped; checked by --check in CI. The kernel's canonical home is iterate-skill/kernel, published as `iterate-kernel`; the vendored mirror under packages/opencode/vendor/kernel was retired with this file.",
   "package": "iterate-kernel",
-  "version": "0.1.10",
+  "version": "0.1.12",
   "resolution": {
     "from": "registry",
-    "lockKey": "iterate-kernel@0.1.10",
+    "lockKey": "iterate-kernel@0.1.12",
     "specifier": "",
-    "integrity": "sha512-+f3Vr8hhUdCqNQZyW0YoMwOCGU8mjUQ4orMB83szXUYBKwstS2BNUFfYqBZC9TqBn7EPmYVaUrgP16q3YHevnQ=="
+    "integrity": "sha512-tc6Px6+Ppb7UxF+w5cqVHsBL7kR9+tV2Zohq/tux+Xh14lZ3vQLIBuayABQ+pL4z2TrIfC59h2DDHIxRU8UMyw=="
   },
   "canonical": {
     "repo": "jingzhao-l/iterate-skill",
@@ -14,7 +14,7 @@
     "branch": "main",
     "npmPublish": "npm publish from the kernel/ directory of that repo"
   },
-  "recordedAt": "2026-10-24",
+  "recordedAt": "2026-11-10",
   "corpus": [
     {
       "file": "fixtures/convergence.ok-01.json",
@@ -34,7 +34,7 @@
     },
     {
       "file": "fixtures/decision-record-transcription.ok-01.json",
-      "sha256": "6b2d0e954319f8df0c722e388abbfbc32c937521e8481dcfb2fb6a3b11b75611"
+      "sha256": "81510efae5ddb65ff71cc613d707b54a2ee0cfcad660605a43424f09d15797ae"
     },
     {
       "file": "fixtures/dimension-context.ok-01.json",
@@ -90,23 +90,23 @@
     },
     {
       "file": "schemas/convergence-round-state.schema.json",
-      "sha256": "f5dbffa403dc84658bcba277dec3b393da185d465dd36986b655b91566b74413"
+      "sha256": "4389432b5d96944adba25c1dac0e6e0f4c20bb56c56cfbcf6291eb14e0706d28"
     },
     {
       "file": "schemas/decision-log-entry.schema.json",
-      "sha256": "0602f0bf0f2f1a5787db6d42f61a6e3e47a6c519d7bac869b5552fdcc9130f3a"
+      "sha256": "f7d9ac89f863a0e0ab9576d7f4f7bc102fe6709c8ff02e21066d38b17d9f2368"
     },
     {
       "file": "schemas/evidence-pack.schema.json",
-      "sha256": "6be298e2086aa157650b8e11fb7e72c8208b77486374f3a813e0a25563720de9"
+      "sha256": "7e4dba1aff3a24fca908b520d9a36544382b4a8e8bf7a8b31be84a564f8fab3d"
     },
     {
       "file": "schemas/invariant-report.schema.json",
-      "sha256": "51d876938e7a8e167183f33d023f027a4ea9e29a258f08504650bded7b68e712"
+      "sha256": "32ab443ba41a83204d98e71c11072101d1b62b1e3cf04d6dec436f2a5459f5cd"
     },
     {
       "file": "schemas/provider-registration.schema.json",
-      "sha256": "c150f5e06ea6acc13f3984057fd53a00e809a9c469b4080392afca74adbfcf12"
+      "sha256": "de93dc77bfb398593d79a143b3ded772a6cefd78fdff664ba26590a579e31573"
     },
     {
       "file": "schemas/recipe-config.schema.json",
@@ -114,11 +114,11 @@
     },
     {
       "file": "schemas/reverification-request.schema.json",
-      "sha256": "b55cb33e485b793b083ceb541e04ad9de07840359b91f98def791c0eea9008f4"
+      "sha256": "8bb10eb3c17d426576cb4e7c7e95f1d19643f3ee11542efd86088a6d4b3bd001"
     },
     {
       "file": "schemas/run-plan.schema.json",
-      "sha256": "60c02b0837c1fa029c241090b25704abea44b3a8a3d8d9f1057ce1100b56bec5"
+      "sha256": "0f27bb1273a712de423544cee9391f964c1cde23e8f42e03296d0b6fdf152729"
     }
   ]
 }
