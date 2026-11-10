@@ -3,6 +3,59 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-11（第三十四次会话）· 主仓收口：0.1.13 追平漏掉的四个测量面（fork-diff / tool-surface / 两份 README / 本 SYNCLOG）
+
+### 〇、改动面数字与开工对表
+
+`fork-diff vs v1.18.32: 4630/6770 byte-identical, 294 edited, 138 added, 1708 deleted`
+（金样在 `harness/contracts/fork-diff.json`，本轮重记。上一条 2026-11-10 记的也是这四个数字——
+内核 pin 从 0.1.12 升到 0.1.13 不改 fork 与上游 opencode 的差异面，只改"我们自己的四份文件"，
+所以 added/edited/deleted 全部不动。变的是下面〇二那些被钉住的内容哈希。）
+
+主仓 `f2bb4b6c`（chore(consumers): 追平 iterate-kernel@0.1.13），整树干净；盘余 8.9 GiB。
+
+### 〇二、上一轮漏掉的那批，本轮由主仓收口
+
+上一轮 `f2bb4b6c`（升内核 pin 0.1.12→0.1.13）只改了 pin 与 mcp-shell 的依赖号，**漏掉了 kernel
+依赖换号时必须一起动的四个测量面**。CI 那一轮 `42768006102` 因此红了四条 lane：
+
+- `public docs` —— `check-doc-links` 的内核 pin 两条判据红（README 写 0.1.12、真源 0.1.13）。
+- `root workspace gate` + `macOS node suites` —— updater 的
+  `scripts-daily-20261020.test.mjs` 两条断言"真实仓库的文档闸必须干净"被同一处拦下。
+- `harness rulers` —— `fork-diff`（我们自己的 pin / conformance / bun.lock / opencode pkg 四份
+  内容哈希变了）与 `tool-surface`（kernel 归因 0.1.12→0.1.13，占比闸不动但归因必须记账）。
+
+本轮在主仓侧把这四个面全部对齐 0.1.13：
+
+- `harness/contracts/fork-diff.json` —— `node harness/tools/fork-diff.mjs --record`。
+- `harness/contracts/tool-surface.json` —— `node harness/tools/tool-surface.mjs --record`
+  （kernel 归因现在记 `iterate-kernel@0.1.13`；A 21.36% / B 23.58% 两面照旧越限，属既有事实）。
+- `harness/README.md` —— kernel-pin 段的 `iterate-kernel@0.1.12` → `0.1.13`。
+- `harness/glasspane-harness/docs/kernel-integration.md` —— `kernel.version` provenance stamp
+  `0.1.12` → `0.1.13`。
+- 本 SYNCLOG 这一条 —— 记账。
+
+`kernel-pin.json` / `kernel-conformance.json` 本轮**未改**（上一轮已记 0.1.13，真源）。
+
+### 一、跑了哪些闸、结果如何（发布前，全部绿）
+
+`fork-diff --check`（绿，数字见〇）、`tool-surface --check`（A 21.36% / B 23.58%，越限属既有事实，
+LOC 棘轮未动）、`brand-surface --check`（无漂移，lineage 9672 / 3353 files）、`product-surface --check`
+（6640 条一致 / 0 条问题）、`surface-semantics --check`（0 hit / 23 files）、`check-kernel-corpus`
+（26 corpus 文件 ↔ pin ↔ 已安装包三份字节同源，mcp-shell 捆 0.1.13）、`check-doc-links`（绿）、
+`check-version`（1.31.2 一致）、`check-workflows --self-test`（48 case）。
+
+### 二、没跑的部分（照实写没跑）
+
+- **TUI 快照 / 真模型轮次 / M2 成包真轮次**：本轮零产品面改动（只动文档正文 + 两份尺子金样），
+  没有触发条件，**未观测**。补它的确切命令：`harness/glasspane-harness` 内
+  `bun run --cwd packages/opencode test:snapshot`；`GLASSPANE_KERNEL_BIN=... glasspane-harness`
+  开真会话走 `gp_diagnose`；`bun run --cwd packages/opencode publish --dry-run`。
+- **fork 侧的 split / tag / Release**：本线只落地 fork 侧子树，不推 fork-origin split，不发版——
+  那是 10:30 那条 harness 独立线的事（与主仓 CI 起跑的时序见提示词第 46 条）。本轮主仓发的是
+  产品面 patch 号。
+
+
 ## 2026-11-10（第三十三次会话）· 取号 0.14.9（patch）：配置优先级项目目录第二半 + 零计划覆盖线契约缺口 + 尺子盲区 + 四个内核 bump 漏掉的测量面
 
 ### 〇、改动面数字与开工对表

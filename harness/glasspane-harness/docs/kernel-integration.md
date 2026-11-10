@@ -198,7 +198,7 @@ for any R40 scenario; every one of them was blocked on kernel API work first.
   between the two implementations is the sha256-pinned corpus (`tests/kernel_fixtures/manifest.json`,
   whose own comment says it is deliberately NOT generated from the kernel but a copy pinned by sha256),
   not a run of both. One more reading to keep honest: `contracts/kernel-conformance.json` carries
-  a `kernel.version` provenance stamp of `0.1.12`, recording which published kernel produced these
+  a `kernel.version` provenance stamp of `0.1.13`, recording which published kernel produced these
   answers, not a version judgment; the judgment is the per-fixture digest. The stamp may lag the
   dependency pin after a bump and that is not a failure — but this sentence quoting a stale pair is,
   which is why the number above is measured against that field on every doc run.
