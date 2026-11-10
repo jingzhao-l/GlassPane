@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "version": "0.14.8",
+  "version": "0.14.9",
   "name": "glasspane-harness",
   "type": "module",
   "license": "MIT",

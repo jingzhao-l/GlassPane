@@ -3,6 +3,59 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-10（第三十三次会话）· 取号 0.14.9（patch）：配置优先级项目目录第二半 + 零计划覆盖线契约缺口 + 尺子盲区 + 四个内核 bump 漏掉的测量面
+
+### 〇、改动面数字与开工对表
+
+`fork-diff vs v1.18.32: 4630/6770 byte-identical, 294 edited, 138 added, 1708 deleted`
+（金样在 `harness/contracts/fork-diff.json`，本轮因 `README.md`/`README.zh-CN.md` 的 fork-diff
+行从 `137 added` 更新到 `138 added` 而重记过一次；日期行 2026-11-08 → 2026-11-10。）
+
+本地 main `4213ae8b`，整树干净；`.external/opencode` describe == pin `v1.18.32` 且 fsck 干净；
+bun 1.3.14；盘余 ≥ 4 GiB（开工核过）。
+
+### 一、本轮修的四处（都在 main，取 0.14.9）
+
+1. **配置优先级——项目目录分支的第二半**（0.14.7 修的是全局目录那条，本半把 directory 循环也
+   拉齐成 "legacy 先读、产品最后读"）。新行为固定点测试 `glasspane-config-precedence.test.ts`
+   钉三态（两目录都有配置→产品赢 / legacy 只在兼容而读 / 产品只在时也读得到）；并给
+   `project-config-dirs.test.ts` 改名——旧名不在任何 CI 通配符里，等于从没跑过。
+2. **零计划覆盖线**：`renderDimensionCoverage` 在会话对没人计划过的维度记了决策时（`planned: []`
+   但 `recorded` 非空）会把空计划喂给内核 `dimensionCoverage`，而内核自 0.1.2 起要求 `planned >= 1`
+   （"I reviewed nothing" 不是有效上下文）。压缩收尾抛错＝把本应成功的记录变失败。修法：
+   本 fork 自己构建形状（每个已记录 id 按定义 unplanned）再交内核 `formatDimensionContext` 排版。
+   `glasspane-compaction.test.ts` 两条先红后绿（反向控制）。
+3. **尺子盲区**：`surface-semantics.mjs` 的 `countEvidenceCompare` 只认 `<field> <op> <value>`；
+   反向写法漏检。按 sibling 先例放宽成两种顺序都认，并加反向顺序正例 CONTROL。
+4. **内核 bump（iterate-kernel@0.1.12）漏掉的测量面**：fork-diff / tool-surface / brand-surface
+   三个金样与两份 README 的 fork-diff 行没跟上，已在 83b9d51b / 4213ae8b 补齐。
+
+### 二、跑了的闸（发布前，全部绿）
+
+`fork-diff`（绿，数字见〇）、`tool-surface --check`（A 21.36% / B 23.58%）、`surface-semantics`
+（绿）、`brand-surface --check`（无漂移）、`product-surface --check`（**6640 条一致 / 0 条问题**，
+版本线 0.14.9，**未 `--record`**）、`hook-liveness`（绿）、`kernel-pin`（绿，0.1.12）、
+`kernel-conformance --impl canonical`（绿）、`check-workflows --self-test`（绿）、
+`check-doc-links`（绿）。TUI 快照 37/37、四个发布包 typecheck 全过、`publish --dry-run` 绿。
+
+### 三、没跑的部分（照实写没跑）
+
+- **真模型轮次 / 真 TUI 观感 / M2 证据成包真轮次**：这三格都是"物理边界"类测量（需要真模型
+  会话、真交互、真打包），本轮无对应用户报障与产品面改动，没有触发条件，**未观测**。补它的
+  确切命令：`harness/glasspane-harness` 内 `bun run --cwd packages/opencode test:snapshot`（TUI 快照，
+  本轮已跑 37/37）；真模型轮次要 `GLASSPANE_KERNEL_BIN=... glasspane-harness` 开真会话走
+  `gp_diagnose`；M2 成包证据要 `bun run --cwd packages/opencode publish --dry-run`（本轮已跑绿）。
+- **CI 远程九 lane**：发布链 `release.yml` 会在 tag 推送后由 workflow 自己跑；本机不跑远程 CI。
+
+### 四、取号
+
+**patch**：两处纯修复（行为对齐既有契约）+ 一条尺子盲区（纯工具面行为，不加产品面），没有新增
+CLI 参数、工具面或产品形状。三处版本线（`product.json` + `packages/opencode/package.json`）与
+`bun.lock` 的 `packages/opencode` 头、curl 入口钉的 tag、两份 README 与 `docs/install.md` 的
+安装命令、`docs/release.md` 第 4 步示例同批跟到 `v0.14.9`；`product-surface --check` 报
+6640 条一致 / 0 条问题。
+
+
 ## 2026-11-09（第三十二次会话）· 取号 0.14.8（0.14.7 烧号）：全局配置目录里老名字不再压过产品名字 + 一条停在信任闸之前的老断言 + 发布程序"tag 必须签名"缺口
 
 ### 〇、烧掉 0.14.7 这个号：程序缺陷，本轮修在 docs/release.md

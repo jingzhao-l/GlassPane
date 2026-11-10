@@ -8,6 +8,43 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.14.9] — 2026-11-10
+
+> **取 patch**：本批没有新增 CLI 参数、工具面或产品形状——两处都是纯修复（配置优先级那
+> 条是 0.14.7 修的**同一个缺陷类**在**项目目录**分支上的第二半，行为对齐既有契约；零计划
+> 覆盖线是让一条本应成功记录的压缩路径不再在收尾时抛错），外加一条尺子盲区（`surface-semantics`
+> 的证据比较只认左操作数，同一断言写反方向就漏）。三处版本线（`product.json` +
+> `packages/opencode/package.json`）与 `bun.lock` 的 `packages/opencode` 头、curl 入口钉的 tag、
+> 两份 README 与 `docs/install.md` 的安装命令同批跟到 `v0.14.9`。
+
+### Fixed — 项目目录里老名字不再压过产品名字（0.14.7 那类的第二半）
+
+`packages/opencode/src/config/config.ts` 的**项目目录**配置加载（directory 循环）此前已修成
+"legacy 先读、产品最后读"，但**全局目录**那条分支（`Global.Path.config`）在 0.14.7 才被拉齐。
+本轮把缺的另一半补上并加了行为固定点测试：`glasspane-config-precedence.test.ts` 钉住
+"两个目录都有配置时产品赢 / legacy 只在兼容而读 / 产品只在时也读得到"，并把
+`project-config-dirs.test.ts` 改名成 CI 通配符认得的名字（旧名不在任何 glob 里，等于从没跑过）。
+
+### Fixed — 零计划覆盖线：记录了维度没人计划时不再抛
+
+`packages/opencode/src/tool/glasspane/kernel.ts` 的 `renderDimensionCoverage` 在会话对着
+**没人计划过的维度**记了决策时（`planned: []` 但 `recorded` 非空），会把空计划喂给内核的
+`dimensionCoverage`——而内核自 0.1.2 起就要求 `planned >= 1`（"I reviewed nothing" 不是有效
+上下文，由内核自己的 `dimension-context.test.mjs` 钉着）。压缩收尾时这条路径会抛，等于把
+本应成功的记录变成失败。修法是让本 fork 自己构建这个形状——每个已记录的 id 按定义就是
+**unplanned**——再交给内核的 `formatDimensionContext` 排版；算术仍是内核的，只绕开它拒绝的
+那一个 `planned: []` 情形。`glasspane-compaction.test.ts` 两条（"记录了没人计划的维度会被
+surface 出来" + "块点名所用规则、没证明新鲜时不冒充新鲜"）先红后绿做反向控制。
+
+### Fixed — 尺子盲区：`surface-semantics` 的证据比较只认左操作数
+
+`harness/tools/surface-semantics.mjs` 的 `countEvidenceCompare` 此前只匹配
+`<field> <op> <value>` 一种方向；同一断言写成 `<value> <op> <field>`（内核
+`threshold-comparison` 家族有先例）就漏检。本轮按 sibling 先例放宽成两种顺序都认，
+并给 `evidence-field-compare` 的 CONTROL 加了反向顺序的正例（`if (0.5 <= pack.changedPixelRatio)`）。
+
+### Version — 0.14.8 → 0.14.9
+
 ## [0.14.8] — 2026-11-09
 
 > **取号说明**：`0.14.7` 这个号被烧掉了。第一次给本批打 tag 时我按 `docs/release.md` 的字面

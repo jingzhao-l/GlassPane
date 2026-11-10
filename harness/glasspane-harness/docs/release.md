@@ -172,8 +172,8 @@ Things worth knowing, because they are the usual way this is set up wrong:
    with the key the installer pins (`GLASSPANE_HARNESS_SIGNING_FPR`):
 
    ```bash
-   git tag -s v0.14.8 -m "glasspane-harness 0.14.8" <split-commit-sha>
-   git tag -v v0.14.8        # must report a good signature from the pinned key
+   git tag -s v0.14.9 -m "glasspane-harness 0.14.9" <split-commit-sha>
+   git tag -v v0.14.9        # must report a good signature from the pinned key
    ```
 
    Then push the *signed tag object*. **Get this right the first time:** the split repo's
@@ -187,7 +187,7 @@ Things worth knowing, because they are the usual way this is set up wrong:
 
    ```bash
    git push https://github.com/jingzhao-l/glasspane-harness.git \
-     refs/tags/v0.14.8:refs/tags/v0.14.8
+     refs/tags/v0.14.9:refs/tags/v0.14.9
    ```
 
 5. **Publish to npm** — either let the workflow do it:
