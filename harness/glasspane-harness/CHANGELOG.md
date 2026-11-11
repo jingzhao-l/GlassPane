@@ -8,6 +8,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.14.11] — 2026-11-11
+
+> **取 patch**：本批没有新增 CLI 参数、工具面或产品形状。内容是**代码审查与供应链安全审查的
+> 九处真缺陷修复**——尺子盲区四修（brand-surface 文件数增长+词频下降、hook-liveness 注释化
+> dispatch 读作 live、product-surface 协议计数地板过低、fork-diff 金样被删不具名拒绝），
+> 安装/发布链完整性三修（postinstall 逐字节核对 registry integrity、setup-bun 冻结锁文件、
+> install.sh 无版本分支点名占位符），以及 SECURITY.md 对发布链确实断言签名密钥的改述。
+> 每处修复都带具名红/绿的固定点对照（`rulers-selftest` 电池新增 15b/15c/8c/注释化 dispatch
+> 四组）。
+
+### Fixed — 尺子盲区（harness/tools/）
+
+- `brand-surface.mjs`：lineage 收缩守卫 `filesScanned === golden` 改 `>=`。文件数更多而词频
+  下降同样只可能是血统点被删（树没缩小就没人解释下降），旧 `===` 是盲区。
+- `hook-liveness.mjs`：fireSites 匹配前剥注释——被注释掉的 dispatch site 不再读作 live，
+  否则一个真实接线被注释掉而尺子仍报 live。`[^:]` 前瞻保住 `http://`，块注释整块移除。
+- `product-surface.mjs`：AGREEMENT_FLOOR 6490→6600（live 6640）——旧地板放行约 150 个检查
+  无声消失（83→86 那类事故的同类）。
+- `rulers-selftest.mjs`：新增 15b（brand 词频降+文件数增必红）、15c（地板高于 live 计数必红）、
+  8c（金样被删必须具名拒绝 exit 2）、注释化 dispatch 必红且点名 chat.message。
+
+### Fixed — 安装/发布链（harness/glasspane-harness/）
+
+- `packages/opencode/script/postinstall.mjs`：installPackage 先 `npm view dist.integrity`
+  （强制 sha512 形状），再 `npm pack` 下载 tarball 并自算 sha512，与 registry 声明逐字节
+  比对后才 `npm install <tarball>`（不重取）——镜像自证其恶不再成立。
+- `.github/actions/setup-bun/action.yml`：`bun install` 一律 `--frozen-lockfile`，防止漂移的
+  锁文件被静默重解。
+- `scripts/install.sh`：npm 分支"本 run 解析不到版本"时，占位补救命令前点名"把 X.Y.Z 换成
+  你要的版本"——用户不再照抄占位符。
+- `SECURITY.md`：改述"发布链确实断言 GPG_PRIVATE_KEY==install.sh 指纹"——checksums 读
+  GLASSPANE_HARNESS_SIGNING_FPR 拒绝不匹配 secret，publish-release 逐资产复核。
+
 ## [0.14.10] — 2026-11-11
 
 > **取 patch**：本批没有新增 CLI 参数、工具面或产品形状。内容是**内核 pin 从 0.1.12 追平到

@@ -3,6 +3,60 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-11（第三十五次会话）· 取号 0.14.11：代码审查九处真缺陷修复（尺子盲区 + 安装/发布链完整性）
+
+### 〇、改动面数字与开工对表
+
+`fork-diff vs v1.18.32: 4630/6770 byte-identical, 294 edited, 138 added, 1708 deleted`
+（金样 `harness/contracts/fork-diff.json` 随本批重记。上一条 0.14.10 记的也是这四个数字——
+本轮只改"我们自己的文件"，不移动与上游 opencode 的差异面，所以三桶计数全部不动。变的是
+下面〇二那些被钉住的内容哈希。）
+
+主仓 `76f01d4f`（hook-liveness 对照改扫参照检出副本）起，整树干净；盘余 8.2 GiB。
+
+### 一、本轮修的（都在主干，重切后切 v0.14.11）
+
+- 尺子盲区四修（`harness/tools/`）：
+  - `brand-surface.mjs`：lineage 收缩守卫 `filesScanned === golden` 改 `>=`——文件数更多而
+    词频下降同样只可能是血统点被删（树没缩小就没人解释下降），旧 `===` 是盲区。
+  - `hook-liveness.mjs`：fireSites 匹配前剥注释——被注释掉的 dispatch site 不再读作 live。
+    `[^:]` 前瞻保住 `http://`，块注释整块移除。
+  - `product-surface.mjs`：AGREEMENT_FLOOR 6490→6600（live 6640）——旧地板放行约 150 个
+    检查无声消失。
+  - `rulers-selftest.mjs`：新增 15b（brand 词频降+文件数增必红）、15c（地板高于 live 计数
+    必红）、8c（金样被删必须具名拒绝 exit 2）、注释化 dispatch 必红且点名 chat.message。
+- 安装/发布链三修（`harness/glasspane-harness/`）：
+  - `packages/opencode/script/postinstall.mjs`：installPackage 先 `npm view dist.integrity`
+    （强制 sha512 形状），再 `npm pack` 下载 tarball 并自算 sha512，与 registry 声明逐字节
+    比对后才 `npm install <tarball>`（不重取）——镜像自证其恶不再成立。
+  - `.github/actions/setup-bun/action.yml`：`bun install` 一律 `--frozen-lockfile`，防止漂移的
+    锁文件被静默重解。
+  - `scripts/install.sh`：npm 分支"本 run 解析不到版本"时，占位补救命令前点名"把 X.Y.Z 换成
+    你要的版本"——用户不再照抄占位符。
+- `SECURITY.md`：改述"发布链确实断言 GPG_PRIVATE_KEY==install.sh 指纹"——checksums 读
+  GLASSPANE_HARNESS_SIGNING_FPR 拒绝不匹配 secret，publish-release 逐资产复核。
+- 版本线：`product.json` + `packages/opencode/package.json` → `0.14.11`；`bun install` 刷新
+  `bun.lock` 的 `packages/opencode` 头；五处安装命令位点（`product.json` 的 `install.curl`、
+  `README.md`/`README.zh-CN.md`、`docs/install.md`×2、`scripts/install.sh` 注释）钉的 tag
+  v0.14.10 → v0.14.11。
+- `CHANGELOG.md`：新增 `0.14.11` 条目（九处修复 + 每处带固定点对照的依据）。
+- 尺子金样：`fork-diff` / `tool-surface` 各 `--record` 重记（与源同批）。
+
+### 二、跑了哪些闸（发布前，全部绿）
+
+`rulers-selftest`（每个守卫具名驱动 + sha256 恢复，含四组新对照）、`fork-diff --check`、
+`tool-surface --check`（A 21.34% / B 23.62%，越限属既有事实、未增长）、`brand-surface --check`
+（lineage 9673 / 3353 文件，0 hit）、`product-surface --check`（6640 协议 ≥ 6600 地板）、
+`hook-liveness --check`（21 钩无漂移、2/2 绑定解析）、`surface-semantics --check`（23 文件 0 hit）。
+
+### 三、没跑的部分（照实写没跑）
+
+- **TUI 快照 / 真模型轮次**：本轮零产品行为改动（只动尺子判据、安装链、文档、版本号、
+  金样），没有触发条件，**未观测**。补它的确切命令：`bun run --cwd packages/opencode test:snapshot`；
+  `GLASSPANE_KERNEL_BIN=... glasspane-harness` 开真会话走 `gp_diagnose`。
+- **npm 三包发布与 GitHub Release**：由 `release.yml` 的 workflow_dispatch（`--ref v0.14.11`）
+  承载；本条只落地 trunk 侧子树与 split/tag，发布在切完签名 tag 后触发。
+
 ## 2026-11-11（第三十四次会话 · 补）· 取号 0.14.10：artifact/split-main 两格红收口 —— 重切主干子树并取号，不覆盖锚点
 
 ### 〇、改动面数字与开工对表
