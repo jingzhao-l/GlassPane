@@ -2,6 +2,42 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.31.3] — 2026-11-11
+
+**版本判断：patch。** 四条判据一条没碰：状态文件字段、退出码集合、CLI 参数、npm 包 `bin`
+声明一字未动。本轮把 `glasspane-mcp` 的运行时依赖 `iterate-kernel` 从 **0.1.10 追平到 0.1.13**——
+registry 上的 `1.31.2` 仍捆 `0.1.10`，其间 0.1.12/0.1.13 各是纯依赖追平（无对外 `gp_*` 形状、
+无 CLI 参数变化），因此合成一个 patch 号把这批送到用户手上。
+
+### 1. `iterate-kernel` 0.1.10 → 0.1.13（含原型污染旁路修复）
+
+`glasspane-mcp` 在 `dimension.ts` / `evidence-report.ts` / `providers.ts` 三处运行时导入
+`iterate-kernel` 的子路径。registry 上 `1.31.2` 捆的是 `0.1.10`，此后 0.1.12、0.1.13 两笔依赖
+追平一直没发版。其中 **0.1.13 修了 `parseDimensionContextInput` 的 `recorded.__proto__` 旁路**
+（纯运行时语义，零 fixture 改动）——这是本轮真正值得送达用户的修复。
+
+`mcp-shell/package.json` 的精确 pin 与根 workspace `package-lock.json` 随 `npm ci` 刷新；
+`kernel/{schemas,fixtures}` 语料镜像由 `scripts/check-kernel-corpus.mjs --record` 从已安装的
+0.1.13 包重抄（26 文件，三腿字节同源：mirror ↔ pin ↔ 已安装包）。fork 侧（`harness/glasspane-harness`）
+的 `iterate-kernel` pin 与 `bun.lock` 同批追平，其 split/tag 由 10:30 那条独立线吸收，本仓不发。
+
+### 2. 追平内核换号漏掉的四个 fork 侧测量面
+
+内核 pin 升号时必须一起动的四个测量面在 `1059f5ec` 补齐，CI `42768006102` 曾因此红四条 lane：
+
+- `harness/contracts/fork-diff.json` —— `fork-diff.mjs --record`（我们自己的 pin/conformance/
+  bun.lock/opencode pkg 四份内容哈希变了 + 两份 fork 内文档）。
+- `harness/contracts/tool-surface.json` —— `tool-surface.mjs --record`（kernel 归因 0.1.12→0.1.13，
+  占比闸不动，A 21.36% / B 23.58% 越限属既有事实、未增长）。
+- `harness/README.md` kernel-pin 段、`kernel-integration.md` provenance stamp —— 正文 0.1.12→0.1.13。
+- `harness/glasspane-harness/SYNCLOG.md` —— 新增一条记账（+53/-0，不删历史）。
+
+反向验证：把 `harness/README.md` 临时改回 0.1.12，`check-doc-links` 具名变红（rc=1，点名那一句），
+恢复后转绿（rc=0）——证明这道闸对内核换号真的关得住，不是恒绿。
+
+**未合并未发布号**：`v1.31.2` 已发（tag/Release 非草稿/registry 两包均 1.31.2），已发布 tag
+一律不动，本轮另取一号。
+
 ## [1.31.2] — 2026-11-09
 
 **版本判断：patch。** 四条判据一条没碰：本轮修的两条都是 P2，改的是 SwiftUI 控件的
