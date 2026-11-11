@@ -44,6 +44,21 @@
 - **npm 三包发布与 GitHub Release**：由 `release.yml` 的 workflow_dispatch（`--ref v0.14.12`）
   承载；本条只落地 trunk 侧子树与 split/tag，发布在切完签名 tag 后触发。
 
+### 四、发布链实测（本条收口补记）
+
+- 搬运分支：`git subtree split` 后 `split^{tree}` = `ce16b559` = `HEAD:harness/glasspane-harness` ✓；
+  旧 tip `bfd9053a` 是新 tip `692b30fe` 的祖先 ⇒ **快进推送**（`git commit-tree -S` 复签单笔），
+  无 `--force`。
+- tag：`v0.14.12` → `692b30fe`（先推 main、核可达、再打签名 tag——tag 对象 peel = split main）。
+- Release：非草稿，6 份资产齐（arm64.zip 46,465,465 / x64.zip 48,649,542、各自 `.asc` 833、
+  `SHA256SUMS.txt` 204 与其 `.asc` 833），`SHA256SUMS.txt` 的 GPG 签名用安装器钉的密钥
+  `0929EA31DF4F7429F63FC53189D88B1D043A1298` 验真，API `digest` 与 SHA256SUMS 逐字相等。
+- npm：`workflow_dispatch --ref v0.14.12 -f publish_npm=true -f confirm=true`（run `42963883212`）
+  success——三包 `0.14.12` live，wrapper `dist.shasum` `d995c573…` 与 registry 逐字相同，
+  provenance `slsa.dev/provenance/v1`。
+- 主仓侧 `release-artifact --check` 复跑：2 agreement / 0 problem（split-main + artifact 两格
+  都绿，tree `ce16b559` 三处相等）。
+
 ## 2026-11-11（第三十五次会话）· 取号 0.14.11：代码审查九处真缺陷修复（尺子盲区 + 安装/发布链完整性）
 
 ### 〇、改动面数字与开工对表
