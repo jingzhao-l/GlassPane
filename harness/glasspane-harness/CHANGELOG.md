@@ -8,6 +8,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.14.10] — 2026-11-11
+
+> **取 patch**：本批没有新增 CLI 参数、工具面或产品形状。内容是**内核 pin 从 0.1.12 追平到
+> 0.1.13**（同 f2bb4b6c）+ 把 fork 子树内四个测量面同步记账——这些改动已在主干 main 上，
+> 但 `ci.yml` 里 `harness/tools/release-artifact.mjs` 的 **artifact / split-main** 那两格
+> 因为 trunk 超前于已发布 `v0.14.9` 而红（**5 个非台账文件、8 行**），卡住了主仓 `v1.31.3`
+> 的发版。合法出路是走 harness 发布程序：把主干子树重切到 split 仓，**并取下一号**切签名 tag。
+> 三处版本线（`product.json` + `packages/opencode/package.json`）与 `bun.lock` 的
+> `packages/opencode` 头同批跟到 `v0.14.10`。
+
+### Fixed — 追平 `iterate-kernel` 0.1.12 → 0.1.13
+
+内核 0.1.13 修了 `parseDimensionContextInput` 的 `recorded.__proto__` 旁路（纯运行时语义，
+零 fixture 改动）。fork 侧 `packages/opencode/package.json` 与 `bun.lock` 同批追平。
+
+### Fixed — fork 子树内四个测量面对齐内核换号
+
+- `harness/contracts/fork-diff.json` —— `fork-diff.mjs --record`（pin/conformance/bun.lock/
+  opencode pkg 四份内容哈希变了 + 两份 fork 内文档）。
+- `harness/contracts/tool-surface.json` —— `tool-surface.mjs --record`（kernel 归因 0.1.12→0.1.13，
+  A 21.36% / B 23.58% 越限属既有事实、未增长）。
+- `harness/README.md` kernel-pin 段 + `docs/kernel-integration.md` provenance stamp —— 正文对齐。
+- `SYNCLOG.md` —— 新增一条（+53/-0，不删历史）。
+
+反向验证：把 `harness/README.md` 临时改回 0.1.12，`check-doc-links` 具名变红（rc=1，点名那一句），
+恢复后转绿（rc=0）——证明这道闸对内核换号真的关得住，不是恒绿。
+
 ## [0.14.9] — 2026-11-10
 
 > **取 patch**：本批没有新增 CLI 参数、工具面或产品形状——两处都是纯修复（配置优先级那

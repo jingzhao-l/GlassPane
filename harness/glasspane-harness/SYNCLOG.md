@@ -3,6 +3,45 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-11（第三十四次会话 · 补）· 取号 0.14.10：artifact/split-main 两格红收口 —— 重切主干子树并取号，不覆盖锚点
+
+### 〇、改动面数字与开工对表
+
+上一条（同日早）把内核 pin 追平到 0.1.13 并补齐四个测量面，但改动全在主干 main 上、没有重切。
+`ci.yml` 的 `harness/tools/release-artifact.mjs` 因此两格红：`split-main` 与 `artifact`——
+trunk 的 `glasspane-harness` 子树超前于已发布 `v0.14.9`，**5 个非台账文件、8 行**：
+
+`SYNCLOG.md`(+53 trunk) / `bun.lock`(0.1.12→0.1.13) / `contracts/kernel-conformance.json` /
+`contracts/kernel-pin.json` / `docs/kernel-integration.md` / `packages/opencode/package.json`。
+`SYNCLOG.md` 落在豁免名单，其余 5 个不在——所以那格红，卡住了主仓 `v1.31.3` 的发版
+（`assert-ci-green` 只认 `ci.yml` 全绿）。
+
+这道闸的**唯一合法出路**不是放宽豁免、也不是移动已发布 tag，而是走 release.md 第 3–4 步：
+把主干子树重切到 split 仓、并取下一号切签名 tag。本条就是那次取号（patch `0.14.10`）。
+
+### 一、本轮修的（都在主干，重切后切 v0.14.10）
+
+- 版本线：`product.json` + `packages/opencode/package.json` → `0.14.10`；`bun install` 刷新
+  `bun.lock` 的 `packages/opencode` 头；五处安装命令位点（`product.json` 的 `install.curl`、
+  `README.md`/`README.zh-CN.md`、`docs/install.md`×2、`scripts/install.sh` 注释）钉的 tag
+  v0.14.9 → v0.14.10。
+- `CHANGELOG.md`：新增 `0.14.10` 条目（内核 0.1.12→0.1.13 + 四个测量面 + 这次收口的依据）。
+- 尺子金样：`fork-diff` / `tool-surface` / `brand-surface` 各 `--record` 重记（与源同批）。
+
+### 二、跑了哪些闸（发布前，全部绿）
+
+`product-surface --check`（安装命令与 manifest 同号）、`tool-surface --check`（A 21.36% /
+B 23.58%，越限属既有事实）、`brand-surface --check`、`fork-diff --check`、
+`check-doc-links`、`check-version`（主仓侧）。
+
+### 三、没跑的部分（照实写没跑）
+
+- **TUI 快照 / 真模型轮次**：本轮零产品行为改动（只动版本号、依赖 pin、文档正文、尺子金样），
+  没有触发条件，**未观测**。补它的确切命令：`bun run --cwd packages/opencode test:snapshot`；
+  `GLASSPANE_KERNEL_BIN=... glasspane-harness` 开真会话走 `gp_diagnose`。
+- **npm 三包发布与 GitHub Release**：由 `release.yml` 的 workflow_dispatch（`--ref v0.14.10`）
+  承载；本条只落地 trunk 侧子树与 split/tag，发布在切完签名 tag 后触发。
+
 ## 2026-11-11（第三十四次会话）· 主仓收口：0.1.13 追平漏掉的四个测量面（fork-diff / tool-surface / 两份 README / 本 SYNCLOG）
 
 ### 〇、改动面数字与开工对表

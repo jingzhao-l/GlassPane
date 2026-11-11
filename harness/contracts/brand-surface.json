@@ -1,5 +1,5 @@
 {
-  "observedAt": "2026-11-10",
+  "observedAt": "2026-11-11",
   "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
   "rules": [
     {
@@ -80,10 +80,10 @@
     "packages/core/src/plugin/skill/customize-harness.md"
   ],
   "lineage": {
-    "occurrences": 9672,
+    "occurrences": 9673,
     "filesScanned": 3353
   },
   "shippedFiles": 1323,
   "shippedSrc": 5,
-  "lineageNote": "2026-11-10: record HEAD's committed tree, 9672 occ/3353 files. Growth vs prior golden 9657 is +15 (that golden was itself recorded against a worktree +8 above its own commit 44b6826b=9649, so true delta from that commit is +23). All +23 attributable to test/comment additions naming the product config dir: glasspane-config-precedence.test.ts (+12, new behavioral test), glasspane-project-config-dirs.test.ts (+8, renamed test), packages/core/src/config.ts (+3, precedence comment) — documented legitimate lineage-growth category."
+  "lineageNote": "2026-11-11: 取 0.14.10 收口 artifact/split-main 两格红 —— CHANGELOG 新增 0.14.10 条目与 SYNCLOG 收口记账提到 packages/opencode 的版本线与内核追平，代码血缘零增长"
 }
