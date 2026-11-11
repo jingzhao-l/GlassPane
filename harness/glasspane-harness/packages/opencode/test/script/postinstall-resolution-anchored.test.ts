@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
+import { createHash } from "crypto"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -39,6 +40,15 @@ const BINARY = PLATFORM === "windows" ? "glasspane-harness.exe" : "glasspane-har
 // read that name or they would pass on a path the script never writes.
 const WRITTEN = "glasspane-harness.exe"
 const REGISTRY = "https://registry.npmjs.org"
+// The postinstall hook's fetch branch (installPackage) now runs three npm sub-commands before it
+// will install anything: `npm view <name>@<version> dist.integrity` (the registry's own claim),
+// `npm pack <name>@<version>` into a scratch dir, and only then `npm install <tarball>`. The stub
+// below answers all three so the fetch branch is exercised end-to-end. `pack` writes a tarball whose
+// sha512 is exactly the integrity `view` declares — if the stub just answered `pack` with `exit 0`
+// and no bytes, the hook's own hash check would refuse before the install step, and the test would
+// be measuring the hash-check refusal rather than the fetch.
+const STUB_TARBALL = "stub npm tarball for postinstall fixed-point\n"
+const STUB_INTEGRITY = `sha512-${createHash("sha512").update(STUB_TARBALL).digest("base64")}`
 
 const scratch = mkdtempSync(path.join(tmpdir(), "gp-postinstall-anchor-"))
 afterAll(() => rmSync(scratch, { recursive: true, force: true }))
@@ -99,11 +109,29 @@ function stubNpm(base: string) {
       "#!/bin/sh",
       `log="${base}/npm-calls.log"`,
       "printf '%s\\n' \"$*\" >> \"$log\"",
-      "# Only the fetch this script builds is answered, and it is answered with a refusal:",
-      "# a stub that also replied to `npm view`, `npm publish` or a bare `npm install` would be",
-      "# vouching for capabilities the hook never uses.",
+      // Only the three calls the fetch branch builds are answered. `pack` writes a tarball whose
+      // bytes hash to exactly the integrity `view` declares, so the hook's own hash check passes and
+      // the run reaches the `install` step; `install` answers with a refusal (exit 1), which is what
+      // makes this branch's overall rc 1 without the stub vouching for a real unpack. Any other
+      // invocation is a hard failure, so a stub can't vouch for a capability the script never asks
+      // for.
       'case "$*" in',
-      '  install*--prefix*"$PACKAGE"@*) exit 1 ;;',
+      `  view*) printf '%s\\n' '${STUB_INTEGRITY}'; exit 0 ;;`,
+      "  pack*)",
+      "    dest=\"\"",
+      "    while [ $# -gt 0 ]; do",
+      "      if [ \"$1\" = \"--pack-destination\" ]; then shift; dest=\"$1\"; fi",
+      "      shift",
+      "    done",
+      `    tarball="\${dest}/${PACKAGE}-${VERSION}.tgz"`,
+      `    printf '%s' '${STUB_TARBALL}' > "\$tarball"`,
+      // postinstall.mjs joins its own scratch `temp` onto whatever `npm pack` prints, so this must
+      // be the bare filename (`${PACKAGE}-${VERSION}.tgz`), not a path — `path.join` would otherwise
+      // nest it under `temp` a second time and the hook's `existsSync` would find nothing.
+      `    printf '%s\\n' "\${tarball##*/}"`,
+      "    exit 0",
+      "    ;;",
+      "  install*--prefix*) exit 1 ;;",
       '  *) echo "stub npm: unexpected invocation: $*" >&2; exit 127 ;;',
       "esac",
       "",
