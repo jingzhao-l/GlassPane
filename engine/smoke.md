@@ -1723,3 +1723,30 @@ stderr 空。`.asc` 在一次性钥匙环里验：`using RSA key 0929EA31DF4F742
 5. **进程与临时件**：本轮起的 daemon 一次性运行都在 `--state-dir` 隔离根上，跑完即退；
    收口时按两次 `pgrep` 判据核对（见台账【收口】那一节）。
 
+
+## 真机冒烟记录与观察（2026-11-11 · v1.31.3 取号日）
+
+本轮零产品代码改动（只动 harness 文档/金样 + 主仓版本线），真机项照旧核两格，实测均在
+发布物/本机构建上跑：
+
+1. **daemon `--permissions`**（`engine/.build/debug/glasspaned --state-dir <临时根>
+   --permissions`）退 0，三张可测席位 `accessibility/input-monitoring/screen-recording`
+   全 `granted`，`developer-tools` 恒 `unverifiable` 并在 `verdictExcludes` 里给得出下一步
+   （`glasspaned --check-developer-tools`）。stderr 那句照旧如实说明本命令不咨询
+   `--state-dir`（`nothing was read, created, tightened or written under it`），事后核对
+   临时根除 `daemon.log` 外无新字节，`~/.glasspane` 未被本轮任何一次运行写过。
+   （本机 `timeout` 命令不存在——用 `/usr/bin/python3 subprocess(timeout=90)` 包壳，不是加
+   闸，只是让一次性运行能超时退出。）
+2. **MCP 端到端（发布归档）**：`v1.31.3` 归档解到临时目录 → `npm pack` → 装进干净前缀 →
+   用装好的 `glasspane-mcp` bin 打一条 `initialize`，回包 `serverName=glasspane-mcp` /
+   `serverVersion=1.31.3`。归档自证：`tar -tzf | grep -cE "(^|/)harness/"` = **0**（数数用
+   `grep -c`，不是 `grep -q`），`mcp-shell/dist`+`schemas` 两份构建产物在包内。
+3. **没跑的（照实写没跑）**：面板 AX `kAXPressAction` 走查本轮未做——理由不是省事，是本轮
+   零面板代码改动（`engine/Sources/glasspane-settings/**` 与 `glasspaned` 的开关/权限语义
+   一字未动），11-03/11-05 那一节的 88 枚标识基线没有可推翻它的改动。补它的那条命令：
+   `engine/.build/debug/glasspane-settings --state-dir <临时根>` 起来后按 `gp-*` 标识走
+   `kAXPressAction`（本机无 pyobjc，走自写 Swift AX helper）。
+4. **进程与临时件**：本轮起的 daemon 一次性运行都在 `--state-dir` 隔离根上，跑完即退；
+   收口时两次 `pgrep` 核对，唯一残留 `32708` 是 `~/Applications/GlassPane Daemon.app` 的
+   安装版常驻 daemon（`--socket-path ~/.glasspane/engine.sock`，起于 07:42，早于本轮第一次
+   冒烟），归属明确不是本轮起的，不动。
