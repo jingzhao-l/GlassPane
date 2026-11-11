@@ -22,7 +22,8 @@
  */
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { readFileSync, writeFileSync, rmSync, existsSync, mkdirSync } from "node:fs"
+import { cpSync, mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync, mkdirSync } from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -58,6 +59,18 @@ const GUARD_RANGES = ["harness/contracts/", "harness/glasspane-harness/", ".exte
 const run = (rel, args = ["--check"]) => {
   try {
     return { rc: 0, text: execFileSync(process.execPath, [rel, ...args], { cwd: repoRoot, encoding: "utf8" }) }
+  } catch (e) {
+    return { rc: e.status ?? 1, text: `${e.stdout ?? ""}${e.stderr ?? ""}` }
+  }
+}
+
+/** Same, with extra environment (e.g. pointing a ruler at a scratch upstream checkout). */
+const runWithEnv = (rel, args, env = {}) => {
+  try {
+    return {
+      rc: 0,
+      text: execFileSync(process.execPath, [rel, ...args], { cwd: repoRoot, encoding: "utf8", env: { ...process.env, ...env } }),
+    }
   } catch (e) {
     return { rc: e.status ?? 1, text: `${e.stdout ?? ""}${e.stderr ?? ""}` }
   }
@@ -529,15 +542,46 @@ mustGoRed(
 // longer runs, and a real un-wiring was invisible. With comment stripping, that same mutation
 // makes the hook dead and the dead-set comparison must name it. On the old matcher this control
 // exited 0 (the blind spot); on the stripped matcher it goes red by name.
-mustGoRed(
-  "harness/glasspane-harness/packages/opencode/src/session/prompt.ts",
-  "hook-liveness: a commented-out dispatch site is dead, not still live",
-  (text) => text.replace(/yield\* plugin\.trigger\(\n\s*"chat\.message",/, 'yield* plugin.trigger(\n  // "chat.message",'),
-  "harness/tools/hook-liveness.mjs",
-  ["--check"],
-  1,
-  ["dead-hook set changed", "chat.message"],
-)
+//
+// The fire-site scan reads the REFERENCE checkout (upstream.json's scanDirs), not the fork tree —
+// the golden's `packages/opencode/src/session/prompt.ts` is checkout-relative, and a fork-tree
+// edit changes nothing the ruler opens. The real checkout is also untouchable: its git-cleanliness
+// guard (driven by control 9) refuses an edited clone, by design. So this control makes a faithful
+// COPY of the checkout's two scanDirs + the Hooks declaration + the version file into a scratch
+// directory, mutates ONLY `prompt.ts` there, and points HARNESS_UPSTREAM_CHECKOUT at the copy.
+// A copy with no `.git` is exempt from the cleanliness guard; the version file makes the
+// expectTag check pass (1.18.32 == pin v1.18.32), so the lane reads the mutated tree for real.
+if (existsSync(refDir)) {
+  const up = JSON.parse(readFileSync(path.join(repoRoot, "harness", "upstream.json"), "utf8"))
+  const scratch = mkdtempSync(path.join(os.tmpdir(), "glasspane-harness-hookctl-"))
+  const started = failures.length
+  try {
+    for (const dir of up.scanDirs) cpSync(path.join(refDir, dir), path.join(scratch, dir), { recursive: true })
+    const versionRel = "packages/opencode/package.json"
+    mkdirSync(path.join(scratch, path.dirname(versionRel)), { recursive: true })
+    cpSync(path.join(refDir, versionRel), path.join(scratch, versionRel))
+    mkdirSync(path.join(scratch, path.dirname(up.hooksFile)), { recursive: true })
+    cpSync(path.join(refDir, up.hooksFile), path.join(scratch, up.hooksFile))
+    const promptRel = "packages/opencode/src/session/prompt.ts"
+    const promptAbs = path.join(scratch, promptRel)
+    const prompt = readFileSync(promptAbs, "utf8")
+    const mutated = prompt.replace(/yield\* plugin\.trigger\(\n\s*"chat\.message",/, 'yield* plugin.trigger(\n  // "chat.message",')
+    if (mutated === prompt) bad("hook-liveness: the comment mutation did not apply to the copied prompt.ts — this control proves nothing")
+    else {
+      writeFileSync(promptAbs, mutated)
+      const got = runWithEnv("harness/tools/hook-liveness.mjs", ["--check"], { HARNESS_UPSTREAM_CHECKOUT: scratch })
+      if (got.rc !== 1) bad(`hook-liveness: a commented-out dispatch site is dead, not still live: exited ${got.rc}, expected 1\n${got.text.slice(0, 800)}`)
+      for (const needle of ["dead-hook set changed", "chat.message"]) {
+        if (!got.text.includes(needle)) bad(`hook-liveness: a commented-out dispatch site is dead, not still live: exited ${got.rc} but never named "${needle}" — a red that does not name its rule is not a control\n${got.text.slice(0, 800)}`)
+      }
+      if (failures.length === started) ok("hook-liveness: a commented-out dispatch site is dead, not still live: exit 1, named as expected")
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+} else {
+  console.log(`note  hook-liveness commented-site NOT OBSERVED: no reference checkout at ${path.relative(repoRoot, refDir)} — the comment-stripping guard could not be driven here. This is not a pass.`)
+}
 // surface-semantics: coverage compared counts, so a same-length substitution was green. Two probes —
 // a golden that stopped carrying names, and one whose names are foreign but the same length.
 mustGoRed(
