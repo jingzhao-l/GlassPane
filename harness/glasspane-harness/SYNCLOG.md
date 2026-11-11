@@ -3,6 +3,47 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-11（第三十六次会话）· 取号 0.14.12：0.14.11 分支 CI 红的固定点桩修复（三步子流程）
+
+### 〇、改动面数字与开工对表
+
+`fork-diff vs v1.18.32: 4630/6770 byte-identical, 294 edited, 138 added, 1708 deleted`
+（金样 `harness/contracts/fork-diff.json` 随本批重记。三桶计数与上一条一致——本轮只动"我们
+自己的测试文件"，不移动与上游 opencode 的差异面。）
+
+主仓 `ac05a6b1`（postinstall 固定点桩修复）起，整树干净。
+
+### 一、本轮修的（都在主干，重切后切 v0.14.12）
+
+- `packages/opencode/test/script/postinstall-resolution-anchored.test.ts`：桩改答三步子流程。
+  `installPackage` 已改成 `npm view dist.integrity` → `npm pack` → `npm install <tarball>`，
+  但祖先 node_modules 用例的桩只答旧单步 install 形状，fetch 分支在 `npm view` 即退 127，
+  `--prefix` 断言空转（0.14.11 的 split 仓 CI 就红在这）。桩改为：view 答声明的 sha512，
+  pack 写出字节哈希恰好等于该声明的 tarball（否则钩子自身哈希检查会先拒绝，测的是哈希拒绝
+  而非 fetch），install 答 exit 1 保留 rc=1。祖先用例日志实测含 view/pack/install 三行。
+- 版本线：`product.json` + `packages/opencode/package.json` → `0.14.12`；`bun install` 刷新
+  `bun.lock` 的 `packages/opencode` 头；五处安装命令位点（`product.json` 的 `install.curl`、
+  `README.md`/`README.zh-CN.md`、`docs/install.md`×2、`scripts/install.sh` 注释）钉的 tag
+  v0.14.11 → v0.14.12。
+- `CHANGELOG.md`：新增 `0.14.12` 条目（桩修复 + 依据）。
+- 尺子金样：`fork-diff` / `tool-surface` 各 `--record` 重记（与源同批）。
+
+### 二、跑了哪些闸（发布前，全部绿）
+
+`rulers-selftest`、`fork-diff --check`、`tool-surface --check`（A 21.34% / B 23.62%，
+越限属既有事实、未增长）、`brand-surface --check`（lineage 9673 / 3353 文件，0 hit）、
+`product-surface --check`（6640 协议 ≥ 6600 地板）、`hook-liveness --check`（21 钩无漂移、
+2/2 绑定解析）、`surface-semantics --check`（23 文件 0 hit）、`check-doc-links`、
+`check-version`（主仓侧）。全 script glob `bun test --timeout 30000 test/script/*.test.ts`
+268 通过。
+
+### 三、没跑的部分（照实写没跑）
+
+- **TUI 快照 / 真模型轮次**：本轮零产品行为改动（只动测试桩、版本号、金样），没有触发条件，
+  **未观测**。
+- **npm 三包发布与 GitHub Release**：由 `release.yml` 的 workflow_dispatch（`--ref v0.14.12`）
+  承载；本条只落地 trunk 侧子树与 split/tag，发布在切完签名 tag 后触发。
+
 ## 2026-11-11（第三十五次会话）· 取号 0.14.11：代码审查九处真缺陷修复（尺子盲区 + 安装/发布链完整性）
 
 ### 〇、改动面数字与开工对表

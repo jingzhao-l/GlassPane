@@ -8,6 +8,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.14.12] — 2026-11-11
+
+> **取 patch**：本批只动一处固定点测试的桩，不动任何 CLI 参数、工具面或产品形状。
+> 0.14.11 的分支 CI 在「Fixed-point tests」job 红在 `Expected to contain: "--prefix"`——
+> `installPackage` 已改成 `npm view dist.integrity` → `npm pack` → `npm install <tarball>`
+> 三步子流程，而祖先 node_modules 用例的桩只答旧单步 install 形状，fetch 分支在 `npm view`
+> 即退 127，`--prefix` 断言空转。桩改为答全部三步：view 答声明的 sha512，pack 写出字节哈希
+> 恰好等于该声明的 tarball（否则钩子自身哈希检查会先拒绝，测的是哈希拒绝而非 fetch），
+> install 答 exit 1 保留 rc=1。祖先用例日志实测含 view/pack/install 三行，全 script glob
+> 268 通过。
+
 ## [0.14.11] — 2026-11-11
 
 > **取 patch**：本批没有新增 CLI 参数、工具面或产品形状。内容是**代码审查与供应链安全审查的
