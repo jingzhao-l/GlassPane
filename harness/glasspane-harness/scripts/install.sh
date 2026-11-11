@@ -778,6 +778,7 @@ if [ "$VERSION_RC" -ne 0 ]; then
     echo    "    bash /tmp/glasspane-harness-install.sh --version $VERSION" >&2
   else
     error "  Or run a tagged release's installer yourself — fetch it, read it, then run it:"
+    error "    (replace X.Y.Z below with the version you want — this run resolved none)"
     echo    "    curl -fsSL $INSTALLER_BASE/vX.Y.Z/scripts/install.sh -o /tmp/glasspane-harness-install.sh" >&2
     echo    "    bash /tmp/glasspane-harness-install.sh --version X.Y.Z" >&2
     error "    (this run resolved no tag, so the branch default \"$INSTALLER_REF\" is not offered as a reproducible command)"

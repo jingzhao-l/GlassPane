@@ -231,6 +231,36 @@ mustGoRed(
   }
 }
 
+// 8c. the "deleted golden" path every ruler has to be able to refuse. The battery drives the
+// golden-forgery and reference-clone-hide paths elsewhere; this one removes the contract file
+// entirely and demands a named red. A ruler that answers green over a missing golden is the
+// "uncounted tree is a cleaner tree" accident, and one that dies with a generic crash is a red
+// nobody can attribute. fork-diff's offline lane names the missing file outright.
+{
+  const knobRel = "harness/upstream.json"
+  const goldenRel = "harness/contracts/fork-diff.json"
+  const knobAbs = path.join(repoRoot, knobRel)
+  const goldenAbs = path.join(repoRoot, goldenRel)
+  const knobOriginal = readFileSync(knobAbs)
+  const goldenOriginal = readFileSync(goldenAbs)
+  const knobBefore = sha(knobOriginal)
+  const goldenBefore = sha(goldenOriginal)
+  const started = failures.length
+  try {
+    writeFileSync(knobAbs, json(knobOriginal.toString("utf8"), (u) => (u.fork.referenceClone = ".external/rulers-selftest-no-such-clone")))
+    rmSync(goldenAbs)
+    const got = run("harness/tools/fork-diff.mjs", ["--check"])
+    if (got.rc !== 2) bad(`8c: fork-diff with its golden deleted exited ${got.rc}, expected 2 (refuse to measure)\n${got.text.slice(0, 800)}`)
+    if (!got.text.includes("no golden") || !got.text.includes(goldenRel)) bad(`8c: exited ${got.rc} but never named the missing golden — a red that cannot say what is missing is not a control\n${got.text.slice(0, 800)}`)
+    if (failures.length === started) ok("8c: fork-diff: a deleted golden is refused by name, not read as a clean tree")
+  } finally {
+    writeFileSync(knobAbs, knobOriginal)
+    writeFileSync(goldenAbs, goldenOriginal)
+    if (sha(readFileSync(knobAbs)) !== knobBefore) bad(`8c: RESTORE FAILED — ${knobRel} is not the byte sequence this control found`)
+    if (sha(readFileSync(goldenAbs)) !== goldenBefore) bad(`8c: RESTORE FAILED — ${goldenRel} is not the byte sequence this control found`)
+  }
+}
+
 // 9-10. the reference clone is read as upstream's bytes; an edited or dirty clone must stop the
 // measurement, not silently attribute the local edit to upstream.
 if (existsSync(path.join(refDir, ".git"))) {
@@ -388,6 +418,41 @@ mustGoRed(
   ["no unrecorded brand drift"],
 )
 
+// 15b. brand-surface: the lineage-shrink guard used to require `filesScanned === golden` — so a
+// drop in occurrences paid while MORE files were scanned (the tree grew but lost bloodline
+// points) read as green: `coverageProblem` returns null for growth, and the `===` on the drop
+// branch never fired. This control makes the tree's scanned-file count EXCEED the golden's while
+// the occurrence count falls below it, and demands the same named note. On the old `===` this
+// exited 0 (measured blind spot); on the `>=` it must go red by name.
+mustGoRed(
+  "harness/contracts/brand-surface.json",
+  "brand-surface: a lineage drop with MORE files scanned is red, not waived",
+  (text) => json(text, (g) => {
+    delete g.lineageNote
+    g.lineage.filesScanned = g.lineage.filesScanned - 1
+    g.lineage.occurrences = g.lineage.occurrences + 1
+  }),
+  "harness/tools/brand-surface.mjs",
+  ["--check"],
+  1,
+  ["lineage occurrences fell"],
+)
+
+// 15c. product-surface: the agreement-count floor is a ratchet against a scan set silently
+// narrowing — the same accident the `83 → 86` history names. A floor that sits far below the
+// live count (6490 vs ~6640) lets a hundred checks disappear without a red; this control raises
+// the floor above the live count and demands the named agreement-count complaint, so the rule's
+// own threshold is itself measured rather than only printed.
+mustGoRed(
+  "harness/tools/product-surface.mjs",
+  "product-surface: an agreement-count floor above the live count is red",
+  (text) => text.replace(/const AGREEMENT_FLOOR = \d+/, "const AGREEMENT_FLOOR = 999999"),
+  "harness/tools/product-surface.mjs",
+  ["--check"],
+  1,
+  ["agreement-count"],
+)
+
 // 16. product-surface's selftest-wired rule: a step that only NAMES a fixed-point test must not
 // count as wiring it. The rule used to be `corpus.includes(basename)` over whole step bodies, so
 // an `echo` or a remedy string holding the path satisfied "a selftest nobody runs is not a
@@ -456,6 +521,22 @@ mustGoRed(
   ["--check"],
   1,
   ["the dispatch sites moved"],
+)
+// hook-liveness: a dispatch site that only survives as a COMMENT must not read as live. The
+// scanner used to match `quoted`/`isTrigger` against raw lines, so commenting out
+// `yield* plugin.trigger("chat.message"` (a live hook with exactly one recorded site) still
+// satisfied the regex and the hook stayed "live" — the ruler printed green over a call that no
+// longer runs, and a real un-wiring was invisible. With comment stripping, that same mutation
+// makes the hook dead and the dead-set comparison must name it. On the old matcher this control
+// exited 0 (the blind spot); on the stripped matcher it goes red by name.
+mustGoRed(
+  "harness/glasspane-harness/packages/opencode/src/session/prompt.ts",
+  "hook-liveness: a commented-out dispatch site is dead, not still live",
+  (text) => text.replace(/yield\* plugin\.trigger\(\n\s*"chat\.message",/, 'yield* plugin.trigger(\n  // "chat.message",'),
+  "harness/tools/hook-liveness.mjs",
+  ["--check"],
+  1,
+  ["dead-hook set changed", "chat.message"],
 )
 // surface-semantics: coverage compared counts, so a same-length substitution was green. Two probes —
 // a golden that stopped carrying names, and one whose names are foreign but the same length.

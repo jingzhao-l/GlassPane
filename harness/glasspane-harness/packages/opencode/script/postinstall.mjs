@@ -5,6 +5,7 @@ import fs from "fs"
 import os from "os"
 import path from "path"
 import { fileURLToPath } from "url"
+import { createHash } from "crypto"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf8"))
@@ -320,25 +321,53 @@ function installPackage(name) {
 
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "glasspane-harness-install-"))
   try {
+    // The registry has to be named. npm resolves `npm_config_registry` (which npm exports
+    // into lifecycle scripts), `NPM_CONFIG_REGISTRY`, `~/.npmrc` and a project `.npmrc`, so
+    // without this the bytes fetched here — then chmod 0755 and executed — come from
+    // whatever mirror the ambient config names, and the package's integrity hash is
+    // self-attested by that same mirror. `script/verify-published.ts` passes `--registry`
+    // for exactly this reason; the install path is the one that runs on a user's machine.
+    //
+    // This branch then goes one step further than "name the registry": it downloads the
+    // tarball with `npm pack`, re-computes its sha512, and refuses it unless that hash equals
+    // the `dist.integrity` the registry itself advertises. npm's own integrity check happens
+    // against the registry's self-attested metadata during unpack — a mirror that serves a
+    // tampered tarball can attest it with matching metadata. Comparing the bytes WE downloaded
+    // against the registry's own claim closes that: `npm install <tarball>` below consumes
+    // exactly the bytes we verified, never a re-fetch.
+    const integrityProbe = childProcess.spawnSync(
+      "npm",
+      ["view", `${name}@${version}`, "dist.integrity", "--registry", REGISTRY],
+      { encoding: "utf8", windowsHide: true },
+    )
+    const declaredIntegrity = (integrityProbe.stdout ?? "").trim()
+    if (integrityProbe.status !== 0 || !/^sha512-[A-Za-z0-9+/]+=*$/.test(declaredIntegrity)) {
+      console.error(`the registry did not answer a sha512 integrity for ${name}@${version} (${integrityProbe.stderr?.trim() || `exit ${integrityProbe.status}`}) — refusing to install bytes this run cannot verify`)
+      return false
+    }
+    const pack = childProcess.spawnSync(
+      "npm",
+      ["pack", `${name}@${version}`, "--registry", REGISTRY, "--pack-destination", temp],
+      { encoding: "utf8", windowsHide: true },
+    )
+    if (pack.status !== 0) {
+      console.error(`npm pack failed for ${name}@${version}: ${pack.stderr?.trim() || `exit ${pack.status}`}`)
+      return false
+    }
+    const tarballName = (pack.stdout ?? "").trim().split("\n").pop()?.trim()
+    const tarballPath = tarballName ? path.join(temp, tarballName) : null
+    if (!tarballPath || !fs.existsSync(tarballPath)) {
+      console.error(`npm pack produced no readable tarball for ${name}@${version}`)
+      return false
+    }
+    const actual = createHash("sha512").update(fs.readFileSync(tarballPath)).digest("base64")
+    if (`sha512-${actual}` !== declaredIntegrity) {
+      console.error(`the tarball for ${name}@${version} does not match the registry's own integrity — downloaded bytes hash to sha512-${actual}, registry declares ${declaredIntegrity}. Refusing it.`)
+      return false
+    }
     const result = childProcess.spawnSync(
       "npm",
-      [
-        "install",
-        "--ignore-scripts",
-        "--no-save",
-        "--loglevel=error",
-        // The registry has to be named. npm resolves `npm_config_registry` (which npm exports
-        // into lifecycle scripts), `NPM_CONFIG_REGISTRY`, `~/.npmrc` and a project `.npmrc`, so
-        // without this the bytes fetched here — then chmod 0755 and executed — come from
-        // whatever mirror the ambient config names, and the package's integrity hash is
-        // self-attested by that same mirror. `script/verify-published.ts` passes `--registry`
-        // for exactly this reason; the install path is the one that runs on a user's machine.
-        "--registry",
-        REGISTRY,
-        "--prefix",
-        temp,
-        `${name}@${version}`,
-      ],
+      ["install", "--ignore-scripts", "--no-save", "--loglevel=error", "--prefix", temp, tarballPath],
       { stdio: "inherit", windowsHide: true },
     )
     if (result.status !== 0) return

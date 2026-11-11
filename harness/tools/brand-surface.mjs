@@ -846,13 +846,18 @@ if (!Number.isFinite(recordedOcc)) {
   problems.push(
     `lineage occurrences grew ${recordedOcc} → ${observed.lineage.occurrences} (bloodline names may shrink, never multiply)`,
   )
-} else if (observed.lineage.occurrences < recordedOcc && observed.lineage.filesScanned === golden.lineage?.filesScanned) {
+} else if (observed.lineage.occurrences < recordedOcc && observed.lineage.filesScanned >= golden.lineage?.filesScanned) {
   // The direction this ratchet REWARDS is the one that needs the second look. The sum is
   // taken over the tree with its comments left in — only the product-file rules strip them —
   // so deleting an unrelated paragraph of upstream prose pays the drop without removing a
   // single brand claim from a shipped surface. That is the failure shape this repository
   // already names ("源码扫描把注释当缺陷 ⇒ 会被删注释换绿"), and the green run is what makes it
   // dangerous: the number goes down and nothing about the product changed.
+  // The filesScanned side of this guard is `>=`, not `===`: a drop in occurrences while MORE
+  // files were scanned is the same crime (a file leaving the tree explains a drop only when
+  // the set SHRANK — `coverageProblem` below is the red for that direction, and it fires
+  // regardless of occurrences; here the set grew or held, so nothing left the tree and a
+  // falling sum can only be bloodline points deleted, which is exactly what needs the note).
   // A drop is therefore accepted when a file leaving the scanned tree explains it (and that
   // path is judged by `coverageProblem` above, not here), or when the record carries the
   // sentence naming what was removed. Anything else is a request for a note, not a pass.

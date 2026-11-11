@@ -149,10 +149,15 @@ runs:
         # Workaround for patched peer variants
         # e.g. ./patches/ for standard-openapi
         # https://github.com/oven-sh/bun/issues/28147
+        # `--frozen-lockfile` is the default here so the action cannot silently re-resolve a
+        # drifted lockfile (the failure mode `bun install` with no flag has: it rewrites the
+        # lock and installs whatever it re-resolved, and every lane that later runs
+        # `bun install --frozen-lockfile` only then sees the drift). A caller may still pass
+        # install-flags, but the freeze is on unless a caller explicitly removes it.
         if [ "$RUNNER_OS" = "Windows" ]; then
-          bun install --linker hoisted ${INSTALL_FLAGS:+$INSTALL_FLAGS}
+          bun install --linker hoisted --frozen-lockfile ${INSTALL_FLAGS:+$INSTALL_FLAGS}
         else
-          bun install ${INSTALL_FLAGS:+$INSTALL_FLAGS}
+          bun install --frozen-lockfile ${INSTALL_FLAGS:+$INSTALL_FLAGS}
         fi
       shell: bash
 

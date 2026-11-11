@@ -93,9 +93,12 @@ held back; nothing about it is silent.
 - Release assets (`glasspane-harness-darwin-<arch>.zip`) carry a `SHA256SUMS.txt` manifest
   and a detached GPG signature per asset (`.asc`). The signing key's full fingerprint is
   asserted, not just mentioned: `scripts/install.sh` carries both the armored public key and
-  the fingerprint it requires a `VALIDSIG` to match. What is **not** yet asserted is that the
-  release lane's `GPG_PRIVATE_KEY` secret *is* that key — CI signs with whatever the secret
-  holds, so the installer's check is the enforcement point, not a CI step.
+  the fingerprint it requires a `VALIDSIG` to match. That the release lane's `GPG_PRIVATE_KEY`
+  secret *is* that key is asserted by the chain itself, not left to the installer alone: the
+  `checksums` job reads `GLASSPANE_HARNESS_SIGNING_FPR` out of `scripts/install.sh` and refuses
+  a secret whose imported fingerprint differs (`exit 1`), and `publish-release` re-verifies
+  every served asset against the installer's embedded key (`gpg --verify`, matching `VALIDSIG`
+  to that fingerprint) before the draft flag is cleared.
 - Two ordering decisions close the window that made the above exploitable. The GitHub release
   is created **draft** and only `publish-release` makes it visible, after the manifest and every
   `.asc` have landed: a public release with no manifest was installable through the `curl` lane

@@ -205,18 +205,34 @@ function parseHooks(file) {
  * freeze recommendation with no cause. A matcher that reads a live extension point as
  * dead is as bad as the reverse: both teach people to distrust the verdict.
  */
+/**
+ * Strip comments so a dispatch site that only survives as prose does not read as live.
+ * `// trigger("chat.message")` is a comment that explains a removed call, not a call: counting
+ * it would let a real dispatch be commented out (turning a live hook dead) while the ruler still
+ * reports "live". The brand ruler carries the same helper for the same reason; this is the
+ * fire-site side of the same discipline. `//` must not swallow `http://` — the `[^:]` lookbehind
+ * keeps a URL's `//` — and block comments (slash-star to star-slash) are removed wholesale.
+ */
+function stripComments(text) {
+  return text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1")
+}
+
 function findFireSites(files, name) {
   const quoted = new RegExp(`["']${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`, "g")
   const sites = []
   for (const file of files) {
     const lines = readFileSync(file, "utf8").split("\n")
     for (let i = 0; i < lines.length; i++) {
+      const codeLine = stripComments(lines[i])
       quoted.lastIndex = 0
-      if (!quoted.test(lines[i])) continue
-      const window = lines.slice(Math.max(0, i - 4), Math.min(lines.length, i + 2)).join("\n")
+      if (!quoted.test(codeLine)) continue
+      const window = lines
+        .slice(Math.max(0, i - 4), Math.min(lines.length, i + 2))
+        .map(stripComments)
+        .join("\n")
       const isTrigger = /\btrigger\s*(?:\.\w+)?\s*(?:<[^()]*?>)?\s*\(/.test(window)
       const isLookup = new RegExp(`\\b(?:hooks?|plugin|p)\\s*\\[\\s*["']${name.replace(/\./g, "\\.")}["']\\s*\\]`).test(
-        lines[i],
+        codeLine,
       )
       if (isTrigger || isLookup) {
         sites.push({ file: path.relative(files.root ?? harnessRoot, file), line: i + 1 })
