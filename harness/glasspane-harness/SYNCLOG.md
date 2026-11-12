@@ -3,6 +3,91 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-12（第三十七次会话）· 取号 0.14.13：两处发布级 P1 安全缺陷随本版送审（取 patch 前滚）
+
+### 〇、改动面数字与开工对表
+
+`fork-diff vs v1.18.32: 4630/6772 byte-identical, 294 edited, 140 added, 1708 deleted`
+（金样 `harness/contracts/fork-diff.json` 随本批重记。identical 6772 → 6772 与上一条
+6770 差 2、added 138 → 140 差 2——本轮新增两个我们的固定点测试文件，不移动与上游
+opencode 的差异面。edited 294、deleted 1708 与上一条一致。）
+
+主仓 `03a3c229`（release 1.31.4）起，整树干净。
+
+### 一、本轮修的（都在主干，重切后切 v0.14.13）
+
+两处**发布级 P1 安全缺陷**，都是审查发现、随本版送审（release-artifact 要求发布物==主干，
+所以修完即发，不留到下一号）：
+
+- `packages/opencode/script/build.ts`：Sentry 守卫。app-build 调用清空 `SENTRY_AUTH_TOKEN` /
+  `SENTRY_ORG` / `SENTRY_PROJECT` / `SENTRY_RELEASE` / `VITE_SENTRY_RELEASE`——发布物是
+  二进制，构建时若宿主有 Sentry 环境变量，会把上传凭证与 release 名打进产物，属于
+  供应链面泄漏。固定点测试 `test/script/embedded-web-ui-sentry-guard.test.ts`（2 用例：
+  清空五开关 + 非空构建路径）。
+- `packages/opencode/src/cli/upgrade.ts`：自动更新 curl 吞错。导出 `canSelfUpgrade(method)`
+  谓词（`method !== "curl"`），`upgrade()` 在 `InstallationVersion === latest` 检查后提前
+  `return`——curl 安装的副本（install.sh 那条路径）没有自升级语义，走 curl 升级会静默
+  吞错、退 0，把"没升级"伪装成"升了"。固定点测试
+  `test/cli/glasspane-auto-update-selfupgrade.test.ts`（curl=false，npm/pnpm/bun=true）。
+- `ci.yml`：新增 `test/cli/glasspane-*.test.ts` 固定点 pattern——自动更新测试落在
+  `test/cli/` 根，原先只被 `test/cli/cmd/` 覆盖，属于"无 pattern 的目录"（0.14.11 同款
+  事故）。39 文件 globs == git ls-files 核对通过。
+- 版本线：`product.json` + `packages/opencode/package.json` → `0.14.13`；`bun install` 刷新
+  `bun.lock` 的 `packages/opencode` 头；五处安装命令位点（`product.json` 的 `install.curl`、
+  `README.md`/`README.zh-CN.md`、`docs/install.md`×2、`scripts/install.sh` 注释）钉的 tag
+  v0.14.12 → v0.14.13。
+- `CHANGELOG.md`：新增 `0.14.13` 条目（两处 P1 + CI pattern）。
+- 尺子金样：`fork-diff` / `tool-surface` / `brand-surface` 各 `--record` 重记（与源同批）。
+- 主干提交链（重切后切 v0.14.13）：
+  `20e8db80`（两处 P1 修复）→ `8ce4e5c9`（安全修复尺子金样重记 + README 同步）→
+  `6207ef36`（brand-surface 金样重记）→ `1702b8e5`（ci.yml 加 pattern）→
+  `7bbf8cc8`（fork-diff 金样重记 + README 同步）→ `f2655b3e`（release 0.14.13）→
+  `b675bd55`（版本线尺子金样重记）。
+
+### 二、跑了哪些闸（发布前，全部绿）
+
+`rulers-selftest`、`fork-diff --check`、`tool-surface --check`（A 21.34% / B 23.62%，
+越限属既有事实、未增长）、`brand-surface --check`（lineage 9673 / 3353 文件，0 hit）、
+`product-surface --check`（6640 协议 ≥ 6600 地板）、`hook-liveness --check`（21 钩无漂移、
+2/2 绑定解析）、`surface-semantics --check`（23 文件 0 hit）、`check-doc-links`、
+`check-version`（主仓侧）。全 script glob `bun test --timeout 30000 test/script/*.test.ts`
+268 通过（两处 P1 的固定点测试在列）。
+
+### 三、没跑的部分（照实写没跑）
+
+- **TUI 快照 / 真模型轮次**：两处 P1 都只在构建与升级路径，不动 TUI 渲染或模型面，
+  **未观测**。
+- **npm 三包发布与 GitHub Release**：由 `release.yml` 的 workflow_dispatch（`--ref v0.14.13`）
+  承载；本条只落地 trunk 侧子树与 split/tag，发布在切完签名 tag 后触发。
+
+### 四、发布链实测（本条收口补记）
+
+- 搬运分支：`git subtree split` 重切后 SHA 与旧链不降（重切是全新历史），用
+  `git rebase --onto 8d0f7a18 <fresh-split-commit-matching-fork-main-tree> split/glasspane-harness`
+  接回 fork main，得到**真快进** `8d0f7a18..0cfc4037`（4 笔，`merge-base --is-ancestor`
+  实证）。split main tree `b04c6ea7` = `HEAD:harness/glasspane-harness` ✓。
+- tag：`v0.14.13`（对象 `317073f1`）→ 签名 tag peel = `0cfc4037` = split main，签名验证于
+  `0929EA31DF4F7429F63FC53189D88B1D043A1298`（CI 日志：`tag identity held`）。先推 main、
+  核可达、再打签名 tag，无 `--force`。
+- Release：非草稿，6 份资产齐（arm64.zip 46,465,465 / x64.zip 48,649,542、各自 `.asc` 833、
+  `SHA256SUMS.txt` 204 与其 `.asc` 833），`SHA256SUMS.txt` 的 GPG 签名用安装器钉的密钥
+  `0929EA31DF4F7429F63FC53189D88B1D043A1298` 验真，API `digest` 与 SHA256SUMS 逐字相等。
+- npm：`workflow_dispatch --ref v0.14.13 -f publish_npm=true -f confirm=true`
+  （run `43153230362`）success——publish-gate 五连绿
+  （`publish target verified: v0.14.13 = 0cfc4037`、`tag identity held`、
+  `cross-chain anchor held: v0.14.13 is public with 6 asset(s)`、
+  `registry set at 0.14.13 is empty … a clean publish`）。三包 `0.14.13` live，
+  wrapper `dist.shasum` `030351a92749dcc33b3c495c241a8b3c4c41eeae`，
+  provenance `slsa.dev/provenance/v1`。
+- verify-published 端到端（CI job `install the published bytes and run them` success，本机
+  复跑 exit 0）：registry 读到三包、前缀安装、`glasspane-harness`/`gp-harness` 两命令
+  `--version` = 0.14.13、os/cpu/version 闸与 platform 块一致、已发布字节带 MCP SDK 补丁
+  （`all 8 artifact-checkable item(s) present`）、内嵌 web app 服务
+  （`content-type=text/html doctype=true assets=referenced`）。
+- 主仓侧 `release-artifact --check` 复跑：2 agreement / 0 problem（split-main + artifact 两格
+  都绿，tree `b04c6ea7` 三处相等）。
+
+
 ## 2026-11-11（第三十六次会话）· 取号 0.14.12：0.14.11 分支 CI 红的固定点桩修复（三步子流程）
 
 ### 〇、改动面数字与开工对表
