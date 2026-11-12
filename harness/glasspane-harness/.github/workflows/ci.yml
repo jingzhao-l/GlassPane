@@ -105,6 +105,11 @@ jobs:
             # naming the upstream project stayed red unseen; the two `glasspane-*` files here are
             # the fixed points for `upgrade`'s and `uninstall`'s exit codes.
             "test/cli/cmd/glasspane-*.test.ts"
+            # The auto-update service (not a command, so it sits beside `test/cli/`, not in
+            # `test/cli/cmd/`). Its fixed point proves the curl channel can never reach
+            # `Installation.upgrade`, so it needs its own pattern — the directory-level
+            # `test/cli/*.test.ts` pattern would sweep in upstream's timing-sensitive suite.
+            "test/cli/glasspane-*.test.ts"
           )
           # One expansion per pattern, so a dead pattern is blamed on the pattern that died rather
           # than on the total it took down.
