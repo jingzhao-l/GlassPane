@@ -1750,3 +1750,24 @@ stderr 空。`.asc` 在一次性钥匙环里验：`using RSA key 0929EA31DF4F742
    收口时两次 `pgrep` 核对，唯一残留 `32708` 是 `~/Applications/GlassPane Daemon.app` 的
    安装版常驻 daemon（`--socket-path ~/.glasspane/engine.sock`，起于 07:42，早于本轮第一次
    冒烟），归属明确不是本轮起的，不动。
+
+## 真机冒烟记录与观察（2026-11-12 · v1.31.4 取号日）
+
+本轮零产品代码改动（`git diff v1.31.3..HEAD` 只有 `engine/smoke.md` 文档；版本线 bump 是取号本身），
+两条审查（正确性 + 信任边界）零 P0/P1。真机两格照旧核：
+
+1. **daemon `--permissions`**（`engine/.build/debug/glasspaned --state-dir <临时根>
+   --permissions`）退 0，三张可测席位 `accessibility/input-monitoring/screen-recording` 全
+   `granted`，`developer-tools` 恒 `unverifiable` 并在 `verdictExcludes` 里给得出下一步
+   (`glasspaned --check-developer-tools`)。stderr 那句照旧如实说明本命令不咨询 `--state-dir`
+   (`nothing was read, created, tightened or written under it`)，事后核对临时根无新字节。
+2. **MCP 端到端（本机构建）**：`mcp-shell` `npm run bundle` 后用 `node dist/index.js` 打
+   `initialize` + `tools/list`：回包 16 条工具（11 条 daemon 转发 + 5 条 shell-only），与
+   `hello.capabilities`(11) 一致，stderr 0 行。发布归档那条 (`npm pack` → 干净前缀 → 装好 bin)
+   在发版归档产出后于收口段核。
+3. **没跑的（照实写没跑）**：面板 AX `kAXPressAction` 走查本轮未做——本轮零面板代码改动
+   (`engine/Sources/glasspane-settings/**` 与 `glasspaned` 开关/权限语义一字未动)，11-03/11-05
+   那节的 88 枚标识基线没有可推翻它的改动。补它的命令：`engine/.build/debug/glasspane-settings
+   --state-dir <临时根>` 起来后按 `gp-*` 标识走 `kAXPressAction`。
+4. **进程与临时件**：本轮一次性 daemon 运行都在 `--state-dir` 隔离根上，跑完即退；常驻
+   `~/Applications/GlassPane Daemon.app` 的安装版 daemon（起于本轮前）归属明确，不动。

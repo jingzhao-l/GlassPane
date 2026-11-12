@@ -2,6 +2,22 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.31.4] — 2026-11-12
+
+**版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、npm 包
+`bin` 声明没动。自 `v1.31.3` 起主仓产品面零代码改动（`git diff v1.31.3..HEAD` 只有 `engine/smoke.md`
+一份文档），其间 8 笔提交全是 harness 文档/金样与主仓门禁收尾。本轮照例做一轮「全面审查 + 修复 +
+发版」：两条审查（正确性 + 信任边界）**零 P0/P1**——socket 信任（bind 前收紧 0177、两侧写前验
+`geteuid()` 所有权与无 group/other 写位）、TCC 三席位实测读数、更新器 TLS/版本比较/签名锚、
+命令注入/路径穿越全部干净；`gp_*` 三处镜像（daemon `hello.capabilities` 11 / shell 转发 11 /
+实测 `tools/list` 16＝11+5 shell-only）一致。唯一 P2 观察（evidence pack 持久化断言
+`actual`/AX `title` 的有界但未脱敏的屏上文本）是 **SECURITY.md §2.4 已写明的既有设计**（0600/0700
+隔离，无 raw screenshot），非缺陷、不改。
+
+本轮唯一实质动作是把上述审查/真机记录随版本线送到用户手上（真机 `--permissions` 退 0、三席位
+granted、developer-tools 恒 `unverifiable` 并给得出下一步；MCP 端到端 `initialize` 回
+`serverName=glasspane-mcp`）。无未合并未发布号。
+
 ## [1.31.3] — 2026-11-11
 
 **版本判断：patch。** 四条判据一条没碰：状态文件字段、退出码集合、CLI 参数、npm 包 `bin`
