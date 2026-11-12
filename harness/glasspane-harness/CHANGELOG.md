@@ -8,6 +8,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.14.13] — 2026-11-12
+
+> **取 patch**：本批没有新增 CLI 参数、工具面或产品形状。内容是**发布与供应链安全审查的
+> 两处 P1 缺陷修复**，外加一处让固定点测试真正进入门禁的 CI 模式补口：
+> - **P1-1 Sentry 外推通道**：`packages/app/vite.config.ts`（上游文件，与参照克隆逐字节一致）
+>   只要 SENTRY_AUTH_TOKEN/SENTRY_ORG/SENTRY_PROJECT 三者齐备就激活 `@sentry/vite-plugin`——
+>   把本产品源码地图推到第三方并删除 `dist` 下的 `.map`。当前没有 workflow 设置这三者，但激活
+>   是环境驱动且外来的。构建入口 `script/build.ts` 显式清空该开关（OPENCODE_CHANNEL 保留）。
+>   固定点测试 `test/script/embedded-web-ui-sentry-guard.test.ts` 带反向对照。
+> - **P1-2 自动更新 curl 静默吞掉**：`Installation.upgrade("curl", …)` 恒以 "does not
+>   self-upgrade over curl" 拒绝，而 `cli/upgrade.ts` 旧 `.catch(() => {})` 把它吞掉——curl
+>   安装的副本在每个 patch 上都静默无操作。抽出 `canSelfUpgrade()` 谓词并在升级尝试前快速失败。
+>   固定点测试 `test/cli/glasspane-auto-update-selfupgrade.test.ts` 带反向对照。
+> - **CI 模式补口**：P1-2 的固定点测试直接放在 `test/cli/`，而 CI 固定点模式的唯一 cli 模式是
+>   `test/cli/cmd/glasspane-*.test.ts`——该文件会被 `git ls-files` 收录却无任何 glob 到达，
+>   触发 CI 的 `not_reached` 检查而红。加 `test/cli/glasspane-*.test.ts` 模式，使该测试真正
+>   进入门禁（模拟验证 39 个固定点文件，globs == git ls-files）。
+
 ## [0.14.12] — 2026-11-11
 
 > **取 patch**：本批只动一处固定点测试的桩，不动任何 CLI 参数、工具面或产品形状。
