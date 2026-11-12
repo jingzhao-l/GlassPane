@@ -3576,7 +3576,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "08278de779ef89f73354a93b9ce9218950b0d6e9"
+      "forkHash": "46235149b440ae3734a8a3c28f97df411e0b2b04"
     },
     {
       "file": "script/beta.ts",
@@ -3632,7 +3632,7 @@
   "addedDetail": [
     {
       "file": ".github/workflows/ci.yml",
-      "forkHash": "1790013cd21ac9821af38a189de2424c6ce30c67"
+      "forkHash": "5a6c3ce94ef310a26f332000f9d670846542ad63"
     },
     {
       "file": ".github/workflows/release.yml",
@@ -4148,7 +4148,7 @@
     },
     {
       "file": "README.zh-CN.md",
-      "forkHash": "ebc561128779d3832a767c442f6db7ea578118f6"
+      "forkHash": "77f4536a4e60825cbcbd94105ad0b5ae5f0c8fd8"
     },
     {
       "file": "script/assert-ci-green.mjs",
