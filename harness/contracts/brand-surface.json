@@ -80,10 +80,10 @@
     "packages/core/src/plugin/skill/customize-harness.md"
   ],
   "lineage": {
-    "occurrences": 9674,
+    "occurrences": 9675,
     "filesScanned": 3355
   },
   "shippedFiles": 1323,
   "shippedSrc": 5,
-  "lineageNote": "2026-11-12: +1 occurrence, the 'glasspane' token in the two new fixed-point test files (embedded-web-ui-sentry-guard, glasspane-auto-update-selfupgrade) — test attribution, not new product surface"
+  "lineageNote": "2026-11-12: +1 occurrence, the 'glasspane-harness' token in the new CHANGELOG 0.14.13 entry — release-note attribution, not new product surface"
 }
