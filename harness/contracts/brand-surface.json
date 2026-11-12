@@ -1,5 +1,5 @@
 {
-  "observedAt": "2026-11-11",
+  "observedAt": "2026-11-12",
   "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
   "rules": [
     {
@@ -80,10 +80,10 @@
     "packages/core/src/plugin/skill/customize-harness.md"
   ],
   "lineage": {
-    "occurrences": 9673,
-    "filesScanned": 3353
+    "occurrences": 9674,
+    "filesScanned": 3355
   },
   "shippedFiles": 1323,
   "shippedSrc": 5,
-  "lineageNote": "2026-11-11: 取 0.14.10 收口 artifact/split-main 两格红 —— CHANGELOG 新增 0.14.10 条目与 SYNCLOG 收口记账提到 packages/opencode 的版本线与内核追平，代码血缘零增长"
+  "lineageNote": "2026-11-12: +1 occurrence, the 'glasspane' token in the two new fixed-point test files (embedded-web-ui-sentry-guard, glasspane-auto-update-selfupgrade) — test attribution, not new product surface"
 }
