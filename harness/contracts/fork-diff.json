@@ -2,11 +2,11 @@
   "baseTag": "v1.18.32",
   "forkPath": "harness/glasspane-harness",
   "referenceClone": ".external/opencode",
-  "observedAt": "2026-11-11",
+  "observedAt": "2026-11-12",
   "counts": {
     "identical": 4630,
     "edited": 294,
-    "added": 138,
+    "added": 140,
     "deleted": 1708
   },
   "edited": [
@@ -390,6 +390,7 @@
     "packages/opencode/src/tool/glasspane/providers.ts",
     "packages/opencode/test/cli/cmd/glasspane-uninstall-exit.test.ts",
     "packages/opencode/test/cli/cmd/glasspane-upgrade-channel.test.ts",
+    "packages/opencode/test/cli/glasspane-auto-update-selfupgrade.test.ts",
     "packages/opencode/test/config/glasspane-config-precedence.test.ts",
     "packages/opencode/test/config/glasspane-plugin-dependency.test.ts",
     "packages/opencode/test/config/glasspane-project-config-dirs.test.ts",
@@ -403,6 +404,7 @@
     "packages/opencode/test/script/assert-ci-green.test.ts",
     "packages/opencode/test/script/build-native-install-locked.test.ts",
     "packages/opencode/test/script/dependency-floors.test.ts",
+    "packages/opencode/test/script/embedded-web-ui-sentry-guard.test.ts",
     "packages/opencode/test/script/fixtures/runner-cancel/annotations.json",
     "packages/opencode/test/script/fixtures/runner-cancel/jobs.json",
     "packages/opencode/test/script/fixtures/runner-cancel/runs.json",
@@ -2809,7 +2811,7 @@
     {
       "file": "packages/opencode/script/build.ts",
       "upstreamHash": "ce45f770f04e8997161e5d746374d3af2374db71",
-      "forkHash": "0392e4874179bb5daf4a58ff618d8d4c345aacec"
+      "forkHash": "d918d979026bfda2b353719809dbb1a64fb0e434"
     },
     {
       "file": "packages/opencode/script/generate.ts",
@@ -2954,7 +2956,7 @@
     {
       "file": "packages/opencode/src/cli/upgrade.ts",
       "upstreamHash": "62b230a6336471aa735f82cfb24a4ae2b0c8c31a",
-      "forkHash": "f2a4179d35869d4336c7305b9d7bb8a4b1058670"
+      "forkHash": "adf928406807c9f5da8c5d63a04d5019f227332d"
     },
     {
       "file": "packages/opencode/src/config/config.ts",
@@ -3957,6 +3959,10 @@
       "forkHash": "fbc5699e0091cbb5b0c48825228c104c9aa87da2"
     },
     {
+      "file": "packages/opencode/test/cli/glasspane-auto-update-selfupgrade.test.ts",
+      "forkHash": "f9399a42837bb4ca06eed6a931444cfb67666d74"
+    },
+    {
       "file": "packages/opencode/test/config/glasspane-config-precedence.test.ts",
       "forkHash": "763a018b2475c07e24d008288ae54e9a0b0ba6f1"
     },
@@ -4007,6 +4013,10 @@
     {
       "file": "packages/opencode/test/script/dependency-floors.test.ts",
       "forkHash": "ad460016f361a206223a8950c2f27f270003017b"
+    },
+    {
+      "file": "packages/opencode/test/script/embedded-web-ui-sentry-guard.test.ts",
+      "forkHash": "aaecdce5e747e7fa15e50bbf27d5d5ef200b67b3"
     },
     {
       "file": "packages/opencode/test/script/fixtures/runner-cancel/annotations.json",

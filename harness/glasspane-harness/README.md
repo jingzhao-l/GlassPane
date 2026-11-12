@@ -98,10 +98,10 @@ That is a measured claim, not a promise. The fork tracks upstream
 [anomalyco/opencode](https://github.com/anomalyco/opencode) at a pinned tag, and
 `harness/tools/fork-diff.mjs` compares every file in this tree against that tag on every
 change. The ruler prints its own line — this is that line, verbatim, against the golden
-recorded 2026-11-10:
+recorded 2026-11-12:
 
 ```
-fork-diff vs v1.18.32: 4630/6770 byte-identical, 294 edited, 138 added, 1708 deleted
+fork-diff vs v1.18.32: 4630/6772 byte-identical, 294 edited, 140 added, 1708 deleted
 ```
 
 Most of what upstream ships is still byte-for-byte upstream — 4,630 of its 6,632 files. The
