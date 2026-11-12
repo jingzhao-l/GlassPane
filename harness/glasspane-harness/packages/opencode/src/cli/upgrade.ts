@@ -5,6 +5,23 @@ import { Installation } from "@/installation"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { GlobalBus } from "@/bus/global"
 
+/**
+ * [gp] Product: whether the auto-update path may attempt a self-upgrade for this
+ * detected install method.
+ *
+ * `curl` is a channel for *reading* a version (a curl install checks this product's own
+ * GitHub releases), but it is not a channel this product can *self-upgrade* over —
+ * `Installation.upgrade("curl", …)` always refuses with "does not self-upgrade over
+ * curl". Reaching that call from auto-update and swallowing the refusal (the old
+ * `.catch(() => {})` in `upgrade()`) meant a curl-installed copy silently did nothing
+ * on every patch, and the only signal was a throw that was discarded. Exported so the
+ * guard has a fixed-point test with a reverse control: the predicate is the gate, and a
+ * channel that cannot self-upgrade must not reach `Installation.upgrade` at all.
+ */
+export function canSelfUpgrade(method: string): boolean {
+  return method !== "curl"
+}
+
 export async function upgrade() {
   const config = await AppRuntime.runPromise(Config.Service.use((cfg) => cfg.getGlobal()))
   if (config.autoupdate === false || Flag.OPENCODE_DISABLE_AUTOUPDATE) return
@@ -28,6 +45,11 @@ export async function upgrade() {
   }
 
   if (InstallationVersion === latest) return
+
+  // [gp] Product guard (see `canSelfUpgrade`): a channel this product cannot self-upgrade
+  // over is a known no-op here, not an error to hide. Failing fast, before the upgrade
+  // attempt, keeps the auto-update path honest.
+  if (!canSelfUpgrade(method)) return
 
   const kind = Installation.getReleaseType(InstallationVersion, latest)
 

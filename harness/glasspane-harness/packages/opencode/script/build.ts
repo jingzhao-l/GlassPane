@@ -35,7 +35,16 @@ const createEmbeddedWebUIBundle = async () => {
   console.log(`Building Web UI to embed in the binary`)
   const appDir = path.join(import.meta.dirname, "../../app")
   const dist = path.join(appDir, "dist")
-  await $`OPENCODE_CHANNEL=${Script.channel} bun run --cwd ${appDir} build`
+  // [gp] Product guard: `packages/app/vite.config.ts` (upstream's file, byte-identical
+  // to the reference clone) activates `@sentry/vite-plugin` whenever SENTRY_AUTH_TOKEN,
+  // SENTRY_ORG and SENTRY_PROJECT are all present — uploading sourcemaps to a third
+  // party and deleting `dist/**/*.map` after. No release workflow sets them today, but
+  // the activation is env-driven and ambient, so any future CI or dev machine that does
+  // would silently push this product's sources to Sentry. This build lane is this
+  // product's entry point, so it clears the switch explicitly rather than relying on the
+  // app's own config to stay quiet. `OPENCODE_CHANNEL` stays: it is this product's own
+  // channel, set by the caller, not a third-party upload.
+  await $`OPENCODE_CHANNEL=${Script.channel} SENTRY_AUTH_TOKEN= SENTRY_ORG= SENTRY_PROJECT= SENTRY_RELEASE= VITE_SENTRY_RELEASE= bun run --cwd ${appDir} build`
   const files = (await Array.fromAsync(new Bun.Glob("**/*").scan({ cwd: dist })))
     .map((file) => file.replaceAll("\\", "/"))
     .filter((file) => !file.endsWith(".map"))
