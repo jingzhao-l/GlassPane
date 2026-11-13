@@ -97,6 +97,34 @@ function placeholder(target: string) {
   chmodSync(target, 0o755)
 }
 
+/**
+ * A stub npm that answers `npm view` and `npm pack` successfully and RECORDS that it ran, so a test
+ * can prove the fetch branch was (or was not) entered. `pack` writes a tarball whose sha512 equals
+ * what `view` declared — the same three-step shape `postinstall-resolution-anchored.test.ts` drives.
+ */
+function recordingNpm(base: string) {
+  const bin = path.join(base, "recordingbin")
+  const log = path.join(base, "npm-calls.log")
+  mkdirSync(bin, { recursive: true })
+  writeFileSync(
+    path.join(bin, "npm"),
+    [
+      "#!/bin/sh",
+      `log="${log}"`,
+      'printf \'%s\\n\' "$*" >> "$log"',
+      'case "$1 $2" in',
+      '  "view "*|*" dist.integrity") printf \'sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\\n\'; exit 0 ;;',
+      '  "pack"*) d=$(mktemp -d); f="$d/pkg.tgz"; printf \'tarball\' > "$f"; printf \'%s\\n\' "$f"; exit 0 ;;',
+      '  "install"*) exit 0 ;;',
+      "esac",
+      "exit 1",
+      "",
+    ].join("\n"),
+  )
+  chmodSync(path.join(bin, "npm"), 0o755)
+  return bin
+}
+
 async function install(fixture: { root: string; base: string }, env: Record<string, string> = {}) {
   const child = Bun.spawn([process.execPath, path.join(fixture.root, "postinstall.mjs")], {
     cwd: fixture.root,
@@ -145,6 +173,39 @@ describe("the install hook writes only through a leaf it can name", () => {
     expect(after.mode & 0o777).toBe(0o600)
     expect(readFileSync(victim, "utf8")).toBe("the bytes this install may not overwrite\n")
     expect(lstatSync(fixture.target).isSymbolicLink()).toBe(true)
+  })
+
+  test("a refused leaf is a terminal security decision, not a reason to fetch: the hook does not spend a download it cannot place", async () => {
+    // Measured 2026-11-13: the leaf refusal thrown by `copyBinary` fell into the retry `catch`, whose
+    // only escape is `installPackage(name)` — a network download placed at the SAME `targetBinary`,
+    // which is still the link, so `refuseLeaf` threw again and the catch reported the honest security
+    // decision as "not installable here". Two fixes pinned here: the refusal surfaces as itself (not
+    // the generic "package manager failed" apology), and NO npm fetch is spent on a target that is
+    // provably unplaceable.
+    const fixture = wrapper("leaf-no-fetch")
+    platformPackage(path.join(fixture.modules, PACKAGE), VERSION, VERSION)
+    npmRecord(fixture.modules, { [PACKAGE]: { version: VERSION } })
+    const victim = path.join(fixture.base, "outside", WRITTEN)
+    mkdirSync(path.dirname(victim), { recursive: true })
+    writeFileSync(victim, "untouched\n")
+    symlinkSync(victim, fixture.target)
+    const npmBin = recordingNpm(fixture.base)
+    const log = path.join(fixture.base, "npm-calls.log")
+    const child = Bun.spawn([process.execPath, path.join(fixture.root, "postinstall.mjs")], {
+      cwd: fixture.root,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, PATH: `${npmBin}:${process.env.PATH}` },
+    })
+    const [rc, stdout, stderr] = await Promise.all([child.exited, Bun.readableStreamToText(child.stdout), Bun.readableStreamToText(child.stderr)])
+    expect(rc).toBe(1)
+    expect(`${stdout}${stderr}`).toContain("refusing to write or chmod through it")
+    // The regression: the hook must not reach the fetch branch at all. No `npm view` / `npm pack` /
+    // `npm install` call is logged.
+    expect(existsSync(log)).toBe(false)
+    // And the link is untouched — no bytes were written through it to the victim.
+    expect(lstatSync(fixture.target).isSymbolicLink()).toBe(true)
+    expect(readFileSync(victim, "utf8")).toBe("untouched\n")
   })
 })
 

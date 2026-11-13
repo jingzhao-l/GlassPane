@@ -518,6 +518,11 @@ function main() {
   // Every placement is undone when the check that follows it fails: `targetBinary` is the command
   // the user runs next, so bytes this run refused must not be sitting on it.
   for (const name of names) {
+    // A leaf `refuseLeaf` refuses (someone pre-set a symbolic link at `targetBinary`) is a SECURITY
+    // decision, not an install failure: both the in-tree `copyBinary` and the fetch `installPackage`
+    // write to the same leaf, so retrying would only spend a network round-trip to hit the identical
+    // refusal and launder the real signal into "not installable here". Measure the refusal once and
+    // stop — nothing any candidate name can do changes the shape of the target.
     try {
       const placement = copyBinary(resolveBinary(name), targetBinary)
       const check = verifyBinary(expected)
@@ -528,6 +533,7 @@ function main() {
       placement.undo()
       seen.push(`${name}: ${check.detail}`)
     } catch (error) {
+      if (error instanceof Error && error.message.includes("refusing to write or chmod through it")) throw error
       const placement = installPackage(name)
       if (placement) {
         const check = verifyBinary(expected)

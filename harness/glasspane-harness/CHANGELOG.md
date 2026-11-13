@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.14.14] — 2026-11-13
+
+> **取 patch**：本批没有新增 CLI 参数、工具面或产品形状。内容是一处**发布级 P1 缺陷修复**，
+> 外加把上游内核依赖从 0.1.13 追平到 0.1.14 时漏掉的两处文档版本号同步：
+> - **P1 postinstall 叶子拒绝触发多余下载**：`script/postinstall.mjs` 的 `main()` 里，`copyBinary`
+>   经 `refuseLeaf` 拒绝"目标叶子是符号链接"这一安全判定后，控制流落进重试 `catch`，而那条
+>   `catch` 的唯一出路是 `installPackage(name)`——对**同一个**仍是链接的 `targetBinary` 再做一次
+>   网络下载，`refuseLeaf` 二次抛出后把诚实的安全拒绝洗成通用的 "not installable here"。
+>   修法：叶子拒绝单独接住并作为终态错误抛出，不再进入重试。固定点测试
+>   `test/script/postinstall-placement-undo.test.ts` 新增用例，用会记录调用的 stub npm 证明
+>   拒绝后**不发生任何** `npm view`/`pack`/`install`（反向变异：撤掉那行守卫，该用例在
+>   `existsSync(log)` 处变红）。
+> - **内核 0.1.13 → 0.1.14 文档同步**：依赖追平提交（父仓 `c414df47`）改了 `bun.lock` /
+>   `kernel-pin.json` / `kernel-conformance.json`，但 `harness/README.md` 与
+>   `docs/kernel-integration.md` 里引用的版本号文字仍停在 0.1.13。本轮随批补齐，并同批重记
+>   `fork-diff` / `tool-surface` 金样（内核依赖字节不属我们的行，但金样要如实记它移动了）。
+
 ## [0.14.13] — 2026-11-12
 
 > **取 patch**：本批没有新增 CLI 参数、工具面或产品形状。内容是**发布与供应链安全审查的
