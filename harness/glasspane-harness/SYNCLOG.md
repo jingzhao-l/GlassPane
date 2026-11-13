@@ -3,6 +3,75 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-13（第三十八次会话）· 取号 0.14.14：postinstall 叶子拒绝不再触发多余下载（取 patch）
+
+### 〇、改动面数字
+
+`fork-diff vs v1.18.32: 4630/6772 byte-identical, 294 edited, 140 added, 1708 deleted`
+（金样 `harness/contracts/fork-diff.json` 随本批重记，四桶与上一条 0.14.13 逐数一致——本轮只动
+我们自己的一个脚本与其测试，没有触碰与上游 opencode 的差异面。identical/edited/added/deleted
+全部持平，说明 fork-diff 这次红纯粹是内核依赖字节移动，不是我们的面变了。）
+
+`tool-surface`：面 A `mcp-shell/src` **13027 LOC / 21.33%**（基线 21.33%，越限是基线常驻事实，
+crossing check 早已花掉）、面 B fork **14453 LOC / 23.67%**（本批 postinstall.mjs +6 行、
+14447 → 14453，已在 `--record` 里如实记）。判红靠 LOC 棘轮，本批复跑 `no growth past the
+recorded baseline`。内核归属：`iterate-kernel@0.1.14`（随 `c414df47` 追平）。
+
+`brand-surface`：血缘 **9675 occurrence(s) / 3355 file(s)**，与基线逐数相等；skill-doc 覆盖
+`[packages/core/src/plugin/skill/customize-harness.md]` 不变；26 product file + 2 doc、
+1323 shipped-code file、0 hit。
+
+`product-surface`：**6640 agreement(s) held, 0 problem(s)**——版本线两处（`product.json` 真源 +
+`packages/opencode/package.json` + `bun.lock` 内嵌号）与安装入口 `install.curl` 及其全部文档
+位点（`install.md`×2、`scripts/install.sh`、`README.md`、`README.zh-CN.md`）全部认同 0.14.14。
+
+### 一、本轮修的（都在主干）
+
+- **P1 postinstall 叶子拒绝触发多余下载**（`script/postinstall.mjs` 的 `main()`）：
+  `copyBinary` 经 `refuseLeaf` 拒绝"目标叶子是符号链接"这一安全判定后，控制流落进重试 `catch`，
+  而 `catch` 的唯一出路是 `installPackage(name)`——对同一个仍是链接的 `targetBinary` 再做一次
+  网络下载，`refuseLeaf` 二次抛出后把诚实的安全拒绝洗成通用 "not installable here"。修法：叶子
+  拒绝单独接住并作为终态错误抛出，不再进入重试。固定点用例
+  `test/script/postinstall-placement-undo.test.ts`「a refused leaf is a terminal security
+  decision, not a reason to fetch」用会记录调用的 stub npm 证明拒绝后不发生任何
+  `npm view`/`pack`/`install`。**反向变异已验**：撤掉那行守卫，该用例在 `existsSync(log)` 处
+  变红（第 205 行，`npm` 调用日志存在）；守卫已核回（`grep -c` = 1）。
+- **内核 0.1.13 → 0.1.14 文档/版本线收口**：`c414df47` 改了 `bun.lock`/`kernel-pin.json`/
+  `kernel-conformance.json`，但文档里引用的版本号文字仍停在 0.1.13（`harness/README.md`、
+  `docs/kernel-integration.md` 两处，由上游那条线在树上改好后本批一并收进主干）。本轮把版本线
+  取号 0.14.14 时顺带把安装入口的全部文档位点跟到 `v0.14.14`。
+
+### 二、跑了哪些闸
+
+全绿：`product-surface --check`（6640/0）、`fork-diff --check`（divergence 匹配）、
+`tool-surface --check`（no growth）、`surface-semantics --check`（0 命中 / 23 文件）、
+`brand-surface --check`（血缘 9675=基线）、`hook-liveness --check`（21 hooks、2 绑定点无漂移）、
+`kernel-pin --check`（0.1.14 + 26 契约文件）、`kernel-conformance`（16 fixtures 全过）、
+`product-surface`、`check-workflows --self-test`（48 cases）/ `check-workflows`（5 workflow）、
+`check-doc-links`（32 份文档、无死链）、typecheck 四包（opencode/tui/sdk-js/plugin 全 rc=0）、
+固定点 opencode 211 + TUI snapshot 37、postinstall 三文件 19、`publish.ts --dry-run`（pack 出
+0.14.14）。
+
+### 三、三条审查发现的处置（零遗留）
+
+- #1（P1）postinstall 叶子拒绝触发多余下载 → **已修 + 固定点测试 + 反向验证**，见上。
+- #2（P2）`installPackage` 的 integrity/manifest 拒绝 `return false` 与"装不上"文案合并 →
+  **判定维持现状**：这不是判定缺陷（integrity 不符仍被拒、仍 `return false` 不放置字节），
+  只是文案把两类故障并成一句；改成携带原因会牵动全部调用方，超出本批最小正确修法。记在这里
+  作为已知边界，不是待修项。
+- #3（P2）`npmAnswer` 把 `ETARGET notarget No matching version` 归 `unaskable` 而非 `absent` →
+  **判定按构造正确**：`registry-readiness.ts:44` 的 probe 契约本就把 ETARGET/404 定义为
+  "not yet"（继续等），现有固定点测试（`registry-readiness.test.ts:114-124`）**故意**钉住这个
+  形状，行为上 ETARGET 确实会继续等到自愈；审查指出的只是日志把 not-yet 标成 transport 失败。
+  改它会破坏一个故意测试并违反文件头部契约，故不动。
+
+### 四、没跑的部分（照实写）
+
+- 真机端到端安装（`glasspane-harness --version`、gp-harness）与真发布物 SHA256/GPG 验签：
+  取号后随本版做，本条留痕时点在本地提交之后、发布之前。
+- `gp_*` 工具面需要 `glasspaned` 在跑：未观测，如实标注。
+
+
 ## 2026-11-12（第三十七次会话）· 取号 0.14.13：两处发布级 P1 安全缺陷随本版送审（取 patch 前滚）
 
 ### 〇、改动面数字与开工对表
