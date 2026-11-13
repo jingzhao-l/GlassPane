@@ -2,6 +2,34 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.31.5] — 2026-11-13
+
+**版本判断：patch。** 四条判据一条没碰：状态文件字段、退出码集合、CLI 参数、npm 包 `bin`
+声明一字未动。`git diff v1.31.4..HEAD -- . ":(exclude)harness"` 只有 `mcp-shell/package.json`
+与两个 lockfile——即把 `glasspane-mcp` 的运行时依赖 `iterate-kernel` 从 0.1.13 追平到
+**0.1.14**，无对外 `gp_*` 形状、无 CLI 变化，照 1.31.3 那条同形处置取 patch。
+
+主仓本轮的实质动作是把上一轮 `c414df47`（内核 0.1.14 追平）遗留的 **main CI 四条红清零**：
+
+- **文档闸红**：内核换号后 `harness/README.md` 的 kernel-pin 段与
+  `harness/glasspane-harness/docs/kernel-integration.md` 的 provenance stamp 仍写 0.1.13，
+  `check-doc-links` 按真源（pin=0.1.14 / 已安装包=0.1.14）判这两句可复算主张失效，连带
+  updater 三个固定点测试（它们断言"main 上文档闸是绿的"）一起红。修法与 1.31.3 同形：只改
+  两句版本字面量。反向验证：改回 0.1.13 ⇒ 三条具名红；改回 0.1.14 ⇒ 绿。
+- **尺子金样红**：内核换号移动了 6 份 fork 内文件的字节，`c414df47` 漏跑 fork-diff /
+  tool-surface 的 `--record`。本批补齐（tool-surface 仅 kernel 归因 0.1.13→0.1.14 +
+  日期，A 13027/21.33%、B 14447→14453/23.67% 由 harness 0.14.14 那批如实记，LOC 棘轮守的
+  是这条）。反向验证：用旧金样 `--check` 得具名红，换重记金样转绿。
+
+`gp_*` 三处镜像（daemon `hello.capabilities` / shell 转发 / 实测 `tools/list`）、socket 信任、
+TCC 席位、更新器签名锚本轮审查**零 P0/P1**（两条独立审查线一致）。两条 P2 观察（daemon
+`attach.projectId` 形状比 shell 松、参数诊断串按 scalar 截断）均属既有有意设计（形状在 shell
+侧已闸住），按最小正确修法不扩面。
+
+**未合并未发布号**：`v1.31.4` 已发（tag/Release 非草稿/registry 两包均 1.31.4），已发布 tag
+一律不动，本轮另取一号。harness 侧 0.14.13→0.14.14（含一处发布级 P1 postinstall 叶子拒绝
+不再触发多余下载 + 内核文档收口）由 10:30 那条独立线同轮发出，本仓不代发其 tag/npm。
+
 ## [1.31.4] — 2026-11-12
 
 **版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、npm 包
