@@ -467,6 +467,24 @@ function flush() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+/**
+ * Drain *enough* macrotask turns for a frame that sits behind
+ * `await turn.acquire()` after a *preceding* turn released — the report in the
+ * abandoned-turn test below. That chain from "the act's reply settled" to
+ * "the queued report's acquire resolved and its frame was written" spans several
+ * macrotasks, and a single `flush()` tick measured that count on an idle machine
+ * but starved it under CI load, reading the wire before the frame landed and
+ * reporting the *scheduling* as a concurrency bug. Unlike `flush()` (one tick,
+ * which the call-order assertions rely on to catch a frame going out too early),
+ * this drains until the awaited frame lands, so it measures the ordering the test
+ * pins rather than a tick count.
+ */
+async function flushSettled() {
+  for (let i = 0; i < 50; i++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
 test("an act admitted after an attach keeps its trail entry when the act replies first", async () => {
   const { engine, io } = makeEngine();
   const session = new EvidenceAuditSession();
@@ -735,7 +753,11 @@ test("an abandoned trail turn does not let a report overtake an outstanding act"
   respondTo(io, actFrame, { operationId: OP_A, actConfirmed: true });
   await actPromise;
 
-  await flush();
+  // The report was queued behind the still-outstanding act; the act has now
+  // released, so the report's acquire resolves and its frame goes out. That
+  // resolution spans several macrotasks, so drain until it lands rather than
+  // counting one tick (see flushSettled).
+  await flushSettled();
   const reportFrame = framesSent(io)[2];
   assert.equal(reportFrame.method, "last_evidence");
   assert.equal(
