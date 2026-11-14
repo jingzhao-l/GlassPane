@@ -1771,3 +1771,43 @@ stderr 空。`.asc` 在一次性钥匙环里验：`using RSA key 0929EA31DF4F742
    --state-dir <临时根>` 起来后按 `gp-*` 标识走 `kAXPressAction`。
 4. **进程与临时件**：本轮一次性 daemon 运行都在 `--state-dir` 隔离根上，跑完即退；常驻
    `~/Applications/GlassPane Daemon.app` 的安装版 daemon（起于本轮前）归属明确，不动。
+
+## 每日真机核对 2026-11-14（v1.31.5 已发后的审查轮；本节补上前面两轮一直写着"没跑"的那一格）
+
+本轮零产品代码改动（两条审查——正确性 + 信任边界——在 1.31.5 上重跑，零 P0/P1；8 条边界逐条
+实测干净）。版本线/tag/Release/registry 三者已在 1.31.5 收口，本节只补真机证据，提交只动这份文档。
+被测产物＝本轮 `swift build` 的 debug 构建 + `make-app.sh` 现打的 bundle（`/var/tmp/gp-ax/GlassPane.app`、
+`GlassPane Daemon.app`）；helper＝本轮现写的 `/var/tmp/gp-ax-helper/axwalk.swift`（沿用 10-30 那节的
+办法：本机无 pyobjc，`cliclick` 点不动裸可执行文件，只能 AX 读标识 + `kAXPressAction` 点）。
+
+**前面 11-12 / 11-13 两节都把面板 AX 走查写成"没跑"（理由是零面板改动）。本轮把它做完了**，
+因为 GUI 会话与三席权限都在、是物理上能做的项，"没跑"不该是默认出口。
+
+1. **daemon 在隔离根上的自报**：`glasspaned --state-dir /var/tmp/gp-ax-state --permissions` 退 0，
+   三张可测席 `accessibility/input-monitoring/screen-recording` 全 `granted`，
+   `developer-tools` 恒 `unverifiable` 并在 `verdictExcludes` 里给得出下一步
+   （`--check-developer-tools`），`verdictSeats` 只含三席（不含 developer-tools）。stderr 那句照旧
+   如实说明本命令不咨询 `--state-dir`；事后核对隔离根除 `daemon.log` 外无新字节。
+2. **MCP 端到端（发布归档 + 本机 pack 两条都核）**：
+   - 发布归档 `v1.31.5.tar.gz`：本地 sha256 == `SHA256SUMS` == GitHub API `assets[].digest` 三处逐字相等
+     （`d8217a02…aab92ad`），两份 `.asc` 用钉纹的签发钥验成"完好的签名"；归档自证
+     `tar -tzf | grep -cE "(^|/)harness/"` = **0**（数数用 `grep -c`）。
+   - 本机 `npm pack` 的 `glasspane-mcp-1.31.5.tgz` 装进干净前缀，用装好的 bin 打 `initialize`：
+     回包 `serverName=glasspane-mcp` / `serverVersion=1.31.5`，`tools/list` 回 **16** 条
+     （11 daemon 转发 + 5 shell-only），stderr 0 行。
+3. **`gp_*` 三处镜像本轮实测一致**：engine `capabilityMethods`（= 13 个枚举 case 去掉 hello/shutdown）
+   = **11**；shell `DAEMON_FORWARDED_METHODS`（按 `execute`/`reachesDaemon` 派生，不手抄）同源；
+   真机 `tools/list` = 16 = 11 + 5 shell-only。三处同号，无契约漂移。
+4. **面板 AX 走查（本轮做完的一格）**：debug daemon 起 `--state-dir /var/tmp/gp-ax-state`
+   `--socket-path /var/tmp/gp-ax-state/engine.sock`（socket 从落盘就是 `srw-------`），面板带同一对参数
+   起。一次遍历拿到 **31** 个 `gp-*` 标识，席位徽标把**实测值**写进标识（`gp-perm-accessibility-granted`
+   等，与 1 的 daemon 自报逐项一致）；`gp-daemon-liveness-answering`=「运行中」、
+   `gp-daemon-state-root`/`gp-daemon-socket-origin` 都指回隔离根。**`kAXPressAction` 打 20 枚交互控件
+   全回 ok（err=0）**：`gp-refresh`/`gp-refresh-all`、`gp-card-toggle-permissions-daemon`、四张
+   `gp-guide-*`、四张 `gp-perm-explainer-*`、`gp-verify-developer-tools`、`gp-copy-binary`、
+   `gp-copy-socket`、六张 `gp-nav-*`（第二次遍历还带出 `gp-guide-banner`）。破坏性控件
+   （`gp-confirm-prune`/`gp-update-apply` 一类）本轮**故意不按**——真机不删真档案。
+5. **进程与临时件**：本 run 起的 debug daemon（98924）与面板（98961）在 SIGTERM 后两次 `pgrep` 命中
+   0 行，`engine.sock` 被 unlink（信号闸在真进程上复现）。在册的真 daemon
+   （`~/Applications/GlassPane Daemon.app`，pid 52139，`--socket-path ~/.glasspane/engine.sock`）本 run
+   没碰：`--prune-evidence` 一类破坏性旗标一次都没执行过。`/var/tmp/gp-ax*` 收口时回收。
