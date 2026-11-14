@@ -330,11 +330,11 @@ function installPackage(name) {
     //
     // This branch then goes one step further than "name the registry": it downloads the
     // tarball with `npm pack`, re-computes its sha512, and refuses it unless that hash equals
-    // the `dist.integrity` the registry itself advertises. npm's own integrity check happens
-    // against the registry's self-attested metadata during unpack — a mirror that serves a
-    // tampered tarball can attest it with matching metadata. Comparing the bytes WE downloaded
-    // against the registry's own claim closes that: `npm install <tarball>` below consumes
-    // exactly the bytes we verified, never a re-fetch.
+    // the `dist.integrity` the registry itself advertises. This closes a tarball whose bytes
+    // diverge from the integrity the registry advertises for that version — storage/mirror
+    // corruption serving one blob under another version's correct metadata. It does NOT close
+    // a MITM that also rewrites the `npm view dist.integrity` answer: both halves come from the
+    // same pinned origin over one channel, and npm tarballs carry no client-enforced signature.
     const integrityProbe = childProcess.spawnSync(
       "npm",
       ["view", `${name}@${version}`, "dist.integrity", "--registry", REGISTRY],

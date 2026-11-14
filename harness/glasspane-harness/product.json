@@ -2,7 +2,7 @@
   "$comment": "产品清单 — glasspane-harness 的机器可读真源：发行名、命令名、平台包模板、版本线、安装入口、上游血缘、产品面边界。随 subtree split 走；改任何一处名字先改这里，product-surface.mjs 会核各脚本是否跟上。",
   "name": "glasspane-harness",
   "displayName": "GlassPane Harness",
-  "version": "0.14.14",
+  "version": "0.14.15",
   "binary": "glasspane-harness",
   "bins": [
     "glasspane-harness",
@@ -13,7 +13,7 @@
   "install": {
     "npm": "npm install -g glasspane-harness",
     "bun": "bun add -g glasspane-harness",
-    "curl": "curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.14.14/scripts/install.sh | bash",
+    "curl": "curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.14.15/scripts/install.sh | bash",
     "curlTagAnchorNote": "入口这一行钉在本版 tag（v<本版>）而不是 main：install.sh 是验二进制的那个东西，钉分支等于让任何能 push split 仓 main 的人换掉校验器。tag 本身可以被 `git tag -f` 重指向，所以本轮给它加了强制机制而不是留下一句散文：split 仓的仓库级 ruleset `published-tags-immutable`（id 26423927，target tag，include refs/tags/v*，rules update + deletion + non_fast_forward，enforcement active，bypass 空，current_user_can_bypass=never）。实测：把 v0.12.5 强制推到它自己已经指向的那个 commit，服务端拒为 `Cannot update this protected ref`，事后 peel 一字未动；新建 tag 仍然允许——那正是发布要做的事。GitHub 的 ORG 级 tag protection 端点对本仓回 HTTP 404（owner_type=User），可用的就是仓库级 ruleset 这一条。",
     "installerRemedyAnchor": "任何「重取安装器自身」的补救/重跑命令由 install.sh 的 `installer_remedy_url` 在运行时把本版 tag 解析成 40 位 commit（内容寻址，不能静默移动），并走「落盘 → 先读 → 再执行」两步。这里故意不存 commit 字面量：写进 product.json 的每一版都会在下一个 release 变成第二条会腐烂的真相，而运行时解析那条由 installer-selftest.sh 的 section 24 钉着。"
   },

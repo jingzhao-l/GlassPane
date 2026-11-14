@@ -8,6 +8,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.14.15] — 2026-11-14
+
+> **取 patch**：本批没有新增 CLI 参数、工具面或产品形状。内容是**全面审查（正确性 + 供应链安全）
+> 审出的两处诚实性/治理缺陷修复**——都不是可利用的门，而是"声称做到了、实际没做到"这一类：
+> - **postinstall tarball 完整性校验的注释高估了它挡住的威胁**：`script/postinstall.mjs` 会
+>   `npm view` 取 `dist.integrity`、`npm pack` 下 tarball、再重算 sha512 与之比对。原注释声称这
+>   "挡住了把篡改 tarball 配上匹配元数据一起投递的镜像"。这不成立：比对的两半（`view` 的元数据与
+>   `pack` 的字节）都来自**同一个 pin 住的 registry、走同一条通道**，而 npm tarball 没有客户端强制
+>   的签名——能改写 pack 字节的攻击者同样能改写 `view` 的应答，等式在完全被攻击者控制的数
+>   据上照样成立。它真实挡住的是**存储/镜像侧的坏 blob**（一个版本号下投递了另一份字节）。注释
+>   改为只声称它做到的那一半，不再暗示一条它并不提供的保证。
+> - **安装 banner 的血缘署名行此前没有任何闸钉住**：`scripts/install.sh` 的 banner 是全产品唯一
+>   一处对用户点出上游项目的位置（"an opencode fork — https://github.com/anomalyco/opencode"）。
+>   它因含 "fork" 一词被 `brand-surface` 的 `LINEAGE_LINE` 豁免——豁免本身是对的（这是诚实的血缘
+>   署名，不是产品主张），但副作用是**没有任何闸读它的署名形状**：一句把 "fork" 删掉、把 URL 换掉、
+>   或改写成产品主张的编辑会无声穿过每一道闸。新增 `product-surface` 的 `installer-lineage` 两条，
+>   把那一行逐字钉死；反向变异两发（删 "fork"／换 URL 保留 "fork"）各出 1／2 条具名红。
+> - 版本线两处（`product.json` 为真源 + `packages/opencode/package.json`）与安装入口
+>   `install.curl` 及其全部文档位点（`docs/install.md`×2 / `scripts/install.sh` / `README.md` /
+>   `README.zh-CN.md`）一并跟到 v0.14.15。
+
 ## [0.14.14] — 2026-11-13
 
 > **取 patch**：本批没有新增 CLI 参数、工具面或产品形状。内容是一处**发布级 P1 缺陷修复**，

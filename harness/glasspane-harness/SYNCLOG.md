@@ -3,6 +3,91 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-14（第三十九次会话）· 取号 0.14.15：两处诚实性/治理缺陷修复（取 patch）
+
+### 〇、改动面数字
+
+`fork-diff vs v1.18.32: 4630/6772 byte-identical, 294 edited, 140 added, 1708 deleted`
+（金样随本批重记：四桶与 0.14.14 逐数一致，只有我们自己的 5 个文件的**内容哈希**移动——
+本轮只改我们自己脚本里的一句话与一个版本号，没有触碰与上游的**差异面**。）
+
+`tool-surface`：面 A `mcp-shell/src` **13027 LOC / 21.33%**、面 B fork **14455 LOC / 23.67%**
+（越限是基线常驻事实，crossing check 早已花掉）。本批 postinstall.mjs 注释**净 0 行**
+（+5/−5），故 LOC 棘轮不红：`no growth past the recorded baseline`。
+
+`brand-surface`：血缘 **9677 occurrence(s) / 3355 file(s)**。+2 来自 CHANGELOG 的 [0.14.15]
+条目——它引用了本轮新钉住的 banner 血缘行的字样（"an opencode fork —
+https://github.com/anomalyco/opencode"），这是"这块字节是谁的"的归属说明，按 9616/9617/9618
+先例带 `--lineage-note` 记账，不是新的产品面。0 hit。
+
+`product-surface`：**6642 断言 / 0 问题**。+2 是本轮新增的 `installer-lineage` 两条（见下）。
+
+### 一、本轮发现与修复（发现 2 条，修复 2 条，未修项 0）
+
+**P2-1 postinstall tarball 完整性注释高估了它挡住的威胁**（`script/postinstall.mjs`）。
+代码会 `npm view` 取 `dist.integrity`、`npm pack` 下 tarball、重算 sha512 与之比对。原注释
+声称这"挡住了把篡改 tarball 配上匹配元数据一起投递的镜像"。这不成立：比对的两半（`view`
+的元数据、`pack` 的字节）都来自**同一个 pin 住的 registry、走同一条通道**，而 npm tarball
+没有客户端强制的签名——能改写 pack 字节的攻击者同样能改写 view 的应答，等式在完全被攻击
+者控制的数据上照样成立。它真实挡住的是**存储/镜像侧的坏 blob**（一个版本号下投递了另一份
+字节）。修法：注释改为只声称它做到的那一半，不再暗示一条它并不提供的保证。这是"注释高估
+契约"一类诚实性缺陷——半修（保留夸大的注释）比不修更糟，因为它把缺陷伪装成已有防护。
+
+**P2-2 安装 banner 的血缘署名行此前没有任何闸钉住**（`scripts/install.sh` 第 208 行）。这一行
+是全产品唯一一处对用户点出上游项目的位置（"an opencode fork —
+https://github.com/anomalyco/opencode"）。它因含 "fork" 一词被 `brand-surface` 的
+`LINEAGE_LINE` 豁免——豁免本身是对的（这是诚实的血缘署名，不是产品主张），但副作用是
+**没有任何闸读它的署名形状**：一句把 "fork" 删掉、把 URL 换掉、或改写成产品主张的编辑会
+无声穿过每一道闸（2026-11-14 实测：把 "fork" 一词删掉，brand 四条规则对 install.sh 的命中
+数不变，因为它本来就靠 lineage 行豁免而非靠规则放行）。修法：新增 `product-surface` 的
+`installer-lineage` 两条，把那一行逐字钉死。**反向变异两发**：① 删 "fork" → 1 条具名红；
+② 换 URL 保留 "fork" → 2 条具名红；恢复一律走自建字节副本 + sha256 相等核对（不用
+git checkout）。
+
+审查里另有一条 adjudicated 为**血缘代码非本产品面**：`packages/cli/bin/lildax.cjs`（上游
+`@opencode-ai/cli`，`private:true`，不在任何 deps/files、不被 build/publish pack、不在
+product.json 的 bins）保留了上游原有的祖先 `node_modules` 上溯与只读 `OPENCODE_BIN_PATH`，
+而已发布的 launcher（`bin/glasspane-harness`）早已修掉这两点。判定：与 `packages/desktop`
+同类，是**留在树里做血缘与同步的上游代码**，不随产品发布，无用户可达的 exec 路径，本轮不改。
+
+### 二、历史挂账逐条回代码复核（全部已收口）
+
+- **真 TUI 观感**：由 `packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx` 37 条
+  快照/行为用例覆盖（含 gp_* 被拒行的视觉可分性）——**维持现状**，本轮 37/0 绿。
+- **M2 决策日志 `logged` 分支**：`glasspane-decision-log.ts:113-136` 真做 `logDecision` 落盘并
+  回 `status:"logged"` + path/sequence/hash——**维持现状**，由
+  `test/plugin/glasspane-decision-log.test.ts` 钉住。
+- **真模型轮次**：仍属**物理边界**（需要真 key + 真 provider），本机未观测。
+- **musl/baseline 无 CI lane**：`product.json.platform.dropped` 已记录这是**没有目标**而非
+  漏 lane（darwin-x64-baseline：macOS 13+ 全有 AVX2）——**维持现状**，不是缺陷。
+- **packages/{app,session-ui,desktop} 取舍**：owner 2026-09-25 已定（CLI+TUI+内嵌 web 为产品面，
+  desktop 血缘保留不发布）——**维持现状**，product.json/build/verify/rulers 四处一致。
+
+### 三、跑了哪些闸、结果如何
+
+- `product-surface --check`：6642 断言 / 0 问题（含新 installer-lineage 两条）
+- `fork-diff --check`：divergence matches the recorded surface（四桶 4630/294/140/1708）
+- `tool-surface --check`：no growth past the recorded baseline（面 A 13027/21.33%、面 B 14455/23.67%）
+- `brand-surface --check`：0 hit，血缘 9677/3355（+2 带 --lineage-note 记账），8/8 正向对照可红
+- `surface-semantics --check`：0 hit across 23 file(s)，3/3 正向对照
+- `hook-liveness --check`：21 hooks vs v1.18.32 无漂移，2/2 绑定点解析
+- `kernel-pin --check`：iterate-kernel@0.1.14 匹配 lock integrity + 26 契约文件；`--probe`：
+  0.1.14 是 published latest（无漂移）
+- `kernel-conformance`：16 fixtures 全过（两侧同判）
+- 固定点：opencode 211 pass / 0 fail（4 文件）、TUI 37 pass / 0 fail
+- typecheck 四包：opencode / tui / sdk-js / plugin 全 rc=0
+- `publish.ts --dry-run`：pack 出 glasspane-harness@0.14.15，os/cpu gate 干净
+- 主仓 `check-workflows --self-test`：48 case 全过（28 变异须被抓 + 20 合法形状须静默）
+- 主仓 `check-workflows`：5 workflow 干净；`check-doc-links`：无死链、双语成对、可复算主张一致
+
+### 四、没跑的部分（照实写）
+
+- **真模型轮次**：需要真 provider key 与真网络，本机未观测。
+- **`gp_*` 工具面端到端**：需要 GlassPane daemon（glasspaned）在跑且辅助功能权限齐，本机
+  会话未起 daemon，未观测。
+- **端到端安装通道**：见发版段的 npm/verify-published 实测。
+
+
 ## 2026-11-13（第三十八次会话）· 取号 0.14.14：postinstall 叶子拒绝不再触发多余下载（取 patch）
 
 ### 〇、改动面数字

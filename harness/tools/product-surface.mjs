@@ -780,6 +780,23 @@ check("installer-registry", sh.includes("integrity: npm dist.integrity"), "insta
 check("installer-registry", sh.includes("product signature: not checked on this channel"), "install.sh's npm success line dropped its verification state — the channel that checks no signature must not read like one that does")
 check("installer-urls", sh.includes("GlassPane engine"), "install.sh does not tell the user that gp_* needs the GlassPane engine running")
 check("installer-urls", sh.includes(`REPO=\"` + product.repo + `\"`) || sh.includes(`REPO="${product.repo}"`), "install.sh REPO is not the product's repo")
+// The one place the installer names the upstream project to a user is the banner's
+// lineage line. brand-surface exempts it (the line says "fork", so LINEAGE_LINE
+// spares it), which is correct for attribution but left it unpinned: an edit that
+// dropped the lineage word, swapped the URL, or turned it into a product claim would
+// have moved through every gate silently. Pin the exact line literally — both the
+// lineage word and the upstream URL are part of the attribution, so any change to
+// either is a deliberate edit someone must re-pin here.
+{
+  const banner = sh.split("\n").filter((l) => /anomalyco\/opencode/.test(l))
+  const expected = "an opencode fork — https://github.com/anomalyco/opencode"
+  check("installer-lineage", banner.length === 1, `install.sh names the upstream ${banner.length} time(s); the banner attribution must appear exactly once`)
+  check(
+    "installer-lineage",
+    banner.length === 1 && banner[0].includes(expected),
+    `the install banner's upstream line changed — it must still read "${expected}" verbatim (this is lineage attribution, the one sanctioned user-facing mention of the upstream project; a line that drops "fork", points elsewhere, or is reworded into a product claim needs a deliberate re-pin of this assertion)`,
+  )
+}
 check("installer-urls", existsSync(path.join(forkRoot, "scripts", "install.ps1")) === false, "a Windows installer exists — the product is macOS-only (owner decision); one that half-works is worse than none")
 check("installer-syntax", (() => {
   try {
