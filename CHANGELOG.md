@@ -2,6 +2,29 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.31.6] — 2026-11-14
+
+**版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、npm 包
+`bin` 声明没动。`git diff v1.31.5..HEAD -- . ":(exclude)harness"` 只有 `engine/smoke.md` 一份文档
+（加版本线 bump 本身）——零产品代码改动，与 1.31.4 同形取 patch。
+
+本轮在 **1.31.5 上重跑两条审查**（正确性 `review-bugbot` 形状的逐文件审查 + 信任边界八条逐条
+实测），**零 P0/P1**：错误帧恒 `{code, message, remedy}` 三字段且 remedy 逐条指向真实存在的命令、
+socket 从落盘即 `0600`（`umask 0177` 围住 `bind()`）、TCC 四席只报实测值、evidence pack 不落盘
+屏幕文本（`captureView` 仅内存 `persisted:false`）、updater 严格大于数值比较 + 归档成员拒绝
+绝对/`..`/反斜杠、installer/bridge 全 argv `spawn` 无 `shell=True`、网关 loopback-only +
+`timingSafeEqual` token、shell 不自判证据语义。8 条边界逐条干净。
+
+**本轮唯一实质动作是把真机证据补齐并随本版送到用户手上**，其中一项是前面两轮一直写成「没跑」
+的：**面板 AX `kAXPressAction` 走查本轮做完了**（GUI 会话与三席权限都在，属物理上能做的项，
+「没跑」不该是默认出口）——一次遍历 31 个 `gp-*` 标识、席位徽标把实测值写进标识本身、
+**`kAXPressAction` 打 20 枚交互控件全回 ok**（破坏性控件故意不按）。另核：发布归档
+`v1.31.5.tar.gz` 三处 sha256 逐字相等 + 两份 `.asc` 验签成「完好」+ `grep -cE "(^|/)harness/"`=0；
+发布归档与本机 pack 两条都打的 MCP `initialize` 回 `glasspane-mcp`/1.31.5、`tools/list` 16 条；
+`gp_*` 三处镜像（engine `capabilityMethods`=11 / shell 派生同源 / 实测 16）同号无漂移。
+
+无未合并未发布号。
+
 ## [1.31.5] — 2026-11-13
 
 **版本判断：patch。** 四条判据一条没碰：状态文件字段、退出码集合、CLI 参数、npm 包 `bin`
