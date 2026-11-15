@@ -5487,3 +5487,62 @@ owner 2026-09-25："那几个配套产品面还是需要的" + "README 等基础
 | **不删**：`.worktrees/harness-daily-20261104`、`.worktrees/harness-daily-20261105` 与同名两条分支、主树里那 8 条未提交文件 | 保持原状并点名 | 那是本线另两次 10:30 会话的在飞批次。与本轮改动的重叠判断：它们碰 `packages/opencode/src/tool/glasspane/daemon.ts`、`engine/**`、`mcp-shell/**`、`installer/**`、根 `.github/workflows/ci.yml`、`tools/release-signing-gate.sh`——本笔一处都没碰（我只动 `harness/glasspane-harness/**` 与 `harness/tools/{product-surface,release-artifact}.mjs`），所以没有需要替它们收尾的缺陷；他们未提交的东西里若含缺陷，归他们那一轮 |
 | 进程 | 本会话起的后台命令全部退出 | 判据是两次 `pgrep`（不是"我执行过 pkill"）：`pgrep -fl "e2e.sh\|bun install --frozen\|gates.sh\|record.sh\|final.sh"` 起前非空、收口后必须空命中；`bun add -g` 的 postinstall 与 `verify-published` 起的临时前缀进程随命令结束自然退出 |
 | 遗留未追踪件 | 0 | 变异用的 `release-artifact.mjs` 备份、`my-synclog.md`、金样基线 sha 都在 `/var/tmp`，随上面那条一起删；仓库树里没有本会话留下的未追踪文件（`git status --porcelain` 中属于本线的为 0 行） |
+
+---
+
+## 会话 · 2026-11-15（第三十九次）
+
+### 一、本轮性质
+
+**纯审查轮，零产品代码改动，无发版。** 全面审查了 fork 定制面与尺子层，未发现需要修复的 P0/P1 缺陷。唯一红的闸是 `fork-diff` 报 SYNCLOG.md 自 0.14.15 记录后又有移动——按纪律随本笔台账同批 `--record` 清掉。
+
+### 二、上一轮遗留核查（三条，均已在 main 落地）
+
+| 遗留项 | 判据 | 结论 |
+| --- | --- | --- |
+| `gp-harness-orphan-20261010`（verify-published 自回显断言改读已安装清单） | `grep -n "platform block" -A3 harness/glasspane-harness/packages/opencode/script/verify-published.ts` 报 `check("the installed package's os/cpu/version gates match the product's platform block",…)`，读自 `installedManifest`（336 行）；远端分支已删 | 已落地 |
+| `gp-harness-sc5-fork-20261020`（providers.ts + registry-readiness.ts） | 两文件均在 main（`src/tool/glasspane/providers.ts` 278 行 / `script/registry-readiness.ts` 267 行）；远端分支已删 | 已落地 |
+| `#license-and-attribution` 锚点（`harness-readme-license-anchor`） | `grep` 报标题为 `## License and attribution`（无 `&`），锚点 `#license-and-attribution` 一致；`scripts/check-doc-links.mjs` 第 119 行注明"已由收件人那条线改掉"、`DEFERRED_FINDINGS = []` | 已落地，豁免已删 |
+
+### 三、审查发现
+
+**正确性（fork 定制面）**
+
+- `permission.ask` 在定制面全树零命中（invariant 成立）
+- `providers.ts` 判定权全留内核：`attributionFrom` 经 `requireMethod` → `resolveProvider` 走内核注册表，本地无第二份阈值或判定逻辑
+- `registry.ts` 第 285 行 gp_ 保留防护到位：`reserved = new Set(s.builtin.filter(item => item.id.startsWith("gp_")))` 过滤 custom 中同名 id
+- `compaction.ts` `collectEvidenceAnchors` 正确遍历多 item 消息帧（`item.parts` 二层循环），#20 边界修复仍在
+- `index.ts` `requireCapability` 读 `hello.capabilities`，两分支（engine 未答 vs 已答但不含）remedy 正确区分
+- `postinstall.mjs` 加固完整：registry integrity 校验（`npm pack` + sha512 与 `dist.integrity` 比对）、叶子拒绝（`lstatSync`）、undo 备份
+
+**供应链安全**
+
+- `publish.ts` 仅指向 `product.json` 的 `registry`（第 54 行），无任何上游 registry 硬编码
+- `release.yml` 全部发布 job 强制 `workflow_dispatch` + `confirm=true` + `environment: release`；dispatch 校验 checkout HEAD == tag SHA（859 行）
+- `create-release` 显式 `--target $GITHUB_SHA`（284 行）——targetCommitish 缺口已修（v0.6.4 记录的那条）
+- `install.sh` npm 通道诚实标注"product signature: not checked on this channel"（282 行）；asset 通道强制 sha256 + GPG，gpg 不在场时 REFUSAL 不降级
+
+**结论：无 P0/P1 缺陷。** 定制面的"判定留 Swift"、"gp_ 命名空间不可覆盖"、"注册表先于呈现"、"registry integrity 校验"四条 invariant 全部成立。
+
+### 四、本轮闸结果
+
+| 闸 | 数字 | 判据 |
+| --- | --- | --- |
+| fork-diff | 4630/6772 identical, 294 edited, 140 added, 1708 deleted | 红仅 SYNCLOG.md blob 落后（本笔 `--record` 清） |
+| tool-surface | 面 A 13027/21.33%｜面 B 14453/23.67%｜无棘轮增长 | 交叉检查已花费，LOC 棘轮守 |
+| surface-semantics | 0 hits 增长 | 全绿（含 2 条正对照） |
+| brand-surface | 血缘 9677 / 基线 9677｜0 hit | 全绿（本轮反向变异证能开火：基线 -7 → rc=1 "bloodline names may shrink, never multiply"） |
+| product-surface | 6642 agreement(s), 0 problem(s) | 全绿 |
+| hook-liveness | 21 hooks vs v1.18.32, no drift | 全绿 |
+| kernel-pin | installed 0.1.14 == probe latest, 26 contracts sha256 ok | 全绿，无漂移 |
+| fork 测试（opencode） | 211 pass / 0 fail / 4.83s | 全绿 |
+| fork 测试（tui） | 37 pass / 0 fail / 2.01s | 全绿 |
+| typecheck | opencode / tui / sdk/js / plugin 全 rc=0 | 全绿 |
+| kernel-conformance | 16 fixture(s) 通过 golden | 全绿 |
+| publish --dry-run | glasspane-harness@0.14.15 pack 干净，2 目标未构建（预期） | 全绿 |
+| check-workflows | self-test 48 cases 各自 fail → 28 变异捕获 / 20 legal silent；主闸 rc=0 | 全绿 |
+| check-doc-links | rc=0 | 全绿 |
+
+### 五、反向验证
+
+brand-surface 反向变异（金样 lineage.occurrences -7 → 树 9677 > 基线 9670）报具名红：`✗ lineage occurrences grew 9670 → 9677 (bloodline names may shrink, never multiply)`，恢复金样后 rc=0。sha 前后相等（`51c7ffca…`）确认恢复。
