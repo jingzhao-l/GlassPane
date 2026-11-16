@@ -1811,3 +1811,42 @@ stderr 空。`.asc` 在一次性钥匙环里验：`using RSA key 0929EA31DF4F742
    0 行，`engine.sock` 被 unlink（信号闸在真进程上复现）。在册的真 daemon
    （`~/Applications/GlassPane Daemon.app`，pid 52139，`--socket-path ~/.glasspane/engine.sock`）本 run
    没碰：`--prune-evidence` 一类破坏性旗标一次都没执行过。`/var/tmp/gp-ax*` 收口时回收。
+
+## 每日真机核对 2026-11-16（本轮 07:30 主仓线；被测产物＝main `8f6375d7` 的 debug 构建 `engine/.build/debug`）
+
+helper 本轮重写：`/var/tmp/glasspane-main-check/2026-11-16/gp-ax-walk.swift`（上一轮那份已被 /var/tmp
+清理；本机无 pyobjc，`cliclick` 点不动裸可执行文件，AX 才点得动，办法与 10-22/10-29/10-30/11-03 各节
+同源：按 `AXIdentifier` 读、按 `kAXPressAction` 点）。全部运行都带 `--state-dir <隔离根>` 与
+`--socket-path <隔离根>/engine.sock`，`--prune-evidence` / `--project-remove` / `--project-prune` /
+「重启后台服务」一类破坏性或改状态的旗标与控件**一次都没有执行过**。
+
+1. **daemon 在隔离根上的自报**：`glasspaned --state-dir <根> --permissions` 退 0，回包
+   `accessibility=granted / input-monitoring=granted / screen-recording=granted /
+   developer-tools=unverifiable`、`verdict:"granted"`、`seatsNotGranted:[]`；`verdictExcludes` 里
+   developer-tools 那一项自己写明"这一席本命令不量，报 granted/denied 都是没读到的判决"，next 指
+   `--check-developer-tools`。
+2. **hello 的真帧**（真 socket，不是读源码）：`version: 1.31.6`、`stateRoot`=那枚隔离根、
+   `capabilities` **11** 枚 = `attach, act, observe, assert_element, diagnose, last_evidence, snapshot,
+   restore, audit_ui, capture_view, probe_status`；socket 从落盘即 `srw-------`（0600）。`pid` 自报
+   等于本 run 起的那个进程。
+3. **面板按标识可读且不自造读数**：权限页一次遍历 **31** 个 `gp-*` 标识，席位徽标把**实测值**写进
+   标识本身（`gp-perm-accessibility-granted` / `gp-perm-input-monitoring-granted` /
+   `gp-perm-screen-recording-granted` / `gp-perm-developer-tools-unverifiable`），与 2 的 daemon 自报
+   逐项一致；`gp-daemon-liveness-answering`=「后台服务运行中」、`gp-daemon-state-root` /
+   `gp-daemon-socket-origin` 都指回隔离根（面板探的是 `GLASSPANE_ENGINE_SOCK` 点名的那一个）。
+4. **控件按得动、确实换页**（`kAXPressAction`，每次按压前该标识 `enabled=1`，逐张记 `err=0`）：
+   `gp-nav-updates` → 标识集合 31 → 30；`gp-nav-projects` → 11；`gp-nav-recipes` → 14；
+   `gp-nav-approvals` → 11；`gp-nav-evidence` → 12（档案页本轮读到 `gp-refresh-evidence` 与
+   `gp-daemon-age-retention`/`gp-daemon-stats-unmeasured` 两句诚实读数：隔离根还没有档案目录时
+   明说"无摘要可聚合"）；`gp-nav-permissions` → 31（回到权限页，集合复原）。
+   这一格证到的是"按下去换了可见面 / 按得动"，不写成"证到了状态刷新"。
+5. **对 11-03 发现 #21 的复现**：`gp-refresh-daemon-stats` 在源码里是登记的
+   （`EvidenceStatsView.swift`，已被 `panelIdentifiersAreStillEnumerated` 钉住），但本轮档案页遍历里
+   它不出现，press 回 `identifier-not-found`——与 11-03 那一节的结论同形（源码登记、该渲染状态不出现），
+   本节只复现，不改动结论。
+6. **进程归属两次 `pgrep` 判决**：本 run 起的 daemon（91392）与面板（91927）在 SIGTERM 后
+   `pgrep -fl "state-dir <隔离根>"` 与 `pgrep -fl "build/GlassPane.app"` 都是**空命中**；隔离根随后
+   `rm -rf` 回收。在册的真 daemon（`~/Applications/GlassPane Daemon.app`，pid 38146）本 run **没碰**：
+   路径与启动方式都不是本 run 起的。另一条如实观察：本机 devtools 会话（IDE 起的
+   `glasspaned --check-developer-tools`，pid 89694/89827）与本 run 无关，按"归属不明一律不动"处理，
+   未杀。

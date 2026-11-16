@@ -2,6 +2,32 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.31.7] — 2026-11-16
+
+**版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、npm 包
+`bin` 声明没动。`git diff v1.31.6..HEAD -- . ":(exclude)harness"` 只有 `engine/smoke.md` 一份文档
+（加版本线 bump 本身）——零产品代码改动，与 1.31.4 / 1.31.6 同形取 patch。版本线漂移检查
+（`node scripts/check-version.mjs`）开工时实测三者一致 1.31.6（仓库 = 最近 tag = npm registry 两包）。
+
+本轮在 main `8f6375d7` 上重跑两条审查（正确性逐文件审查 + 信任边界五条），**零 P0/P1**：socket 从
+`bind()` 即 `umask(0o177)` 落盘 `0600`、父目录 `0700` 带祖先隔离与叶子符号链接拒绝；TCC 四席只报
+实测值（三席 tri-state，developer-tools 恒 `unverifiable`）；evidence 不落盘屏幕文本
+（`captureView` 仅内存 `persisted:false`）；updater 归档成员拒绝对路径/`..`/反斜杠、symlink 物化为
+副本、gzip 上限 1 GiB、签名锚为 out-of-payload 指纹；错误帧恒 `{code,message,remedy}` 且 remedy 逐条
+指向真实存在的命令（`HumanInterventionAuditTests` 闸）；install.sh/bridge 全 argv `spawn` 无
+`shell=True`；`gp_*` 三处镜像（engine `capabilityMethods`=11 派生 / shell 同源 / 实测 16=11+5
+shell-only）同号无漂移。
+
+**本轮唯一实质动作是把真机证据补齐并随本版送到用户手上**（GUI 会话与权限都在，属物理上能做的项）：
+debug daemon 起在隔离状态根（`--state-dir` + `--socket-path`，socket 从落盘即 `srw-------`），
+`hello` 真帧回 `version:1.31.6`、`capabilities` **11** 枚；面板 AX `kAXPressAction` 走查本轮做完了——
+权限页一次遍历 **31** 个 `gp-*` 标识、席位徽标把实测值写进标识本身、六张 `gp-nav-*` 逐张按压全回
+`err=0` 且标识集合按页切换（31→30→11→14→11→12→31）。`gp-refresh-daemon-stats` 复现 11-03 发现 #21
+同形结论：源码登记、该渲染状态不出现（press 回 `identifier-not-found`）。本 run 起的 daemon 与面板
+SIGTERM 后两次 `pgrep` 均空命中、隔离根回收；在册真 daemon（pid 38146）一次没碰。
+
+无未合并未发布号。
+
 ## [1.31.6] — 2026-11-14
 
 **版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、npm 包
