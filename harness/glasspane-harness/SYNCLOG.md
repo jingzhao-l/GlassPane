@@ -5546,3 +5546,50 @@ owner 2026-09-25："那几个配套产品面还是需要的" + "README 等基础
 ### 五、反向验证
 
 brand-surface 反向变异（金样 lineage.occurrences -7 → 树 9677 > 基线 9670）报具名红：`✗ lineage occurrences grew 9670 → 9677 (bloodline names may shrink, never multiply)`，恢复金样后 rc=0。sha 前后相等（`51c7ffca…`）确认恢复。
+
+---
+
+## 会话 · 2026-11-16（第四十次）
+
+### 一、本轮性质
+
+**纯审查轮，零产品代码改动，无发版。** 自上一版 `0.14.15`（`ebd229b5`）以来 fork 树只动过两处：`SYNCLOG.md`（台账）与 `harness/contracts/fork-diff.json`（金样，随台账 blob 移动重记）——即 11-15 那次纯审查轮的形态。本轮重跑了全部闸并亲自做了定点不变量审查（审查子代理撞配额 HTTP 429，改由主代理通读），未发现新的 P0/P1 缺陷。
+
+### 二、上一轮遗留核查
+
+| 遗留项 | 判据 | 结论 |
+| --- | --- | --- |
+| `gp-harness-orphan-20261010` | `verify-published.ts` L336 读 `installedManifest`，check 文案 `the installed package's os/cpu/version gates match the product's platform block`；本地/远端分支均无引用 | 已落地（11-15 已核） |
+| `gp-harness-sc5-fork-20261020` | `src/tool/glasspane/providers.ts`(278 行) + `script/registry-readiness.ts` 均在 main；分支无引用 | 已落地（11-15 已核） |
+| 两远端游离分支 | `git for-each-ref refs/heads`=仅 main；`git branch -r`=origin/main+harness/main；split 仓 `ls-remote --heads`=仅 main；open PR=0 | 历轮清理已生效，无遗留 |
+
+### 三、审查发现（本轮，定点不变量 + 供应链）
+
+- `permission.ask` 死钩子在定制面全树**零命中**（排除 `permission.asked` 后 count=0）；正路走 `permission.asked` 事件 + `client.permission.reply`（`cli/cmd/run.ts:781-786` 等）——invariant 成立
+- 判定留 Swift：`providers.ts:119` 「方法名来自 engine 不来自 corpus」、`index.ts:499-500` 阈值由内核 `requireMethod` 答 registry 问题、verdict 仍只来自 daemon 回复；`daemon.ts` 只搬运 engine 的 verdict 不改写
+- 供应链：`publish.ts` 仅指向 `product.json.registry`，无上游 registry/ghcr/homebrew 硬编码；`build.ts` 只产 `dist/` 不推外部；`postinstall.mjs` 只打 pin 的 registry 并验 `dist.integrity`；`install.sh` GPG 缺席即 REFUSAL 不降级、npm 通道诚实标注「product signature: not checked on this channel」；curl 自升级路径已删（`installation/index.ts:202` 改为拒绝并指向 `install.sh`/`npm install -g`）
+
+**结论：无 P0/P1 缺陷。** 定制面四条 invariant（判定留 Swift、gp_ 命名空间不可覆盖、注册表先于呈现、registry integrity 校验）本轮再次成立。
+
+### 四、本轮闸结果
+
+| 闸 | 数字 | 判据 |
+| --- | --- | --- |
+| fork-diff | 4630/6772 identical, 294 edited, 140 added, 1708 deleted | 全绿（本轮台账追加后需 `--record` 清 SYNCLOG blob） |
+| tool-surface | 面 A 13027/21.33%｜面 B 14453/23.67%｜无棘轮增长 | 交叉检查已花费，LOC 棘轮守 |
+| surface-semantics | 0 hits 增长；正对照 3/3 | 全绿 |
+| brand-surface | 血缘 9677 / 基线 9677｜0 hit；正对照 8/8 | 全绿 |
+| product-surface | 6642 agreement(s), 0 problem(s) | 全绿 |
+| hook-liveness | 21 hooks vs v1.18.32, no drift；bound 2/2 | 全绿 |
+| kernel-pin | installed 0.1.14 == probe latest, 26 contracts sha256 ok | 全绿，无漂移 |
+| fork 测试（opencode） | 211 pass / 0 fail / 26.63s | 全绿 |
+| fork 测试（tui） | 37 pass / 0 fail / 10.77s | 全绿 |
+| typecheck | opencode / tui / sdk/js / plugin 全 rc=0 | 全绿 |
+| kernel-conformance | 16 fixture(s) 通过 golden | 全绿 |
+| publish --dry-run | glasspane-harness@0.14.15 pack 干净（Shasum `b3bf2edf…`），2 目标未构建（预期） | 全绿 |
+| check-workflows | self-test 48 cases；主闸 5 workflow 干净 | 全绿 |
+| check-doc-links | 32 文档 / 275 内链 / 46 外链 / 491 表格，rc=0 | 全绿 |
+
+### 五、反向验证
+
+本轮无代码改动，反向验证沿用 11-15 那次：brand-surface 反向变异（金样 lineage.occurrences -7）报具名红 `✗ lineage occurrences grew …`、恢复后 rc=0。product-surface 永不 `--record`（无基线）。
