@@ -21,6 +21,8 @@ import { SkillTool } from "./skill"
 import { glasspaneDefs } from "./glasspane"
 import * as Tool from "./tool"
 import { Config } from "@/config/config"
+import { ConfigPlugin } from "@/config/plugin"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { type ToolContext as PluginToolContext, type ToolDefinition } from "@opencode-ai/plugin"
 import type { JSONSchema7, JSONSchema7Definition } from "@ai-sdk/provider"
 import { Schema } from "effect"
@@ -198,7 +200,20 @@ const layer = Layer.effect(
           Glob.scanSync("{tool,tools}/*.{js,ts}", { cwd: dir, absolute: true, dot: true, symlink: true }),
         )
         if (matches.length) yield* config.waitForDependencies()
-        for (const match of matches) {
+        // [gp] Same gate as project plugins (ConfigPlugin.projectPluginPlan): importing a file out of
+        // the checkout under review is arbitrary code execution, and the process that runs it holds
+        // the `gp_*` accessibility surface. Tools a config file declares never reach this loop.
+        const toolPlan = ConfigPlugin.projectToolPlan(
+          matches.map((file) => ({ file })),
+          Flag.GLASSPANE_HARNESS_TRUST_PROJECT_PLUGINS,
+        )
+        if (toolPlan.refused.length > 0) {
+          yield* Effect.logWarning("project tools were discovered and not loaded", {
+            files: toolPlan.refused.length,
+            remedy: `set GLASSPANE_HARNESS_TRUST_PROJECT_PLUGINS=true for this run, or declare the tool in your config's "tool" list`,
+          })
+        }
+        for (const { file: match } of toolPlan.load) {
           const namespace = path.basename(match, path.extname(match))
           // `match` is an absolute filesystem path from `Glob.scanSync(..., { absolute: true })`.
           // Import it as `file://` so Node on Windows accepts the dynamic import.

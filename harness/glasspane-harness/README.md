@@ -101,7 +101,7 @@ change. The ruler prints its own line — this is that line, verbatim, against t
 recorded 2026-11-12:
 
 ```
-fork-diff vs v1.18.32: 4630/6772 byte-identical, 294 edited, 140 added, 1708 deleted
+fork-diff vs v1.18.32: 4630/6773 byte-identical, 294 edited, 141 added, 1708 deleted
 ```
 
 Most of what upstream ships is still byte-for-byte upstream — 4,630 of its 6,632 files. The
@@ -157,7 +157,7 @@ npm install -g glasspane-harness
 bun add -g glasspane-harness
 
 # or one-click (npm first, GitHub release asset as fallback)
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.14.15/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.14.16/scripts/install.sh | bash
 ```
 
 Two commands are installed: **`glasspane-harness`** and the short alias **`gp-harness`**. npm and

@@ -8,6 +8,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.14.16] — 2026-11-17
+
+> **取 patch**：本批没有新增 CLI 参数、工具面或产品形状。内容是**一处安全缺陷修复**——把
+> fork 自己写下的威胁模型（config.ts:512-516："从被审查目录导入文件即任意代码执行，且这份代码
+> 继承 `gp_*` 可访问性面"）应用到**项目工具**，与项目插件对称：
+> - **项目工具自动发现此前没有信任闸**：`src/tool/registry.ts` 会 glob 配置目录下的
+>   `{tool,tools}/*.{js,ts}` 并逐个动态 `import()`，无任何闸。同一文件里的插件路径早就加了
+>   `GLASSPANE_HARNESS_TRUST_PROJECT_PLUGINS` 闸（`projectPluginPlan`）——但工具路径走的是完全
+>   相同的 `import()`，威胁等级相同，却漏在闸外。克隆一个带恶意 `tool/*.ts` 的仓库即代码执行，
+>   而那个进程持有 `gp_*` 可访问性面（能驱动真实 macOS 应用）。修法：新增 `ConfigPlugin.projectToolPlan`
+>   （`projectPluginPlan` 的工具孪生），registry 的工具发现循环经它把关，与插件共用同一枚信任 flag，
+>   默认拒绝并打带 remedy 的日志。
+> - **固定点测试 +3**（`test/config/glasspane-project-tool-trust.test.ts`）：证明发现的工具默认
+>   被拒、空项目零拒绝（告警不会在空仓库上空转）、工具闸与插件闸共享同一信任决策。**反向验证**：
+>   把 `projectToolPlan` 的闸改成"无条件加载"，具名用例 2 条变红（`a discovered tool file is not
+>   loaded unless the operator trusted the checkout` + `the tool gate and the plugin gate share one
+>   trust decision`），恢复即绿。
+> - **版本线两处**（`product.json` 为真源 + `packages/opencode/package.json`）与安装入口
+>   `install.curl` 及其全部文档位点（`docs/install.md`×2 / `scripts/install.sh` / `README.md` /
+>   `README.zh-CN.md`）一并跟到 v0.14.16。
+> - **随批重记两把棘轮金样**：`tool-surface`（面 B +35 LOC，新闸代码）与 `brand-surface`（血缘
+>   +1，registry.ts 新增 `@opencode-ai/core/flag/flag` import——保留的血缘名，按基线只许减不许增，
+>   本轮是有意新增故 `--record`）；`fork-diff` 金样同批重记（2 tracked files 编辑 + 1 新增测试文件）。
+
 ## [0.14.15] — 2026-11-14
 
 > **取 patch**：本批没有新增 CLI 参数、工具面或产品形状。内容是**全面审查（正确性 + 供应链安全）

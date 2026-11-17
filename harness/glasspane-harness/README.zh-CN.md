@@ -90,7 +90,7 @@ SDK 与 plugin API。为了塞下内核，没有任何功能被砍掉。
 下面这一行——原样照抄，对着 2026-11-12 记录的金样：
 
 ```
-fork-diff vs v1.18.32: 4630/6772 byte-identical, 294 edited, 140 added, 1708 deleted
+fork-diff vs v1.18.32: 4630/6773 byte-identical, 294 edited, 141 added, 1708 deleted
 ```
 
 上游发来的 6,632 个文件里 4,630 个仍逐字节保持上游原样。改动（294 个）集中在 config/paths/品牌、
@@ -135,7 +135,7 @@ Azure、OpenRouter 等等全在——几百个模型——每一个都用**你�
 ```bash
 npm install -g glasspane-harness     # 推荐
 bun add -g glasspane-harness
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.14.15/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.14.16/scripts/install.sh | bash
 ```
 
 会装出两个命令：**`glasspane-harness`** 与短别名 **`gp-harness`**。npm 与 bun 从 wrapper 的

@@ -7,14 +7,14 @@
     "fork": "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted, and one deleted line excuses at most one re-added line (pairing is one-to-one, so 40 copies of a rebranded line bill 39)",
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
-  "observedAt": "2026-11-14",
+  "observedAt": "2026-11-17",
   "engineLoc": 33590,
   "engineFiles": 67,
   "surfaces": {
     "mcpShell": {
       "loc": 13027,
       "files": 16,
-      "ratio": 0.2133,
+      "ratio": 0.2132,
       "byFile": {
         "mcp-shell/src/tools.ts": 3168,
         "mcp-shell/src/engine-client.ts": 2285,
@@ -35,7 +35,7 @@
       }
     },
     "fork": {
-      "loc": 14453,
+      "loc": 14488,
       "files": [
         {
           "file": "packages/opencode/script/dependency-floors.ts",
@@ -880,7 +880,7 @@
         {
           "file": "packages/opencode/src/config/plugin.ts",
           "kind": "edited",
-          "lines": 14
+          "lines": 33
         },
         {
           "file": "packages/opencode/src/config/tui-migrate.ts",
@@ -1055,7 +1055,7 @@
         {
           "file": "packages/opencode/src/tool/registry.ts",
           "kind": "edited",
-          "lines": 31
+          "lines": 47
         },
         {
           "file": "packages/opencode/src/tool/webfetch.ts",
@@ -1223,14 +1223,14 @@
           "lines": 36
         }
       ],
-      "ratio": 0.2367,
+      "ratio": 0.2371,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
       },
       "testsExcluded": {
-        "files": 68,
-        "lines": 12216
+        "files": 69,
+        "lines": 12262
       },
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {
@@ -1239,7 +1239,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 27480,
+  "totalToolSurfaceLoc": 27515,
   "note": null,
   "carried": null
 }

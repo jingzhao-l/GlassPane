@@ -43,6 +43,25 @@ export function projectPluginPlan(discovered: readonly ConfigPluginV1.Spec[], tr
     : ({ load: [] as ConfigPluginV1.Spec[], refused: [...discovered] })
 }
 
+/**
+ * The tool twin of `projectPluginPlan`.
+ *
+ * Auto-discovered project tools (`{tool,tools}/*.{js,ts}`) go through the identical `import()` as
+ * auto-discovered plugins, so they carry the identical threat: importing a file out of the
+ * repository under review is arbitrary code execution, and in this product the process that runs
+ * it holds the `gp_*` accessibility surface. This used to be gated for plugins only — closing it
+ * for tools too so the fork's own stated threat model does not depend on which directory you
+ * globbed. Tools a config file declares are a different lane and never reach here.
+ */
+export function projectToolPlan(
+  discovered: readonly { file: string }[],
+  trusted: boolean,
+): { load: { file: string }[]; refused: { file: string }[] } {
+  return trusted
+    ? { load: [...discovered], refused: [] }
+    : { load: [], refused: [...discovered] }
+}
+
 export function pluginSpecifier(plugin: ConfigPluginV1.Spec): string {
   return Array.isArray(plugin) ? plugin[0] : plugin
 }
