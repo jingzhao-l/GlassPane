@@ -5593,3 +5593,46 @@ brand-surface 反向变异（金样 lineage.occurrences -7 → 树 9677 > 基线
 ### 五、反向验证
 
 本轮无代码改动，反向验证沿用 11-15 那次：brand-surface 反向变异（金样 lineage.occurrences -7）报具名红 `✗ lineage occurrences grew …`、恢复后 rc=0。product-surface 永不 `--record`（无基线）。
+
+## 会话 · 2026-11-17（第四十一次）
+
+### 一、本轮性质
+
+**安全修复轮，取 patch 0.14.16。** 两个审查子代理（正确性 + 供应链）各出发现；主代理逐条对代码复核后收口一处 P1 安全缺陷，一处 P2 经复核判为**误报**（我的第一版修法是错的，已收回）。
+
+### 二、上一轮遗留核查
+
+| 遗留项 | 判据 | 结论 |
+| --- | --- | --- |
+| `gp-harness-orphan-20261010` | 本地/远端分支均无引用；`verify-published.ts:363` 已读 installed manifest（`the installed package's os/cpu/version gates match the product's platform block`） | 已落地 |
+| `gp-harness-sc5-fork-20261020` | 分支无引用；`providers.ts` + `registry-readiness.ts` 在 main | 已落地 |
+| 11-05 交接的 README license 锚点 | README 已是 `## License and attribution` / `#license-and-attribution`（无 `&`）；父仓 `check-doc-links.mjs:119` 的 `harness-readme-license-anchor` 归口条目已删 | 已落地 |
+| 两远端游离分支 | `git for-each-ref refs/heads`=仅 main；`git branch -r`=origin/main+harness/main+origin/HEAD；split 仓 `ls-remote --heads`=仅 main | 历轮清理已生效 |
+
+### 三、审查发现与处置
+
+- **P1（已修）项目工具自动发现没有信任闸**：`src/tool/registry.ts:196-210` glob 配置目录下 `{tool,tools}/*.{js,ts}` 并逐个动态 `import()`，无闸。同一文件里的**插件**路径早有 `GLASSPANE_HARNESS_TRUST_PROJECT_PLUGINS` 闸（`config.ts:517` `projectPluginPlan`），威胁模型写在 `config.ts:512-516`（"从被审查目录导入文件即任意代码执行，且这份代码继承 `gp_*` 可访问性面"）。工具路径走完全相同的 `import()`、威胁等级相同，却漏在闸外——克隆带恶意 `tool/*.ts` 的仓库即代码执行，进程持有 `gp_*` 可访问性面。修法：新增 `ConfigPlugin.projectToolPlan`（`projectPluginPlan` 的工具孪生，`config/plugin.ts`），registry 工具发现循环经它把关，与插件共用同一枚信任 flag，默认拒绝 + 带 remedy 的 logWarning。固定点测试 +3（`test/config/glasspane-project-tool-trust.test.ts`）。
+- **P2（误报，我第一版修错已收回）README 分叉文件数**：审查报 README.md:107 的 "6,632 files" 与上方 fenced block 的 "6,772" 自相矛盾。我照此把 6,632 改成 6,772，随即 `product-surface` 的 `fork-diff-readme` 两条报红。逐条读该规则才知：**两个数都是对的、是不同分母**——`total=identical+edited+added+deleted=4630+294+1708+140=6772`（fenced block 用），`refSize=identical+edited+deleted=6632`（prose "N of its M files" 用，把 fork-only 的 added 排除）。规则从 `fork-diff.json` 重导这两个量，prose 的 6,632 与 golden 精确相等，`product-surface` 在 main 上本就绿——是**我的编辑**造的假错。已把两份 README 改回 6,632，无代码改动。教训：**报告的"数字矛盾"要先读产生该判据的闸**，尤其当那把闸本就在绿位——它红只可能是我动了它盯的东西。
+
+### 四、本轮闸结果
+
+| 闸 | 数字 | 判据 |
+| --- | --- | --- |
+| fork-diff | 4630/6773 identical, 294 edited, 141 added, 1708 deleted | `--record` 随批重记（新测试文件 → added 140→141, total 6772→6773）；全绿 |
+| tool-surface | 面 A 13027/21.33%｜面 B 14488/23.71%（+35 LOC = 新闸） | `--record` 随批；交叉检查已花费，LOC 棘轮守 |
+| surface-semantics | 0 hits；正对照 3/3 | 全绿 |
+| brand-surface | 血缘 9679 / 基线 9679｜0 hit；正对照 8/8 | `--record` 随批（+2：registry.ts 新增 `@opencode-ai/core/flag/flag` import + 新测试文件入扫集）；全绿 |
+| product-surface | 6642 agreement(s), 0 problem(s) @0.14.16 | 全绿（中途抓到 bun.lock 仍 0.14.15，`bun install` 后归位） |
+| hook-liveness | 21 hooks vs v1.18.32, no drift；bound 2/2 | 全绿 |
+| kernel-pin | installed 0.1.14 == probe latest, 26 contracts sha256 ok | 全绿，无漂移 |
+| fork 测试（opencode） | 固定点 4 文件 211 pass / 0 fail；tool-trust 新增 3 pass | 全绿 |
+| fork 测试（tui） | 37 pass / 0 fail | 全绿 |
+| typecheck | opencode / tui / sdk/js / plugin 全 rc=0 | 全绿 |
+| kernel-conformance | 16 fixture(s) 通过 golden | 全绿 |
+| publish --dry-run | glasspane-harness@0.14.16 pack 干净（Shasum `4aff6c10…`） | 全绿 |
+| check-workflows | self-test 48 cases；主闸 5 workflow 干净 | 全绿 |
+| check-doc-links | 32 文档 / 275 内链 / 46 外链 / 493 表格，rc=0 | 全绿 |
+
+### 五、反向验证
+
+把 `projectToolPlan` 的闸改成"无条件加载"（`return { load: [...discovered], refused: [] }`），具名用例 2 条变红：`a discovered tool file is not loaded unless the operator trusted the checkout` + `the tool gate and the plugin gate share one trust decision, not two flags`；恢复即 3 pass。product-surface 永不 `--record`（无基线）。
