@@ -1850,3 +1850,45 @@ helper 本轮重写：`/var/tmp/glasspane-main-check/2026-11-16/gp-ax-walk.swift
    路径与启动方式都不是本 run 起的。另一条如实观察：本机 devtools 会话（IDE 起的
    `glasspaned --check-developer-tools`，pid 89694/89827）与本 run 无关，按"归属不明一律不动"处理，
    未杀。
+
+## 每日真机核对 2026-11-17（本轮 07:30 主仓线；被测产物＝main `0acccde4` 的 debug 构建 `engine/.build/debug`）
+
+本轮两条审查（正确性逐文件 + 信任边界七条）**零 P0/P1/P2**：唯一一条报出的 P3
+（`gp_attach` 广告 `oneOf` 漏 `projectId` 分支）经**执行证否**——`{projectId}` 单独被 shell 的
+zod refine 拒（`bundleId` XOR `pid` 恒须给一）、`{bundleId|pid, projectId}` 放行，与广告 schema
+（exactly-one + `projectId` 可选同位）一致，广告与行为不漂移。故本轮**零产品代码改动**，实质
+动作是把真机证据补齐并随本版送到用户手上（GUI 会话与三席权限都在，属物理上能做的项）。
+helper 本轮重写：`/var/tmp/glasspane-main-check/2026-11-17/gp-ax-walk.swift`（上一轮那份已被
+/var/tmp 清理）。全部运行都带 `--state-dir <隔离根>` 与 `--socket-path <隔离根>/engine.sock`，
+`--prune-evidence` / `--project-remove` / `--project-prune` / 「重启后台服务」一类破坏性或改状态
+的旗标与控件**一次都没有执行过**。
+
+1. **daemon 在隔离根上的自报**：`glasspaned --state-dir <根> --permissions` 退 0，回包
+   `accessibility=granted / input-monitoring=granted / screen-recording=granted /
+   developer-tools=unverifiable`、`verdict:"granted"`、`seatsNotGranted:[]`；stderr 如实注明
+   "--permissions reads no state, so the --state-dir root this run named was not consulted"。
+   另一次误把 `--socket-path` 与 `--permissions` 混用，被 usage 闸以 exit 64 拒并点名
+   `--socket-path is not read by --permissions`——一次性子命令不与服务态修饰旗标混用这条判据在真机
+   成立。
+2. **hello 的真帧**（真 socket，不是读源码）：`version: 1.31.7`、`capabilities` **11** 枚 =
+   `attach, act, observe, assert_element, diagnose, last_evidence, snapshot, restore, audit_ui,
+   capture_view, probe_status`；socket 从落盘即 `srw-------`（0600）。`gp_*` 三处镜像同号：engine
+   `capabilityMethods`=11 / shell 转发同源 9 条 daemon 能力 + 5 条 shell-only = 实测 16 条工具。
+3. **面板按标识可读且不自造读数**：权限页一次遍历 **28** 个 `gp-*` 标识，席位徽标把**实测值**写进
+   标识本身（`gp-perm-accessibility-granted` / `gp-perm-input-monitoring-granted` /
+   `gp-perm-screen-recording-granted` / `gp-perm-developer-tools-unverifiable`），与 1 的 daemon
+   自报逐项一致；`gp-daemon-liveness-answering`、`gp-daemon-state-root` / `gp-daemon-socket-origin`
+   都指回隔离根（面板探的是 `GLASSPANE_ENGINE_SOCK` 点名的那一个）。
+4. **控件按得动、确实换页**（`kAXPressAction`，每次按压前该标识 `enabled=1`，逐张记 `err=0`）：
+   `gp-nav-updates`（28，同页徽标集合）→ `gp-nav-projects`（11）→ `gp-nav-recipes`（14）→
+   `gp-nav-approvals`（11）→ `gp-nav-evidence`（12）→ `gp-nav-permissions`（28，回到权限页集合复原）。
+   本轮 11-16 那次 `gp-nav-updates` 回 30，本轮回 28——同一控件两次遍历的徽标数差属渲染态差异，
+   本节只记实测，不改动结论。这一格证到的是"按下去换了可见面 / 按得动"，不写成"证到了状态刷新"。
+5. **进程归属两次 `pgrep` 判决**：本 run 起的 daemon（62410）与面板（62475）在 SIGTERM 后
+   `pgrep -fl "state-dir <隔离根>"` 与 `pgrep -fl "glasspane-settings"` 两次都是**空命中**；隔离根
+   随后 `rm -rf` 回收。在册的真 daemon（`~/Applications/GlassPane Daemon.app`，pid 56488）本 run
+   **没碰**：路径与启动方式都不是本 run 起的。另一条如实观察：本机 devtools 会话（IDE 起的
+   `glasspaned --check-developer-tools`，pid 60567/60568）与本 run 无关，按"归属不明一律不动"处理，
+   未杀。
+
+   没碰：`--prune-evidence` 一类破坏性旗标一次都没执行过。`/var/tmp/gp-ax*` 收口时回收。
