@@ -3,6 +3,84 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-18（第四十二次会话）· 取号 0.14.17：压缩插件证据帧读取补 throw 闸 + 两处文档漂移（取 patch）
+
+### 〇、改动面数字
+
+`fork-diff vs v1.18.32: 4630/6773 byte-identical, 294 edited, 141 added, 1708 deleted`
+（金样随本批重记：四桶与 0.14.16 逐数一致，只有我们自己的 3 个文件的**内容哈希**移动——
+`glasspane-compaction.ts`、它的测试、`FORK.md`。没有触碰与上游的**差异面**。）
+
+`tool-surface`：面 A `mcp-shell/src` **13027 LOC / 21.31%**、面 B fork **14513 LOC / 23.74%**。
+面 B +25 LOC 是新闸代码与它的注释（`glasspane-compaction.ts` 的 try/catch 包裹），属本批有意增长，
+金样随批 `--record`；越限是基线常驻事实，crossing check 早已花掉。`no growth past the recorded baseline`。
+
+`brand-surface`：血缘 **9681 occurrence(s) / 3356 file(s)**。+2 来自 CHANGELOG 的 [0.14.17] 条目——它
+在说明"什么跟到了新号"的散文里两次引用 `packages/opencode/package.json` 这条版本线路径。与
+9616/9617/9618 同类，带 `--lineage-note` 记账，不是新的产品面/上游 npm 或平台名。0 hit。
+
+`product-surface`：**6642 断言 / 0 问题**（`glasspane-harness@0.14.17`）。
+
+### 一、本轮发现与修复（发现 3 条，修复 3 条，未修项 0）
+
+**P1 `collectEvidenceAnchors` 调 `readEvidenceFrame` 没有 throw 闸**（
+`packages/opencode/src/plugin/glasspane-compaction.ts`）。`kernel.ts` 只把 `KernelSchemaError`
+转成拒绝返回、其余一律 `throw`（kernel.ts:207）。决策日志插件 `glasspane-decision-log.ts:93-98`
+对**同一个调用**包了 try/catch 并写明为什么（宿主不接住 rejecting hook）。收集器漏了：读路径上一个
+非标签抛出会从 `collectEvidenceAnchors` 逃出、落进 `injectEvidenceAnchors` 的**渲染阶段** catch
+——那格的句子与 `GP_E_COMPACTION_RENDER` 码都把责任推给"本插件的渲染器"，还告诉读者"链在盘上、
+没被动过"，而内核读故障让这句话变成假的。修法：镜像 decision-log——把该调用包进闸，抛出记成锚点上的
+`GP_E_DECISION_LOG_RUNTIME`（账/内核事实），不再被重标成渲染缺陷。
+
+**固定点测试 +1**（`test/plugin/glasspane-compaction.test.ts`，"a frame the kernel read path
+rethrows is a ledger fact, not a renderer defect"）。**反向控制**：帧用一个在 `evidencePack` 访问时就抛的
+getter——它从 `readEvidenceFrame` 自己的 try **之前**逃出（那个 try 只护 `parseEvidencePackRead`）。
+旧的无闸收集器下这条测试直接 **ERROR**（抛出逃出收集器、断言根本跑不到）；修复本身就是它变绿的原因。
+
+P2 两条是 `FORK.md` 的文档漂移（无代码影响）：M1 行写死的"固定点测试 6 条"已与树的
+`glasspane-*.test.ts` 集合不符（FORK.md 自己就说"别信任何写死的数字"），改为指向集合；
+"验过的构建结果"一行仍写私有化前的 `dist/opencode-darwin-arm64/bin/opencode` 与开发回退版本串，
+改为产品真名与 `Script.version`。
+
+### 二、供应链安全审查（独立复核，无发现）
+
+按 prompt 的供应链清单逐条读了代码：`publish.ts`/`build.ts` 不往第三方基础设施推（registry 钉
+npmjs）；`postinstall.mjs` 走 `npm view dist.integrity` + `npm pack` 重算 sha512 比对，注释只声称它
+做到的那一半（存储/镜像侧坏 blob）；`install.sh` 三通道——release 资产通道验 SHA256SUMS + GPG
+（`.asc`，钉 `GLASSPANE_HARNESS_SIGNING_FPR`），curl 升级腿**不再 fetch-and-pipe 上游 install 脚本**
+（改为如实报错，指 npm 包）；项目 `tool/*` 自动发现与插件共用同一枚
+`GLASSPANE_HARNESS_TRUST_PROJECT_PLUGINS` 信任闸（0.14.16 那批加的）；两条工作流无
+`pull_request_target`、第三方 action 全按 SHA 钉、无 `${{ github.event }}` 注入 run 体；
+`setup-bun` 复合 action 内部 action 全钉 SHA。`permission.ask` 在 fork 里只有上游自己的
+doom-loop 守卫（processor.ts:372，逐字来自 v1.18.32，不在 fork-diff 编辑集）——按纪律我们不挂它，
+`hook-liveness` 的死钩子金样就是这条的报警器。
+
+### 三、跑了哪些闸、结果如何
+
+六把尺子从主仓根全绿：fork-diff `matches the recorded surface` / tool-surface `no growth` /
+surface-semantics `0 hit` / brand-surface `9681=9681` / product-surface `6642/0` / hook-liveness
+`2/2 绑定点解析`。`kernel-pin --check` 绿（0.1.14 == pin、lock、26 契约文件），`--probe` 报
+0.1.14 即 registry latest（无漂移）。`kernel-conformance` 16/16 fixtures 全答对。固定点四文件
+合跑 211 pass / 0 fail（本批改动前基线）。`product-surface`、`check-workflows --self-test`
+（48 cases）、`check-workflows`（5 workflows clean）、`check-doc-links`（275 内链 / 46 外链，OK）全绿。
+typecheck 四包 exit 0。`publish.ts --dry-run` 干净（wrapper pack 形状 + optionalDependencies 矩阵）。
+
+**没跑/假红照实写**：`glasspane-surface.test.ts` 的 3 条 socket ceiling 用例
+（`attach`/`probe_status` 越上限）在本机**负载 avg 257–308** 下超时为假红——它们起真 socket peer、
+内层 `Daemon.call(method, {}, 30_000)` 的硬超时与外层 `--timeout` 抢时间。这三条与本次改动
+**不相交**（我改的是 compaction 插件 + 它的测试 + FORK.md；surface 用例读的是 daemon/registry/index，
+一字未动），且当日基线（改动前）同批 211/0 已证非回归。隔离复跑 compaction 文件：49 pass / 0 fail
+（含新固定点）。**未观测**：真 daemon 权限席位下的 `gp_*` 端到端、真模型轮次、真 TUI 会话观感
+（组件级 37 条快照已绿）——均为物理边界，本机无从驱动。
+
+### 四、本轮替 owner 做的决定
+
+取 **patch**（无新增 CLI 参数/工具面/产品形状，纯修复）；随批重记 fork-diff / tool-surface /
+brand-surface 三把金样（fork-diff 四桶未动、tool-surface 面 B +25 LOC、brand 血缘 +2，均为本轮
+有意变化，依据与反证写在上面）。split 是否需要覆盖：先试普通 push（fast-forward），仅当远端真
+前进才用带显式 SHA 的 lease。
+
+
 ## 2026-11-14（第三十九次会话）· 取号 0.14.15：两处诚实性/治理缺陷修复（取 patch）
 
 ### 〇、改动面数字
