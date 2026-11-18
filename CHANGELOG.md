@@ -2,6 +2,46 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.31.9] — 2026-11-18
+
+**版本判断：patch。** 四条判据一条没碰：状态文件字段没动（`pruneFailures`/`pruneFailureTotal`
+本就是 R-15 那轮已发布的字段）、退出码集合没动、CLI 参数没动、npm 包 `bin` 声明没动。
+`git diff v1.31.8..HEAD -- . ":(exclude)harness"` 只有 `EvidenceStore.swift` 的 cap 路径失败
+上账 + 新测试 + 版本线 bump——零对外形状改动，与 1.31.4/1.31.6/1.31.7/1.31.8 同形取 patch。
+
+**修复（本轮唯一缺陷）：`EvidenceStore.pruneIfNeeded()` 按条数上限的 FIFO 删档把"删不掉"
+吞成"删掉了"。** 2026-11-18 两条审查（正确性逐文件审查 + 信任边界五条）里正确性那条唯一
+报出的真缺陷，位于 `engine/Sources/GlassPaneEngine/EvidenceStore.swift`（风险区：归因与证据
+语义）。形状与 R-15（2026-11-05）修掉的 TTL 路径同根：TTL 那半 `removeExpired` 早已用
+`noteRemovalFailure` + `log.error` 上账删不掉的枚数（CLI 由此能报"moved 7, 3 still there"），
+而按条数上限那半 `pruneIfNeeded` 仍用 `(try? removeItem) != nil` 静默计数——删不动的枚数既不
+进 `pruneFailures` 也不进 `pruneFailureTotal`，于是 `retentionNotice` 报的删除数偏小、一次部分
+成功被写成了一次圆满。后果在只读卷/带 ACL/带 immutable 位的档案上：归档永久超上限，每次写都
+重试 prune 并静默再失败，"审计档案静默删了一条"与"删了并说出来"在事后读起来是两件事——模块头
+与 `reportRetention` 那段注释正是这么要求它的。
+
+**修法与 TTL 那半对齐**：`pruneIfNeeded` 的 `try?` 换成 `do/catch`，失败走同一个
+`noteRemovalFailure(url:error:)` + `log.error`，victim 的名字与原因进 `pruneFailures`（上限
+`removalFailureCap`）、总数进 `pruneFailureTotal`。CLI 那一侧零改动即生效——`--prune-evidence`
+本就按 `pruneFailureTotal > 0` 把 partial 判为 `failed`/`failures` 形状并退 1（R-15 落地时
+建好的那半），cap 路径现在也喂它了。返回值语义不变：只数真删掉的，删不掉的不折进去。
+
+**反向验证（证明闸能红）**：新测试
+`EvidenceArchiveSafetyTests.testFifoPruneRefusedVictimIsNamedNotSilent`——cap=2、两枚旧档、给
+最老那枚 victim 带 `chflags uchg`（父目录仍可写，第三笔才写得进；实测本机 `uchg` 让
+`removeItem` 回 `Operation not permitted`），第三次写触发 cap prune。断言 victim 仍在盘上、
+`pruneFailureTotal == 1`、`pruneFailures` 点名到那一枚且带 reason；再解掉不可变位证明 victim
+真删得掉（差的只是那一位）。在修前的 `(try? …) != nil` 下 `pruneFailureTotal` 恒为 0，该断言
+必红——闸是能变红的，不是恒绿摆设。
+
+**其余审查结论**：信任边界五条（socket `umask(0o177)` 从 bind 起落盘 0600、父目录 0700 走
+祖先隔离与叶子符号链接拒绝、inode 级 unlink；TCC 四席只报实测值、developer-tools 恒
+unverifiable 且不进退出码判决；evidence 不落盘屏幕文本、pixel 只存 `changedPixelRatio` 标量、
+HTML 报告 `O_EXCL|O_NOFOLLOW` 0600 + fstat 复核；错误帧 remedy 逐条指向真实存在的命令；
+updater 签名锚 out-of-payload、TLS 不可关、版本比较走数值、spawn 全 argv 无
+`shell:true`）——本轮零 P0/P1/P2/P3，逐条经执行/读码证否。zip-slip、TOCTOU、日志泄密、
+HTTP 网关 loopback + 常时比较 token 同样核过，均已在案。
+
 ## [1.31.8] — 2026-11-17
 
 **版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、npm 包
