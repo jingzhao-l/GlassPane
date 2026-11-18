@@ -1892,3 +1892,48 @@ helper 本轮重写：`/var/tmp/glasspane-main-check/2026-11-17/gp-ax-walk.swift
    未杀。
 
    没碰：`--prune-evidence` 一类破坏性旗标一次都没执行过。`/var/tmp/gp-ax*` 收口时回收。
+
+## 每日真机核对 2026-11-18（本轮 07:30 主仓线 · v1.31.9 取号日；被测产物＝main `5c4a511f` 的 debug 构建 `engine/.build/debug`）
+
+本轮两条审查（正确性逐文件 + 信任边界五条）报出**一条 P2 并已修复**：`EvidenceStore.pruneIfNeeded()`
+按条数上限的 FIFO 删档把"删不掉"吞成"删掉了"（R-15 那轮只修了 TTL 那半，cap 那半仍用
+`(try? removeItem) != nil` 静默计数）。修法见 1.31.9 CHANGELOG；新测试
+`EvidenceArchiveSafetyTests.testFifoPruneRefusedVictimIsNamedNotSilent` 用 `chflags uchg` 夹具
+反向验证闸能红。信任边界五条零缺陷。本节把能做的真机项做完（GUI 会话与三席权限都在）。全部
+运行带 `--state-dir <隔离根>`；`--prune-evidence` / `--project-remove` / `--project-prune`
+一类破坏性旗标**一次都没有执行过**。helper 本轮重写（上轮那份已被 /var/tmp 清理）：
+`/var/tmp/gp-panel-1319/gp-ax-walk.swift`。
+
+1. **daemon hello 的真帧**（真 socket，换行分隔 JSON——本轮先猜成 4 字节长度前缀导致 recv
+   阻塞，读 `FrameCodec.swift` 才确认是 NDJSON，按真形状重写 helper）：`glasspaned --state-dir
+   <根> --socket-path <根>/engine.sock` 起在隔离根，真帧回 `version:1.31.9`、`capabilities` **11**
+   枚 = `attach, act, observe, assert_element, diagnose, last_evidence, snapshot, restore,
+   audit_ui, capture_view, probe_status`；socket 从落盘即 `0o600`。SIGTERM 后 `pgrep -fl
+   "gp-hello-1319b"` 空命中，隔离根回收。
+2. **`glasspaned --permissions` 自报**：退 0，回包 `accessibility=granted /
+   input-monitoring=granted / screen-recording=granted / developer-tools=unverifiable`、
+   `verdict:"granted"`、`seatsNotGranted:[]`、`verdictExcludes` 把 developer-tools 判为
+   `judgedByThisCommand:false` 并指向 `--check-developer-tools`；stderr 如实注明 "--permissions
+   reads no state, so the --state-dir root this run named was not consulted"。
+3. **MCP initialize 端到端**：`npm pack` mcp-shell → 装进干净前缀 → stdin 打一条 `initialize`
+   真帧，回包 `serverInfo.name = "glasspane-mcp"`、`serverInfo.version = "1.31.9"`——发布物与
+   registry 上的字节一致。本轮 `timeout` 命令在本机不存在（zsh 报 command not found、rc=127），
+   改为不带 timeout 直接跑（initialize 自身会退出）。
+4. **面板按标识可读且不自造读数**：权限页一次遍历 **28** 个 `gp-*` 标识，席位徽标把**实测值**
+   写进标识本身（`gp-perm-accessibility-granted` / `gp-perm-input-monitoring-granted` /
+   `gp-perm-screen-recording-granted` / `gp-perm-developer-tools-unverifiable`），与 2 的 daemon
+   自报逐项一致；`gp-daemon-liveness-answering`、`gp-daemon-state-root` / `gp-daemon-socket-origin`
+   都指回隔离根（面板探的是 `GLASSPANE_ENGINE_SOCK` 点名的那一个）。
+5. **控件按得动、确实换页**（`kAXPressAction`，每次按压前该标识 `enabled=1`，逐张记 `err=0`）：
+   `gp-nav-permissions`（28，同页徽标集合）→ `gp-nav-updates`（28）→ `gp-nav-projects`（11）→
+   `gp-nav-recipes`（14）→ `gp-nav-approvals`（11）→ `gp-nav-evidence`（11）→ `gp-nav-permissions`
+   （28，回到权限页集合复原）。这一格证到的是"按下去换了可见面 / 按得动"，不写成"证到了状态刷新"。
+6. **进程归属两次 `pgrep` 判决**：本 run 起的 daemon（70182）与面板（70360）在 SIGTERM 后
+   `pgrep -fl "state-dir <隔离根>"` 与 `pgrep -fl "gp-panel-1319/GlassPane.app"` 两次都是**空命中**；
+   隔离根随后 `rm -rf` 回收。面板退出时它顺手点了一次 `--evidence-stats`，那个一次性子命令进程
+   （71442）在第一次 pgrep 里仍活着，本轮点名称收、第二次 pgrep 空命中——一次性子命令不随面板
+   退出是它的设计，不是遗留，但收口时仍要单独确认。在册的真 daemon（`~/Applications/GlassPane
+   Daemon.app`）本 run **没碰**：路径与启动方式都不是本 run 起的。
+
+   没碰：`--prune-evidence` 一类破坏性旗标一次都没执行过。`/var/tmp/gp-panel-1319`、
+   `/var/tmp/gp-e2e-1319`、`/var/tmp/gp-verify-1319` 收口时回收。
