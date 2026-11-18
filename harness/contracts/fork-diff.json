@@ -2192,7 +2192,7 @@
     {
       "file": "bun.lock",
       "upstreamHash": "7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c",
-      "forkHash": "d03b1366f62aa25310259b89043c721c7ee9c115"
+      "forkHash": "7511f86b4f35622b8453557bafda0af6d3ac9867"
     },
     {
       "file": "bunfig.toml",
@@ -2807,7 +2807,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "9bdf7c684b23b4f99e23c1e0f31d604151de5baf"
+      "forkHash": "e3cff72539cfa695488bdbc8ae3c5930fc5c4bf2"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -3817,11 +3817,11 @@
     },
     {
       "file": "contracts/kernel-conformance.json",
-      "forkHash": "5868f7ca24a45cd44370e85551bf158704978ff1"
+      "forkHash": "04c8ca3d04d71ab1ff04ddefe5afdc374cad36a9"
     },
     {
       "file": "contracts/kernel-pin.json",
-      "forkHash": "9766ff02933047d493946f0fcd8b7f25162a4af9"
+      "forkHash": "376c2508c17859ab2e8f82c359671a654f64aae3"
     },
     {
       "file": "contracts/models-catalog.json",
@@ -4193,7 +4193,7 @@
     },
     {
       "file": "SYNCLOG.md",
-      "forkHash": "8b1cb8e59a83cc76660778032c65bfdedc3cc14f"
+      "forkHash": "53702fbda437d7583c539cbed93ecfd7bd8e17c5"
     }
   ]
 }
