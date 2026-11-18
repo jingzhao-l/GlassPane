@@ -988,6 +988,40 @@ describe("which blank the block prints, and what it says about it", () => {
     expect(new Set(lines).size).toBe(lines.length)
   })
 
+  test("a frame the kernel read path rethrows is a ledger fact, not a renderer defect", () => {
+    // DEFECT pinned: `collectEvidenceAnchors` called `readEvidenceFrame` unguarded, so the one
+    // throw `kernel.ts` deliberately rethrows (a non-`KernelSchemaError` from the read path —
+    // kernel.ts keeps only `KernelSchemaError` and returns a rejection for the rest) escaped the
+    // collector and landed in `injectEvidenceAnchors`' RENDER-stage catch. That catch's sentence
+    // and `GP_E_COMPACTION_RENDER` code both blame *this plugin's renderer* and tell the reader
+    // "the chain is on disk and untouched" — a claim a kernel read fault makes false. The sibling
+    // plugin (`glasspane-decision-log.ts`) has always wrapped the identical call for exactly this
+    // reason; the collector is the one that forgot.
+    //
+    // REVERSE CONTROL: the throw is a getter that fires on `evidencePack` access, so it escapes
+    // `readEvidenceFrame` *before* its own try (which only guards `parseEvidencePackRead`). Under
+    // the old unguarded collector this test ERRORS — the throw propagates out of
+    // `collectEvidenceAnchors` and the assertions never run. The fix is what makes it pass.
+    const frame = {
+      get evidencePack() {
+        throw new Error("reader blew up")
+      },
+    }
+    const collected = collectEvidenceAnchors([
+      message("gp_observe", { metadata: okMetadata({ decisionLog: receipt(), result: frame }) }),
+    ])
+    expect(collected.calls).toBe(1)
+    expect(collected.anchors.length).toBe(1)
+    expect(collected.anchors[0].operationId).toBeUndefined()
+    expect(collected.anchors[0].packUnreadable).toBe("GP_E_DECISION_LOG_RUNTIME")
+    // The receipt still chains, and the block names the real stage instead of blaming the renderer.
+    const line = anchorLine(renderAnchorBlock(collected))
+    expect(line).toContain("pack unreadable (GP_E_DECISION_LOG_RUNTIME)")
+    expect(line).toContain("outcome pass")
+    expect(line).toContain("ledger seq 0")
+    expect(line).not.toContain(`op ${OP_OK}`)
+  })
+
   test("and the two blanks are textually different sentences", () => {
     // THE IDENTITY OF THE OLD DEFECT, asserted directly: one readable pack with no id, one pack
     // that could not be read, same receipt, same method. Under the old renderer both lines read

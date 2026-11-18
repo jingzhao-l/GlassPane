@@ -1,5 +1,5 @@
 {
-  "observedAt": "2026-11-17",
+  "observedAt": "2026-11-18",
   "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
   "rules": [
     {
@@ -80,10 +80,10 @@
     "packages/core/src/plugin/skill/customize-harness.md"
   ],
   "lineage": {
-    "occurrences": 9679,
+    "occurrences": 9681,
     "filesScanned": 3356
   },
   "shippedFiles": 1323,
   "shippedSrc": 5,
-  "lineageNote": "2026-11-17: +3 from the project-tool trust gate — registry.ts adds one 'import { Flag } from @opencode-ai/core/flag/flag' (internal bloodline identifier, mirrors the config.ts import); the new test/config/glasspane-project-tool-trust.test.ts joins the scanned set; bun.lock's refreshed workspace entry adds one occurrence. None is new product surface or an upstream npm/platform name."
+  "lineageNote": "2026-11-18: +2 from the 0.14.17 CHANGELOG entry — it cites the 'packages/opencode/package.json' version-line path twice in prose describing what moved to the new number (the compaction-plugin throw-guard fix + two FORK.md doc drifts). Same class as 9616/9617/9618: the literal appears in the changelog explaining a change, none is a new product surface, npm/platform name, or product claim."
 }

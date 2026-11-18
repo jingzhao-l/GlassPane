@@ -8,6 +8,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.14.17] — 2026-11-18
+
+> **取 patch**：本批没有新增 CLI 参数、工具面或产品形状。内容是**全面审查（正确性 + 供应链安全）审出的
+> 一处错误分类缺陷修复 + 两处文档漂移**——都与 0.14.15 那批同类，是"声称做到了、实际没做到"这一类：
+> - **压缩插件的证据帧读取此前没有 throw 闸，会把内核故障误标成渲染缺陷**：`glasspane-compaction.ts`
+>   的 `collectEvidenceAnchors` 调 `readEvidenceFrame`（`kernel.ts`）时没包 try/catch。`kernel.ts` 只把
+>   `KernelSchemaError` 转成拒绝返回、其余一律 `throw`，所以读路径上一个非标签抛出会从收集器逃出、落进
+>   `injectEvidenceAnchors` 的**渲染阶段** catch——那一格的句子与 `GP_E_COMPACTION_RENDER` 码都把责任推给
+>   "本插件的渲染器"，还告诉读者"链在盘上、没被动过"，而内核读故障让这句话变成假的。姊妹插件
+>   `glasspane-decision-log.ts` 对**同一个调用**一直包着闸，收集器漏了。修法：镜像 decision-log——把该调用
+>   包进闸，抛出记成锚点上的 `GP_E_DECISION_LOG_RUNTIME`（账/内核事实），不再被重标成渲染缺陷。
+>   **固定点测试 +1**（`test/plugin/glasspane-compaction.test.ts`）：用一个在 `evidencePack` 访问时就抛的帧
+>   证明抛出不再逃出收集器、锚点带上真实阶段的码、台账字段仍链上。**反向控制**：旧的无闸收集器下这条测试
+>   直接 ERROR（抛出逃出 `collectEvidenceAnchors`，断言跑不到）——修复本身就是它变绿的原因。
+> - **FORK.md 两处陈旧实测读数**（文档漂移，无代码影响）：M1 行写死的"固定点测试 6 条"已与树的 `glasspane-*.test.ts`
+>   集合不符（FORK.md 自己就说"别信任何写死的数字"），改为指向集合；"验过的构建结果"一行仍写私有化前的
+>   `dist/opencode-darwin-arm64/bin/opencode` 与开发回退版本串，改为产品真名与 `Script.version`。
+> - **版本线两处**（`product.json` 为真源 + `packages/opencode/package.json`）、`bun.lock` 版本头，与安装入口
+>   `install.curl` 及其全部文档位点（`docs/install.md`×2 / `scripts/install.sh` / `README.md` /
+>   `README.zh-CN.md`）一并跟到 v0.14.17。
+> - **随批重记两把金样**：`fork-diff`（FORK.md + 收集器 + 测试三处内容哈希移动）与 `tool-surface`（面 B
+>   +25 LOC，新闸代码与注释）。
+
 ## [0.14.16] — 2026-11-17
 
 > **取 patch**：本批没有新增 CLI 参数、工具面或产品形状。内容是**一处安全缺陷修复**——把

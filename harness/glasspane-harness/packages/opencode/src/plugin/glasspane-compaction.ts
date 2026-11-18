@@ -218,7 +218,32 @@ export function collectEvidenceAnchors(messages: unknown): AnchorCollection {
       // the receipt can outlive a body the kernel's read-side parser rejects. The rejection
       // code travels with the blank, so a reader can tell "no id in a readable pack" from
       // "the pack could not be read" — see `EvidenceAnchor.packUnreadable`.
-      const read = readEvidenceFrame(metadata.result)
+      //
+      // Guarded like the decision-log plugin's identical call (`glasspane-decision-log.ts`
+      // `readEvidenceFrame`): `kernel.ts` rethrows anything that is not its own tagged error
+      // (it keeps only `KernelSchemaError` and returns a rejection for the rest). Left
+      // unguarded, that rethrow lands in the render-stage catch below, whose sentence and
+      // `GP_E_COMPACTION_RENDER` code both blame *this plugin's renderer* and tell the
+      // reader the chain is on disk and untouched — a claim a kernel read fault makes false.
+      // A fault reading the pack is a ledger/kernel fact, so it is recorded in the anchor
+      // shape rather than reclassified as a rendering defect.
+      let read: ReturnType<typeof readEvidenceFrame>
+      try {
+        read = readEvidenceFrame(metadata.result)
+      } catch (error) {
+        anchors.push({
+          method,
+          dimension,
+          operationId: undefined,
+          packUnreadable: "GP_E_DECISION_LOG_RUNTIME",
+          outcome: text(note.outcome),
+          ledgerLine: numberOf(note.line),
+          ledgerSequence: numberOf(note.sequence),
+          ledgerHash: text(note.hash),
+          ledgerPath: text(note.path),
+        })
+        continue
+      }
       anchors.push({
         method,
         dimension,

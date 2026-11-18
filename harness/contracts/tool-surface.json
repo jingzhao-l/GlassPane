@@ -14,7 +14,7 @@
     "mcpShell": {
       "loc": 13027,
       "files": 16,
-      "ratio": 0.2132,
+      "ratio": 0.2131,
       "byFile": {
         "mcp-shell/src/tools.ts": 3168,
         "mcp-shell/src/engine-client.ts": 2285,
@@ -35,7 +35,7 @@
       }
     },
     "fork": {
-      "loc": 14488,
+      "loc": 14513,
       "files": [
         {
           "file": "packages/opencode/script/dependency-floors.ts",
@@ -95,7 +95,7 @@
         {
           "file": "packages/opencode/src/plugin/glasspane-compaction.ts",
           "kind": "added",
-          "lines": 545
+          "lines": 570
         },
         {
           "file": "packages/opencode/src/plugin/glasspane-decision-log.ts",
@@ -1223,14 +1223,14 @@
           "lines": 36
         }
       ],
-      "ratio": 0.2371,
+      "ratio": 0.2374,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
       },
       "testsExcluded": {
         "files": 69,
-        "lines": 12262
+        "lines": 12296
       },
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {
@@ -1239,7 +1239,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 27515,
+  "totalToolSurfaceLoc": 27540,
   "note": null,
   "carried": null
 }
