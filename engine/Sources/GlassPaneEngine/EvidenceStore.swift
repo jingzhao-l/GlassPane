@@ -964,10 +964,11 @@ public final class EvidenceStore {
 
     /// Enforce the archive cap: when the evidence entry count exceeds
     /// `maxFiles`, delete the oldest `count - maxFiles` entries by mtime
-    /// (FIFO-by-mtime, spec v1.6 §12.2). Best-effort; returns how many were
-    /// actually removed. The just-written entry is never a victim because the
-    /// victims are chosen strictly from the oldest excess, and an entry whose
-    /// mtime cannot be read sorts as newest so it is never picked as old.
+    /// (FIFO-by-mtime, spec v1.6 §12.2). Returns how many were actually
+    /// removed; an entry whose removal is refused is **not** folded into that
+    /// count — it is named in `pruneFailures` via `noteRemovalFailure`, exactly
+    /// the R-15 contract the age path already honours, so a partial pass is
+    /// never reported as the whole job done.
     @discardableResult
     private func pruneIfNeeded() -> Int {
         let urls = archiveEntryURLs(keys: [.contentModificationDateKey])
@@ -980,8 +981,12 @@ public final class EvidenceStore {
         }
         var removed = 0
         for url in oldestFirst.prefix(excess) {
-            if (try? FileManager.default.removeItem(at: url)) != nil {
+            do {
+                try FileManager.default.removeItem(at: url)
                 removed += 1
+            } catch {
+                noteRemovalFailure(url: url, error: error)
+                log.error("over-cap evidence entry \(url.path) could not be removed (\(error)) — it is still on disk")
             }
         }
         return removed

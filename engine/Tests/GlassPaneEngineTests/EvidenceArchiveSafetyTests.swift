@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 @testable import GlassPaneEngine
 
 /// Deletion-radius guard for `EvidenceStore` (P5 §9.2 / v1.6 §12 retention).
@@ -223,8 +224,46 @@ final class EvidenceArchiveSafetyTests: XCTestCase {
 
     // MARK: - FIFO (maxFiles) pruning
 
-    func testFifoPruneCountsAndDeletesOnlyEvidenceEntries() throws {
-        let dir = makeTempDir("fifo")
+    /// R-15 的另一半（cap 路径）：删不掉的那枚必须上账，不许把一次部分成功写成
+    /// 圆满。夹具与 `DailyRound20261029Swift1` 同形——给**最老那枚** victim 带
+    /// `uchg`（父目录仍可写，第三笔才写得进），第三次写触发 cap prune：victim 回
+    /// `EPERM`，另一枚照删，两数之和等于本来要删的两枚。
+    func testFifoPruneRefusedVictimIsNamedNotSilent() throws {
+        let dir = makeTempDir("fifo-refused")
+        defer {
+            // 解掉夹具再清场：带 uchg 的那枚否则删不掉，会把临时目录留在盘上。
+            for seed: UInt64 in [41, 42] { chflags(entryURL(dir, seed: seed).path, 0) }
+            try? FileManager.default.removeItem(atPath: dir)
+        }
+        let store = makeStore(dir: dir, maxFiles: 2)
+        XCTAssertTrue(store.write(pack(seed: 41, createdAt: daysAgo(3))))
+        XCTAssertTrue(store.write(pack(seed: 42, createdAt: daysAgo(2))))
+        // 钉 mtime，让 victim 在同一墙钟秒内也无歧义；最老那枚（41）带不可变位。
+        try setMTime(entryURL(dir, seed: 41), to: Date(timeIntervalSinceNow: -300))
+        try setMTime(entryURL(dir, seed: 42), to: Date(timeIntervalSinceNow: -200))
+        XCTAssertEqual(chflags(entryURL(dir, seed: 41).path, UInt32(UF_IMMUTABLE)), 0,
+                       "夹具没装上：chflags uchg 失败")
+
+        XCTAssertTrue(store.write(pack(seed: 43, createdAt: daysAgo(1))))
+        defer { chflags(entryURL(dir, seed: 41).path, 0) }
+
+        // 43 进来了、cap=2 ⇒ excess=1，FIFO 只点名**最老那一枚** 41；它回 EPERM，
+        // 所以一枚都没删掉，档案仍在 3 条，而失败那一格必须把 41 报出来。
+        XCTAssertEqual(store.stats().count, 3, "victim 删不掉 ⇒ 那一条 cap prune 一枚都没少：\(store.stats().count)")
+        XCTAssertEqual(store.pruneFailureTotal, 1,
+                       "victim 删不动必须上账，而失败那一格是 \(store.pruneFailureTotal)")
+        XCTAssertNotNil(store.read(operationId: opId(41)), "删不掉的 victim 还在盘上")
+        XCTAssertEqual(store.pruneFailures.count, 1)
+        let failure = store.pruneFailures[0]
+        XCTAssertTrue(failure["file"]?.contains(opId(41)) == true,
+                      "点名要点到删不动的那一枚：\(failure)")
+        XCTAssertNotNil(failure["reason"], "点名要带原因：\(failure)")
+        // 解掉不可变位之后 victim 必须真删得掉——证明这一支差的只是那一位。
+        chflags(entryURL(dir, seed: 41).path, 0)
+        try FileManager.default.removeItem(at: entryURL(dir, seed: 41))
+    }
+
+    func testFifoPruneCountsAndDeletesOnlyEvidenceEntries() throws {        let dir = makeTempDir("fifo")
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let store = makeStore(dir: dir, maxFiles: 2)
         let decoys = try plantDecoys(in: dir)
