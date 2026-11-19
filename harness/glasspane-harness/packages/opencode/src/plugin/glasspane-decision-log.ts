@@ -98,7 +98,7 @@ export function recordToolExecution(
   }
   if (!read.ok) {
     // Measured against the engine, not a list kept here: `last_evidence` is the one
-    // method whose reply carries an `evidencePack` (`Dispatcher.swift:156`), so this is
+    // method whose reply carries an `evidencePack` (`Dispatcher.swift:216`), so this is
     // the ordinary path for every other gp_* call — `gp_act` included, whose reply is
     // the flat operation dict (`EngineCore.swift:1275-1300`). `skipped` is the honest
     // word for it: nothing was decided, so nothing is recorded, and a dimension declared

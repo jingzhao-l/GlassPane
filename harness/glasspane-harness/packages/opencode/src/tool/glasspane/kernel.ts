@@ -137,7 +137,7 @@ export interface LedgerRef {
 }
 
 /**
- * The daemon's evidence frame is `{evidencePack: {…}}` (`Dispatcher.swift:156`).
+ * The daemon's evidence frame is `{evidencePack: {…}}` (`Dispatcher.swift:216`).
  * The envelope is checked here; the body goes to the kernel's **read-side**
  * parser, which still accepts archives the engine legitimately wrote before the
  * schema froze. The label measured off the wire is returned alongside, because
@@ -456,7 +456,7 @@ export const DIMENSION_ID_LIMITS = {
  * agent says which dimension a call was serving, the shell echoes it into the tool
  * result's metadata, and compaction turns the pair into "2/3 verified". Only a call whose
  * engine reply carries an evidence pack produces the decision half of that pair — today
- * that is `last_evidence` and nothing else (`Dispatcher.swift:156`) — so a dimension
+ * that is `last_evidence` and nothing else (`Dispatcher.swift:216`) — so a dimension
  * declared on `gp_act`, `gp_observe`, `gp_attach` or `gp_diagnose` is recorded nowhere and
  * its dimension stays reported unverified. The shape is validated for every method that
  * accepts it, because a declaration that reaches the ledger malformed is the lying case;

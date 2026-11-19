@@ -8,6 +8,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.14.18] — 2026-11-19
+
+> **取 patch**：本批没有新增 CLI 参数、工具面或产品形状。内容是**全面审查（正确性 + 供应链安全）
+> 审出的四处文档漂移修复**——都是"引用了错的出处"这一类，代码行为无变化：
+> - **四处陈旧交叉引用 `Dispatcher.swift:156` 改为 `Dispatcher.swift:216`**：`evidencePack` 帧的真实
+>   返回点在 `engine/Sources/GlassPaneEngine/Dispatcher.swift` 的 `handleLastEvidence` 方法内的
+>   `return ["evidencePack": object]`（实测第 216 行）；第 156 行是 `handleAct` 的方法声明。`index.ts:37`
+>   早就写对了（"`Dispatcher.swift:216` … `:156` is `handleAct`"），姊妹四文件相对它是陈旧的。
+>   涉及文件：`packages/opencode/src/tool/glasspane/kernel.ts`（两处）、
+>   `packages/opencode/src/plugin/glasspane-compaction.ts`、
+>   `packages/opencode/src/plugin/glasspane-decision-log.ts`。判据：`grep -n "handleAct\|handleLastEvidence\|evidencePack" engine/Sources/GlassPaneEngine/Dispatcher.swift`
+>   返回 `75:handleAct` / `83:handleLastEvidence` / `155:private func handleAct(` / `209:private func handleLastEvidence(` / `216:return ["evidencePack": object]`。
+>   这个引用是"单发射者"事实的出处戳记——整个 dimension-coverage 设计依赖它，引用错行等于把读者引到
+>   别的方法体。
+> - **审查结论**：fork 定制面（trust gate、throw 闸、边界算术、`gp_` 保留集过滤）与供应链面
+>   （GPG 指纹逐字对、postinstall sha512 与 `dist.integrity` 端到端、registry 显式 pin、build 清 SENTRY_*）
+>   本轮复审未发现可利用缺陷。
+> - **版本线两处**（`product.json` 为真源 + `packages/opencode/package.json`）与安装入口 `install.curl`
+>   及其全部文档位点（`docs/install.md`×2 / `scripts/install.sh` / `README.md` / `README.zh-CN.md`）
+>   一并跟到 v0.14.18；`bun.lock` 经 `bun install` 重算（非手改）。
+
 ## [0.14.17] — 2026-11-18
 
 > **取 patch**：本批没有新增 CLI 参数、工具面或产品形状。内容是**全面审查（正确性 + 供应链安全）审出的

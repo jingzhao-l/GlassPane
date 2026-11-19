@@ -42,7 +42,7 @@ export type PlanRead = { ok: true; plan: RunPlanRef | null } | { ok: false; erro
  *    plan nobody ran.
  *    The remaining asymmetry is measured and printed, not assumed: the anchors that can
  *    carry a declared dimension come only from calls that recorded a decision, and the engine
- *    emits an `evidencePack` on one method, `last_evidence` (`Dispatcher.swift:156`),
+ *    emits an `evidencePack` on one method, `last_evidence` (`Dispatcher.swift:216`),
  *    so a dimension declared on `gp_act`, `gp_observe`, `gp_attach` or `gp_diagnose`
  *    never reaches an anchor at all — those calls record no decision, and an anchor is
  *    where a declared dimension would have been transcribed. `declaredWithoutAnchor` counts
