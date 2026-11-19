@@ -7,16 +7,16 @@
     "fork": "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted, and one deleted line excuses at most one re-added line (pairing is one-to-one, so 40 copies of a rebranded line bill 39)",
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
-  "observedAt": "2026-11-18",
-  "engineLoc": 33595,
+  "observedAt": "2026-11-19",
+  "engineLoc": 33643,
   "engineFiles": 67,
   "surfaces": {
     "mcpShell": {
-      "loc": 13027,
+      "loc": 13028,
       "files": 16,
-      "ratio": 0.2131,
+      "ratio": 0.2129,
       "byFile": {
-        "mcp-shell/src/tools.ts": 3168,
+        "mcp-shell/src/tools.ts": 3169,
         "mcp-shell/src/engine-client.ts": 2285,
         "mcp-shell/src/http-gateway.ts": 1799,
         "mcp-shell/src/project-registry.ts": 1744,
@@ -1223,7 +1223,7 @@
           "lines": 36
         }
       ],
-      "ratio": 0.2374,
+      "ratio": 0.2372,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
@@ -1235,11 +1235,11 @@
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {
         "package": "iterate-kernel",
-        "version": "0.1.14"
+        "version": "0.1.15"
       }
     }
   },
-  "totalToolSurfaceLoc": 27540,
+  "totalToolSurfaceLoc": 27541,
   "note": null,
   "carried": null
 }
