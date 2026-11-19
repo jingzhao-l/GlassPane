@@ -3,6 +3,94 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-19（第四十三次会话）· 取号 0.14.18：四处陈旧 Dispatcher.swift:156 交叉引用 → 216（取 patch）
+
+### 〇、改动面数字
+
+`fork-diff vs v1.18.32: 4630/6773 byte-identical, 294 edited, 141 added, 1708 deleted`
+（金样随本批重记：四桶与 0.14.17 **逐数一致**——没有任何我们与上游的差异面变化。只有
+`bun.lock`、`packages/opencode/package.json` 两个已在 declared divergence 里的文件的
+**内容哈希**随版本号追平而移动。）
+
+`tool-surface`：面 A `mcp-shell/src` **21.29%**（基线常驻超限，crossing check 早已花掉，
+LOC 棘轮守：`no growth past the recorded baseline`）；面 B fork **23.72%**（同上）。
+本轮零 LOC 增长——只改注释。
+
+`brand-surface`：血缘 **9681 occurrence(s) / 3356 file(s)**，与 0.14.17 持平。0 hit。
+CHANGELOG 的 [0.14.18] 条目引用了 `Dispatcher.swift:156`/`:216` 两条出处戳记——它们是
+**引擎文件路径 + 行号**的散文引用，不涉及上游 npm 名/平台包名/上游 registry，无需
+`--lineage-note`（按 9616/9617/9618 先例，那是引用版本线路径才记；本轮不是那种）。
+
+`product-surface`：**6642 agreement(s) held, 0 problem(s)**（glasspane-harness@0.14.18 —
+manifest, build, publish, installers and pipelines agree）。无 `--record`（永远禁）。
+
+`surface-semantics`：0 hit across 23 file(s)；3/3 positive controls fired。
+
+`hook-liveness`：21 hooks checked against `anomalyco/opencode@v1.18.32`, no drift；
+`tool.execute.after → glasspane-decision-log.ts`、`experimental.session.compacting →
+glasspane-compaction.ts` 两个 binding sites resolve。
+
+`kernel-pin`：iterate-kernel@0.1.15 matches its lock integrity and 26 pinned contract
+file(s)；`--probe` 报 0.1.15 是 published latest（无漂移）。
+
+### 一、审查发现与修法
+
+**发现**：`evidencePack` 帧的真实返回点在
+`engine/Sources/GlassPaneEngine/Dispatcher.swift` 的 `handleLastEvidence` 方法体内的
+`return ["evidencePack": object]`——**实测第 216 行**。第 156 行是 `private func handleAct(`
+的方法声明。判据：
+
+```
+grep -n "handleAct\|handleLastEvidence\|evidencePack" engine/Sources/GlassPaneEngine/Dispatcher.swift
+# 75:  return try handleAct(request.params)
+# 83:  return try handleLastEvidence(request.params)
+# 155: private func handleAct(_ params: [String: Any]) throws -> [String: Any] {
+# 209: private func handleLastEvidence(_ params: [String: Any]) throws -> [String: Any] {
+# 216: return ["evidencePack": object]
+```
+
+`index.ts:37` 早就写对了（"`Dispatcher.swift:216` … `:156` is `handleAct`"），姊妹四
+文件相对它是陈旧的。涉修：`kernel.ts:140`、`kernel.ts:459`、`glasspane-compaction.ts:45`、
+`glasspane-decision-log.ts:101`，四处注释里的 `Dispatcher.swift:156` → `Dispatcher.swift:216`。
+
+**为什么这是缺陷而不是 nit**：这个引用是"单发射者"事实的出处戳记——`dimensionContext`
+把"planned dimension"升成"verified"的那条证据链要求"engine 回包带 evidencePack 的方法
+只有一个"，整个 dimension-coverage 设计依赖它。引用错行等于把读者引到别的方法体，
+未来 sync 时按行号 diff 也会撞到 `handleAct`。
+
+**审查范围**：fork 定制面（trust gate、throw 闸、边界算术、`gp_` 保留集过滤）与供应链面
+（GPG 指纹逐字对、postinstall sha512 与 `dist.integrity` 端到端、registry 显式 pin、
+build 清 SENTRY_*）本轮全面复审未发现可利用缺陷。
+
+### 二、跑了哪些闸
+
+| 闸 | 结果 |
+|---|---|
+| `fork-diff --check`（先 check 后 record） | 4630/6773 byte-identical, 294/141/1708 四桶与 0.14.17 逐数一致 |
+| `tool-surface --check` | no growth past baseline |
+| `surface-semantics --check` | 0 hit；3/3 positive controls fired |
+| `brand-surface --check` | 0 hit；lineage 9681/3356 unchanged |
+| `product-surface --check` | 6642 agreement(s) / 0 problem(s) |
+| `hook-liveness --check` | 21 hooks, no drift |
+| `kernel-pin --check` / `--probe` | 0.1.15 matches lock + 26 contracts；published latest |
+| `bun test`（4 个 glasspane 固定点文件，--timeout 30000） | **212 pass / 0 fail** across 4 files，1492 expect() 调用，206.49s |
+| `bun run typecheck`（packages/opencode） | tsgo --noEmit 退 0 |
+| `scripts/check-workflows.mjs --self-test` | 48 case(s) each verified to fail — 28 mutation(s) + 20 legal shape(s) |
+| `scripts/check-workflows.mjs` | 5 workflow file(s) clean |
+| `scripts/check-doc-links.mjs` | 32 docs / 275 intra / 46 external / 495 tables；OK |
+
+### 三、没跑的部分照实写没跑
+
+- 整包构建（>10 分钟）：本轮零代码行为变化（4 行注释），按纪律不放进每条改动后的复跑。
+- `bun run script/publish.ts --dry-run`、端到端安装、`verify-published.ts`：随发版流程走
+  （tag → Release → npm publish → registry 读回 → 端到端安装 → 验签），不作为代码闸。
+- TUI 真实观感、真模型轮次、musl/baseline 目标：本机不可靠，照例标"未观测"。
+
+### 四、版本判断与发布
+
+取 **patch**（0.14.17 → 0.14.18）：本批没有新增 CLI 参数、工具面或产品形状，内容是
+四处文档漂移修复。判据写进 CHANGELOG 条目开头。
+
 ## 2026-11-18（第四十二次会话）· 取号 0.14.17：压缩插件证据帧读取补 throw 闸 + 两处文档漂移（取 patch）
 
 ### 〇、改动面数字
