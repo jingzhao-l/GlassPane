@@ -2,7 +2,7 @@
   "baseTag": "v1.18.32",
   "forkPath": "harness/glasspane-harness",
   "referenceClone": ".external/opencode",
-  "observedAt": "2026-11-18",
+  "observedAt": "2026-11-19",
   "counts": {
     "identical": 4630,
     "edited": 294,
@@ -3845,7 +3845,7 @@
     },
     {
       "file": "docs/kernel-integration.md",
-      "forkHash": "6574b70362332960337edb5a98af497fc0388887"
+      "forkHash": "4affea5da49d15c731738a8389148eee6fcbadd9"
     },
     {
       "file": "docs/migrate-from-opencode.md",
