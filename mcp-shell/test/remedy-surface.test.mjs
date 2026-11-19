@@ -232,6 +232,29 @@ test("every engine call in the tool layer carries the trail generation it was ad
   assert.ok(source.includes("session.generation"), "一条都没匹配到＝这个闸已经不再看任何东西");
 });
 
+test("gp_capture_view forwards engineBody(value), not the raw caller args", () => {
+  // The "engine never sees our `dimension` annotation" invariant (dimension.ts) is held at the
+  // default forward path by `engineBody(value)`. `captureView` has its own executor, so it is
+  // the one `.call(` that could otherwise bypass that strip: today `CaptureViewArgs` carries no
+  // `dimension`, so the leak is closed by luck of the schema — the next natural step (declaring
+  // dimension on every tool) would have forwarded it and put an unplanned-dimension declaration
+  // into the daemon frame. Pin the shape of the call, not the current schema.
+  const source = fs.readFileSync(path.resolve(HERE, "..", "src", "tools.ts"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("//"))
+    .join("\n");
+  const captureCalls = [];
+  for (const match of source.matchAll(/\.call\(\s*"capture_view"([\s\S]{0,120}?)\)/g)) {
+    captureCalls.push(match[1].replace(/\s+/g, " "));
+  }
+  assert.equal(captureCalls.length, 1, `capture_view 的 .call( 应恰好一处，实测 ${captureCalls.length} 处：${JSON.stringify(captureCalls)}`);
+  assert.ok(
+    captureCalls[0].includes("engineBody("),
+    `capture_view 的 .call( 必须经 engineBody 剥掉 shell 侧注解再发帧，实测：${captureCalls[0]}`,
+  );
+});
+
 /* ------------------------------------------------------------------ *
  * R9: the daemon's per-label capture advice, read out of `EngineCore.swift`.
  *

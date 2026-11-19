@@ -1003,7 +1003,13 @@ final class ConsoleModel: ObservableObject {
             // 两条 `readDataToEndOfFile()` 要等"所有写端关闭"才见得到 EOF，写端在子进程手里，
             // 所以是 terminate → waitUntilExit（收尸，同时解掉两条 reader）→ join → 关读端。
             // 预算 `timeoutSeconds` 一个字没动：一个只在安静时成立的时限判断不是控制。
-            process.waitUntilExit()
+            // SIGTERM 是请求不是保证：子进程若忽略它（或它派生、共享这两条 pipe 的孩子不肯死），
+            // 下面的 `waitUntilExit()` 会把这条 detached task 永久钉住——所以收尸这一步自己
+            // 也要有界，给一个宽限期后升到 SIGKILL（与 `UpdateModel.runUpdater` 同一份）。
+            if !waitForExit(process, grace: 5) {
+                kill9(process)
+                _ = waitForExit(process, grace: 5)
+            }
             group.wait()
             pipe.fileHandleForReading.closeFile()
             errorPipe.fileHandleForReading.closeFile()
@@ -1016,6 +1022,24 @@ final class ConsoleModel: ObservableObject {
         guard let text = String(data: outBox.value, encoding: .utf8),
               let errorText = String(data: errBox.value, encoding: .utf8) else { return nil }
         return (text, errorText, process.terminationStatus)
+    }
+
+    /// 等子进程退场，最多 `grace` 秒；返回是否真的退了。与无界的 `waitUntilExit()`
+    /// 的区别就在这个上界——超时那一趟的收尸不能反过来把调用者永久钉住。
+    private nonisolated static func waitForExit(_ process: Process, grace: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(grace)
+        while process.isRunning {
+            if Date() >= deadline { return false }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return true
+    }
+
+    /// 升到 SIGKILL。`interrupt()` 发的是 SIGINT，对一条忽略 SIGTERM 的进程同样不保证；
+    /// 只有 SIGKILL 不可捕获、不可忽略——收尸的最后一手必须是它。
+    private nonisolated static func kill9(_ process: Process) {
+        guard process.isRunning else { return }
+        kill(process.processIdentifier, SIGKILL)
     }
 
     /// 两路输出里"被理解的那一份"：带 JSON 对象形状的优先，stdout 在前

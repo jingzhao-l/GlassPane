@@ -2221,12 +2221,13 @@ async function captureView(
   context: ToolExecuteContext,
 ): Promise<ToolResult> {
   try {
-    // The generation travels with this call too. `capture_view` answers with a PNG
-    // and no operationId today, so nothing leaks if it is omitted — but that is a
-    // property of the reply shape, not of the call site, and the trail must not
-    // depend on nobody ever adding an id to this frame. The gate at the bottom of
-    // `test/remedy-surface.test.mjs` keeps every `.call(` in this file honest.
-    const raw = await context.engine.call("capture_view", args, context.session.generation);
+    // `engineBody` strips the shell-only `dimension` annotation, exactly as the default
+    // forward path does — hold the "engine never sees our annotation" invariant by the shape
+    // of this call, not by luck that `CaptureViewArgs` carries no `dimension` today. The
+    // generation travels with the call too, so a late reply stays attributable even though
+    // `capture_view` answers with a PNG and no operationId today; the fixed-point test at the
+    // bottom of `test/remedy-surface.test.mjs` keeps every `.call(` in this file honest.
+    const raw = await context.engine.call("capture_view", engineBody(args), context.session.generation);
     const body = (raw ?? {}) as Record<string, unknown>;
     const png = body.pngBase64;
     if (typeof png !== "string" || png.length === 0) {
