@@ -2,6 +2,34 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.31.10] — 2026-11-19
+
+**版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、
+npm 包 `bin` 声明没动。本版是**全面审查（正确性 + 信任边界）的两处 P2 修复 + iterate-kernel
+0.1.14 → 0.1.15 消费方追平**，无新增 CLI 参数、`gp_*` 工具或产品形状。
+
+- **两处子进程收尾的无界等待（P2）**：`UpdateModel.runUpdater` 与 `ConsoleModel.runDaemonCLI`
+  超时那一趟 `terminate()` 只发 SIGTERM，随后 `process.waitUntilExit()` 没有上界。SIGTERM 是
+  请求不是保证——子进程若忽略它（或它派生、共享 stdout 管道的孩子不肯死），`waitUntilExit()`
+  把那条 detached task 永久钉住，`inFlight` 闸闩死、整页更新/清理按钮再点不动且不报错。修法：
+  terminate 后给 5s 宽限，不退升到 SIGKILL（不可捕获不可忽略），再兜底等 5s。两处同形状，
+  各配 `nonisolated` 的 `waitForExit`/`kill9` 助手。
+- **`gp_capture_view` 发帧绕过 engineBody 剥注解（P2）**：默认前向路径 `runValidatedTool` 用
+  `engineBody(value)` 把 shell 侧 `dimension` 注解剥掉再发帧（引擎永不认识这个词）。`captureView`
+  有自己的 executor，是 `tools.ts` 里唯一一处 `.call(` 直接转 raw args——今天 `CaptureViewArgs`
+  是 `strictObject({scale})` 靠 schema 巧合没漏，一旦 dimension 加到这个工具就会把未计划的维度
+  声明送进 daemon 帧。改为经 `engineBody(args)`，按调用形状守住不变量。固定点测试 +1
+  （`remedy-surface.test.mjs`），反向控制=撤掉 `engineBody` 包裹后该用例具名变红。
+- **iterate-kernel 追平 0.1.15**：内核 0.1.15 修 decision-log 空行账本拒绝路径（canonical 侧已发
+  registry）。本版把 mcp-shell pin、根 lock、fork 侧 opencode pin 追到同号，corpus 镜像与
+  kernel-pin / kernel-conformance 金样随批重记（0.1.15 是代码修复，无 fixture/schema 变化）。
+  文档两处内核版本散文（README/kernel-integration）同步追平。
+
+**门禁实测**：`npm ci` / `npm run build` / `npm test --workspaces`（763+353+818 全 pass）/
+`check-version` / `check-doc-links` / `check-workflows --self-test`（48 case）+ `check-workflows`
+（5 文件）/ `swift build` / `swift test`（1616 pass / 0 fail / 5 skip）/ `sh -n install.sh` /
+`tool-surface --check` / `fork-diff --check` 全绿；两处 P2 修复配固定点测试与反向控制。
+
 ## [1.31.9] — 2026-11-18
 
 **版本判断：patch。** 四条判据一条没碰：状态文件字段没动（`pruneFailures`/`pruneFailureTotal`
