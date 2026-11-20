@@ -14,7 +14,7 @@
     "mcpShell": {
       "loc": 13028,
       "files": 16,
-      "ratio": 0.2129,
+      "ratio": 0.2128,
       "byFile": {
         "mcp-shell/src/tools.ts": 3169,
         "mcp-shell/src/engine-client.ts": 2285,
@@ -35,7 +35,7 @@
       }
     },
     "fork": {
-      "loc": 14513,
+      "loc": 14538,
       "files": [
         {
           "file": "packages/opencode/script/dependency-floors.ts",
@@ -1033,6 +1033,11 @@
           "lines": 5
         },
         {
+          "file": "packages/opencode/src/session/retry.ts",
+          "kind": "edited",
+          "lines": 11
+        },
+        {
           "file": "packages/opencode/src/session/session.ts",
           "kind": "edited",
           "lines": 1
@@ -1100,7 +1105,7 @@
         {
           "file": "packages/tui/src/app.tsx",
           "kind": "edited",
-          "lines": 0
+          "lines": 3
         },
         {
           "file": "packages/tui/src/attention.ts",
@@ -1121,6 +1126,16 @@
           "file": "packages/tui/src/component/dialog-provider.tsx",
           "kind": "edited",
           "lines": 11
+        },
+        {
+          "file": "packages/tui/src/component/dialog-retry-action.tsx",
+          "kind": "edited",
+          "lines": 3
+        },
+        {
+          "file": "packages/tui/src/component/error-component.tsx",
+          "kind": "edited",
+          "lines": 8
         },
         {
           "file": "packages/tui/src/component/use-connected.tsx",
@@ -1223,14 +1238,14 @@
           "lines": 36
         }
       ],
-      "ratio": 0.2371,
+      "ratio": 0.2374,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
       },
       "testsExcluded": {
-        "files": 69,
-        "lines": 12296
+        "files": 71,
+        "lines": 12324
       },
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {
@@ -1239,7 +1254,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 27541,
+  "totalToolSurfaceLoc": 27566,
   "note": null,
   "carried": null
 }

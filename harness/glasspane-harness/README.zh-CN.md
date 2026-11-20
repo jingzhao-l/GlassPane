@@ -87,13 +87,13 @@ SDK 与 plugin API。为了塞下内核，没有任何功能被砍掉。
 这句话是**量出来的**，不是承诺。分叉锚定上游
 [anomalyco/opencode](https://github.com/anomalyco/opencode) 的某个 tag，
 `harness/tools/fork-diff.mjs` 每次改动都会把本树与那个 tag 逐文件对比。那把尺子自己打出的就是
-下面这一行——原样照抄，对着 2026-11-12 记录的金样：
+下面这一行——原样照抄，对着 2026-11-20 记录的金样：
 
 ```
-fork-diff vs v1.18.32: 4630/6773 byte-identical, 294 edited, 141 added, 1708 deleted
+fork-diff vs v1.18.32: 4625/6773 byte-identical, 299 edited, 141 added, 1708 deleted
 ```
 
-上游发来的 6,632 个文件里 4,630 个仍逐字节保持上游原样。改动（294 个）集中在 config/paths/品牌、
+上游发来的 6,632 个文件里 4,625 个仍逐字节保持上游原样。改动（299 个）集中在 config/paths/品牌、
 `gp_*` 工具面、内核绑定、压缩钩子和打包脚本；删掉的是上游**自己的**发布管道（ghcr 镜像、AUR、
 Homebrew tap、托管 console 账号）——外加 0.4.0 里下面说的第一方账号面。
 
@@ -135,7 +135,7 @@ Azure、OpenRouter 等等全在——几百个模型——每一个都用**你�
 ```bash
 npm install -g glasspane-harness     # 推荐
 bun add -g glasspane-harness
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.14.18/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.15.0/scripts/install.sh | bash
 ```
 
 会装出两个命令：**`glasspane-harness`** 与短别名 **`gp-harness`**。npm 与 bun 从 wrapper 的

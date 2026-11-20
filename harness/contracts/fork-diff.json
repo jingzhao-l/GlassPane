@@ -2,10 +2,10 @@
   "baseTag": "v1.18.32",
   "forkPath": "harness/glasspane-harness",
   "referenceClone": ".external/opencode",
-  "observedAt": "2026-11-19",
+  "observedAt": "2026-11-20",
   "counts": {
-    "identical": 4630,
-    "edited": 294,
+    "identical": 4625,
+    "edited": 299,
     "added": 141,
     "deleted": 1708
   },
@@ -206,6 +206,7 @@
     "packages/opencode/src/server/routes/instance/httpapi/server.ts",
     "packages/opencode/src/session/llm/native-runtime.ts",
     "packages/opencode/src/session/llm/request.ts",
+    "packages/opencode/src/session/retry.ts",
     "packages/opencode/src/session/session.ts",
     "packages/opencode/src/skill/index.ts",
     "packages/opencode/src/storage/schema.ts",
@@ -229,6 +230,8 @@
     "packages/opencode/test/plugin/workspace-adapter.test.ts",
     "packages/opencode/test/server/auth.test.ts",
     "packages/opencode/test/server/httpapi-experimental.test.ts",
+    "packages/opencode/test/session/retry.test.ts",
+    "packages/opencode/test/session/schema-decoding.test.ts",
     "packages/plugin/package.json",
     "packages/plugin/script/publish.ts",
     "packages/script/src/index.ts",
@@ -242,6 +245,8 @@
     "packages/tui/src/component/dialog-model.tsx",
     "packages/tui/src/component/dialog-move-session.tsx",
     "packages/tui/src/component/dialog-provider.tsx",
+    "packages/tui/src/component/dialog-retry-action.tsx",
+    "packages/tui/src/component/error-component.tsx",
     "packages/tui/src/component/use-connected.tsx",
     "packages/tui/src/config/keybind.ts",
     "packages/tui/src/context/editor.ts",
@@ -2192,7 +2197,7 @@
     {
       "file": "bun.lock",
       "upstreamHash": "7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c",
-      "forkHash": "750f7bfff15b11c838452d2a701eb896669a95c8"
+      "forkHash": "ec7583550bf58d8d97fabfb7041d75ec33542cf3"
     },
     {
       "file": "bunfig.toml",
@@ -2807,7 +2812,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "3f1367845b2ae7193a06af90e9762d5cc81431d3"
+      "forkHash": "78abb07dc1e5a5b53a52b0af2589ff34f5895490"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -3130,6 +3135,11 @@
       "forkHash": "834ee1764392b4e16dd3abbc394b2fb5c4a13337"
     },
     {
+      "file": "packages/opencode/src/session/retry.ts",
+      "upstreamHash": "284c0f0ade4143df6aae127e60c511f5466c46a6",
+      "forkHash": "9b8bbaaa3c05dc4925f165f510d992376f090780"
+    },
+    {
       "file": "packages/opencode/src/session/session.ts",
       "upstreamHash": "a2a91cd47b5e854606444d1fc09fb18515fbe3b7",
       "forkHash": "9cb13c4af6d56ca082c06a3f2b48adb4f7205560"
@@ -3245,6 +3255,16 @@
       "forkHash": "9f95e8b69422eccde867e8f774f8c40a976b3605"
     },
     {
+      "file": "packages/opencode/test/session/retry.test.ts",
+      "upstreamHash": "20c8678cf0a7b8c82f772d5431576723c6ca9b92",
+      "forkHash": "2f324fb18b077e4e99c4ac9949d60f57752d5e34"
+    },
+    {
+      "file": "packages/opencode/test/session/schema-decoding.test.ts",
+      "upstreamHash": "3bcbd55d4b6ab3d47ac019845c636e98f743d370",
+      "forkHash": "bf17189d5d2cf78ea454ee2822bc7e37f50a805e"
+    },
+    {
       "file": "packages/plugin/package.json",
       "upstreamHash": "efb79b8e94f1115cc97529432554e0b8f3957be4",
       "forkHash": "6fc52b8b65cb2aefc4c1da0afa4d051b664cff3b"
@@ -3287,7 +3307,7 @@
     {
       "file": "packages/tui/src/app.tsx",
       "upstreamHash": "6852311f9e845639027804d8d18c7b3c23475b6e",
-      "forkHash": "bd2bc2a9526b2a42a415cf253254caec39398959"
+      "forkHash": "be95ccfa6e4d6dae7a5b2e6e44dfb60b5c7cbc1b"
     },
     {
       "file": "packages/tui/src/attention.ts",
@@ -3308,6 +3328,16 @@
       "file": "packages/tui/src/component/dialog-provider.tsx",
       "upstreamHash": "6b86a32e3482a819de0e8985bf49d7e0f7d8537c",
       "forkHash": "458d6db86c69e3123aa7c0153152b34cf7de3861"
+    },
+    {
+      "file": "packages/tui/src/component/dialog-retry-action.tsx",
+      "upstreamHash": "b52a6e9b9f698279f59fac49623203da0ac5608f",
+      "forkHash": "7a24eefa970bcf1286b2c03415070c971ee08dd3"
+    },
+    {
+      "file": "packages/tui/src/component/error-component.tsx",
+      "upstreamHash": "48f5f93309fb09568f3859e4a6ec154be0c28e8d",
+      "forkHash": "444215ea84877cfe7ecff8d13390cc1b3a51d993"
     },
     {
       "file": "packages/tui/src/component/use-connected.tsx",
@@ -3577,7 +3607,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "0b132a32252fa69d0c4e7b30b94bedbf2ec9df75"
+      "forkHash": "53c47485704377297fd3689901bea6efd2cb46d6"
     },
     {
       "file": "script/beta.ts",
@@ -3805,7 +3835,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "48d602b5df3e59c077428567851a488b293e2c09"
+      "forkHash": "1ff32f4e58dccac905ee3c8358b48ec8803675e5"
     },
     {
       "file": "contracts/dependency-floors.json",
@@ -3841,7 +3871,7 @@
     },
     {
       "file": "docs/install.md",
-      "forkHash": "c3e206d80941019a58e8e2592f4df5344f3aeb21"
+      "forkHash": "6b0bb0c550dbed20f8b00c9e180eb2c925b52c17"
     },
     {
       "file": "docs/kernel-integration.md",
@@ -4149,11 +4179,11 @@
     },
     {
       "file": "product.json",
-      "forkHash": "5c91b9431d82c93415fd061d48b93321008b1fa6"
+      "forkHash": "728d8891000ca084e9f0d54e32451915a1ad8b27"
     },
     {
       "file": "README.zh-CN.md",
-      "forkHash": "ce77dfd596ea7b4d929ca45ba19c3a4153a4600d"
+      "forkHash": "470f02529cdf373f2898a31bff537a33895df11b"
     },
     {
       "file": "script/assert-ci-green.mjs",
@@ -4189,7 +4219,7 @@
     },
     {
       "file": "scripts/install.sh",
-      "forkHash": "25df66f090668a696c49318a1f84f75fd07885f6"
+      "forkHash": "100fbf264dfe20b6260dfb16d092bdff95c04838"
     },
     {
       "file": "SYNCLOG.md",

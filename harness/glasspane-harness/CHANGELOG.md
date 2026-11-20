@@ -8,6 +8,53 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.15.0] — 2026-11-20
+
+> **取 minor**：本批改动**用户可见的产品面文案与目标**——崩溃屏、`docs.open` 命令、引擎重试动作的
+> 文案——都在用户看得见的地方出现，故按 pre-1.0 的 minor 口径取号（0.14.18 → 0.15.0）。无新增 CLI 参数、
+> 无新增 `gp_*` 工具、无新增产品形状。内容是**全面审查（正确性 + 供应链安全）审出的三处"把人送回上游"
+> 的私有化缺陷**——都违反 `product.json` 的 `privateSurface.rule`（"用户可见的产品面不再出现上游项目的名字"
+> 与"不许推送到别人家基础设施"）：
+> - **TUI 崩溃屏把 bug 报到上游的 issue tracker**：`packages/tui/src/component/error-component.tsx` 的
+>   `buildIssueURL` 指向 `github.com/anomalyco/opencode/issues/new?template=bug-report.yml`，并按**上游**
+>   bug-report.yml 的字段 id（`opencode-version` / `terminal` / `reproduce`）预填。改指本产品仓库
+>   `jingzhao-l/glasspane-harness`，并按**本仓自己的** `.github/ISSUE_TEMPLATE/bug-report.yml` 的 id
+>   （`version` / `os` / `what`）预填；崩溃标题 `opencode crashed` → `glasspane-harness crashed`、页脚
+>   `opencode <version>` → `glasspane-harness <version>`、预填正文里的产品名同步改。判据：本仓模板
+>   `id` 为 `version`/`engine`/`what`/`os`/`consent`（`cat .github/ISSUE_TEMPLATE/bug-report.yml`），
+>   与上游的 `opencode-version`/`terminal`/`reproduce` 不同——按上游 id 预填的字段在本仓模板里**静默丢弃**。
+> - **TUI `docs.open` 命令打开上游文档站**：`packages/tui/src/app.tsx:807` 硬编码
+>   `open("https://opencode.ai/docs")`。`product.json` 早已声明上游文档站不进本产品，改指本产品仓库的
+>   `docs/index.md`。
+> - **引擎重试路径仍在制造上游 Go 订阅 upsell（三处里最深的一处，是 brand-surface 放宽闸针后新暴露的）**：
+>   `packages/opencode/src/session/retry.ts` 对 `FreeUsageLimitError` / `GoUsageLimitError` 返回的动作带
+>   营销文案（`Subscribe to OpenCode Go for reliable access … $10/month`）与**可点击链接**
+>   （`https://opencode.ai/go`、`https://opencode.ai/workspace/<id>/go`），经 TUI 的 `DialogRetryAction`
+>   作为可点 URL 呈现给用户——这是营销别人的付费产品并推送到别人家基础设施。改法：只报「额度已到、何时重置」
+>   的中性事实，`link` 字段留空（它本就是**可选**字段，契约不变）；删掉 `GO_UPSELL_MESSAGE` /
+>   `GO_UPSELL_URL` 两个死常量；删掉 TUI `dialog-retry-action.tsx` 里为该 upsell 而设、早已因
+>   `GO_UPSELL_PROVIDERS` 为空而死掉的 Go 光效分支（`GO_URL` / `PAD_TOP_OUTER` / `FOREGROUND_ALPHA` /
+>   `panelOverlay` / `BgPulse` import）。
+>   **为什么这条长期漏检**：`brand-surface` 的 `first-party-gateway` 闸针此前只匹配**引号紧贴**的
+>   `opencode.ai/zen`（`["'`]opencode\.ai/zen["'`]`），匹配不到生产真写的 `https://opencode.ai/go`
+>   （`GO_URL` 常量就是带 `https://` 前缀的）。放宽闸针为 host/path 形式（`opencode\.ai/(?:zen|go)`
+>   或 `https?://opencode\.ai/(?:zen|go)`），并把正向对照改写成**真实形状**
+>   （`const GO_URL = "https://opencode.ai/go"`），重跑 8/8 具名红证闸能红；血缘 9681 → 9670（只减不增，
+>   方向合法）。
+> - **固定点测试**：`test/session/retry.test.ts` 三个 Go/free 用例改为断言动作里**没有 `link` 字段**（旧的
+>   断言的是上游 URL，改法后必然红）；`test/session/schema-decoding.test.ts` 的 retry round-trip fixture
+>   去掉上游 URL 与营销文案，并补上「`link` 缺席也可解码」那一半（证明可选字段契约仍在）。**反向控制**：
+>   旧代码下新断言 `action.link` 为 undefined 必然变红（旧代码正是设了 `opencode.ai/go`），修法即它变绿的原因。
+> - **闸针盲区收口**：`brand-surface.mjs` 的 `FIRST_PARTY_GATEWAY` 正则与 `SHIPPED_RULE_CONTROLS`
+>   `["first-party-gateway"]` 样本同批更新——这条"闸自己被验过吗"的结论按既有口径写进 `harness/README.md`
+>   的闸自验小节。
+> - **版本线**：`product.json`（真源）+ `packages/opencode/package.json` + `bun.lock` 版本头 + 安装入口
+>   `install.curl` 及全部文档位点（`docs/install.md`×2 / `scripts/install.sh` / `README.md` /
+>   `README.zh-CN.md`）一并跟到 v0.15.0；两份 README 的 fork-diff 行与散文数字按 2026-11-20 金样重算。
+>   `fork-diff` / `tool-surface` 金样同批重记（`tool-surface` surface B coverage 237 → 240 是**陈旧基线
+>   校正**：`retry.ts` / `dialog-retry-action.tsx` / `error-component.tsx` 此前与上游逐字节相同、从未进过
+>   surface B 计量，本次改动使它们成为 `edited`、其 authored 行首次入账，非真实增长）。
+
 ## [0.14.18] — 2026-11-19
 
 > **取 patch**：本批没有新增 CLI 参数、工具面或产品形状。内容是**全面审查（正确性 + 供应链安全）
