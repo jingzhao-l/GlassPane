@@ -14,6 +14,15 @@ npm 包 `bin` 声明没动。本版是**全面审查（正确性 + 信任边界�
   把那条 detached task 永久钉住，`inFlight` 闸闩死、整页更新/清理按钮再点不动且不报错。修法：
   terminate 后给 5s 宽限，不退升到 SIGKILL（不可捕获不可忽略），再兜底等 5s。两处同形状，
   各配 `nonisolated` 的 `waitForExit`/`kill9` 助手。
+- **收尸之后那条 reader join 仍无界（P2，2026-11-20 安全审查补）**：上一条的收尸只保证**直系**
+  孩子退场，`kill(pid)` 够不着它派生的、共享 stdout 写端的孩子。那种孩子活着，两条
+  `readDataToEndOfFile()` 就永远等不到「所有写端关闭」，超时分支末尾那条无界 `group.wait()`
+  把调用者钉死——SIGKILL 升级治好的死法从进程句柄换到了管道读者身上复现。修法：两处
+  `_ = group.wait(timeout: .now() + readerDrainGraceSeconds)`（2s，与 `DebugCapabilityProbe`
+  已验证的 `drainGraceSeconds` 同形状），取不到 EOF 就取已读部分。测试
+  `DailyRound20261120PipeDrainBoundTests`：派生一个忽略 SIGTERM 的 holder 孩子握住写端，
+  直接孩子被收掉后超时那一趟仍须在 10s 内回来（更新器与 daemon CLI 两条都测）；反向控制＝
+  把有界 join 退回无界 `group.wait()`，该用例**永久挂住**（实测 40s 仍不结束）即具名红。
 - **`gp_capture_view` 发帧绕过 engineBody 剥注解（P2）**：默认前向路径 `runValidatedTool` 用
   `engineBody(value)` 把 shell 侧 `dimension` 注解剥掉再发帧（引擎永不认识这个词）。`captureView`
   有自己的 executor，是 `tools.ts` 里唯一一处 `.call(` 直接转 raw args——今天 `CaptureViewArgs`

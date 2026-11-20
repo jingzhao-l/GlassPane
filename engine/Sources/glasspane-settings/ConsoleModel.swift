@@ -1010,7 +1010,11 @@ final class ConsoleModel: ObservableObject {
                 kill9(process)
                 _ = waitForExit(process, grace: 5)
             }
-            group.wait()
+            // 收尸只解直系孩子；它派生的、共享这两条 pipe 写端的孩子不归 `kill(pid)` 管——
+            // 那种孩子活着，读端就永远等不到 EOF，下面这条 join 就把这条 detached task
+            // 永久钉住。所以两条 reader 的 join 自己要有界（与 `DebugCapabilityProbe`
+            // 已验证的形状一致）：宽限期内 EOF 就取全量，取不到就取已经读到的部分。
+            _ = group.wait(timeout: .now() + readerDrainGraceSeconds)
             pipe.fileHandleForReading.closeFile()
             errorPipe.fileHandleForReading.closeFile()
             return nil
@@ -1023,6 +1027,11 @@ final class ConsoleModel: ObservableObject {
               let errorText = String(data: errBox.value, encoding: .utf8) else { return nil }
         return (text, errorText, process.terminationStatus)
     }
+
+    /// 超时那一趟 reader join 的上限：收尸只解直系孩子，派生的写端持有者不归它管，
+    /// join 不能反过来把调用者钉住（宽限期取不到 EOF 就取已读部分）。与
+    /// `UpdateModel.readerDrainGraceSeconds` 同一份。
+    private nonisolated static let readerDrainGraceSeconds: TimeInterval = 2
 
     /// 等子进程退场，最多 `grace` 秒；返回是否真的退了。与无界的 `waitUntilExit()`
     /// 的区别就在这个上界——超时那一趟的收尸不能反过来把调用者永久钉住。
