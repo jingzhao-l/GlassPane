@@ -229,22 +229,25 @@ describe("SessionStatus.Info", () => {
     expect(decode({ type: "busy" })).toEqual({ type: "busy" })
   })
 
-  test("retry carries attempt/message/action/next", () => {
+  test("retry carries attempt/message/action/next (action.link optional, decodes when present)", () => {
     const input = {
       type: "retry" as const,
       attempt: 1,
       message: "transient",
       action: {
-        reason: "free_tier_limit",
-        provider: "opencode",
-        title: "Free limit reached",
-        message: "Subscribe to OpenCode Go.",
-        label: "subscribe",
-        link: "https://opencode.ai/go",
+        reason: "account_rate_limit",
+        provider: "some-provider",
+        title: "Usage limit reached",
+        message: "5 hour usage limit reached. It will reset in 5 hours.",
+        label: "retry",
+        link: "https://example.com/status",
       },
       next: 500,
     }
     expect(decode(input)).toEqual(input)
+    // The optional link also decodes when absent (the shape this product now emits).
+    const { link: _link, ...withoutLink } = input.action
+    expect(decode({ ...input, action: withoutLink })).toEqual({ ...input, action: withoutLink })
   })
 
   test("rejects unknown type", () => {

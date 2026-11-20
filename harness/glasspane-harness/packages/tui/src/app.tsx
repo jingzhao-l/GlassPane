@@ -804,7 +804,9 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         name: "docs.open",
         title: "Open docs",
         run: () => {
-          open("https://opencode.ai/docs").catch(() => {})
+          // The fork's own docs (docs/ in this repository) are the canonical ones;
+          // the upstream docs site is a different product's documentation.
+          open("https://github.com/jingzhao-l/glasspane-harness/blob/main/docs/index.md").catch(() => {})
           dialog.clear()
         },
         category: "System",

@@ -204,7 +204,10 @@ const occ = (text, re) => (text.match(re) ?? []).length
 // skill-document loop below. Two copies is the defect class: the skill loop once kept a
 // decorative second copy that applied no pattern and hard-coded `count: 1`, so it accused
 // documents of strings they did not contain and could never go red.
-const FIRST_PARTY_GATEWAY = /["'`](?:opencode|opencode-go|opencodeZen|opencode\.ai\/zen)["'`]|dialog\.provider\.opencode|provider\.connect\.opencodeZen/g
+// The host/path alternation is unanchored on purpose: production writes the full
+// `https://opencode.ai/go`, so requiring the path to sit right after the opening
+// quote would miss the real shape (the dead `GO_URL` constant was exactly that).
+const FIRST_PARTY_GATEWAY = /["'`](?:opencode|opencode-go|opencodeZen|opencode\.ai\/(?:zen|go)|https?:\/\/opencode\.ai\/(?:zen|go))["'`]|dialog\.provider\.opencode|provider\.connect\.opencodeZen/g
 
 /** The fork's own lineage documents. They are where the bloodline story lives
  *  (FORK.md, SYNCLOG.md, the READMEs, NOTICE, upstream's AGENTS/CONTEXT/
@@ -327,7 +330,9 @@ const SHIPPED_RULES = [
  * written the way production writes it. Missing entry is a `CANNOT MEASURE`, not a skip.
  */
 const SHIPPED_RULE_CONTROLS = {
-  "first-party-gateway": 'const gateway = "opencode-go"',
+  // The real shape production wrote (the dead `GO_URL` constant): the full URL, so the
+  // control pins the host/path form that an unanchored needle would have missed.
+  "first-party-gateway": 'const GO_URL = "https://opencode.ai/go"',
   "wire-identity": 'const headers = { "X-Title": "opencode" }',
   "foreign-schema-write": 'const doc = { "$schema": "https://opencode.ai/config.json" }',
   "product-file-name": 'const database = "opencode.db"',
