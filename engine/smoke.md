@@ -1937,3 +1937,48 @@ helper 本轮重写：`/var/tmp/glasspane-main-check/2026-11-17/gp-ax-walk.swift
 
    没碰：`--prune-evidence` 一类破坏性旗标一次都没执行过。`/var/tmp/gp-panel-1319`、
    `/var/tmp/gp-e2e-1319`、`/var/tmp/gp-verify-1319` 收口时回收。
+
+## 每日真机核对 2026-11-20（v1.31.10 取号日；被测产物＝main `a3ad0a45` 的 debug 构建 `engine/.build/debug` 与 release 构建 `engine/.build/release`，发布物＝GitHub Release 归档 + registry 两包）
+
+本轮两条审查（正确性逐文件 + 信任边界七条）报出**两条 P2 并已修复**（同一处：超时那一趟收尸之后
+的 reader join 仍无界，见 1.31.10 CHANGELOG）。信任边界七条零缺陷（socket 0600/父 0700、
+`--permissions` 测真值、证据只存元数据不存屏幕文本且 0700/0600、错误帧恒三字段、参数 Zod 预校验、
+updater 签名硬闸+原子 apply、install.sh 钉 tag+tag 验签）。GUI 会话与三席权限都在，本节把能做的
+真机项做完。全部运行带 `--state-dir <隔离根>`；`--prune-evidence` / `--project-remove` /
+`--project-prune` 一类破坏性旗标**一次都没有执行过**。AX helper 本轮重写（上轮那份已被 /var/tmp
+清理）：`/var/tmp/gp-smoke-13110/gp-ax-walk.swift`（收口时回收）。
+
+1. **`glasspaned --permissions` 自报**：退 0，`accessibility=granted / input-monitoring=granted /
+   screen-recording=granted / developer-tools=unverifiable`、`verdict:"granted"`、
+   `verdictSeats` 三席、`verdictExcludes` 把 developer-tools 判 `judgedByThisCommand:false` 并指向
+   `--check-developer-tools`；stderr 如实注明 "--permissions reads no state, so the --state-dir
+   root this run named was not consulted"（它不读状态，故隔离根没被碰是对的）。
+2. **daemon 生命周期（真 socket，隔离根）**：`glasspaned --state-dir <根> --socket-path <根>/test.sock`
+   起来后 socket 落盘即 `srw-------`(0600)、父目录 `drwx------`(0700)、stderr 一行
+   `glasspaned 1.31.10 listening on <root>/test.sock`；SIGTERM 后干净退（三次起停各跑在一个由
+   脚本点名、由 daemon 自己创建并收紧的根里）、socket 文件被 unlink、`pgrep` 两次空命中。
+   在册的真 daemon（`~/Applications/GlassPane Daemon.app`，pid 18241）本 run **没碰**。
+3. **MCP initialize 端到端（装的是发布物）**：`npm pack glasspane-mcp@1.31.10` → 装进干净前缀 →
+   stdin 打一条 `initialize` 真帧，回包 `serverInfo.name="glasspane-mcp"`、`serverInfo.version=
+   "1.31.10"`、stderr 0 行。**bin 入口是符号链接但背后有真字节**（285,945 bytes，2026-10-11 那条
+   "符号链接交付 0 字节"的 P0 未复现）；installer 包同样：`cli.js` 242,421 bytes，未知参数诚实拒绝
+   （`--version` → "未知参数：--version（--help 查看用法）"）。registry 两包 `@1.31.10 --prefer-online`
+   均回 `1.31.10`、latest 指针均 `1.31.10`（publish run 44646669439 绿后即时回查即中，无读副本延迟）。
+4. **面板按标识可读且不自造读数**：权限页一次遍历 **28** 个 `gp-*` 标识，席位徽标把**实测值**写进
+   标识本身（`gp-perm-accessibility-granted` / `gp-perm-input-monitoring-granted` /
+   `gp-perm-screen-recording-granted` / `gp-perm-developer-tools-unverifiable`），与 1 的 daemon
+   自报逐项一致；`gp-daemon-liveness-answering`、`gp-daemon-state-root` / `gp-daemon-socket-origin`
+   都指回隔离根（面板探的是 `GLASSPANE_ENGINE_SOCK` 点名的那一个）。
+5. **控件按得动、确实换页**（`kAXPressAction`，每次按压前该标识 `enabled=1`，逐张记 `err=0`）：
+   `gp-nav-updates` → `gp-nav-projects` → `gp-nav-recipes` → `gp-nav-approvals` → `gp-nav-evidence`
+   → `gp-nav-permissions`，六次按压全 `err=0`，回到权限页后 28 标识集合与席位徽标逐项复原。这一格
+   证到的是"按下去换了可见面 / 按得动"，不写成"证到了状态刷新"。
+6. **进程归属两次 `pgrep` 判决**：本 run 起的 daemon（45132）与面板（45155）在 SIGTERM 后
+   `pgrep -fl "gp-smoke-13110|panel.sock"` 连查两次都是**空命中**；隔离根随后 `rm -rf` 回收。
+   本轮还顺手 bootout 了一个**别人早轮遗留**的孤儿 launchd 任务 `com.glasspane.reprobe.1794615821`
+   （nonce 戳 2026-11-14，与本会话无关；它带 keepalive 每 ~25s 重起一个 `--check-developer-tools`
+   的 zsh wrapper，卡在 TCC 开发者工具 prompt 上）——bootout 后 30s 内不再重生，判为机器遗留不是
+   代码缺陷，未改任何产品代码。
+
+   没碰：`--prune-evidence` 一类破坏性旗标一次都没执行过。`/var/tmp/gp-smoke-13110`、
+   `/var/tmp/gp-e2e-13110`、`/var/tmp/gp-statedir-smoke-20261120` 收口时回收。
