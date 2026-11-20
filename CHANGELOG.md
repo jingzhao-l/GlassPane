@@ -34,10 +34,18 @@ npm 包 `bin` 声明没动。本版是**全面审查（正确性 + 信任边界�
   kernel-pin / kernel-conformance 金样随批重记（0.1.15 是代码修复，无 fixture/schema 变化）。
   文档两处内核版本散文（README/kernel-integration）同步追平。
 
-**门禁实测**：`npm ci` / `npm run build` / `npm test --workspaces`（763+353+818 全 pass）/
-`check-version` / `check-doc-links` / `check-workflows --self-test`（48 case）+ `check-workflows`
-（5 文件）/ `swift build` / `swift test`（1616 pass / 0 fail / 5 skip）/ `sh -n install.sh` /
-`tool-surface --check` / `fork-diff --check` 全绿；两处 P2 修复配固定点测试与反向控制。
+**门禁实测**（2026-11-20 发版日复跑，隔离单跑）：`npm ci` / `npm run build` / `npm test
+--workspaces`（763+353+818 全 pass）/ `check-version` / `check-doc-links` / `check-workflows
+--self-test`（48 case）+ `check-workflows`（5 文件）/ `swift build` / `swift test`（1619 executed
+/ 1614 pass / 0 fail / 5 skip，含本轮新增的 `DailyRound20261120PipeDrainBoundTests` 3 条）/
+`swift test engine/probe`（58 pass / 1 skip）/ `pytest bridge`（223 pass / 1 skip）/
+`sh -n install.sh` / `signal smoke`（SIGTERM/SIGINT 自退且 socket unlink）/ publish-shape
+（bundle+pack：`glasspane-mcp-1.31.10.tgz` 31 files）/ `tool-surface --check` /
+`fork-diff --check` 全绿；两处 P2 修复配固定点测试与反向控制。CI 全 lane 绿于
+`a3ad0a45`（首跑 engine 一条时序红 `Qoder20261019DribblingPeerTests` 属负载假红，隔离复跑
+3/3 绿、全 suite 0 fail 后 rerun 转 success）。归档 833 entries、0 个 harness 条目、sha256
+本地读数＝SHA256SUMS＝GitHub API `digest`（`4e441b18…`）三处逐字相等，`.asc` GPG 签名
+完好（key `0929EA31…43A1298`）。
 
 ## [1.31.9] — 2026-11-18
 
