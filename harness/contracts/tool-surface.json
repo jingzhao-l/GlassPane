@@ -7,8 +7,8 @@
     "fork": "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted, and one deleted line excuses at most one re-added line (pairing is one-to-one, so 40 copies of a rebranded line bill 39)",
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
-  "observedAt": "2026-11-19",
-  "engineLoc": 33643,
+  "observedAt": "2026-11-20",
+  "engineLoc": 33661,
   "engineFiles": 67,
   "surfaces": {
     "mcpShell": {
@@ -1223,7 +1223,7 @@
           "lines": 36
         }
       ],
-      "ratio": 0.2372,
+      "ratio": 0.2371,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
