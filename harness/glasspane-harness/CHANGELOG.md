@@ -8,6 +8,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.15.2] — 2026-11-22
+
+> **取 patch**：零产品代码改动，零用户可见面变动。本版存在的唯一理由是**吸收一次内核依赖升级**——
+> 主仓 `343f1526` 把 fork 的 `iterate-kernel` 依赖从 0.1.15 pin 到 0.1.16（纯源码健壮性修复：写死的
+> summary 长度字面量改为引用唯一常量，契约/schema/fixtures 零变化），主干 `harness/glasspane-harness`
+> 子树随之前进，而已发布的 tag `v0.15.1` 永不移动。`release-artifact` 的 **artifact 腿**因此变红
+> （"用户装到的不是本仓说自己发了的"）——那条红跑在主仓 `harness-rulers` job 里，会经 `assert-ci-green`
+> 挡住主仓自己的取号。这一格只能由**切一个新号**来清，上一轮把这半边明确交给 harness 线却没切，本轮补完。
+> - **改动面**：`fork-diff` 四桶与 0.15.1 逐数一致（`4625 identical / 299 edited / 142 added / 1708 deleted`）；
+>   `tool-surface` 面 A/B 的 LOC 与覆盖文件数与旧基线持平（A 21.25%、B 23.71%，crossing check 早已花掉，
+>   LOC 棘轮守零增长），只有 kernel 归因一行 `{"version":"0.1.15"}→{"version":"0.1.16"}`。
+>   两把金样已随批 `--record` 吸收同一有意变化（kernel pin），非真实工具面增长。
+> - **追平的滞后**：主仓两处文档（`harness/README.md`、`docs/kernel-integration.md`）按真源
+>   `kernel-pin.json` 复算的旧号 0.1.15 一并改到 0.1.16，`check-doc-links` 的可复算主张闸转绿
+>   （连带 node suite 里三条"真仓库 doc 闸应绿"的用例解封）。
+> - **split-main**：重切 subtree split 快进推 split 仓 main（远端 split main 是新 tip 的祖先，
+>   零独有字节丢失），已转绿。
+> - **反向验证**：把 `contracts/fork-diff.json` 与 `contracts/tool-surface.json` 改回 0.1.15，
+>   两把尺子 `--check` 立即具名变红（own-file / kernel 归因移动）；恢复即绿。证明这两把闸不是空转。
+
 ## [0.15.1] — 2026-11-21
 
 > **取 patch**：纯修复，无用户可见的产品面/CLI 形状变动。修的是上一版 0.15.0 留下的**一处半修**

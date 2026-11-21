@@ -3,6 +3,63 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-22（第四十七次会话）· 取号 0.15.2：吸收内核依赖升级 0.1.16（零产品代码改动，取 patch）
+
+### 〇、改动面数字
+
+`fork-diff vs v1.18.32: 4625/6774 byte-identical, 299 edited, 142 added, 1708 deleted`
+——四桶与 0.15.1 **逐数一致**。本批零产品代码改动，动的全是版本号与契约元数据。
+
+`tool-surface`：面 A `mcp-shell/src` **21.25%**（基线常驻超限，crossing check 早已花掉，LOC 棘轮守：
+`no growth past the recorded baseline`）；面 B fork **23.71%**（同上）。两把金样随批 `--record`
+吸收同一有意变化——kernel pin 0.1.15 → 0.1.16（fork-diff 的 `contracts/kernel-pin.json` /
+`contracts/kernel-conformance.json` 两个 own-file 移动；tool-surface 只有 kernel 归因一行
+`{"version":"0.1.15"}→{"version":"0.1.16"}`）。非真实工具面增长。
+
+`brand-surface`：血缘 **9698 occurrence(s) / 3357 file(s)**（与 0.15.1 持平）。0 新增 brand hit。
+`product-surface`：**6642 agreement(s) held, 0 problem(s)**（glasspane-harness@0.15.2）。无 `--record`（永远禁）。
+`surface-semantics`：0 hit across 23 file(s)；3/3 positive controls fired。
+`hook-liveness`：21 hooks vs v1.18.32, no drift；bound 2/2。
+`kernel-pin`：iterate-kernel@0.1.16 matches lock + 26 contracts。
+
+### 一、为什么取这个号（跨线吸收，不是新缺陷）
+
+主仓 `343f1526`（2026-11-21）把 fork 的 `iterate-kernel` 依赖从 0.1.15 pin 到 **0.1.16**（上游纯源码
+健壮性修复：`decision-log-transcribe` 拒绝路径与 `evidence-decision` 截断路径里写死的 summary 长度
+字面量 2048/2045 改为引用唯一 `SUMMARY_MAX_LENGTH` 常量；契约/schema/fixtures 零变化）。主干
+`harness/glasspane-harness` 子树随之前进，而已发布的 tag **`v0.15.1` 永不移动**。
+
+后果：`release-artifact` 的 **artifact 腿**变红（"被 tag 的树 ≠ 主干子树"）。那条红跑在**主仓**
+`ci.yml` 的 `harness-rulers` job 里，会经 `release.yml` 第一步 `assert-ci-green`（要求被 tag 的 sha 上
+`ci.yml` 最新一条 success）**挡住主仓自己的取号**。这一格只能由**切一个新号**来清——上一轮把这半边
+明确写进提交正文交给 harness 线（"harness 侧的 fork-diff 金样与 subtree split/tag 吸收由 harness 每日
+那条线完成"）却没切，本轮补完。
+
+### 二、本批补完的三处滞后
+
+1. **两处文档旧 pin 号**：主仓 `harness/README.md`（"内核 pin 版本"）与 `docs/kernel-integration.md`
+   （"内核语料出处戳记"）按真源 `kernel-pin.json` 复算仍写 0.1.15，`check-doc-links` 的可复算主张闸
+   因此红，连带 node suite 里三条"真仓库 doc 闸应绿"的用例（`not ok 317/610/643`）连坐。一并改到
+   0.1.16，`check-doc-links` 转绿（文档 32 份 / 仓库内链接 275 条 / 0 问题）。
+2. **两把金样**：fork-diff 与 tool-surface 的金样仍记 0.1.15，随批 `--record` 吸收（见 〇）。
+3. **split-main**：重切 subtree split 快进推 split 仓 main（远端 split main `620b06cf` 是新 tip
+   `70b31368` 的祖先，`git merge-base --is-ancestor` 实测 true，零独有字节丢失；新增两笔＝kernel
+   pin bump + 文档追平）。`release-artifact` split-main 腿转绿。
+
+### 三、跑了哪些闸、结果
+
+`fork-diff` / `tool-surface` / `brand-surface` / `product-surface` / `surface-semantics` /
+`hook-liveness` 六把 `--check` 全绿（red-lines=0）；`release-artifact` split-main 腿绿。fork 侧
+`bun install` 后 lock 刷新到 0.15.2；`check-doc-links` 绿。
+
+### 四、没跑的部分照实写
+
+- 主仓 `harness-rulers` 在 CI 上对本批的最终读数未观测（需推 main 后 CI 才跑）；本机六把尺子 + 
+  split-main 已逐条复跑为绿。
+- fork 全套件（`bun test`）未跑：本批零产品代码改动，动的全是版本号/CHANGELOG/SYNCLOG/契约元数据，
+  无行为面可测；fork ci.yml 在 split main 上对等改动已实测绿。
+
+
 ## 2026-11-21（第四十五次会话）· 0.15.0 三处「把人送回上游」的私有化缺陷（用户可见面取 minor；typecheck 半修由 0.15.1 收）
 
 ### 〇、改动面数字
