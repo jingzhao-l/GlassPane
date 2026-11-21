@@ -2,11 +2,11 @@
   "baseTag": "v1.18.32",
   "forkPath": "harness/glasspane-harness",
   "referenceClone": ".external/opencode",
-  "observedAt": "2026-11-20",
+  "observedAt": "2026-11-21",
   "counts": {
     "identical": 4625,
     "edited": 299,
-    "added": 141,
+    "added": 142,
     "deleted": 1708
   },
   "edited": [
@@ -441,6 +441,7 @@
     "packages/opencode/test/tool/glasspane-websearch-boundary.test.ts",
     "packages/tui/src/util/tool-denial.ts",
     "packages/tui/test/cli/tui/tool-denial-marker-stability.test.tsx",
+    "packages/tui/test/cli/tui/user-destinations.test.ts",
     "patches/@modelcontextprotocol%2Fsdk@1.32.0.patch",
     "product.json",
     "script/assert-ci-green.mjs",
@@ -4172,6 +4173,10 @@
     {
       "file": "packages/tui/test/cli/tui/tool-denial-marker-stability.test.tsx",
       "forkHash": "011c9dbc84687cc9602827b88415f84558bac478"
+    },
+    {
+      "file": "packages/tui/test/cli/tui/user-destinations.test.ts",
+      "forkHash": "2d4be3a321a867d8cfa0b1be9db422d5df68fc23"
     },
     {
       "file": "patches/@modelcontextprotocol%2Fsdk@1.32.0.patch",
