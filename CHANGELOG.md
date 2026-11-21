@@ -35,8 +35,9 @@ npm 包 `bin` 声明没动。本版是**全面审查（正确性 + 信任边界 
 重写的 `testOversizedResponseAnswersPayloadTooLargeWithRealId` 共 2 条）/ `swift test
 engine/probe`（58 pass / 1 skip）/ `pytest bridge`（223 pass / 1 skip）/ `sh -n install.sh` /
 信号 smoke（SIGTERM/SIGINT 自退且 socket unlink）/ publish-shape（bundle+pack：
-`glasspane-mcp-1.31.11.tgz` 31 files）/ `tool-surface --check`（面 A/B 基线随本版 engine
-增长重记，见 harness 基线补记那条提交）全绿。
+`glasspane-mcp-1.31.11.tgz` 31 files）/ 三把尺子 `--check` 全绿（面 A/B 基线随本版 engine
+增长重记；fork-diff 与 brand-surface 重记的是上一轮 `837f4ffc` 给 fork 加 TUI 测试却没重记
+的遗留账——那笔在 CI 上先红挡住了本版发版，见 harness 基线补记两条提交）全绿。
 
 ## [1.31.10] — 2026-11-19
 
