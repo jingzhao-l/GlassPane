@@ -3,6 +3,95 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-21（第四十四次会话）· 取号 0.15.1：retryable() 补回显式返回注解，修掉 0.15.0 的 typecheck 半修（取 patch）
+
+### 〇、改动面数字
+
+`fork-diff vs v1.18.32: 4625/6774 byte-identical, 299 edited, 142 added, 1708 deleted`
+（金样随本批重记：四桶与 0.15.0 **逐数一致**——`retry.ts` 的 `+1` 只动该文件的**内容哈希**，
+仍在 edited 桶内，未越桶。`299/142/1708` 三张计数不变，正是发布程序第 ② 条"金样那一半不花钱"
+要守的判据。）
+
+`tool-surface`：面 A `mcp-shell/src` **21.25%**（基线常驻超限，crossing check 早已花掉，
+LOC 棘轮守：`no growth past the recorded baseline`）；面 B fork **23.71%**（同上）。
+本轮 +1 LOC——`retryable()` 的显式返回注解 `: Retryable | undefined`，随批 `--record`。
+
+`brand-surface`：血缘 **9698 occurrence(s) / 3357 file(s)**（0.15.0 是 9697/3357，+1）。
+CHANGELOG 的 [0.15.1] 条目按 9616/9617/9618 先例**引用了被删掉的上游名**（"Go 订阅 upsell"）
+以说明它已在 0.15.0 被移除、其守卫在 0.15.1 补回——`--lineage-note` 记为归属，非新增产品面。
+shipped code 0 新增 brand hit。
+
+`product-surface`：**6642 agreement(s) held, 0 problem(s)**（glasspane-harness@0.15.1）。
+无 `--record`（永远禁）。中途它正确抓到四处 `installer-curl-pinned` 红——版本号换号后
+product.json 的 curl 安装锚与四份携带该锚的文档/脚本必须逐字镜像，已一并改到 v0.15.1。
+
+`surface-semantics`：0 hit across 23 file(s)；3/3 positive controls fired。
+`hook-liveness`：21 hooks vs v1.18.32, no drift；bound 2/2。
+`kernel-pin`：iterate-kernel@0.1.15 matches lock + 26 contracts；`--probe` 报 published latest（无漂移）。
+
+### 一、审查发现与修法
+
+**发现（P1，上一版 0.15.0 留下的半修）**：`bun run typecheck`（packages/opencode）在 main 上退
+**rc=2**，"四包 typecheck 全绿"这道闸是坏的。三个错误全在 `test/session/retry.test.ts`
+（行 363/401/430）：`Property 'link' does not exist on type '{ reason; provider; title; message; label }'`。
+
+**根因**：0.15.0（`ffbd7b60`）把 `retryable()` Go/Free 动作体里的订阅 upsell `link` 删掉了，
+而 `retryable()`（`src/session/retry.ts:83`）**没有显式返回注解**——TypeScript 从字面量推断返回类型，
+`link` 字段随删随之从**推断类型**里消失。导出的 `Retryable` 契约类型（`:12`）仍声明
+`link?: string`，但那份契约没被接到 `retryable` 上。于是三处 `action?.link` 守卫断言引用的是
+**类型上已不存在的属性**——这是教科书式的半修：呈现面（返回体）改了，契约面（推断类型）
+跟着变了，而守卫（测试断言）既没失效也没变红，只是 typecheck 塌了。
+
+**修法**：给 `retryable()` 补上它本就该有的显式返回注解 `: Retryable | undefined`，
+把契约（字段存在但**故意留空**）重新接回函数。三处守卫断言从"引用不存在属性"变回
+**活的固定点守卫**，typecheck 回到 rc=0。不删断言（删了等于把守卫拆了）、不加
+`// @ts-expect-error`（等于把闸关了）——补注解是唯一同时满足"契约诚实 + 守卫活着 + typecheck 绿"的修法。
+
+**反向验证（证明守卫不是空转）**：临时把一条网关链接塞回 Go 动作
+（`link: "https://opencode.ai/go"`），具名用例两条变红：
+`maps Go subscription limits to a reset-time message without a gateway link`、
+`maps Go subscription limits without limit metadata`；恢复即 60 pass。
+证明这三条 `link` 留空守卫是**真闸**，不是死代码。
+
+**审查范围**：fork 定制面与供应链面本轮经两个审查子代理全面复审。正确性面无 P0/P1
+（除上述 typecheck 半修）；供应链面无 P0——`publish.ts` 上游分发尾（ghcr/AUR/homebrew）已删、
+`install.sh` 默认拒未验资产且 GPG 指纹逐字对、`postinstall` sha512 对 `dist.integrity` 端到端、
+项目工具/插件发现仍受 `projectToolPlan` 信任闸把关（0.14.16 落地，未绕过）。
+
+### 二、跑了哪些闸
+
+| 闸 | 结果 |
+|---|---|
+| `fork-diff --check`（record 后复跑） | 4625/6774 identical, 299/142/1708 四桶与 0.15.0 逐数一致；divergence matches recorded surface |
+| `tool-surface --check`（record 后复跑） | no growth past the recorded baseline |
+| `surface-semantics --check` | 0 hit；3/3 positive controls fired |
+| `brand-surface --check`（record 后复跑） | 0 hit；lineage 9698/3357（+1 归属 CHANGELOG 引用） |
+| `product-surface --check` | 6642 agreement(s) / 0 problem(s) @0.15.1 |
+| `hook-liveness --check` | 21 hooks, no drift；bound 2/2 |
+| `kernel-pin --check` / `--probe` | 0.1.15 matches lock + 26 contracts；published latest |
+| `bun test`（4 个 glasspane 固定点文件，--timeout 30000） | **212 pass / 0 fail**（基线，改前） |
+| `bun test test/session/retry.test.ts`（改后） | **60 pass / 0 fail**；反向变异 2 fail → 恢复 60 pass |
+| `bun run typecheck`（opencode） | 改前 rc=2（本缺陷）→ 改后 rc=0 |
+| `bun run typecheck`（tui / sdk/js / plugin） | 各 rc=0 |
+| `kernel-conformance` | 16 fixture(s) through 1 implementation；every expectation held |
+| `bun run script/publish.ts --dry-run` | glasspane-harness@0.15.1 packs cleanly |
+| `scripts/check-workflows.mjs --self-test` | 48 case(s) each verified to fail |
+| `scripts/check-workflows.mjs` | 5 workflow file(s) clean |
+| `scripts/check-doc-links.mjs` | 32 docs / 275 intra / 46 external / 496 tables；OK |
+
+### 三、没跑的部分照实写没跑
+
+- 整包构建（>10 分钟）：`retry.ts` 是纯类型注解，无运行时行为变化，按纪律不放进每条改动后的复跑。
+- 端到端安装 / `verify-published.ts` / registry 三包核对：随发版流程走（tag → Release → npm → verify）。
+- 真 `gp_*` 工具轮次、真 daemon 往返：物理边界（需 `glasspaned` 在跑），本轮未观测。
+
+### 四、本轮决定
+
+- **取 patch 0.15.1**：`retry.ts` 是纯类型注解，无用户可见产品面/CLI 形状变动，按 pre-1.0 口径取 patch。
+- **不删三处 `link` 断言**：删守卫换绿是被明令禁止的捷径；补返回注解让守卫活着且 typecheck 绿。
+- **CHANGELOG 引用上游名 + brand `--lineage-note`**：按 9616/9617/9618 先例，引用被删名以说明其已被移除，
+  记为归属而非新增产品面。
+
 ## 2026-11-19（第四十三次会话）· 取号 0.14.18：四处陈旧 Dispatcher.swift:156 交叉引用 → 216（取 patch）
 
 ### 〇、改动面数字

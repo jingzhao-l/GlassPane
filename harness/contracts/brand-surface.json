@@ -80,10 +80,10 @@
     "packages/core/src/plugin/skill/customize-harness.md"
   ],
   "lineage": {
-    "occurrences": 9697,
+    "occurrences": 9698,
     "filesScanned": 3357
   },
   "shippedFiles": 1323,
   "shippedSrc": 5,
-  "lineageNote": "2026-11-21: +14 lineage occurrences (all token 'opencode') come from the fork test packages/tui/test/cli/tui/user-destinations.test.ts added at 837f4ffc by the harness TUI lane (fixed-point test for user-visible destinations); attribution, not new product surface — the file is a fork test, the daemon/mcp-shell product files carry 0 new brand hits"
+  "lineageNote": "2026-11-21: +1 lineage occurrence from CHANGELOG.md 0.15.1 entry naming the removed upstream Go subscription upsell (attribution: the entry documents that the upsell was deleted in 0.15.0 and its guard restored in 0.15.1); not new product surface — shipped code carries 0 new brand hits"
 }

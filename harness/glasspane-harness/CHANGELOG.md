@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.15.1] — 2026-11-21
+
+> **取 patch**：纯修复，无用户可见的产品面/CLI 形状变动。修的是上一版 0.15.0 留下的**一处半修**
+> （改了呈现面而判定/契约面还按旧行为走）：0.15.0 把引擎重试动作里的 Go 订阅 upsell 链接从
+> `retryable()` 的返回体里删掉了，但导出的 `Retryable` 契约类型仍声明 `link?: string`，而 `retryable()`
+> **没有写显式返回注解**——TypeScript 于是从字面量推断返回类型，`link` 字段随删随之从推断类型里消失。
+> 结果 `test/session/retry.test.ts` 里三处守卫断言（`action?.link` 应为 `undefined`）拿到的是**类型上已不存在的属性**，
+> `bun run typecheck` 退 **rc=2**，"四包 typecheck 全绿"这道闸在 main 上是坏的。
+> - **修法**：给 `retryable()` 补上它本就该有的显式返回注解 `Retryable | undefined`，把契约（字段存在但
+>   故意留空）重新接回函数。三处守卫断言从"引用不存在属性"变回**活的固定点守卫**，typecheck 回到 rc=0。
+> - **反向验证**：临时把一条网关链接塞回 Go 动作，具名用例 `maps Go subscription limits to a reset-time
+>   message without a gateway link` 与 `maps Go subscription limits without limit metadata` 两条变红；
+>   恢复即 60 pass。证明这三条守卫不是空转（假绿），`link` 的"留空"是有闸守着的。
+> - **数字**：opencode typecheck rc=2 → rc=0；`retry.test.ts` 60 pass / 0 fail；product-surface 6642 agreements
+>   / 0 problems @0.15.1；fork-diff 四桶 4625 identical / 299 edited / 142 added / 1708 deleted（`retry.ts`
+>   内容变更随批 `--record`，只动了 hash 没动三张计数）。
+
 ## [0.15.0] — 2026-11-20
 
 > **取 minor**：本批改动**用户可见的产品面文案与目标**——崩溃屏、`docs.open` 命令、引擎重试动作的
