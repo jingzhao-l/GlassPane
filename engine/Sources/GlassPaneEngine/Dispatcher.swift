@@ -42,9 +42,9 @@ public final class Dispatcher {
         case .success(let request):
             do {
                 let result = try dispatch(request)
-                return response(id: request.id, result: result)
+                return response(id: request.id, result: result, method: request.method)
             } catch let error as GPError {
-                return response(id: request.id, error: error)
+                return response(id: request.id, error: error, method: request.method)
             } catch {
                 log.error("unhandled engine error: \(error)")
                 // The escaped error's own text is not put on the wire: a Foundation
@@ -236,17 +236,17 @@ public final class Dispatcher {
 
     // MARK: - Response encoding
 
-    private func response(id: Int64?, result: [String: Any]) -> Data {
+    private func response(id: Int64?, result: [String: Any], method: EngineMethod? = nil) -> Data {
         var frame: [String: Any] = ["result": result]
         if let id {
             frame["id"] = NSNumber(value: id)
         } else {
             frame["id"] = NSNull()
         }
-        return encode(frame, id: id)
+        return encode(frame, id: id, method: method)
     }
 
-    private func response(id: Int64?, error: GPError) -> Data {
+    private func response(id: Int64?, error: GPError, method: EngineMethod? = nil) -> Data {
         var frame: [String: Any] = [
             "error": [
                 "code": error.code.rawValue,
@@ -259,7 +259,81 @@ public final class Dispatcher {
         } else {
             frame["id"] = NSNull()
         }
-        return encode(frame, id: id)
+        return encode(frame, id: id, method: method)
+    }
+
+    // MARK: - Outbound over-cap remedy, per originating method
+
+    /// The **outbound** over-cap answer (`encode` hits it when a *reply* it built
+    /// would not fit the frame). The shared table's remedy for this code names
+    /// only `observe`'s knobs ("reduce observe maxDepth or narrow the selector
+    /// scope"), because `observe` is what reaches the limit most often. But a reply
+    /// that overflowed can come from any method, and most methods have neither a
+    /// `maxDepth` nor a selector — `last_evidence` replays a recorded pack, `act`
+    /// and `assert_element` and `diagnose` have no depth knob at all. A caller whose
+    /// `last_evidence` reply overflowed cannot "reduce maxDepth" (it never passed
+    /// one) and cannot "narrow a selector" (it passed none), so the advice pointed
+    /// at controls it does not have and the only next step it could take was to
+    /// retry the identical call — the exact non-executable-remedy dead end the
+    /// inbound arm was already fixed for at `Dispatcher.handle`.
+    ///
+    /// So the outbound remedy is chosen by the method that produced the reply: each
+    /// sentence names a knob that method **actually reads** (`acceptedParamKeys` is
+    /// the source of truth for which those are), and says honestly when the size is
+    /// fixed by what was recorded rather than shrinkable from the request. The
+    /// default (a reply with no originating method — an error frame) keeps the
+    /// shared table entry, which is correct for `observe` and harmless as a generic
+    /// fallback.
+    static let outboundOverCapRemedy: [EngineMethod: String] = [
+        .observe:
+            "shrink the reply: lower `maxDepth` "
+                + "(\(ParamValidation.observeMaxDepthLower)–\(ParamValidation.observeMaxDepthUpper)) "
+                + "or narrow the selector scope",
+        .snapshot:
+            "shrink the reply: lower `maxDepth` "
+                + "(\(ParamValidation.observeMaxDepthLower)–\(ParamValidation.observeMaxDepthUpper))",
+        .auditUI:
+            "shrink the reply: lower `maxDepth` "
+                + "(\(ParamValidation.observeMaxDepthLower)–\(ParamValidation.observeMaxDepthUpper)) "
+                + "or raise `minHitTargetPt` (a higher floor keeps fewer nodes)",
+        .lastEvidence:
+            "this reply is a recorded evidence pack, so its size is fixed by what that "
+                + "operation observed — it is not shrinkable from this call. Request a "
+                + "specific smaller `operationId`, or re-run a narrower operation to record "
+                + "a smaller pack",
+        .restore:
+            "shrink the request this call needs: pass fewer `steps` (a tier-2 ffwd reply "
+                + "carries one row per step). A tier-1 checkpoint reply replays the probe's "
+                + "whole recorded checkpoint, so if that is what overflowed, re-snapshot a "
+                + "smaller UI region",
+        .attach:
+            "this reply is a registration acknowledgement, not a tree — an over-cap here "
+                + "is unexpected; retry the same call and report it if it repeats",
+        .act:
+            "shrink what this call records: `act` returns a measurement, not a tree, so an "
+                + "over-cap here is unexpected; retry the same call and report it if it repeats",
+        .assertElement:
+            "shrink the assertion: `assert_element` returns a single property comparison, "
+                + "not a tree, so an over-cap here is unexpected; retry the same call and "
+                + "report it if it repeats",
+        .diagnose:
+            "shrink what is diagnosed: `diagnose` reads back a recorded operation's geometry "
+                + "audit — request a specific smaller `operationId`, or re-run a narrower "
+                + "`act` to record a smaller operation",
+        .captureView:
+            "shrink the capture: lower `scale` (the reply is a PNG of the captured view, and "
+                + "a smaller scale encodes fewer pixels)",
+        .probeStatus:
+            "this reply is a fixed-size probe status, not a tree — an over-cap here is "
+                + "unexpected; retry the same call and report it if it repeats",
+    ]
+
+    /// The over-cap remedy for a reply produced by `method`. `nil` → the shared
+    /// table entry (a reply with no originating method).
+    static func overCapRemedy(for method: EngineMethod?) -> String {
+        guard let method else { return GPError.remedy(for: .payloadTooLarge) }
+        return outboundOverCapRemedy[method]
+            ?? GPError.remedy(for: .payloadTooLarge)
     }
 
     /// Serializes one outbound frame under the same 4 MiB cap the inbound
@@ -267,7 +341,9 @@ public final class Dispatcher {
     /// over-cap line would desynchronize the shell's reader, so the caller
     /// gets the spec'd structured error instead — carrying the real request
     /// id, so the answer still matches the pending call.
-    private func encode(_ frame: [String: Any], id: Int64?) -> Data {
+    private func encode(
+        _ frame: [String: Any], id: Int64?, method: EngineMethod? = nil
+    ) -> Data {
         guard let data = try? JSONSerialization.data(
             withJSONObject: frame,
             options: [.sortedKeys, .withoutEscapingSlashes]
@@ -279,15 +355,16 @@ public final class Dispatcher {
                 id: id,
                 code: .internalError,
                 message: "response serialization failed; "
-                    + "reduce observe maxDepth (\(ParamValidation.observeMaxDepthLower)–\(ParamValidation.observeMaxDepthUpper)) and retry"
+                    + "reduce observe maxDepth (\(ParamValidation.observeMaxDepthLower)–\(ParamValidation.observeMaxDepthUpper)) and retry",
+                method: method
             )
         }
         guard data.count + 1 <= FrameCodec.maxFrameBytes else {
             return Self.structuredErrorLine(
                 id: id,
                 code: .payloadTooLarge,
-                message: "response of \(data.count) bytes exceeds \(FrameCodec.maxFrameBytes) byte frame cap; "
-                    + "reduce observe maxDepth (\(ParamValidation.observeMaxDepthLower)–\(ParamValidation.observeMaxDepthUpper)) or narrow the selector scope"
+                message: "response of \(data.count) bytes exceeds \(FrameCodec.maxFrameBytes) byte frame cap",
+                method: method
             )
         }
         return data + Data([0x0A])
@@ -296,12 +373,20 @@ public final class Dispatcher {
     /// Builds a small always-serializable error frame for the two cases where
     /// the caller's payload cannot be used. The text is engine-authored and
     /// bounded, so this path can neither overflow the cap nor recurse.
-    static func structuredErrorLine(id: Int64?, code: GPErrorCode, message: String) -> Data {
+    static func structuredErrorLine(
+        id: Int64?, code: GPErrorCode, message: String, method: EngineMethod? = nil
+    ) -> Data {
+        // Only the outbound over-cap code is method-specific; every other code's
+        // remedy is already about the caller's request, so the method adds nothing.
+        let remedy =
+            (code == .payloadTooLarge)
+            ? Self.overCapRemedy(for: method)
+            : GPError.remedy(for: code)
         var frame: [String: Any] = [
             "error": [
                 "code": code.rawValue,
                 "message": message,
-                "remedy": GPError.remedy(for: code)
+                "remedy": remedy
             ]
         ]
         if let id {

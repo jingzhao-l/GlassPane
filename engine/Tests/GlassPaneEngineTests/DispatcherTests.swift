@@ -378,6 +378,8 @@ final class DispatcherTests: XCTestCase {
     /// The 4 MiB cap covers both directions (P0 §3.1). An oversized observe
     /// answer must come back as GP_E_PAYLOAD_TOO_LARGE carrying the real
     /// request id — never as an over-cap line that desynchronizes the shell.
+    /// The remedy is now **method-specific** (see the last_evidence test below):
+    /// for observe it names the knobs observe actually reads.
     func testOversizedResponseAnswersPayloadTooLargeWithRealId() throws {
         try attach()
         let heavyLeaf = AxNode(role: "AXStaticText", title: String(repeating: "x", count: 12_000))
@@ -402,10 +404,58 @@ final class DispatcherTests: XCTestCase {
         XCTAssertEqual(error["code"] as? String, "GP_E_PAYLOAD_TOO_LARGE")
         let message = try XCTUnwrap(error["message"] as? String)
         XCTAssertTrue(
-            message.contains("maxDepth"),
-            "the agent needs the shrink instruction, not just a size: \(message)"
+            message.contains("exceeds \(FrameCodec.maxFrameBytes) byte frame cap"),
+            "the agent needs the size it blew past: \(message)"
         )
-        XCTAssertEqual(error["remedy"] as? String, GPError.remedy(for: .payloadTooLarge))
+        // observe 的 outbound remedy 点名 observe 真读的旋钮，不再沿用只说 observe
+        // 的通用句（那条对 observe 仍然对，但通用句里没有尺寸，尺寸在 message 里）。
+        let remedy = try XCTUnwrap(error["remedy"] as? String)
+        XCTAssertTrue(remedy.contains("maxDepth"), "observe 的 remedy 点 maxDepth：\(remedy)")
+        XCTAssertTrue(remedy.contains("selector"), "observe 的 remedy 点 selector：\(remedy)")
+        // 它不再是通用表那一句（通用句没有尺寸上下界）。
+        XCTAssertNotEqual(remedy, GPError.remedy(for: .payloadTooLarge))
+    }
+
+    /// The fixed defect: a reply that overflowed on a method with **neither**
+    /// `maxDepth` nor a selector — `last_evidence` replays a recorded pack — used to
+    /// get the observe-only remedy "reduce observe maxDepth or narrow the selector
+    /// scope". Neither knob exists on that call, so the agent had no executable next
+    /// step and could only retry the identical frame. The observe case above proves
+    /// the originating method is threaded end-to-end through `encode`; this pins the
+    /// method→remedy dispatch the outbound over-cap arm now uses, including the
+    /// methods that must NOT be told to shrink a depth they never passed.
+    func testOverCapRemedyIsMethodSpecificNotAlwaysObserveKnobs() {
+        // observe / snapshot / audit_ui really do read maxDepth — they keep the
+        // shrink-the-depth advice.
+        XCTAssertTrue(Dispatcher.overCapRemedy(for: .observe).contains("maxDepth"))
+        XCTAssertTrue(Dispatcher.overCapRemedy(for: .snapshot).contains("maxDepth"))
+        XCTAssertTrue(Dispatcher.overCapRemedy(for: .auditUI).contains("maxDepth"))
+
+        // last_evidence reads only `operationId` — no maxDepth, no selector.
+        let lastEvidence = Dispatcher.overCapRemedy(for: .lastEvidence)
+        XCTAssertFalse(
+            lastEvidence.contains("maxDepth"),
+            "last_evidence 的 remedy 不得把人支去 maxDepth（这个方法没有那个旋钮）：\(lastEvidence)"
+        )
+        XCTAssertFalse(
+            lastEvidence.contains("selector"),
+            "last_evidence 的 remedy 不得把人支去 selector（这个方法没有 selector）：\(lastEvidence)"
+        )
+        XCTAssertTrue(
+            lastEvidence.contains("operationId"),
+            "last_evidence 的 remedy 点到它真读的 operationId：\(lastEvidence)"
+        )
+
+        // diagnose likewise has no depth knob — it reads a recorded operation.
+        let diagnose = Dispatcher.overCapRemedy(for: .diagnose)
+        XCTAssertFalse(diagnose.contains("maxDepth"))
+        XCTAssertTrue(diagnose.contains("operationId"))
+
+        // A reply with no originating method keeps the shared table entry.
+        XCTAssertEqual(
+            Dispatcher.overCapRemedy(for: nil),
+            GPError.remedy(for: .payloadTooLarge)
+        )
     }
 
     /// A response that fits is untouched by the cap check.
