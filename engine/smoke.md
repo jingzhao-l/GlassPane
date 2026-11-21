@@ -1982,3 +1982,25 @@ updater 签名硬闸+原子 apply、install.sh 钉 tag+tag 验签）。GUI 会�
 
    没碰：`--prune-evidence` 一类破坏性旗标一次都没执行过。`/var/tmp/gp-smoke-13110`、
    `/var/tmp/gp-e2e-13110`、`/var/tmp/gp-statedir-smoke-20261120` 收口时回收。
+
+## 2026-11-21 · v1.31.11 取号日真机核对
+
+- **归档自证**：`make-release-archive.mjs --verify` → 833 entries / 5,142,082 bytes，30 条声明命令
+  与 schema 全在，`grep -cE "(^|/)harness/"` = **0**。本地 `shasum -a 256` = `SHA256SUMS-1.31.11.txt`
+  = GitHub API `assets[].digest` = `77ccfa0a…43b3` 三处逐字相等；`.asc` GPG 签名
+  （key `0929EA31…43A1298`）校验 Good。
+- **MCP initialize 端到端（装的是发布物）**：`npm pack glasspane-mcp@1.31.11` → 装进干净前缀
+  `/var/tmp/glasspane-main-check/e2e-13111/prefix` → stdin 打一条 `initialize` 真帧，回包
+  `serverInfo.name="glasspane-mcp"`、`serverInfo.version="1.31.11"`、`protocolVersion="2024-11-05"`。
+  registry 两包 `@1.31.11 --prefer-online` 均回 `1.31.11`，`versions` 列表尾部均 `1.31.11`
+  （publish run 44849071730 绿后即时回查即中）。
+- **daemon `--permissions`（隔离 `--state-dir`）**：exit 0，`verdict=granted`，三席实测
+  accessibility / input-monitoring / screen-recording 全 granted；developer-tools 诚实
+  `unverifiable`（`verdictExcludes` 点名 TCC 无查询 API、"报成 granted 或 denied 都没人读"）。
+  命令自带 note 声明 `--permissions` 不读状态，故未在隔离根写入任何东西（隔离根事后回收）；
+  home 默认根未被本次 run 触碰。
+- **本轮唯一修复真机相关性**：出站 `payloadTooLarge` remedy 改为按来源方法点名真旋钮
+  （`last_evidence`/`diagnose`/`restore` 不再被支去 observe 的 maxDepth/selector），属协议文本层，
+  本轮无真机面改动；daemon/MCP 的返回形状与席位读数与 1.31.10 一致。
+
+没碰：`--prune-evidence` 一类破坏性旗标一次都没执行过。
