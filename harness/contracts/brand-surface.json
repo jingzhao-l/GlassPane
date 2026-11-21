@@ -1,5 +1,5 @@
 {
-  "observedAt": "2026-11-20",
+  "observedAt": "2026-11-21",
   "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
   "rules": [
     {
@@ -80,10 +80,10 @@
     "packages/core/src/plugin/skill/customize-harness.md"
   ],
   "lineage": {
-    "occurrences": 9683,
-    "filesScanned": 3356
+    "occurrences": 9697,
+    "filesScanned": 3357
   },
   "shippedFiles": 1323,
   "shippedSrc": 5,
-  "lineageNote": "2026-11-20: net -2 then +2 back — the 0.15.0 CHANGELOG entry quotes the upstream strings it REMOVED ('opencode.ai/go', 'opencode.ai/workspace/<id>/go', 'opencode.ai/docs', 'opencode.ai/issues', 'OpenCode Go for ... $10/month', 'opencode-version/terminal/reproduce') in prose explaining the de-upstreaming fix, which is exactly the documented 9616/9617/9618 class: the literal appears in the changelog that says it was taken out. Net product-source lineage actually FELL 9681->9670 (measured mid-batch, before the CHANGELOG was written); the shipped source carries no new upstream claim, and the first-party-gateway needle was widened (opencode.ai/go now matches) precisely so this class cannot silently return."
+  "lineageNote": "2026-11-21: +14 lineage occurrences (all token 'opencode') come from the fork test packages/tui/test/cli/tui/user-destinations.test.ts added at 837f4ffc by the harness TUI lane (fixed-point test for user-visible destinations); attribution, not new product surface — the file is a fork test, the daemon/mcp-shell product files carry 0 new brand hits"
 }
