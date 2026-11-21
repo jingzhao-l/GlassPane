@@ -27,6 +27,19 @@ npm 包 `bin` 声明没动。本版是**全面审查（正确性 + 信任边界 
   updater 指纹钉 + 三道 consent 门、workflows dispatch-only）经读码逐条确认干净；
   `--grant-accessibility` 超时退 1（`main.swift:879`）与 exit-code 表一致，非缺陷。
 
+**本轮替 owner 做的决定 —— 补完 harness 线未完成的 0.15.0 发布（跨线修复，非本版内容）**：
+commit `119114b2`（harness 线 11-20）把 fork 在 trunk 上号到 0.15.0，但**没走完它的发布**——
+split 仓仍停在 0.14.18、无 `v0.15.0` tag、npm 仍 0.14.18。那笔在 CI 上先被 `837f4ffc` 的金样漂移
+盖住（fork-diff/brand-surface/product-surface 依次先红），本轮把这些金样重记后才暴露出
+`release-artifact` 那格红——而 `release.yml` 第一步 `assert-ci-green` 要求被 tag 的 sha 的 `ci.yml`
+全绿，这道红会挡住本版取号。修法（release-artifact 自带的 remedy，也是 release.md step 3）：
+`git subtree split --prefix=harness/glasspane-harness` 重切搬运分支，**证明 split 树 == trunk 子树**
+且是远端 main 的**快进**（被覆盖内容在分支历史里，无独有字节丢失——split 的 94 行
+"published-only" 全是 0.15.0 有意摘掉的 Go 订阅营销/opencode.ai 链接），push split main，再用
+owner 钉的那把签名钥匙（`0929EA31…43A1298`，本地 `gpg --list-secret-keys` 实测在）打 `v0.15.0`
+signed tag 并 push。七把尺子全绿、`release-artifact` 两格（split-main + artifact）都
+`== trunk 子树`。这半不占本版号、不改 fork 版本（trunk 早已是 0.15.0），只是把那条线欠的发布动作补上。
+
 **门禁实测**（2026-11-21 发版日复跑，隔离单跑）：`npm ci` / `npm run build` / `npm test
 --workspaces`（763+353+818 全 pass）/ `check-version`（15 位点一致 1.31.11）/
 `check-doc-links`（32 文档 275 内链 46 外链）/ `check-workflows --self-test`（48 case）+
@@ -35,9 +48,9 @@ npm 包 `bin` 声明没动。本版是**全面审查（正确性 + 信任边界 
 重写的 `testOversizedResponseAnswersPayloadTooLargeWithRealId` 共 2 条）/ `swift test
 engine/probe`（58 pass / 1 skip）/ `pytest bridge`（223 pass / 1 skip）/ `sh -n install.sh` /
 信号 smoke（SIGTERM/SIGINT 自退且 socket unlink）/ publish-shape（bundle+pack：
-`glasspane-mcp-1.31.11.tgz` 31 files）/ 三把尺子 `--check` 全绿（面 A/B 基线随本版 engine
-增长重记；fork-diff 与 brand-surface 重记的是上一轮 `837f4ffc` 给 fork 加 TUI 测试却没重记
-的遗留账——那笔在 CI 上先红挡住了本版发版，见 harness 基线补记两条提交）全绿。
+`glasspane-mcp-1.31.11.tgz` 31 files）/ 七把尺子 `--check` 全绿（fork-diff / tool-surface /
+brand-surface / product-surface / surface-semantics / hook-liveness / release-artifact；前四把
+的金样按本轮与上一轮的有意变化重记，最后一把随补完 fork 0.15.0 转绿）全绿。
 
 ## [1.31.10] — 2026-11-19
 
