@@ -2,6 +2,42 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.31.11] — 2026-11-21
+
+**版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、
+npm 包 `bin` 声明没动。本版是**全面审查（正确性 + 信任边界 + UX/功能缺口）唯一报出的真缺陷**
+的一处修复，无新增 CLI 参数、`gp_*` 工具或产品形状。
+
+- **出站 `payloadTooLarge` 的 remedy 按来源方法给，不再一律支去 observe 的旋钮（P2）**：
+  位于 `engine/Sources/GlassPaneEngine/Dispatcher.swift` 的 `encode`（风险区：归因与证据
+  语义的对外错误面）。回帧超 4 MiB 那条结构化错误的 remedy 从前恒是共享表那句
+  "reduce observe maxDepth or narrow the selector scope"。那两个旋钮只有 `observe`/
+  `snapshot`/`audit_ui` 真读；对 `last_evidence`（重放一份已记录的 pack）、`diagnose`、
+  `restore` 这类**既没有 maxDepth 也没有 selector** 的方法，remedy 指着调用方从来没有的
+  控件，唯一能走的下一步就是原样重发同一帧——正是入站那条臂（`Dispatcher.handle` 的
+  `.oversize`）早已单独修过的"remedy 不可执行"死路，出站这一侧漏了。修法：新增
+  `outboundOverCapRemedy: [EngineMethod: String]`，按产生该回帧的方法点名它**真读**的
+  旋钮（来源＝`acceptedParamKeys`）；`last_evidence` 的 remedy 老实说"这份 pack 的尺寸由
+  当时的观察定死、本次调用缩不了，改点具体的较小 `operationId` 或重跑更窄的操作"；无来源
+  方法的回帧（错误帧）仍用共享表条目。测试 `DispatcherTests.testOverCapRemedyIsMethodSpecific…`
+  + 重写 `testOversizedResponse…`；反向控制＝把 `overCapRemedy(for:)` 退回一律返回共享句，
+  该用例在 `last_evidence`/`diagnose` 的 maxDepth/selector 断言上**具名变红**（实测 6 条
+  断言红）。
+- 其余审查面（Unix socket 权限模型、TCC 四席位、证据落盘不泄屏、installer/install.sh 注入、
+  updater 指纹钉 + 三道 consent 门、workflows dispatch-only）经读码逐条确认干净；
+  `--grant-accessibility` 超时退 1（`main.swift:879`）与 exit-code 表一致，非缺陷。
+
+**门禁实测**（2026-11-21 发版日复跑，隔离单跑）：`npm ci` / `npm run build` / `npm test
+--workspaces`（763+353+818 全 pass）/ `check-version`（15 位点一致 1.31.11）/
+`check-doc-links`（32 文档 275 内链 46 外链）/ `check-workflows --self-test`（48 case）+
+`check-workflows`（5 文件）/ `swift build` / `swift test`（1620 executed / 1615 pass /
+0 fail / 5 skip，含本轮新增 `testOverCapRemedyIsMethodSpecificNotAlwaysObserveKnobs` 与
+重写的 `testOversizedResponseAnswersPayloadTooLargeWithRealId` 共 2 条）/ `swift test
+engine/probe`（58 pass / 1 skip）/ `pytest bridge`（223 pass / 1 skip）/ `sh -n install.sh` /
+信号 smoke（SIGTERM/SIGINT 自退且 socket unlink）/ publish-shape（bundle+pack：
+`glasspane-mcp-1.31.11.tgz` 31 files）/ `tool-surface --check`（面 A/B 基线随本版 engine
+增长重记，见 harness 基线补记那条提交）全绿。
+
 ## [1.31.10] — 2026-11-19
 
 **版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、
