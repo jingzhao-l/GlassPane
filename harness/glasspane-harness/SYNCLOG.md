@@ -3,6 +3,67 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-21（第四十五次会话）· 0.15.0 三处「把人送回上游」的私有化缺陷（用户可见面取 minor；typecheck 半修由 0.15.1 收）
+
+### 〇、改动面数字
+
+本会话两批：
+- **0.15.0（本次取号）**：`fork-diff vs v1.18.32: 4625/6773 byte-identical, 299 edited, 141 added, 1708 deleted`
+  ——`retry.ts` / `dialog-retry-action.tsx` / `error-component.tsx` 此前与上游逐字节相同、**从未进过
+  edited 桶**，本次改动使三者首次成为 edited（294→299）。`tool-surface` surface B coverage 237→240
+  是同一件事的另一面：**陈旧基线校正**，非真实增长（三文件的 authored 行首次入账）。
+- **0.15.1（另一会话在我取号之后补的 patch，收掉我留下的 typecheck 半修）**：四桶逐数一致
+  （`retry.ts` 的 `+1` 只动内容哈希、仍在 edited 桶内）。
+
+### 一、审出并修掉的三处（全部进 0.15.0）
+
+`review-bugbot` + `review-security` 两轮子代理审查，跨 fork 定制面与尺子层。三条**真实**缺陷：
+
+1. **TUI 崩溃屏把 bug 报到上游 tracker**（`error-component.tsx`）：`buildIssueURL` 指
+   `github.com/anomalyco/opencode/issues/new`，并按**上游** bug-report.yml 的字段 id 预填——而本仓
+   模板的 id 不同（`version/engine/what/os/consent` vs 上游的 `opencode-version/terminal/reproduce`），
+   所以预填的字段在 GitHub 侧**静默丢弃**。改指本产品仓库、按本仓 id 预填、崩溃标题与页脚改产品名。
+2. **TUI `docs.open` 打开上游文档站**（`app.tsx:807`）：`opencode.ai/docs` → 本产品仓库 `docs/index.md`。
+3. **引擎重试路径仍制造上游 Go 订阅 upsell**（`session/retry.ts`，三处里最深）：对
+   `FreeUsageLimitError`/`GoUsageLimitError` 返回营销文案 + 可点击链接
+   （`opencode.ai/go`、`opencode.ai/workspace/<id>/go`），经 TUI `DialogRetryAction` 呈现。改中性事实 +
+   `link` 留空（可选字段）；删 `GO_UPSELL_MESSAGE`/`GO_UPSELL_URL` 两常量与 TUI 里死掉的 Go 光效分支。
+
+**根因（为什么第 3 条长期漏检）**：`brand-surface` 的 `first-party-gateway` 闸针只匹配**引号紧贴**的
+`opencode.ai/zen`，匹配不到生产真写的 `https://opencode.ai/go`。放宽为 host/path 形式，正向对照改
+真实形状 `const GO_URL = "https://opencode.ai/go"`，重跑 8/8 具名红。
+
+### 二、跑了哪些闸、结果如何
+
+- 六把尺子全绿：`fork-diff`（4625/299/141/1708，与金样一致）、`tool-surface`（面 A 13028/21.25%、
+  面 B 14539/23.71%，coverage 16/240 文件不变，LOC 棘轮绿）、`brand-surface`（0 hit；血缘先降
+  9681→9670 后因 CHANGELOG 引用被删字样回升，`--record --lineage-note` 记为 9616/9617/9618 同类）、
+  `surface-semantics`（0 hit）、`product-surface`（0.15.1 号 6642 agreement/0 problem）、
+  `hook-liveness`（21 hooks 无漂移）。`kernel-pin`（0.1.15 对齐）。
+- 父仓公共闸：`check-workflows`（5 clean）、`check-doc-links`（OK）、`release-artifact`
+  （split-main 与 trunk 树逐字相等 `dcb484e5`；唯一 lag 是 0.15.1 的 SYNCLOG 台账，"next tag carries it"）。
+- 固定点测试：opencode 四文件 212/0；tui inline-tool-wrap 37/0；**新增**
+  `test/cli/tui/user-destinations.test.ts` 6/0（崩溃屏 tracker/id/产品名 + docs.open + 重试网关 +
+  双向对照）；`retry.test.ts` 60/0（三 Go/free 用例改断言无 `link`）；`schema-decoding.test.ts` 25/0。
+- **反向验证（实测）**：把 `docs.open` 改回 `https://opencode.ai/docs` → `user-destinations` 那条变红
+  点名 offender；复原即绿。`brand-surface` 新针重跑 8/8 具名红。
+- typecheck 四包全绿（0.15.1 那半修已由另一会话补齐）。
+
+### 三、没跑的部分照实写
+
+- 真模型轮次、真 TUI 观感：**未观测**（需真机 + 真 provider）。
+- musl/baseline 目标：**未观测**（`product.json` 声明但无 CI lane，属产品边界，维持现状）。
+- `gp_*` 工具面对真 daemon：本轮未起 daemon 走查（审查为读码 + 固定点，未做真机）。
+
+### 四、本会话留下的一个过程教训（诚实记账）
+
+0.15.0 的 `retry.ts` 改法留下**一处 typecheck 半修**（删 `GO_UPSELL_*` 后 `str(body?.metadata?.workspace)`
+成了未使用变量一类的问题），我在本会话跑的四包 typecheck **没有抓到**——另一会话的 0.15.1
+（`7cbf953c`）补回显式返回注解才收掉。本会话跑 typecheck 时改动已在 HEAD、四包报 rc=0，说明那处
+半修的形状在我跑的时点之前已被吸收；但**我在 0.15.0 取号前没有对改动面单独复跑 typecheck**，
+这是发布程序该补的一条（改 `src/**` 后、取号前，对改动包单独 `bun run typecheck` 一次）。
+
+
 ## 2026-11-21（第四十四次会话）· 取号 0.15.1：retryable() 补回显式返回注解，修掉 0.15.0 的 typecheck 半修（取 patch）
 
 ### 〇、改动面数字
