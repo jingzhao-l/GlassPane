@@ -2004,3 +2004,26 @@ updater 签名硬闸+原子 apply、install.sh 钉 tag+tag 验签）。GUI 会�
   本轮无真机面改动；daemon/MCP 的返回形状与席位读数与 1.31.10 一致。
 
 没碰：`--prune-evidence` 一类破坏性旗标一次都没执行过。
+
+## 2026-11-22 · v1.31.12 取号日真机核对
+
+- **归档自证**：`make-release-archive.mjs --verify` → 833 entries / 5,143,625 bytes，30 条声明命令
+  与 schema 全在，`grep -cE "(^|/)harness/"` = **0**。本地 `shasum -a 256` = `SHA256SUMS-1.31.12.txt`
+  = GitHub API `assets[].digest` = `228078a8…5a30` 三处逐字相等；`.asc` GPG 签名
+  （key `0929EA31…43A1298`）校验 Good。
+- **MCP initialize 端到端（装的是 registry 发布物）**：`npm pack glasspane-mcp@1.31.12`（从 registry 拉
+  权威 tarball，非本地 `mcp-shell/` 那份可能陈旧的 dist）→ 装进干净前缀 → stdin 打一条 `initialize`
+  真帧，回包 `serverInfo.name="glasspane-mcp"`、`serverInfo.version="1.31.12"`、`toolsCap=true`。
+  教训：本轮先误用了 `mcp-shell/` 里一份 1.31.7 时代的本地 dist 残留做 pack，装出 `1.31.11`，
+  险些误判为"发布物版本字面量陈旧"——端到端必须从 registry 取权威 tarball。
+  registry 两包 `@1.31.12 --prefer-online` 均回 `1.31.12`（publish run 44966279164 绿后即时回查即中）。
+- **daemon `--permissions`（隔离 `--state-dir`）**：exit 0，`verdict=granted`，三席实测
+  accessibility / input-monitoring / screen-recording 全 granted；developer-tools 诚实
+  `unverifiable` 并给出可执行 next `glasspaned --check-developer-tools`。补跑该 next：
+  `verdict=denied`（受限真实 lldb 探测），如实报系统明确拒绝，未把 unverifiable 读成拒绝。
+  `--permissions` 自带 note 声明不读状态，隔离根未被写入（事后回收）；home 默认根未触碰。
+- **本轮修复真机相关性**：本轮改动全在 `harness/`（上一轮 kernel pin 0.1.16 的跨线收口：两处文档
+  pin 号、fork-diff/tool-surface 两把金样、harness 线 0.15.2 取号），产品面唯一变化是 mcp-shell 依赖
+  pin 0.1.15 → 0.1.16。协议/返回形状/席位读数与 1.31.11 一致。
+
+没碰：`--prune-evidence` 一类破坏性旗标一次都没执行过。
