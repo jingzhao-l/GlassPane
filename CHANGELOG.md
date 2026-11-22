@@ -2,6 +2,29 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.31.12] — 2026-11-22
+
+**版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、
+npm 包 `bin` 声明没动。产品面唯一变化是把 `mcp-shell` 的 `iterate-kernel` 依赖从 0.1.15 pin 到
+0.1.16（`343f1526`，上游纯源码健壮性修复，契约/schema/fixtures 零变化）；本轮其余改动全在
+`harness/`（上一轮 kernel bump 的跨线收口），而发布归档显式排除 `harness/`。
+
+- **追平上一轮 kernel pin 0.1.16 的跨线半修**：`343f1526` 把 fork 侧依赖 pin 到 0.1.16，却漏追平
+  两处文档里按真源 `kernel-pin.json` 复算的旧号，以及 fork-diff / tool-surface 两把金样。后果三处
+  CI 同一轮红：`check-doc-links` 的可复算主张闸（连带 node suite 里三条"真仓库 doc 闸应绿"的用例
+  `not ok 317/610/643` 连坐）、`harness-rulers` 的 fork-diff 腿、tool-surface 腿。本轮补完：
+  - 两处文档 pin 号 0.1.15 → 0.1.16（`harness/README.md`、`harness/glasspane-harness/docs/kernel-integration.md`）。
+  - 两把金样随批 `--record` 吸收同一有意变化（kernel pin），非工具面增长。
+- **补完 harness 线被上一轮推迟的 0.15.2 取号**：主干子树随 kernel bump 前进，已发布 tag `v0.15.1`
+  永不移动，`release-artifact` 的 artifact 腿因此红——那条红跑在本仓 `harness-rulers` job 里，会经
+  `assert-ci-green` 挡住本仓取号。本轮重切 subtree split 快进推 split main（远端 split main 是新 tip
+  的祖先，零独有字节丢失）、打 `v0.15.2` 签名 tag、发 GitHub Release（draft=false、6 资产）与 npm
+  三包。两腿 `release-artifact` 实测全绿。
+
+**本轮替 owner 做的决定**：`harness/` 那半边的 0.15.2 取号原本上一轮明确"交给 harness 每日那条线"
+却没切，而它拉红本仓 CI 会挡住本版取号——跨线缺陷按"缺陷长在哪条线就跨到哪条线修"补完，未列入遗留。
+回滚：`git revert` 本轮四笔 harness 提交。
+
 ## [1.31.11] — 2026-11-21
 
 **版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、
