@@ -2,6 +2,31 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.31.13] — 2026-11-23
+
+**版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、
+npm 包 `bin` 声明没动。本轮唯一产品面改动是 `mcp-shell/package-lock.json` 一个文件（构建/安装
+锁定坐标），加两处文档 pin 号追平；`harness/` 那半边按跨线纪律修完并单独发 0.15.5，不进本仓发布物。
+
+- **补完 `8ac7ca3f` kernel bump 的跨线半修（mcp-shell lock 脱节）**：`8ac7ca3f` 把 `mcp-shell/package.json`
+  的 `iterate-kernel` 精确依赖升到 0.1.17 并刷新了根 `package-lock.json`，却漏了 `mcp-shell/package-lock.json`
+  —— CI 的 mcp-shell job 用的是它自己的 lockfile（`ci.yml:92` 的 `cache-dependency-path`），该文件 root
+  block 与 `node_modules` 槽仍指向 0.1.16，与 manifest 的 0.1.17 脱节。本轮 `npm install
+  --package-lock-only --workspaces=false` 重新生成，root block 与 `node_modules` 槽均升到 0.1.17，
+  integrity 对齐 registry（`sha512-hOw63ll7pNK`）。失效模式：`npm ci` 照旧装 0.1.16，与壳侧声明的
+  0.1.17 不符（`check-kernel-corpus` 的 mcp-shell leg 靠 `node_modules` 实装版本判定，本轮已实测转绿）。
+- **两处文档 pin 号追平（`check-doc-links` 可复算主张闸）**：`harness/README.md:76`「registry 依赖
+  iterate-kernel@0.1.16」与 `harness/glasspane-harness/docs/kernel-integration.md:201`「provenance stamp
+  0.1.16」均按真源 `kernel-pin.json`（0.1.17）改到 0.1.17。失效模式：主张与真源脱节，闸具名变红。
+- **跨线连带：harness 0.15.5**：`kernel-integration.md` 在 `harness/glasspane-harness/` 子树内、属发布物
+  字节，改它使 `release-artifact` 的 artifact 腿红（v0.15.4 永不移动）。按「缺陷长在哪条线就跨到哪条线修」
+  切 harness 0.15.5（签名 tag / Release 6 资产 / split main fast-forward，零 published-only 字节丢失）。
+
+**本轮替 owner 做的决定**：把 `kernel-integration.md` 的 pin 号一并追平（而非只修本仓 `README.md`），依据是
+`check-doc-links` 的可复算主张闸把它当真源对账项；代价是必须跨到 harness 线补一个 patch 号，已按跨线纪律
+做完并留痕。回滚：`git revert` 本轮两笔（`33247fda` + harness 0.15.5 那笔），mcp-shell lock 退回
+`/var/tmp/glasspane-main-check/20261123/` 备份。
+
 ## [1.31.12] — 2026-11-22
 
 **版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、
