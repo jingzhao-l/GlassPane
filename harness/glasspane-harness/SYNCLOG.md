@@ -3,6 +3,75 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-22（第四十八次会话）· 只读审查轮：无代码改动、无发版，0.15.2 端到端健康
+
+### 〇、改动面数字
+
+`fork-diff vs v1.18.32: 4625/6774 byte-identical, 299 edited, 142 added, 1708 deleted`
+——四桶与 0.15.2 逐数一致。本轮**零产品代码改动**，是一次只读审查 + 已发布物端到端健康确认。
+
+### 一、审查结论
+
+两个并行子代理（正确性 / 安全-供应链）审完全部定制面（`tool/glasspane/*`、`plugin/*`、`registry.ts`）与发布供应链（`publish.ts`、`build.ts`、`postinstall.mjs`、`install.sh`、两条 workflow）。
+
+**无 P0/P1 缺陷。** P2 观察项逐条评估：
+
+| 观察项 | 判定 | 理由 |
+| --- | --- | --- |
+| FORK.md:13/:66 写死 `iterate-kernel@0.1.8` | 维持现状 | 血缘文档对 2026-10-08 vendored→依赖 转变的历史快照，自带时间戳，真源是 `kernel-pin.json`（`kernel-pin.mjs --check` 已绿守） |
+| postinstall.mjs:32 `REGISTRY` 硬编码字面量 | 维持现状 | product-surface.mjs:463-466 有专有规则离线守护，`--check` 报 0 problem |
+| providers.ts:258 throw rethrow | 维持现状 | 不可达（draft 是静态字面量、只抛已接 tagged error），可读性观察 |
+| kernel.ts:359 folded `.GlassPane` | 维持现状 | fail-direction 写明（拒绝优于漏放），已在源码注释 |
+| install.sh npm 通道无独立 sha256 比对 | 维持现状 | npm 注册表 `dist.integrity` 自证；install.sh:281 已如实标注"成功行依赖 dist.integrity" |
+
+### 二、历史挂账回代码复核
+
+- **musl/baseline 目标**：product.json 只声明 `darwin-arm64`/`darwin-x64`，release.yml matrix:332-333 严格对齐，`release.yml:33-34` 明示退役。挂账不成立。
+- **FORK.md 内核版本**：见上表，维持现状。
+- **07:30 交接的 license 锚点**：已于 2026-11-06 落地（README.md `## License and attribution`，父仓 DEFERRED_FINDINGS 清空），本轮确认。
+
+### 三、0.15.2 端到端健康（本轮实测）
+
+- **Release**：`isDraft=false`、6 资产（arm64/x64 zip + 各 .asc + SHA256SUMS + .asc）、`targetCommitish=059d45bc`（split HEAD）
+- **registry**：三包 `glasspane-harness@0.15.2` / `-darwin-arm64@0.15.2` / `-darwin-x64@0.15.2` 全部 `--prefer-online` 命中
+- **verify-published 0.15.2**：12 项全通过（安装、双 bin --version、已安装包 gates、provenance、patched-deps artifact-check、内嵌 web 服务）
+- **npm install -g**：`~/.local` 前缀下 `glasspane-harness --version` 与 `gp-harness --version` 均报 0.15.2
+- **curl 兜底通道**：SHA256SUMS + arm64 zip sha256 OK；gpg `--verify SHA256SUMS.txt.asc` 完好（密钥 `0929EA31`）
+
+### 四、本轮闸结果（全部从主仓根跑）
+
+| 闸 | 数字 | 判据 |
+| --- | --- | --- |
+| fork-diff | 4625/6774 identical, 299 edited, 142 added, 1708 deleted | `--check`（无 `--record`：无代码改动） |
+| tool-surface | 面 A 13027/21.25%｜面 B 14488/23.71% | LOC 棘轮守零增长；crossing check 已花费，两个 `!` 是常驻噪声 |
+| surface-semantics | 0 hits；正对照 3/3 | 全绿 |
+| brand-surface | 血缘 9698 / 基线 9698｜0 hit；正对照 8/8 | 全绿 |
+| product-surface | 6642 agreement(s), 0 problem(s) @0.15.2 | 全绿（无 --record：永远禁） |
+| hook-liveness | 21 hooks vs v1.18.32, no drift；bound 2/2 | 全绿 |
+| kernel-pin | installed 0.1.16 == published latest, 26 contracts sha256 ok | 全绿，无漂移（`--probe` 确认 0.1.16 即 published latest） |
+| kernel-conformance | 16 fixture(s) 全过 golden | 全绿 |
+| fork 测试（opencode glasspane 4 文件） | 212 pass / 0 fail | 全绿 |
+| fork 测试（opencode provider/websearch/cli/daily 4 文件） | 41 pass / 0 fail | 全绿 |
+| fork 测试（opencode script 5 文件） | 30 pass / 0 fail | 全绿 |
+| fork 测试（tui inline-tool-wrap） | 37 pass / 0 fail | 全绿 |
+| typecheck | opencode / tui / sdk/js / plugin 全 rc=0 | 全绿 |
+| publish --dry-run | glasspane-harness@0.15.2 pack 干净 | 全绿 |
+| check-workflows --self-test | 48 cases（28 mutation + 20 legal） | 全绿 |
+| check-workflows | 5 workflow 干净 | 全绿 |
+| check-doc-links | 32 文档 / 275 内链 / 46 外链 / 497 表格，rc=0 | 全绿 |
+| 主仓 CI（GlassPane） | 6 条最近 runs 全 `completed success` | 全绿 |
+
+### 五、未观测项
+
+- **真 daemon 会话 TUI 观感**：需 glasspaned 在跑 + 真 AI 调用——物理边界，无命令补
+- **musl/baseline 构建**：本轮 product.json 不声明这两个目标，不适用
+
+### 六、发版决策
+
+**本轮不取号。** 依据：零代码改动、0.15.2 三格齐（split main == parent subtree tree `b8258d02`、tag v0.15.2 已推、Release 6 资产非草稿、registry 三包命中）、全部闸绿——没有新东西要发。下一个取号由下一轮有代码改动的审查触发。
+
+---
+
 ## 2026-11-23（第四十九次会话）· 取号 patch 0.15.3：吸收内核 pin 0.1.16→0.1.17
 
 ### 〇、改动面数字

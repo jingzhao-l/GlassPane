@@ -2198,7 +2198,7 @@
     {
       "file": "bun.lock",
       "upstreamHash": "7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c",
-      "forkHash": "fa6d443b61c4cc5efe71e179c68954d45313109e"
+      "forkHash": "7c0992b6c23e400bd98519fcccb76625d5c4b493"
     },
     {
       "file": "bunfig.toml",
@@ -2813,7 +2813,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "c41ed1493d12adf095b78609fa03f52f04ced5b2"
+      "forkHash": "a4e5efdc895f07846ecbd7a80ff06438c4107763"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -3608,7 +3608,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "5d2c4a5a08ef46532936995c5f9b067732656395"
+      "forkHash": "5db1f4f0e5c6c1201525c5b0c4da426a289fba50"
     },
     {
       "file": "script/beta.ts",
@@ -3836,7 +3836,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "6d43af9322d8abd651c60cfd05c358383ccb4f62"
+      "forkHash": "075aacf3796a29ef914a2a6b879bf77ab40472ba"
     },
     {
       "file": "contracts/dependency-floors.json",
@@ -3872,7 +3872,7 @@
     },
     {
       "file": "docs/install.md",
-      "forkHash": "3d3c52e4a55501a63c3a1b66da3f952fe72ff8ab"
+      "forkHash": "b0cc791c361df119c748fe334c072c8bb1bf49ed"
     },
     {
       "file": "docs/kernel-integration.md",
@@ -4184,11 +4184,11 @@
     },
     {
       "file": "product.json",
-      "forkHash": "7b337a8d6bfa1aff739101334746d07d42878537"
+      "forkHash": "c2a2b159e402027fda322c7c2bcbee1207cdd76e"
     },
     {
       "file": "README.zh-CN.md",
-      "forkHash": "cf71b33201cea7fd3be2b5edcc2f8dc67dc73a90"
+      "forkHash": "77c2a188510f35ad9d321bc765e0a8f261784198"
     },
     {
       "file": "script/assert-ci-green.mjs",
@@ -4224,11 +4224,11 @@
     },
     {
       "file": "scripts/install.sh",
-      "forkHash": "d725c2089e75db95067f68b2a92ea9f40c83c108"
+      "forkHash": "25a0851fee96aa95a66526f7b50b9760d29b18ea"
     },
     {
       "file": "SYNCLOG.md",
-      "forkHash": "cc898a89a580b44420d3743ad53136f8a7a21604"
+      "forkHash": "882f24a5c250b1dcb96e86c2ee4c530329acb4d4"
     }
   ]
 }
