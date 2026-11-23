@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.15.5] — 2026-11-23
+
+> **取 patch**：零产品代码改动，零用户可见面变动。本版存在的唯一理由与 0.15.2/0.15.4 相同——**吸收一次主干文档 pin 号追平**。
+> 主仓 `33247fda` 修 `check-doc-links` 两处 stale 引用时，顺带把本仓 `docs/kernel-integration.md:201` 的
+> `kernel.version` provenance stamp 从 0.1.16 改到 0.1.17（与 `contracts/kernel-pin.json` 真源对齐）。该文件在
+> `harness/glasspane-harness/` 子树内，是发布物字节的一部分，而已发布的 tag `v0.15.4` 永不移动，`release-artifact` 的
+> artifact 腿因此红（"已发布 tag 背后的树 ≠ 主干子树"：1 行非台账文件差）。这一格只能由**切一个新号**清，本轮补完。
+> - **改动面**：版本线 0.15.4 → 0.15.5（product.json / packages/opencode/package.json / bun.lock / install.curl 四份门面
+>   文档 curl 兜底钉点）。`fork-diff` 仅 `docs/kernel-integration.md` 一行变化，金样随批 `--record` 吸收，非真实分叉变化；
+>   `product-surface` 报 6642 agreement / 0 problem。
+> - **教训沿用 0.15.4**：发版 tag 必须 `git tag -s -m`；轻量 tag 会在 version-check 被挡，且号一经推远端即被 immutability
+>   锁死，只能让号。
+
 ## [0.15.4] — 2026-11-23
 
 > **取 patch**：零产品代码改动，零用户可见面变动。本版存在的唯一理由与 0.15.2 相同——**吸收一次内核依赖升级**。
