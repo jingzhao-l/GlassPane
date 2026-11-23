@@ -3,7 +3,47 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
-## 2026-11-22（第四十八次会话）· 只读审查轮：无代码改动、无发版，0.15.2 端到端健康
+## 2026-11-23（第四十九次会话）· 取号 patch 0.15.3：吸收内核 pin 0.1.16→0.1.17
+
+### 〇、改动面数字
+
+`fork-diff vs v1.18.32: 4625/6774 byte-identical, 299 edited, 142 added, 1708 deleted`
+——四桶与 0.15.2 **逐数一致**。本轮**零产品代码改动**，唯一内容是吸收主仓 `8ac7ca3f` 的内核 pin 升级（0.1.16→0.1.17），
+把已落后的 `release-artifact` artifact 腿从红转绿（同 0.15.2 先例）。
+
+### 一、为什么取号（决定 + 依据）
+
+主仓 `8ac7ca3f` 把 `packages/opencode/package.json` 的 `iterate-kernel` 依赖从 0.1.16 升到 0.1.17（该轮内核只加校验闸，
+fixture/schema 字节零变化），主干子树前进 4 个非台账文件各一行。已发布 tag `v0.15.2` 背后的树仍是 0.1.16，
+`release-artifact --check` 报 `✗ artifact: published b8258d02 ≠ trunk 10ff6db2`，4 个差异路径均非台账 ⇒ 无豁免。
+**该轮把这半边明确交给本线**（提交正文："harness 侧的 split/tag 吸收由 10:30 每日线完成"），本轮兑现。
+回滚：`git tag -d v0.15.3` + split 仓删 tag + product.json 等退回 0.15.2（tag 一旦推远端即不可移动）。
+
+### 二、两把金样 --record（同一有意变化，非工具面增长）
+
+- `fork-diff.json`：仅 `observedAt` 2026-11-21→2026-11-23 + 4 个 tracked 文件哈希随 pin 移动；四桶计数零变。
+- `tool-surface.json`：仅 `observedAt` + kernel 归因 `{"version":"0.1.16"}→{"version":"0.1.17"}`；
+  面 A 13028 行/21.25%、面 B 14539 行/23.71% 与旧基线持平，LOC 棘轮零增长。
+- **反向验证**：两金样改回 0.1.16 时 `fork-diff --check` / `tool-surface --check` 立即具名变红；恢复即绿。
+
+### 三、版本线对齐（product-surface 6642 agreement / 0 problem）
+
+`product.json` + `packages/opencode/package.json` + `bun.lock`（`bun install` 刷新）+ `install.curl` 钉点
+→ v0.15.3；四份门面文档（`README.md`/`README.zh-CN.md`/`docs/install.md`/`scripts/install.sh`）curl 兜底钉点同步。
+
+### 四、双向审查（本轮新跑）
+
+正确性 / 供应链两路并行子代理审全部定制面与发布通道：**无 P0/P1/P2**。
+两条 P3 观察项（compaction `appendBlock` 的 prompt 覆盖边界、`install.sh` commit 锚点 best-effort 回退）维持现状，
+与第四十八次会话处置一致。
+
+### 五、闸的实测数字
+
+kernel-pin 0.1.17 无漂移（26 contract 文件）；kernel-conformance 16 fixtures 全过；固定点 **280 用例全绿**
+（opencode 212 + 31 + tui 37），0 fail；四包 typecheck rc=0；publish --dry-run 干净；
+surface-semantics 0 hit/23 files；brand-surface 血缘 9698 持平；hook-liveness 21 hooks 无漂移。
+
+
 
 ### 〇、改动面数字
 

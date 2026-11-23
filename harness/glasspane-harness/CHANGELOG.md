@@ -8,6 +8,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.15.3] — 2026-11-23
+
+> **取 patch**：零产品代码改动，零用户可见面变动。本版存在的唯一理由与 0.15.2 相同——**吸收一次内核依赖升级**。
+> 主仓 `8ac7ca3f` 把 fork 的 `iterate-kernel` 依赖从 0.1.16 pin 到 0.1.17（该轮内核只加校验闸，fixture/schema 字节零变化），
+> 主干 `harness/glasspane-harness` 子树随之前进，而已发布的 tag `v0.15.2` 永不移动。`release-artifact` 的 **artifact 腿**因此变红
+> （"已发布 tag 背后的树 ≠ 主干子树"：4 个非台账文件各差 0.1.16/0.1.17 一行）。这一格只能由**切一个新号**清，本轮补完。
+> - **改动面**：`fork-diff` 四桶与 0.15.2 逐数一致（`4625 identical / 299 edited / 142 added / 1708 deleted`）；
+>   `tool-surface` 面 A/B 的 LOC 与覆盖文件数与旧基线持平（A 13028 行/21.25%、B 14539 行/23.71%，crossing check 早已花掉，
+>   LOC 棘轮守零增长），只有 kernel 归因一行 `{"version":"0.1.16"}→{"version":"0.1.17"}`。
+>   两把金样（`fork-diff.json` / `tool-surface.json`）已随批 `--record` 吸收同一有意变化，非真实工具面增长。
+> - **版本线**：`product.json` + `packages/opencode/package.json` + `bun.lock` + `install.curl` 钉点，以及四份门面文档
+>   （`README.md` / `README.zh-CN.md` / `docs/install.md` / `scripts/install.sh`）的 curl 兜底通道钉点全部对齐 v0.15.3；
+>   `product-surface` 报 6642 agreement / 0 problem。
+> - **双向审查**：正确性与供应链两路并行审查全部定制面与发布通道，均无 P0/P1/P2；两条 P3 观察项
+>   （compaction `appendBlock` 的 prompt 覆盖边界、`install.sh` 的 commit 锚点 best-effort 回退）维持现状，与上一轮处置一致。
+> - **反向验证**：两把金样改回 0.1.16 时 `fork-diff --check` / `tool-surface --check` 立即具名变红（own-file / kernel 归因移动）；
+>   恢复即绿，证明这两把闸不是空转。
+
 ## [0.15.2] — 2026-11-22
 
 > **取 patch**：零产品代码改动，零用户可见面变动。本版存在的唯一理由是**吸收一次内核依赖升级**——

@@ -2,7 +2,7 @@
   "baseTag": "v1.18.32",
   "forkPath": "harness/glasspane-harness",
   "referenceClone": ".external/opencode",
-  "observedAt": "2026-11-21",
+  "observedAt": "2026-11-23",
   "counts": {
     "identical": 4625,
     "edited": 299,
@@ -2198,7 +2198,7 @@
     {
       "file": "bun.lock",
       "upstreamHash": "7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c",
-      "forkHash": "b85cdbbfa9af2a5c8edabb189806b9c89eec6da2"
+      "forkHash": "fa6d443b61c4cc5efe71e179c68954d45313109e"
     },
     {
       "file": "bunfig.toml",
@@ -2813,7 +2813,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "680e1d6392ec8a96475f9560c0755a67607fa726"
+      "forkHash": "c41ed1493d12adf095b78609fa03f52f04ced5b2"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -3848,11 +3848,11 @@
     },
     {
       "file": "contracts/kernel-conformance.json",
-      "forkHash": "5d38a905fa2bc5ddbcaa31d156a95c20afef9df7"
+      "forkHash": "ebd7d6b2182483d4d2e9122d277bbcc367055032"
     },
     {
       "file": "contracts/kernel-pin.json",
-      "forkHash": "c39f729cac4554946a7c2d7afd6c61d66d909ee1"
+      "forkHash": "389d5f5b45ff68601b3a795fc7d73d1a165633e0"
     },
     {
       "file": "contracts/models-catalog.json",
@@ -4228,7 +4228,7 @@
     },
     {
       "file": "SYNCLOG.md",
-      "forkHash": "9fb0b2c432a4c53a2949569de7bc471f6f7a8099"
+      "forkHash": "cc898a89a580b44420d3743ad53136f8a7a21604"
     }
   ]
 }
