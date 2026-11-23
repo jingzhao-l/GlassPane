@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
-## [0.15.3] — 2026-11-23
+## [0.15.4] — 2026-11-23
 
 > **取 patch**：零产品代码改动，零用户可见面变动。本版存在的唯一理由与 0.15.2 相同——**吸收一次内核依赖升级**。
 > 主仓 `8ac7ca3f` 把 fork 的 `iterate-kernel` 依赖从 0.1.16 pin 到 0.1.17（该轮内核只加校验闸，fixture/schema 字节零变化），
@@ -19,8 +19,14 @@ contract does not).
 >   LOC 棘轮守零增长），只有 kernel 归因一行 `{"version":"0.1.16"}→{"version":"0.1.17"}`。
 >   两把金样（`fork-diff.json` / `tool-surface.json`）已随批 `--record` 吸收同一有意变化，非真实工具面增长。
 > - **版本线**：`product.json` + `packages/opencode/package.json` + `bun.lock` + `install.curl` 钉点，以及四份门面文档
->   （`README.md` / `README.zh-CN.md` / `docs/install.md` / `scripts/install.sh`）的 curl 兜底通道钉点全部对齐 v0.15.3；
+>   （`README.md` / `README.zh-CN.md` / `docs/install.md` / `scripts/install.sh`）的 curl 兜底通道钉点全部对齐 v0.15.4；
 >   `product-surface` 报 6642 agreement / 0 problem。
+> - **为什么是 0.15.4 不是 0.15.3**：本轮先切了 v0.15.3，但那次 push 的是**轻量 tag 指针**（无 tag object、无 GPG 签名），
+>   `release.yml` 的 `version-check` 第 5 步「The tag itself must be a signed tag」具名变红。要补一个签名 tag object 必须
+>   覆盖或删除远端那个轻量指针，而 split 仓 `published-tags-immutable` 规则集（id 26423927，`current_user_can_bypass: never`）
+>   同时禁止 `update` 与 `deletion`——v0.15.3 遂成不可移动的废号。按「让号」先例（1.12.1、1.20.1）改切 v0.15.4：
+>   版本线整体从 0.15.3 顶到 0.15.4，重推 split、用 `git tag -s` 出**签名** tag object。**教训**：发版 tag 必须
+>   `git tag -s -m`（见 memory `release-toolchain-gotchas-20261029`），轻量 tag 会在 `version-check` 处被挡、且号一经推远端即被 immutability 锁死。
 > - **双向审查**：正确性与供应链两路并行审查全部定制面与发布通道，均无 P0/P1/P2；两条 P3 观察项
 >   （compaction `appendBlock` 的 prompt 覆盖边界、`install.sh` 的 commit 锚点 best-effort 回退）维持现状，与上一轮处置一致。
 > - **反向验证**：两把金样改回 0.1.16 时 `fork-diff --check` / `tool-surface --check` 立即具名变红（own-file / kernel 归因移动）；

@@ -72,7 +72,7 @@
 
 ---
 
-## 2026-11-23（第四十九次会话）· 取号 patch 0.15.3：吸收内核 pin 0.1.16→0.1.17
+## 2026-11-23（第四十九次会话）· 取号 patch 0.15.4：吸收内核 pin 0.1.16→0.1.17（0.15.3 让号）
 
 ### 〇、改动面数字
 
@@ -80,13 +80,21 @@
 ——四桶与 0.15.2 **逐数一致**。本轮**零产品代码改动**，唯一内容是吸收主仓 `8ac7ca3f` 的内核 pin 升级（0.1.16→0.1.17），
 把已落后的 `release-artifact` artifact 腿从红转绿（同 0.15.2 先例）。
 
-### 一、为什么取号（决定 + 依据）
+### 一、为什么取号 + 为什么是 0.15.4（决定 + 依据）
 
 主仓 `8ac7ca3f` 把 `packages/opencode/package.json` 的 `iterate-kernel` 依赖从 0.1.16 升到 0.1.17（该轮内核只加校验闸，
 fixture/schema 字节零变化），主干子树前进 4 个非台账文件各一行。已发布 tag `v0.15.2` 背后的树仍是 0.1.16，
 `release-artifact --check` 报 `✗ artifact: published b8258d02 ≠ trunk 10ff6db2`，4 个差异路径均非台账 ⇒ 无豁免。
-**该轮把这半边明确交给本线**（提交正文："harness 侧的 split/tag 吸收由 10:30 每日线完成"），本轮兑现。
-回滚：`git tag -d v0.15.3` + split 仓删 tag + product.json 等退回 0.15.2（tag 一旦推远端即不可移动）。
+该轮把这半边明确交给本线，本轮兑现。
+
+**0.15.3 让号**：本线先切 v0.15.3，但 `git push split/glasspane-harness:refs/tags/v0.15.3` 推的是**轻量 tag 指针**
+（无 tag object、无 GPG 签名），`release.yml` `version-check` 第 5 步「The tag itself must be a signed tag」具名变红。
+补签名 tag object 需覆盖/删除那个轻量指针，而 split 仓 `published-tags-immutable` 规则集（id 26423927，
+`current_user_can_bypass: never`，rules: update + deletion + non_fast_forward）两者全禁——实测 `git push :refs/tags/v0.15.3`
+退「Cannot delete this tag」、`--force-with-lease` 退「Cannot update this protected ref」。v0.15.3 遂成不可移动的废号。
+按「让号」先例（1.12.1、1.20.1）改切 v0.15.4：版本线 0.15.3→0.15.4、重推 split、用 `git tag -s` 出**签名** tag object
+（本地密钥 `0929EA31…` 与 `install.sh:323` 的 `GLASSPANE_HARNESS_SIGNING_FPR` 同一枚）。
+回滚：`git tag -d v0.15.4` + split 仓删 tag（若已被 immutability 锁死则让号 0.15.5）+ 版本线退回。
 
 ### 二、两把金样 --record（同一有意变化，非工具面增长）
 
@@ -98,7 +106,7 @@ fixture/schema 字节零变化），主干子树前进 4 个非台账文件各�
 ### 三、版本线对齐（product-surface 6642 agreement / 0 problem）
 
 `product.json` + `packages/opencode/package.json` + `bun.lock`（`bun install` 刷新）+ `install.curl` 钉点
-→ v0.15.3；四份门面文档（`README.md`/`README.zh-CN.md`/`docs/install.md`/`scripts/install.sh`）curl 兜底钉点同步。
+→ v0.15.4；四份门面文档（`README.md`/`README.zh-CN.md`/`docs/install.md`/`scripts/install.sh`）curl 兜底钉点同步。
 
 ### 四、双向审查（本轮新跑）
 
