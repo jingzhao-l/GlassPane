@@ -2,6 +2,36 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.31.14] — 2026-11-24
+
+**版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、
+npm 包 `bin` 声明没动。本版唯一改动面是 `.github/workflows/`（CI/发布通道本身）与新增
+`.github/dependabot.yml`，不碰任何产品面代码、schema、`gp_*` 工具契约或发布平台矩阵。
+
+- **GitHub Actions pin 升级（并入 PR #26，`ci/node24-actions-20261123`，CI 全绿）**：三个 workflow
+  （`ci.yml` / `release.yml` / `harness-contract.yml`）的 `actions/checkout`、`actions/setup-node`、
+  `actions/setup-python` 从 Node 20 时代的 SHA 升到经上游 API 逐条核过的较新 SHA。失效模式：旧 pin
+  停在 Node 20 运行时，与 Dependabot 后来在别处报的 Node 24 更新线脱节；升级把运行时抬到 Node 24，
+  `fetch-depth`/权限默认/`node-version` 输入语义均未变。三个新 SHA 经 `gh api repos/actions/<repo>/…`
+  核为官方提交（checkout→`v5.1.0`、setup-node→`v5.0.0`、setup-python→`v6.3.0`），非仿冒。
+- **修正并入内容的版本注释**：该分支原始提交把注释写成 `# v4`/`# v5`，与新 SHA 实际解析到的 tag
+  （v5/v5/v6）不符。本版按本仓注释惯例（写 major 版本）改回与真源一致的 `# v5`/`# v5`/`# v6`。
+  失效模式：注释与 SHA 脱节会误导读码者，且与 `release.yml` 里那条 pin 闸的说明口径不一致。
+- **新增 `.github/dependabot.yml`**：`github-actions` 生态、每周、`open-pull-requests-limit: 5`，
+  盯 pin 更新。与 `scripts/check-workflows.mjs` 规则 3c（每个 `uses:` 必须 40-hex）互补而非冲突：
+  Dependabot 只开 PR 提新 SHA 并同步注释，闸独立强制 40-hex 形状。
+- **安全复核**：`release.yml` 里两个 `environment: release`、读 `secrets.GPG_PRIVATE_KEY` 且持
+  `contents: write` 的 job 仍全程 SHA-pinned（升级后 `checkout`/`setup-node` 依然是 40-hex），无可变
+  ref；Dependabot 的自动 PR 跑在标准 `GITHUB_TOKEN` 下、进不了 `release` 环境的 secrets。两次子代理
+  审查（正确性 + 供应链）均无 P0/P1；一条 P2 提示 `harness/glasspane-harness/` 子树内的 pin 仍停在
+  v4——那是 harness 独立发布线的事，本线按跨线纪律不碰 `harness/`。
+
+**本版替 owner 做的决定**：把 PR #26 判为 patch 号 1.31.14（依据：改动全在发布通道与 CI 配置，不触
+产品面四条判据任一条）；把该分支基于 1.31.13 发版前 main 这一点用干净合并解决（合并自动保留了
+1.31.13 的版本线，`check-version` 当场绿），而不是 rebase 重放（保留原 PR 的提交历史与 CI 证据）。
+回滚：`git revert -m 1 84056909`（并 pin 的合并）+ `git revert` 取号提交；dependabot.yml 单文件
+`git rm .github/dependabot.yml`。
+
 ## [1.31.13] — 2026-11-23
 
 **版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、
