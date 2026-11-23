@@ -85,8 +85,8 @@ jobs:
     # (measured 2026-11-04 by reverse mutation — reverting one `swift`-lane action to `@v4` reddens
     # that check and names the job), so the read-only lanes are covered too.
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v4
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v4
         with:
           node-version: 20
       - name: The CI of this exact commit must be green before anything ships
@@ -373,8 +373,8 @@ jobs:
     env:
       MODE: ${{ github.event.inputs.mode }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v4
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
