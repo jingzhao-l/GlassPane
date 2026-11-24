@@ -2,6 +2,24 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.31.15] — 2026-11-24
+
+**版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、
+npm 包 `bin` 声明没动。本版唯一改动面仍是 `.github/workflows/`，不碰产品面。
+
+- **吸收 1.31.14 引入 dependabot 后首批三个自动 PR（#27/#28/#29，各自 13 lane CI 全绿）**：把
+  `actions/checkout`→`v7.0.1`、`actions/setup-node`→`v7.1.0`、`actions/setup-python`→`v7.1.0`
+  并入 main。三个 SHA 经上游 API 核为官方提交（`prep v7.0.1 release` 等），非仿冒。失效模式：pin
+  停在 v5/v6 运行时而 Dependabot 已报 v7，注释与真源脱节。顺序合并时三个 dependabot 分支互踩
+  （各 PR 基于不同前序状态），`ci.yml`/`release.yml`/`harness-contract.yml` 共 12 处冲突按「两者都要」
+  解（checkout v7 + setup-node v7），并把注释统一成 major-only `# v7`。
+- **为什么补一个号**：1.31.14 的 tag 落在并入这三个 PR 之前，若不补号，main 就领先已发布物——
+  违反「发布物 == 主干」。补 1.31.15 让三处 v7 pin 进发布物。
+
+**本版替 owner 做的决定**：把 dependabot 的三个 v7 major bump 判为安全吸收（CI 13 lane 全绿 +
+SHA 官方 + CI-only 无产品面）并补 patch 号，依据是「本轮发现的活当轮清零」与「发布物==主干」。
+回滚：`git revert` 三个 merge commit（`c29a0f33`、`cec510bb`、checkout 那笔）+ `git revert` 取号提交。
+
 ## [1.31.14] — 2026-11-24
 
 **版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、
