@@ -98,10 +98,10 @@ That is a measured claim, not a promise. The fork tracks upstream
 [anomalyco/opencode](https://github.com/anomalyco/opencode) at a pinned tag, and
 `harness/tools/fork-diff.mjs` compares every file in this tree against that tag on every
 change. The ruler prints its own line — this is that line, verbatim, against the golden
-recorded 2026-11-21:
+recorded 2026-11-24:
 
 ```
-fork-diff vs v1.18.32: 4625/6774 byte-identical, 299 edited, 142 added, 1708 deleted
+fork-diff vs v1.18.32: 4625/6775 byte-identical, 299 edited, 143 added, 1708 deleted
 ```
 
 Most of what upstream ships is still byte-for-byte upstream — 4,625 of its 6,632 files. The
@@ -157,7 +157,7 @@ npm install -g glasspane-harness
 bun add -g glasspane-harness
 
 # or one-click (npm first, GitHub release asset as fallback)
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.15.5/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.15.6/scripts/install.sh | bash
 ```
 
 Two commands are installed: **`glasspane-harness`** and the short alias **`gp-harness`**. npm and

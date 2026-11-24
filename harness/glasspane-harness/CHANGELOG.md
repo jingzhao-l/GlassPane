@@ -8,6 +8,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.15.6] — 2026-11-24
+
+> **取 patch**：零产品代码改动，零用户可见面变动。本版存在的唯一理由是**把 CI 供应链 pin 的改动同步回主干 fork 子树**。
+> split 仓 PR #8（`actions/checkout` Node20→Node24 SHA pin + 新增 `.github/dependabot.yml`）只改了 split 仓 main，
+> 而 trunk 的 fork 子树仍停在旧 pin `11d5960a` 且无 dependabot.yml。`release-artifact --check` 的 split-main 腿因此红，
+> 并打 `⚠ RE-SPLIT RISK`：今天从 trunk 重切会覆盖 split 独有这些行。按闸 remedy 把 published-only 三件落回 trunk 后，
+> artifact 腿仍红（已发布 tag `v0.15.5` 背后的树 ≠ 主干子树，`.github/` 是非台账差异，无 allowance）——这一格只能由
+> 切一个新号清。改动面：`.github/dependabot.yml`（新增）+ ci.yml/release.yml 的 checkout pin `11d5960a→fbc6f399`
+> + 版本线 0.15.5→0.15.6。`product-surface` 报 6642 agreement / 0 problem。零运行时字节变化（`.github/` 只在 split 仓
+> 作为 CI/dependabot 跑，不进发布物 archive）。
+
 ## [0.15.5] — 2026-11-23
 
 > **取 patch**：零产品代码改动，零用户可见面变动。本版存在的唯一理由与 0.15.2/0.15.4 相同——**吸收一次主干文档 pin 号追平**。

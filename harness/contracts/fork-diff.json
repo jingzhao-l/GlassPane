@@ -2,11 +2,11 @@
   "baseTag": "v1.18.32",
   "forkPath": "harness/glasspane-harness",
   "referenceClone": ".external/opencode",
-  "observedAt": "2026-11-23",
+  "observedAt": "2026-11-24",
   "counts": {
     "identical": 4625,
     "edited": 299,
-    "added": 142,
+    "added": 143,
     "deleted": 1708
   },
   "edited": [
@@ -311,6 +311,7 @@
     "script/version.ts"
   ],
   "added": [
+    ".github/dependabot.yml",
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",
     ".glasspane-harness/.gitignore",
@@ -2198,7 +2199,7 @@
     {
       "file": "bun.lock",
       "upstreamHash": "7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c",
-      "forkHash": "03f32616b2dc2cfddaf921c1c28d66212c849c3f"
+      "forkHash": "0d22f16ca119e4714ccb59da93a721d325690e36"
     },
     {
       "file": "bunfig.toml",
@@ -2813,7 +2814,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "f355ab24f250347ef2293fd10c11615c6c2292b0"
+      "forkHash": "ecb273525042a04ecfc27c549ab9e69dddbdfb73"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -3608,7 +3609,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "8526e8aa6a1869b4bd336015823b1ee7c1f59d45"
+      "forkHash": "1cc8f141769fb6c03a2603e76fcd3d2389b79ef2"
     },
     {
       "file": "script/beta.ts",
@@ -3663,12 +3664,16 @@
   ],
   "addedDetail": [
     {
+      "file": ".github/dependabot.yml",
+      "forkHash": "80049834289c86e55d0fe144de3d59519386dd0a"
+    },
+    {
       "file": ".github/workflows/ci.yml",
-      "forkHash": "5a6c3ce94ef310a26f332000f9d670846542ad63"
+      "forkHash": "013909e2506b543a5efa233f4ed19943fa4e1cc1"
     },
     {
       "file": ".github/workflows/release.yml",
-      "forkHash": "8d6a96a5bae5a23a0836649322e8e179278ec6a7"
+      "forkHash": "69fe0c64f75a9af5a2d15a85456316573cb3356c"
     },
     {
       "file": ".glasspane-harness/.gitignore",
@@ -3836,7 +3841,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "fcdecfe5aca418fad1c2801b0e9c9a54f7f51214"
+      "forkHash": "c09c04ae3cafd12e12d65973fb50d330b673fd09"
     },
     {
       "file": "contracts/dependency-floors.json",
@@ -3872,7 +3877,7 @@
     },
     {
       "file": "docs/install.md",
-      "forkHash": "10d593d261f1f775aa2d45e75f9f9098072d51bb"
+      "forkHash": "ca4a171168480f4e928f2fd92dd3559aa6cf4a8d"
     },
     {
       "file": "docs/kernel-integration.md",
@@ -4184,11 +4189,11 @@
     },
     {
       "file": "product.json",
-      "forkHash": "94518bbd209820340e69368de17de68c1f832156"
+      "forkHash": "c86271ca5fe4fb01b403f1f84d90642c96c8171e"
     },
     {
       "file": "README.zh-CN.md",
-      "forkHash": "fa3ae5bf9058032c347e160a3c7c525df6b1bf8c"
+      "forkHash": "ee71b7c4e3a87baf428cd389d50db26611da933d"
     },
     {
       "file": "script/assert-ci-green.mjs",
@@ -4224,11 +4229,11 @@
     },
     {
       "file": "scripts/install.sh",
-      "forkHash": "c438d8b5a98172d30308fa89aa18b1c868457469"
+      "forkHash": "15489b4d105b4192e170baafda09fe3f7ffcf91d"
     },
     {
       "file": "SYNCLOG.md",
-      "forkHash": "1faedc88db85b6881d17e66867928bf213f04a19"
+      "forkHash": "e86d7be13cb90b8d94954125a0f34d25381d47e1"
     }
   ]
 }
