@@ -57,6 +57,21 @@
 - `gp_*` 工具面需 `glasspaned` 在跑：本轮未起 daemon 做真机走查，照实标"未观测"。补它的一条命令：`glasspane-harness serve` 后跑一次 `gp_diagnose` 真轮次。
 - PR #8 的 `npm verify_oidc` 干跑未单跑（本轮 dispatch 走的是真 publish，OIDC verify job 在 publish 模式下 skipped）。
 
+### 七、本轮因审查/闸发现而追发的 0.15.6
+
+合并 PR #8 让 `release-artifact --check` 转红（split-main 腿：dependabot 改动只落 split 仓 `.github/`，trunk fork 子树停旧 pin）。按闸 remedy 把 `.github` 三件落回 trunk 后 artifact 腿仍红（非台账差异、v0.15.5 永不移动）⇒ 切 **0.15.6**（patch，零产品面）。改动面：`fork-diff: 4625/6775 byte-identical, 299 edited, 143 added, 1708 deleted`（added 142→143 = dependabot.yml）。
+
+| 项 | 数字/判据 |
+| --- | --- |
+| split 顺序 | 先推 trunk main（`737eea59`）→ 重切断言 tree `8c9e9230` == trunk 子树 → `--force-with-lease=refs/heads/main:5871f875` 推 split main（`006f8c98`）→ 逐条证明被覆盖内容不丢（dependabot.yml + 新 pin 在新分支、`--diff-filter=D` 空、树相等） |
+| tag v0.15.6 | 切在 `006f8c98`，签名 tag，push 触发 Release run `45320909758` 全绿（version-check→binaries 双平台→SHA256SUMS+GPG→发布可见） |
+| Release v0.15.6 | 非草稿；6 资产（双平台 zip + 各 .asc + SHA256SUMS.txt + 其 .asc）；targetCommitish 是 SHA `006f8c98`（非分支名） |
+| npm 三包 | dispatch run `45322068768` success；registry `npm view <p>@0.15.6 version --prefer-online` 三包实测 0.15.6 |
+| 发布闸 | `release-artifact --check` split-main ✓ + artifact ✓ 两腿均 == trunk 树 `8c9e9230` |
+| verify-published | 全绿：版本/os-cpu gates/integrity/provenance/MCP patch 8 item/内嵌 web |
+| 端到端三通道 | npm -g 0.15.6（两命令）、bun -g 0.15.6、curl 兜底 SHA256SUMS+GPG（签名密钥 `0929EA31…`）全验过 0.15.6 |
+| 反向验证 | `set-version.mjs` 越界把父仓产品线 1.31.15 改成 0.15.6 → `git restore` 全部还原，改用手动 7 处 harness 位点；product-surface 报 6642 agreement 确认父仓未动 |
+
 
 ## 2026-11-22（第四十八次会话）· 只读审查轮：无代码改动、无发版，0.15.2 端到端健康
 
