@@ -3,6 +3,54 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-25（第五十次会话）· kernel 追平收尾：切 0.15.7 清 release-artifact 两条红，零产品代码改动
+
+### 〇、改动面数字
+
+`fork-diff vs v1.18.32: 4625/6775 byte-identical, 299 edited, 143 added, 1708 deleted`（与 0.15.6 同数——本轮唯一源码级改动是两份 docs 的版本号句子，属注释，不进分叉面计数）。
+
+### 一、本轮性质
+
+**收尾轮，取 patch 0.15.7。** 上一笔 kernel 追平 0.1.18（落在本仓 main `0c6eb0a0`）只改了 fork 的 `package.json`/`bun.lock`/两份 contracts 与 mcp-shell，**没做 fork 侧收尾**（fork-diff --record、SYNCLOG、split、tag）。本仓主线的 `harness-rulers` lane 因此三把尺子红，且 `assert-tag-ready`/`assert-ci-green` 会用它按住本仓自己的发版。本轮把这批收尾做完。
+
+### 二、上一轮遗留核查
+
+| 遗留项 | 判据 | 结论 |
+| --- | --- | --- |
+| kernel 追平 0.1.18 未做 fork 侧收尾 | fork-diff 四份声明分叉文件 `bun.lock`/`packages/opencode/package.json`/`contracts/kernel-conformance.json`/`contracts/kernel-pin.json` 实际字节已移动而金样停在旧值 | 真未落地，本轮收口 |
+| 两份 docs 版本号停在 0.1.17 | 主仓 `check-doc-links.mjs` 把 `harness/README.md`「内核 pin 版本」与 `kernel-integration.md`「内核语料出处戳记」注册为读者，真源 0.1.18 ⇒ 闸红 + 连带 mcp-shell 三个守闸用例（317/610/643）失败 | 本轮修，见下 |
+
+### 三、审查发现与处置
+
+- **发现（P1，已修）kernel 追平漏改对外文档版本号**：`harness/README.md` 与 `kernel-integration.md` 仍写 `iterate-kernel@0.1.17` / provenance stamp `0.1.17`，而契约真源已 0.1.18。主仓 `check-doc-links` 当读者，闸转红。修法：把两处句子追平 0.1.18（不是改闸判据——闸判据取的是金样自己的 kernel.version，方向正确）。反向验证：改前闸具名报这两处 0.1.17≠0.1.18；改后 rc=0，mcp-shell 763 pass / 0 fail。
+- **发现（P2，已修）tool-surface 的 kernel attribution 脱节**：`tool-surface --check` 报 `kernel attribution moved: golden 0.1.17 → this run 0.1.18`（面 B 排除 kernel 依赖字节靠这份 manifest，换内核版本是口径变化，须随追平重记）。修法：`--record` 重记，与 0.1.18 追平同批。
+
+### 四、本轮闸结果
+
+| 闸 | 数字 | 判据 |
+| --- | --- | --- |
+| fork-diff | 4625/6775 identical, 299 edited, 143 added, 1708 deleted | `--record` 随批重记；`--check` 全绿 |
+| tool-surface | 面 A 21.25%｜面 B 23.71%（与上轮同数；+0 LOC） | `--record` 随批（kernel attribution 0.1.17→0.1.18）；交叉检查已花费，LOC 棘轮守 |
+| surface-semantics | 0 hits | 全绿 |
+| brand-surface | lineage 9698 / 3358 文件（+1 文件）；0 hit | `--record` 随批（install.md 入扫集计数）；全绿 |
+| product-surface | 6642 agreement(s), 0 problem(s) @0.15.7 | 全绿（`installer-curl-pinned` 强制 7 处版本位点钉 v0.15.7） |
+| hook-liveness | 21 hooks vs v1.18.32, no drift；bound 2/2 | 全绿 |
+| kernel-pin | installed 0.1.18（本仓已追平），26 contracts sha256 ok | 全绿，无漂移 |
+
+### 五、发版
+
+发版动作（split push → 签名 tag → Release → npm dispatch → registry 回查）在写本条 SYNCLOG 时**尚未执行**，本轮收口时逐格回填实测值；不在此预写"已核过"。计划顺序：先 `git subtree split` 断言 tree 相等再推 split main → `git tag -s v0.15.7`（fpr `0929EA31DF4F7429F63FC53189D88B1D043A1298` = install.sh 锚点）→ push 触发 Release → `gh workflow run release.yml --ref v0.15.7 -f publish_npm=true -f confirm=true` → registry `--prefer-online` 回查三包。
+
+### 六、本轮替 owner 做的决定
+
+- **切新号 0.15.7（而非 re-split 蒙混）**：release-artifact 的 split-main 腿要 split main == trunk 子树**恒等**，artifact 腿只对 `SYNCLOG.md`/`CHANGELOG.md` 两个台账文件给 lagging allowance。本轮非台账差异（kernel 契约 + lock + `.github`）⇒ 已发布 v0.15.6 永不移动 ⇒ 唯一出路是切新号。回滚：npm 不可撤（`npm deprecate glasspane-harness@0.15.7 …`）。
+- **零产品代码**：`product-surface` 6642 agreement / 0 problem，fork 源码与 schema 一字未动，仅版本线 + docs 版本号句子 + 金样重记。
+
+### 七、没跑的部分
+
+父仓 `harness/glasspane-harness/packages/opencode` 的全量 `bun test` / `bun typecheck` 本轮未跑（改动面仅 docs 版本号句子 + 版本线 + 三份金样，不碰 src/ 与 test/）；CI 的 fork 侧测试 lane 覆盖。
+
+
 ## 2026-11-24（第四十九次会话）· 补发 0.15.5 npm + 并遗留 CI pin PR + 只读审查，无产品代码改动
 
 ### 〇、改动面数字
