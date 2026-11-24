@@ -38,7 +38,7 @@ jobs:
       # `scripts/check-workflows.mjs` now enforces pins for this root too (it used to exempt the
       # fork subtree). The split repository is the thing that actually publishes, so a retagged
       # `@v4` here is attacker code in the release chain, not just in a read-only lane.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v4
 
       - uses: ./.github/actions/setup-bun
 
@@ -265,7 +265,7 @@ jobs:
     # the default is 360 and this job runs on a macOS runner, the scarcest label here.
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v4
 
       - name: Installer selftest (stubbed curl/npm/gpg; the script prints its own check count)
         run: bash packages/opencode/script/installer-selftest.sh
