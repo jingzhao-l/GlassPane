@@ -1,12 +1,12 @@
 {
   "_comment": "Provenance of the iterate-kernel dependency this fork ships. Written by script/kernel-pin.mjs --record when the version is deliberately bumped; checked by --check in CI. The kernel's canonical home is iterate-skill/kernel, published as `iterate-kernel`; the vendored mirror under packages/opencode/vendor/kernel was retired with this file.",
   "package": "iterate-kernel",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "resolution": {
     "from": "registry",
-    "lockKey": "iterate-kernel@0.1.17",
+    "lockKey": "iterate-kernel@0.1.18",
     "specifier": "",
-    "integrity": "sha512-hOw63ll7pNK/GwgkJSWOOl+NRS3rVbaSZfccwawjU5q9dNg8Aoeq965Lj3KwE0r3/E5pI3EhOsXs1lKnoawj8A=="
+    "integrity": "sha512-nvGRn76wswPcbmF3r1q9r3/NDXFDNxadsyKWy+lfi2gsTmKHnLlm90PG2QMTnp27hdSQWZq0JGHAlC9UG8uVGQ=="
   },
   "canonical": {
     "repo": "jingzhao-l/iterate-skill",
@@ -14,7 +14,7 @@
     "branch": "main",
     "npmPublish": "npm publish from the kernel/ directory of that repo"
   },
-  "recordedAt": "2026-11-22",
+  "recordedAt": "2026-11-24",
   "corpus": [
     {
       "file": "fixtures/convergence.ok-01.json",
