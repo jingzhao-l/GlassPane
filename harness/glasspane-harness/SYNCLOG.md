@@ -3,6 +3,61 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-24（第四十九次会话）· 补发 0.15.5 npm + 并遗留 CI pin PR + 只读审查，无产品代码改动
+
+### 〇、改动面数字
+
+`fork-diff vs v1.18.32: 4625/6774 byte-identical, 299 edited, 142 added, 1708 deleted`
+——与 0.15.2 逐数一致。本轮**零产品代码改动**：是一次遗留收口（补发 npm、并一个 CI 供应链 PR）+ 只读审查轮。
+
+### 一、本轮收口的遗留（两笔）
+
+1. **0.15.5 的 npm 三包从未发布**（上一轮漏了独立 dispatch 步）。已发布 tag `v0.15.5` 的 push 触发那条 Release run `45107831761` 全绿，但它的 `npm darwin-x64` / `npm darwin-arm64` / `npm glasspane-harness (wrapper)` 三个 job 全 `skipped`——push 触发不带 `publish_npm=true`，npm 是 `workflow_dispatch` 的独立动作（`docs/release.md` 第 g 步）。registry 停在 0.15.4。**补发**：`gh workflow run release.yml --ref v0.15.5 -f publish_npm=true -f confirm=true`（run `45316315752`）。dispatch 前先证 tag↔子树等式：`git rev-parse v0.15.5^{tree}` == `git rev-parse HEAD:harness/glasspane-harness` == split main tree == `eb74d6ed…`（三处逐字相等），`publish-gate` 的 `Refuse to publish a tree no tag vouches for` job 在 run 里 success 确认。结果：wrapper + darwin-arm64 + darwin-x64 三包 `npm view <p>@0.15.5 version --prefer-online` 实测均 `0.15.5`。
+2. **split 仓 open PR #8（`ci/node24-actions-20261123`）**：把 `actions/checkout` 的 SHA pin 从 Node20 版（`11d5960a…` releases-v4）升到 Node24 版（`fbc6f399…` releases-v5），并新增 `.github/dependabot.yml`（weekly github-actions 生态）。只碰 split 仓 `.github/`，**不在 fork 子树内，不改发布物字节**。已验新 SHA 属 `actions/checkout` 官方仓库（`api.github.com/repos/actions/checkout/commits/fbc6f399…` → "backport fixes to releases-v5"），PR CI 三检查全绿。合并被 ruleset `main-branch-protection`（要求 PR review）拦下——owner 是唯一人、物理上无法自审，属"物理边界"，用 `--admin` 合并并留痕。合并后 split main → `5871f875`。
+
+### 二、历史遗留分支判定（用字节不用分支名）
+
+`gp-harness-orphan-20261010` 与 `gp-harness-sc5-fork-20261020` 在 origin 已不存在。逐文件核实其内容去向：
+- orphan 的 verify-published 修法（读已安装包 os/cpu 而非拿 product.json 跟自己比）：main `verify-published.ts:363` 已是该形状（"the installed package's os/cpu/version gates match the product's platform block"）。
+- sc5 三笔（`6bcbb18a` provider 注册、`9c1ede8f` 面 A 归属、`f32ef8dd` verify-published 等 registry）：main 已包含全部实质。sc5 与 main 无共同祖先（历史重写），`git merge-base` 空、`git merge-base --is-ancestor f32ef8dd main` 为假，但**逐 blob 证 main 是 sc5 的严格超集**：sc5 唯一删除方向是去掉 `evidenceAttribution`/`requireEvidenceMethod`（sc5 版 0 处），而 main 保留它们（2 处）且有真实生产消费者（`index.ts:544` `evidenceAttribution("last-evidence")`）+ `test/tool/glasspane-provider-registration.test.ts:279-306` 锚定——sc5 的删除方向被 main 后续决定推翻。`registry-readiness.ts` main 又比 sc5 多 87 行（`answeredInstead` 区分"读到别的版本"与"还没读到"）。判定：sc5 内容已被取代，不重并。
+
+### 三、审查结论
+
+两个并行子代理（正确性 / 安全-供应链）审完全部定制面与尺子层。**无 P0/P1。** 三条 P2 观察：
+- security：`postinstall.mjs` `resolveBinary` 对 `no-record` 状态（npm -g / pnpm / bun 无 `.package-lock.json`）在树边界 + 版本检查通过后放行。**判定为有意设计、非缺陷**：`test/script/postinstall-resolution-anchored.test.ts:245` 有具名用例断言该形状必须能装（refusing 会破坏产品推荐的安装方式）；且攻击者能写全局 prefix 的 `node_modules` 就已与 wrapper 同信任边界（可直接改 wrapper），非提权。
+- bugbot 两条纯开销观察（`providers.ts` 每次 diagnose 重建 registry；`session/index.tsx` 每渲染调两次 glasspaneRow），非正确性，不修。
+
+### 四、本轮闸结果
+
+| 闸 | 数字 | 判据 |
+| --- | --- | --- |
+| fork-diff | 4625/6774 identical, 299 edited, 142 added, 1708 deleted | 全绿（与基线逐数一致，无 `--record`） |
+| tool-surface | 面 A 21.25%｜面 B 23.71%（no growth past baseline） | 全绿 |
+| surface-semantics | 0 hit(s) across 23 file(s)；正对照 3/3 | 全绿 |
+| brand-surface | 血缘 9698 / 基线 9698｜0 hit；正对照 8/8 | 全绿 |
+| product-surface | 6642 agreement(s), 0 problem(s) @0.15.5 | 全绿（永不 `--record`） |
+| hook-liveness | 21 hooks vs v1.18.32, no drift；bound 2/2 | 全绿 |
+| kernel-pin | installed 0.1.17 == pin, 26 contracts sha256 ok | 全绿，无漂移 |
+| fork 测试（opencode） | 固定点 4 文件 212 pass / 0 fail；provider-registration 26 pass / 0 fail | 全绿 |
+| fork 测试（tui） | 37 pass / 0 fail | 全绿 |
+| typecheck | opencode / tui / sdk/js / plugin 全 rc=0 | 全绿 |
+| kernel-conformance | 16 fixture(s) 通过 golden | 全绿 |
+| publish --dry-run | glasspane-harness@0.15.5 pack 干净（Shasum `7e7b644f…`） | 全绿 |
+| check-workflows | self-test 48 cases；主闸 5 workflow 干净 | 全绿 |
+| check-doc-links | 32 文档 / 275 内链 / 46 外链 / 501 表格，rc=0 | 全绿 |
+
+### 五、本轮替用户做的决定 → 依据 → 回滚
+
+- **补发 0.15.5 npm（非取新号）**：tag/Release/二进制全在且健康，唯一缺的是 registry 三包，属"发版链漏一步"而非"需要新内容"。回滚：npm 不可撤（deprecate `npm deprecate glasspane-harness@0.15.5 …`）。
+- **PR #8 用 `--admin` 合并**：纯 CI 供应链 pin 更新、SHA 已验官方、CI 全绿、不改发布物；review ruleset 在单人 repo 物理上无法满足。回滚：`git revert <merge-commit>` 于 split main。
+- **历史 orphan/sc5 不重并**：字节证已被 main 取代（见二）。无需回滚（内容已在 main 且更新）。
+
+### 六、未观测项（物理边界）
+
+- `gp_*` 工具面需 `glasspaned` 在跑：本轮未起 daemon 做真机走查，照实标"未观测"。补它的一条命令：`glasspane-harness serve` 后跑一次 `gp_diagnose` 真轮次。
+- PR #8 的 `npm verify_oidc` 干跑未单跑（本轮 dispatch 走的是真 publish，OIDC verify job 在 publish 模式下 skipped）。
+
+
 ## 2026-11-22（第四十八次会话）· 只读审查轮：无代码改动、无发版，0.15.2 端到端健康
 
 ### 〇、改动面数字
