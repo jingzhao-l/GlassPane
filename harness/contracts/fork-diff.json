@@ -2199,7 +2199,7 @@
     {
       "file": "bun.lock",
       "upstreamHash": "7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c",
-      "forkHash": "85f3d6854aab0174acc303da0e355cd517dbbe30"
+      "forkHash": "5566889c6013422ec50fa8820da47e82271da1d0"
     },
     {
       "file": "bunfig.toml",
@@ -2814,7 +2814,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "5f5b34ddebb8227aa93eb9039aed79a1549af5cf"
+      "forkHash": "7c646642557e6f8bbff8fdeb3f06af2d208f8c06"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -3609,7 +3609,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "1cc8f141769fb6c03a2603e76fcd3d2389b79ef2"
+      "forkHash": "6ec357d147468820be1372ecd1e1ecbe55a72205"
     },
     {
       "file": "script/beta.ts",
@@ -3841,7 +3841,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "c09c04ae3cafd12e12d65973fb50d330b673fd09"
+      "forkHash": "aed2c59ca464d91eac36c06f00ddacbf856a9f9a"
     },
     {
       "file": "contracts/dependency-floors.json",
@@ -3877,7 +3877,7 @@
     },
     {
       "file": "docs/install.md",
-      "forkHash": "ca4a171168480f4e928f2fd92dd3559aa6cf4a8d"
+      "forkHash": "864dd9231010e7921e16ff6bccd2fc6b6019ae61"
     },
     {
       "file": "docs/kernel-integration.md",
@@ -4189,11 +4189,11 @@
     },
     {
       "file": "product.json",
-      "forkHash": "c86271ca5fe4fb01b403f1f84d90642c96c8171e"
+      "forkHash": "b145b30d0f9bd1709ae31f86d376d2eddbd5edbf"
     },
     {
       "file": "README.zh-CN.md",
-      "forkHash": "ee71b7c4e3a87baf428cd389d50db26611da933d"
+      "forkHash": "2e801cb9c572f0ed90997986d32d1ce6fb046bf9"
     },
     {
       "file": "script/assert-ci-green.mjs",
@@ -4229,7 +4229,7 @@
     },
     {
       "file": "scripts/install.sh",
-      "forkHash": "15489b4d105b4192e170baafda09fe3f7ffcf91d"
+      "forkHash": "ff11556532beb945e551813f66cb88abf0012a84"
     },
     {
       "file": "SYNCLOG.md",

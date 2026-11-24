@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.15.7] — 2026-11-25
+
+> **取 patch**：零产品代码改动（fork 源码与 schema 不变），零用户可见面变动。本版存在的唯一理由是
+> **清掉 `release-artifact` 两条红**：kernel 追平 0.1.18（上一笔落在本仓 main）之后，`fork-diff` 的四份
+> 声明分叉文件（`bun.lock`/`packages/opencode/package.json`/`contracts/kernel-conformance.json`/`contracts/kernel-pin.json`）
+> 的实际字节已移动，而金样停在旧值 ⇒ fork-diff `--check` 红；同一批也让已发布 `v0.15.6` 背后的树 ≠ 主干
+> fork 子树（`.github/` 之外还有 kernel 契约与 lock 的非台账差异，无 allowance），`release-artifact` 的
+> split-main 与 artifact 两条腿都红。已发布 tag 永不移动 ⇒ 这一格只能由切一个新号清。
+> 同批重记 `fork-diff --record`（4625/6775 identical, 299 edited, 143 added, 1708 deleted，与 0.15.6 同数
+> —— docs 版本号句子是注释不是分叉面），并写本轮 SYNCLOG。
+> 验证：`fork-diff --check` / `product-surface`（6642 agreement / 0 problem @0.15.7）/ `tool-surface` /
+> `brand-surface` / `surface-semantics` / `hook-liveness` 全绿。
+
 ## [0.15.6] — 2026-11-24
 
 > **取 patch**：零产品代码改动，零用户可见面变动。本版存在的唯一理由是**把 CI 供应链 pin 的改动同步回主干 fork 子树**。
