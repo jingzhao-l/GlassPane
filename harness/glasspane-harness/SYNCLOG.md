@@ -37,9 +37,11 @@
 | hook-liveness | 21 hooks vs v1.18.32, no drift；bound 2/2 | 全绿 |
 | kernel-pin | installed 0.1.18（本仓已追平），26 contracts sha256 ok | 全绿，无漂移 |
 
-### 五、发版（收口时回填的实测读数）
+### 五、发版
 
-顺序：`git subtree split`（断言 split tree == trunk 子树 `55ca5840`，可快进）→ 推 split main → `git tag -s v0.15.7`（fpr `0929EA31DF4F7429F63FC53189D88B1D043A1298` = install.sh 锚点，`git tag -v` 报 Good signature / ultimate trust）→ push tag 触发 Release → `gh workflow run release.yml --ref v0.15.7 -f publish_npm=true -f confirm=true` → registry 回查。
+发版动作（split push → 签名 tag → Release → npm dispatch → registry 回查）在写本条 SYNCLOG 时**尚未执行**，本轮收口时逐格回填实测值；不在此预写"已核过"。计划顺序：先 `git subtree split` 断言 tree 相等再推 split main → `git tag -s v0.15.7`（fpr `0929EA31DF4F7429F63FC53189D88B1D043A1298` = install.sh 锚点）→ push 触发 Release → `gh workflow run release.yml --ref v0.15.7 -f publish_npm=true -f confirm=true` → registry `--prefer-online` 回查三包。
+
+收口回填——上述"尚未执行"已不成立（发版已落地），下列为逐格实测值。原文按字节保留在上面（不删不改），使 tag↔trunk 的逐行比较只产生 trunk 领先的 lag、不产生 lead：
 
 | 格 | 实测结果 |
 | --- | --- |
