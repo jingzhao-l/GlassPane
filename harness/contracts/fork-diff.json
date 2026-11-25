@@ -2,7 +2,7 @@
   "baseTag": "v1.18.32",
   "forkPath": "harness/glasspane-harness",
   "referenceClone": ".external/opencode",
-  "observedAt": "2026-11-24",
+  "observedAt": "2026-11-25",
   "counts": {
     "identical": 4625,
     "edited": 299,
@@ -4233,7 +4233,7 @@
     },
     {
       "file": "SYNCLOG.md",
-      "forkHash": "a256772ca04e3a13a702a7b05fbab10643ce1cd7"
+      "forkHash": "d137d48787558f3070e8e4f69d6b71980d5724df"
     }
   ]
 }

@@ -37,9 +37,19 @@
 | hook-liveness | 21 hooks vs v1.18.32, no drift；bound 2/2 | 全绿 |
 | kernel-pin | installed 0.1.18（本仓已追平），26 contracts sha256 ok | 全绿，无漂移 |
 
-### 五、发版
+### 五、发版（收口时回填的实测读数）
 
-发版动作（split push → 签名 tag → Release → npm dispatch → registry 回查）在写本条 SYNCLOG 时**尚未执行**，本轮收口时逐格回填实测值；不在此预写"已核过"。计划顺序：先 `git subtree split` 断言 tree 相等再推 split main → `git tag -s v0.15.7`（fpr `0929EA31DF4F7429F63FC53189D88B1D043A1298` = install.sh 锚点）→ push 触发 Release → `gh workflow run release.yml --ref v0.15.7 -f publish_npm=true -f confirm=true` → registry `--prefer-online` 回查三包。
+顺序：`git subtree split`（断言 split tree == trunk 子树 `55ca5840`，可快进）→ 推 split main → `git tag -s v0.15.7`（fpr `0929EA31DF4F7429F63FC53189D88B1D043A1298` = install.sh 锚点，`git tag -v` 报 Good signature / ultimate trust）→ push tag 触发 Release → `gh workflow run release.yml --ref v0.15.7 -f publish_npm=true -f confirm=true` → registry 回查。
+
+| 格 | 实测结果 |
+| --- | --- |
+| split push | `977c4c92..78eeaa06 split/glasspane-harness -> main`（快进）；split tip tree == trunk 子树 tree `55ca5840…` 逐字相等 |
+| tag v0.15.7 | 切在 split commit `78eeaa06`，**签名 tag**（`git tag -v`：`gpg: Good signature from "jingzhao-l (sign-github)" [ultimate]`，指纹 = install.sh 锚 `0929EA31…`）；远端 tag object `3a275ae6` peel → `78eeaa06` |
+| Release run（push 触发） | `45513982341` **completed success**（version-check ✓ → 双平台二进制 ✓ → SHA256SUMS+GPG ✓ → Release 可见 ✓） |
+| Release v0.15.7 | draft=false；targetCommitish=`78eeaa063ebf66066ffee6c4348de5b38858c37e`（split commit，非分支名）；6 资产（darwin-arm64/x64 各 zip + .asc、SHA256SUMS.txt + .asc） |
+| npm publish（dispatch 触发） | `45515414554` **completed success**（`Refuse to publish a tree no tag vouches for` ✓ → darwin-arm64 2m53s ✓ → darwin-x64 5m30s ✓ → wrapper 6m45s ✓） |
+| registry 回查（`--prefer-online`） | `glasspane-harness@0.15.7` / `glasspane-harness-darwin-arm64@0.15.7` / `glasspane-harness-darwin-x64@0.15.7` 三包 latest 与点名版本均实测 `0.15.7` |
+| 发布闸 | `release-artifact --check`：2 agreement / 0 problem —— split-main ✓ + artifact ✓ 两腿均 == trunk 树 `55ca5840…`（v0.15.7 tag 背后的树与主干子树逐字相等） |
 
 ### 六、本轮替 owner 做的决定
 
