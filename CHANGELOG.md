@@ -2,6 +2,30 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.31.16] — 2026-11-26
+
+**版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、
+npm 包 `bin` 声明没动。本版唯一产品面改动是 `mcp-shell` 的 `iterate-kernel` 依赖 pin 与随之
+同步的 lockfile；`SERVER_INFO`/daemon hello/CFBundle 等 15 处派生位点只是跟着版本线走。
+
+- **补号理由：main 领先已发布物，违反「发布物 == 主干」。** 1.31.15 的 tag 落在 mcp-shell 把
+  `iterate-kernel` pin 从 `0.1.17` 抬到 `0.1.18`（commit `0c6eb0a0`）之前，于是 registry 上的
+  `glasspane-mcp@1.31.15` 声明的仍是 `iterate-kernel@0.1.17`，而 main 的 `mcp-shell/package.json`
+  + 两个 lockfile 已是 `0.1.18`。实测对账：`npm view glasspane-mcp@1.31.15 dependencies` →
+  `iterate-kernel: 0.1.17`，与 `node scripts/check-kernel-corpus.mjs` 判定的 pin `0.1.18`（mirror ↔
+  pin ↔ 已安装包三份字节同源）不一致。若不补号，用户从 registry 装到的 1.31.15 与主干契约差一个内核号。
+- **本版做了什么**：`node scripts/set-version.mjs 1.31.16` 把 15 处派生位点 + 两个 lockfile 统一到
+  `1.31.16`，`iterate-kernel@0.1.18` pin 原样保留；全部门禁（npm ci / build / 818 tests / 1620 swift
+  engine + 76 swift-testing / probe 58 / bridge 223 / check-version / check-doc-links /
+  check-workflows 48 self-test / check-kernel-corpus / 信号闸 / publish-shape / tool-surface --check）复跑全绿。
+- **审查结论**：本轮 correctness + security 两路审查跨 engine(Swift) / mcp-shell / installer /
+  updater / bridge / scripts 全部信任边界，未发现需修复缺陷；`gp_*` 工具数非写死（kernel schema /
+  daemon `hello.capabilities` / `mcp-shell/src/tools.ts` 三处对账一致，16 条工具 = 10 条转发 + 6 条 shell-only）。
+
+**本版替 owner 做的决定**：判 1.31.16 为 patch（仅依赖 pin 变化）并补号，依据是「发布物 == 主干」
+这条本仓自设硬约束被 `0c6eb0a0` 打破；回滚：`git revert` 取号提交 + `git tag -d v1.31.16` +
+`git push origin :refs/tags/v1.31.16`（仅当 npm 尚未 publish 时安全）。
+
 ## [1.31.15] — 2026-11-24
 
 **版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、
