@@ -8,6 +8,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.15.8] — 2026-11-26
+
+> **取 patch**：零产品代码改动（fork 源码与 schema 不变），零用户可见面变动。本版存在有两个理由，
+> 都是收口性质：
+>
+> ① **把 kernel 追平 0.1.19 的 fork 侧收尾发出**：主仓 `646d51d3` 已把 fork 与 mcp-shell 的
+> `iterate-kernel` pin 追到 0.1.19（内核修了 decision-log payload 非整数浮点的跨语言 digest 分叉），
+> 但 fork 侧的 split/tag 没做，`release-artifact` 的 split-main 与 artifact 两条腿因
+> 「已发布 v0.15.7 背后的树 ≠ 主干 fork 子树（kernel 契约与 lock 的非台账差异，无 allowance）」而红。
+> 本版随号发出这批 pin 追平。
+>
+> ② **补记 `646d51d3` 漏掉的两把闸金样**：该笔正文写"两把闸 --record 重记"，但 `fork-diff.json` 与
+> `tool-surface.json` 实际未动 ⇒ clean main 上两把闸恒红（kernel 归属 0.1.18→0.1.19；四个声明分叉文件
+> 字节已移动）。已由本线补记并随本版发出（见 SYNCLOG 2026-11-26 条目与两笔 `[gp]` 提交）。
+>
+> 验证：`fork-diff --check`（299/143/1708，与 0.15.7 同数）/ `product-surface`（6642 agreement /
+> 0 problem @0.15.8）/ `tool-surface` / `brand-surface` / `surface-semantics` / `hook-liveness` /
+> `kernel-pin`（0.1.19 + 26 文件）/ `kernel-conformance`（16 fixture）/ `release-artifact` 全绿。
+
 ## [0.15.7] — 2026-11-25
 
 > **取 patch**：零产品代码改动（fork 源码与 schema 不变），零用户可见面变动。本版存在的唯一理由是

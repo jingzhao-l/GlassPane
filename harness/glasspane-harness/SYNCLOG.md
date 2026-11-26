@@ -3,6 +3,39 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-26（第五十一次会话）· 收口：kernel 0.1.19 fork 侧 + 两把闸金样补记 + hook-liveness 盲区修，取 patch 0.15.8
+
+### 〇、改动面数字
+
+`fork-diff vs v1.18.32: 4625/6775 byte-identical, 299 edited, 143 added, 1708 deleted`（与 0.15.7 同数——本轮 fork 源码零改动，唯一 fork 树内移动是版本号句子、pin、lock 与 CHANGELOG/SYNCLOG，均不进分叉面计数或属台账 allowance）。
+
+### 一、上一轮遗留核查
+
+| 遗留项 | 判据 | 结论 |
+| --- | --- | --- |
+| 主仓 `646d51d3` kernel 追平 0.1.19 的 fork 侧 split/tag 未做 | `release-artifact --check`：已发布 `v0.15.7` 背后的树 ≠ 主干 fork 子树（kernel 契约 + lock 的非台账差异，无 allowance），split-main/artifact 两条腿红 | 真未落地，本线收口（取号是唯一出路） |
+| `646d51d3` 正文称"两把闸 --record 重记"但两金样未动 | clean main 上 `fork-diff --check`/`tool-surface --check` 恒红：kernel 归属 0.1.18→0.1.19；四个声明分叉文件字节已移动 | 收口缺陷，已补记（commit `17f56f78`） |
+
+### 二、本轮修的缺陷（发现 2 条 / 修复 2 条 / 未修 0）
+
+1. **两把闸金样滞后**（P1）：`646d51d3` 追 kernel pin 却漏 `fork-diff --record`/`tool-surface --record`，clean main 上两把闸恒红。修法＝补 `--record`（计数与 0.15.7 同：299/143/1708；tool-surface total 27567 == 13028+14539，kernel 归属 0.1.18→0.1.19）。反向：闸红在先，`--check` 已具名点名四个文件。
+2. **`hook-liveness` 的 `boundSites` 引用核对盲区**（P1）：`BOUND_HOOKS` 的 fork 侧引用闸原先拿原始字节跑 quoted-name 正则，同文件 `findFireSites`（上游侧）早就在去注释后匹配。fork 的 `glasspane-compaction.ts` 带一条解释绑定、逐字引用 hook 名的 doc 注释 ⇒ 把真绑定成员删掉、只留注释，闸仍回 "2/2 binding sites resolve"（rc 0）。**反向证明**（备份+sha 核回，未 git checkout）：删 line 544 真成员、留 line 66 注释，旧匹配器 rc 0 假绿；改后 rc 1 具名红。修法＝`boundSites` 改读 `stripComments(...)`，并在 `rulers-selftest` 补固定点控制（反证仍成立：`tool.execute.after` 无注释，`mustNot` 钉两条钩子各自作答）。
+
+### 三、闸读数（本机实测）
+
+`fork-diff --check` 绿（299/143/1708）；`tool-surface --check` 绿（A 13028/21.25%、B 14539/23.71%，crossing 已花，LOC 棘轮守）；`surface-semantics` 绿（0 hit/23 file）；`brand-surface` 绿（lineage 9698/3358 file，正对照 8/8）；`product-surface` 绿（6642 agreement/0 problem @0.15.8）；`hook-liveness` 绿（21 hook 无漂移，2/2 引用，去注释后仍 2/2）；`kernel-pin --check` 绿（0.1.19 + 26 文件）；`kernel-conformance` 16 fixture 全过；`check-kernel-corpus` 三腿绿；`rulers-selftest` rc 0（zero `bad`，含新加的 boundSites 控制与既有 8/8 正对照）；`check-doc-links`/`check-workflows --self-test` 绿。fork 包内固定点测试与四包 typecheck 未在本轮复跑（0.15.7 之后 fork 源码零改动，见下「未观测」）。
+
+### 四、替用户做的决定
+
+- **补记 646d51d3 漏掉的金样**（依据：pin 追平而不重记＝闸替已发生的移动作掩护；fork-diff 计数与 0.15.7 同数证明非分叉面增长）。
+- **取 patch 0.15.8**（依据：`release-artifact` 要求已发布 tag 树 == 主干 fork 子树，kernel 0.1.19 追平已在主干，只能切号发出；无产品代码改动故 patch）。回滚：`git revert` 本版两笔 release 提交 + 删 split 仓 tag。
+
+### 五、未观测
+
+- fork 包内固定点测试（`bun test` 四文件）与四包 typecheck：0.15.7 之后 fork 源码零改动（唯一 fork 树内移动是版本号/pin/lock/台账），本轮未复跑。补跑命令：`cd harness/glasspane-harness/packages/opencode && bun test --timeout 30000 test/tool/glasspane-surface.test.ts test/tool/glasspane-kernel.test.ts test/plugin/glasspane-decision-log.test.ts test/plugin/glasspane-compaction.test.ts`。
+- 端到端 npm 安装与 `gp_*` 工具面真机轮次：见【最终汇报】物理边界。
+
+
 ## 2026-11-25（第五十次会话）· kernel 追平收尾：切 0.15.7 清 release-artifact 两条红，零产品代码改动
 
 ### 〇、改动面数字
