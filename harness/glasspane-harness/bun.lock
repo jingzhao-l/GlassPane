@@ -462,7 +462,7 @@
         "htmlparser2": "8.0.2",
         "ignore": "7.0.5",
         "immer": "11.1.4",
-        "iterate-kernel": "0.1.18",
+        "iterate-kernel": "0.1.19",
         "jsonc-parser": "3.3.1",
         "mime-types": "3.0.2",
         "minimatch": "11.0.1",
@@ -2759,7 +2759,7 @@
 
     "isomorphic-ws": ["isomorphic-ws@5.0.0", "", { "peerDependencies": { "ws": "*" } }, "sha512-muId7Zzn9ywDsyXgTIafTry2sV3nySZeUDe6YedVd1Hvuuep5AsIlqK+XefWpYTyJG5e503F2xIuT2lcU6rCSw=="],
 
-    "iterate-kernel": ["iterate-kernel@0.1.18", "", { "dependencies": { "zod": "4.6.7" } }, "sha512-nvGRn76wswPcbmF3r1q9r3/NDXFDNxadsyKWy+lfi2gsTmKHnLlm90PG2QMTnp27hdSQWZq0JGHAlC9UG8uVGQ=="],
+    "iterate-kernel": ["iterate-kernel@0.1.19", "", { "dependencies": { "zod": "4.6.7" } }, "sha512-LHMIYdnwhG5eWQ5MKATXuB8v/dwwMyEJKIFXm6lR7vHNhMViN6tAOQ/2f/bj1J1vzXilYrUe6qaoQhUKmRGo4g=="],
 
     "jackspeak": ["jackspeak@4.2.3", "", { "dependencies": { "@isaacs/cliui": "^9.0.0" } }, "sha512-ykkVRwrYvFm1nb2AJfKKYPr0emF6IiXDYUaFx4Zn9ZuIH7MrzEZ3sD5RlqGXNRpHtvUHJyOnCEFxOlNDtGo7wg=="],
 
