@@ -2027,3 +2027,29 @@ updater 签名硬闸+原子 apply、install.sh 钉 tag+tag 验签）。GUI 会�
   pin 0.1.15 → 0.1.16。协议/返回形状/席位读数与 1.31.11 一致。
 
 没碰：`--prune-evidence` 一类破坏性旗标一次都没执行过。
+
+## 2026-11-26 · v1.31.16 取号日真机核对
+
+被测产物＝main `8346e46c` 的 debug 构建 `engine/.build/debug`，发布物＝GitHub Release 归档
+`GlassPane-1.31.16.tar.gz` + registry 两包 `glasspane-mcp`/`glasspane-install`@1.31.16。
+
+1. **发布物 e2e（从 registry 取权威 tarball，非本地 dist）**：`npm pack glasspane-mcp@1.31.16` → 装进
+   干净前缀 → stdin 打一条 `initialize` + `tools/list`。回包 `serverInfo.name="glasspane-mcp"`、
+   `serverInfo.version="1.31.16"`、`tools/list` 16 条，stderr 0 行。registry 两包 `@1.31.16
+   --prefer-online` 均回 `1.31.16`，`glasspane-mcp@1.31.16 dependencies` 实测 `iterate-kernel: 0.1.18`
+   —— 1.31.15 那条「发布物声明 0.1.17、主干 0.1.18」的漂移就此闭掉。
+2. **Release 归档**：`make-release-archive.mjs --verify` → 834 entries、5148002 bytes、30 条声明命令与
+   schema 全在、无 `harness/` 条目；`grep -cE "(^|/)harness/"` ＝ 0；`shasum -a 256 -c
+   SHA256SUMS-1.31.16.txt` → tar.gz OK；Release draft=false、target=`8346e46c`（本轮 commit）、4 件资产
+   （归档 + SHA256SUMS + 两份 `.asc`）。
+3. **npm 通道**：tag push 自动跑 GitHub Release（run `45725421494` 绿，npm job skipped）；
+   dry dispatch（run `45726394462` 绿，`--ref v1.31.16 -f mode=dry`，日志实跑 `npm pack --dry-run`、未 publish）；
+   publish dispatch（run `45726553223` 绿，`--ref v1.31.16 -f mode=publish`，含 12min registry 轮询）。
+4. **daemon `--permissions`（真机 GUI 会话）**：exit 0，`verdict=granted`，三席实测
+   accessibility / input-monitoring / screen-recording 全 granted；developer-tools 诚实 `unverifiable`
+   并给可执行 next `glasspaned --check-developer-tools`。`--permissions` 是只读 TCC 探测、不写状态根
+   （本轮按真机纪律跑的是它，没碰 `--prune-evidence` 那类破坏性旗标）。
+5. **面板 AX `kAXPressAction` 走查未做**：本轮产品面唯一改动是 `mcp-shell` 的 `iterate-kernel` pin
+   0.1.17→0.1.18 + 15 处派生版本位点，零 `glasspane-settings`/面板代码改动，与 2026-11-12 那轮同一
+   判断——协议/返回形状/席位读数与已走查轮一致，无可新验证的面板行为。补上它需要的那条人工动作：
+   起 `glasspane-settings`（隔离 `--state-dir <临时根>`）后用 AX helper 按 `gp-*` 标识跑 `kAXPressAction`。
