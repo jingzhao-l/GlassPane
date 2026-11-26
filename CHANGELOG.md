@@ -2,6 +2,47 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+
+## [1.31.17] — 2026-11-27
+
+**版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、
+npm 包 `bin` 声明没动。本版唯一产品面改动是 `mcp-shell` 的 `iterate-kernel` 依赖 pin（`0.1.18`
+→ `0.1.19`，随 kernel 0.1.19 那轮四处消费方同号追平）与随之同步的两个 lockfile；`SERVER_INFO`/
+daemon hello/CFBundle 等 15 处派生位点只是跟着版本线走，README 两侧 clone 位点同号。
+
+- **补号理由：main 领先已发布物，违反「发布物 == 主干」。** 1.31.16 的 tag 落在 mcp-shell 把
+  `iterate-kernel` pin 从 `0.1.18` 抬到 `0.1.19`（commit `646d51d3`）之前，于是 registry 上的
+  `glasspane-mcp@1.31.16` 声明的仍是 `iterate-kernel@0.1.18`，而 main 的 `mcp-shell/package.json`
+  + 两个 lockfile 已是 `0.1.19`。实测对账：`npm view glasspane-mcp@1.31.16 dependencies --prefer-online`
+  → `iterate-kernel: 0.1.18`，与 `node scripts/check-kernel-corpus.mjs` 判定的 pin `0.1.19`
+  （mirror ↔ pin ↔ 已安装包三份字节同源）不一致。若不补号，用户从 registry 装到的 1.31.16 与
+  主干契约差一个内核号——与上一版 1.31.16 补号同因，逐字同形。
+- **本版做了什么**：`node scripts/set-version.mjs 1.31.17` 把 15 处派生位点 + 两个 lockfile 统一到
+  `1.31.17`，`iterate-kernel@0.1.19` pin 原样保留；全部门禁复跑全绿：npm ci（0 漏洞）/ build /
+  npm test 818 tests / swift engine 1620 tests + 6 skipped + swift-testing 76 / probe 58 + 1 skipped /
+  bridge 223 passed + 1 skipped / check-version / check-doc-links（32 份文档 275 内链）/ check-workflows
+  48 self-test + 5 workflow / check-kernel-corpus（pin 0.1.19）/ 信号闸 / publish-shape / tool-surface
+  --check（无增长）。
+- **端到端实测**：树内 `npm pack` → 装进干净前缀 → stdin 打一条 MCP `initialize`，回包
+  `serverInfo.name="glasspane-mcp"`、`serverInfo.version="1.31.17"`；daemon `glasspaned --state-dir
+  <临时根> --permissions`（真机 GUI 会话）exit 0、`verdict=granted`，三席
+  accessibility / input-monitoring / screen-recording 全 granted，developer-tools 诚实
+  `unverifiable` 并给可执行 next `glasspaned --check-developer-tools`；该命令只读 TCC、不写状态根。
+- **审查结论**：本轮 correctness + security 两路审查跨 engine(Swift) / mcp-shell / installer /
+  updater / bridge / scripts 全部信任边界。security 路结论：unix socket 0600 在 bind 期以 umask
+  0177 建立（无 connectable 窗口）、目录隔离拒绝符号链接/world-writable 祖先、mcp-shell 侧
+  `trustSocket` 独立二次校验、probe 侧 `getpeereid`+`LOCAL_PEERPID` 双因子、TCC 四席诚实（不凭
+  历史造 `denied`）、证据只落度量不落 AX 文本、错误恒 `{code,message,remedy}` 三字段且 remedy
+  全部 agent 可执行、installer/updater 下载验证分层（长度→checksum→sha256→GPG 锚定）、
+  bridge 全程 `argv` 数组无 `shell=True`、workflow 无 `pull_request_target`——未发现需修复缺陷。
+  两条 P2 观察（installer `doctor` 回显 socket 路径未走 redact/quote；TCC 座位按提问进程身份报
+  granted）经复核判为化妆性加固与设计如此：`doctor` 从不把该路径写进它执行的命令、状态根非机密、
+  shell 侧已独立闸；GUI 经 daemon `hello` 来源消歧不会越权宣称。均不属本轮需修缺陷。
+
+**本版替 owner 做的决定**：判 1.31.17 为 patch（仅依赖 pin 变化）并补号，依据是「发布物 == 主干」
+这条本仓自设硬约束被 `646d51d3` 打破；回滚：`git revert` 取号提交 + `git tag -d v1.31.17` +
+`git push origin :refs/tags/v1.31.17`（仅当 npm 尚未 publish 时安全）。
+
 ## [1.31.16] — 2026-11-26
 
 **版本判断：patch。** 四条判据一条没碰：状态文件字段没动、退出码集合没动、CLI 参数没动、

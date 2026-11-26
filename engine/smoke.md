@@ -2053,3 +2053,22 @@ updater 签名硬闸+原子 apply、install.sh 钉 tag+tag 验签）。GUI 会�
    0.1.17→0.1.18 + 15 处派生版本位点，零 `glasspane-settings`/面板代码改动，与 2026-11-12 那轮同一
    判断——协议/返回形状/席位读数与已走查轮一致，无可新验证的面板行为。补上它需要的那条人工动作：
    起 `glasspane-settings`（隔离 `--state-dir <临时根>`）后用 AX helper 按 `gp-*` 标识跑 `kAXPressAction`。
+
+## 2026-11-27 · v1.31.17 取号日真机核对
+
+被测产物＝main 的 debug 构建 `engine/.build/debug`，发布物＝GitHub Release 归档
+`GlassPane-1.31.17.tar.gz` + registry 两包 `glasspane-mcp`/`glasspane-install`@1.31.17。
+本轮产品面唯一改动＝`mcp-shell` 的 `iterate-kernel` pin 0.1.18→0.1.19 + 15 处派生版本位点
+（补号闭掉「registry 1.31.16 声明 0.1.18、主干已 0.1.19」的漂移，与 1.31.16 补号同因同形）。
+
+1. **发布物 e2e**：树内 `npm pack` → 装进干净前缀 → stdin 打一条 MCP `initialize`。回包
+   `serverInfo.name="glasspane-mcp"`、`serverInfo.version="1.31.17"`。
+2. **daemon `--permissions`（真机 GUI 会话）**：`engine/.build/debug/glasspaned --state-dir
+   <临时根> --permissions` → exit 0、`verdict=granted`，三席 accessibility / input-monitoring /
+   screen-recording 全 granted；developer-tools 诚实 `unverifiable` 并给可执行 next
+   `glasspaned --check-developer-tools`。命令自报「reads no state」、实测不写状态根。
+   本轮按真机纪律跑的是它，没碰 `--prune-evidence` 那类破坏性旗标。
+3. **面板 AX `kAXPressAction` 走查未做**：零 `glasspane-settings`/面板代码改动，与 2026-11-26 那轮
+   同一判断——协议/返回形状/席位读数与已走查轮一致，无可新验证的面板行为。补上它需要的那条
+   人工动作：起 `glasspane-settings`（隔离 `--state-dir <临时根>`）后用 AX helper 按 `gp-*`
+   标识跑 `kAXPressAction`。
