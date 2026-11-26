@@ -115,7 +115,13 @@ function boundSites() {
       continue
     }
     const quoted = new RegExp(`["']${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`)
-    if (!quoted.test(readFileSync(file, "utf8"))) {
+    // Match against comment-stripped bytes, same as findFireSites. A doc comment that quotes the
+    // hook name to explain the binding (`glasspane-compaction.ts` carries one) would otherwise
+    // satisfy the regex after the real binding is removed: the citation then reads "still bound"
+    // over a hook nothing calls — the exact "looks healthy, does nothing" failure this table exists
+    // to catch. Reverse-proven 2026-11-26: removing the live member while its comment survived
+    // printed green on the raw matcher; on the stripped one it goes red by name.
+    if (!quoted.test(stripComments(readFileSync(file, "utf8")))) {
       problems.push(`${name}: ${binding} exists but no longer names "${name}" as a quoted member, so it does not bind it — the citation is stale, and the binding it claims to prove is elsewhere or nowhere.`)
       continue
     }

@@ -582,6 +582,24 @@ if (existsSync(refDir)) {
 } else {
   console.log(`note  hook-liveness commented-site NOT OBSERVED: no reference checkout at ${path.relative(repoRoot, refDir)} — the comment-stripping guard could not be driven here. This is not a pass.`)
 }
+// hook-liveness fork-side: the `BOUND_HOOKS` citation check must also strip comments. The fork's
+// glasspane-compaction.ts carries a doc comment that quotes the hook name it binds, and the
+// citation resolver used to match the quoted-name regex against RAW bytes, so removing the live
+// member while the explanatory comment survived still read "2/2 binding sites resolve" (exit 0).
+// This mutation removes exactly the live member — the comment at line ~66 stays — and expects the
+// citation to go red by name. On the raw matcher it exited 0 (the blind spot); reverse-proven
+// 2026-11-26 before the fix. The other bound hook (tool.execute.after) has no such comment, so the
+// two hooks answer independently: the `mustNot` pin keeps this control from passing on the wrong hook.
+mustGoRed(
+  "harness/glasspane-harness/packages/opencode/src/plugin/glasspane-compaction.ts",
+  "hook-liveness: a fork binding whose only mention survives as a comment is stale, not bound",
+  (text) => text.replace('"experimental.session.compacting": async (hookInput, output) => {', '"experimental.session.removed-by-selftest": async (hookInput, output) => {'),
+  "harness/tools/hook-liveness.mjs",
+  ["--check"],
+  1,
+  ["no longer names", "experimental.session.compacting"],
+  ["tool.execute.after"],
+)
 // surface-semantics: coverage compared counts, so a same-length substitution was green. Two probes —
 // a golden that stopped carrying names, and one whose names are foreign but the same length.
 mustGoRed(
