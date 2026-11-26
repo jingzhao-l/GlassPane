@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.15.10] — 2026-11-26
+
+> **取 patch**：唯一产品面改动是把 fork docs 里 `docs/kernel-integration.md` 的内核 provenance 戳记
+> `0.1.18`→`0.1.19`（随 kernel 0.1.19 追平，prose 与 `contracts/kernel-conformance.json` 的真源 stamp
+> 对齐；主仓 `check-doc-links` 复算「文档散文 vs 真源 stamp」抓出的两条红之一）。另一条在尺子层
+> `harness/README.md`，trunk-only，不进 fork 子树。schema 与源码零改动。**为何取号**：`refs/tags/v*`
+> immutable（0.15.8 那次已实测）⇒ 已发布 v0.15.9 背后的树 ≠ 主干 fork 子树（kernel-integration.md 的
+> 非台账一行）只能由切新号清。`product-surface`（6642 agreement/0 problem @0.15.10）、`fork-diff`、
+> `release-artifact` 全绿。
+
 ## [0.15.9] — 2026-11-26
 
 > **取 patch**：零产品代码改动（fork 源码与 schema 不变），零用户可见面变动。本版存在有两个理由，

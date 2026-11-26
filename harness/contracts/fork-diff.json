@@ -2199,7 +2199,7 @@
     {
       "file": "bun.lock",
       "upstreamHash": "7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c",
-      "forkHash": "f7ba867a79414faa45638a76f307335581f452ed"
+      "forkHash": "4a601016314058877e5548553578b80c019f15af"
     },
     {
       "file": "bunfig.toml",
@@ -2814,7 +2814,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "9ebd574e728f6daf7b173686881a945d48d78e15"
+      "forkHash": "fcc2cb7c613fe07128ca8c9853a2457e2707dcd4"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -3609,7 +3609,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "5a111067284c98639801e462f219dee302b7d9de"
+      "forkHash": "8a4ddd42cfc5fa8ee03b5fba84ec665ac7e6130d"
     },
     {
       "file": "script/beta.ts",
@@ -3841,7 +3841,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "c9cdd527dc974625824d780b8b5a614e0fc87a4c"
+      "forkHash": "07f2040a661b32292f0eaa43bdab94d5208a1798"
     },
     {
       "file": "contracts/dependency-floors.json",
@@ -3877,11 +3877,11 @@
     },
     {
       "file": "docs/install.md",
-      "forkHash": "8a8765075bf75750c07e2e59709276d0432b838c"
+      "forkHash": "eebf8efba7f931feea5b2ce2b64b355d679bcb42"
     },
     {
       "file": "docs/kernel-integration.md",
-      "forkHash": "3ae6f336a70c833d13968bb2dd4af8d7ec954288"
+      "forkHash": "bbe30d602378352f9277d5d9490828abf3743bb0"
     },
     {
       "file": "docs/migrate-from-opencode.md",
@@ -4189,11 +4189,11 @@
     },
     {
       "file": "product.json",
-      "forkHash": "9f7a20ca621ddee5294ef41fb3b7483bf3862099"
+      "forkHash": "1a41805da0ee42c507f034c986657917bdb31ef2"
     },
     {
       "file": "README.zh-CN.md",
-      "forkHash": "48738f444a3ff1e77981a148159281bdc6f47932"
+      "forkHash": "eb1eefd431b5119ed3c16ed15c6ab4a1d434d710"
     },
     {
       "file": "script/assert-ci-green.mjs",
@@ -4229,11 +4229,11 @@
     },
     {
       "file": "scripts/install.sh",
-      "forkHash": "803bcb217df5fd5fb08a58c1db04aa8946e296f7"
+      "forkHash": "80f4f392ba607aa998a6f926b1d4f8e4f59931d5"
     },
     {
       "file": "SYNCLOG.md",
-      "forkHash": "15519e96752f85db80897e70b6b3e4594611328f"
+      "forkHash": "df57749ac131d0cb96231cc9b3e0ac246bb56c48"
     }
   ]
 }

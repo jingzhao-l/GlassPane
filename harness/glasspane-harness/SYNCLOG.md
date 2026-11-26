@@ -28,7 +28,8 @@
 ### 四、替用户做的决定
 
 - **补记 646d51d3 漏掉的金样**（依据：pin 追平而不重记＝闸替已发生的移动作掩护；fork-diff 计数与 0.15.7 同数证明非分叉面增长）。
-- **取 patch 0.15.9（0.15.8 烧掉）**（依据：首次 tag 误推 lightweight 指针、split 仓 version-check 拒（objecttype=commit 无签名）；`refs/tags/v*` immutable 删/覆盖均被 repository rule 拒；被拒 tag 是指向 `ad08cd71` 的裸指针零内容可丢，唯一出路＝tag 未被占的新号）。回滚：`git revert` 本版 release 提交 + 删 split 仓 v0.15.9 tag（若已建 Release）。
+- **取 patch 0.15.9（0.15.8 烧掉）**（依据：首次 tag 误推 lightweight 指针、split 仓 version-check 拒（objecttype=commit 无签名）；`refs/tags/v*` immutable 删/覆盖均被 repository rule 拒；被拒 tag 是指向 `ad08cd71` 的裸指针零内容可丢，唯一出路＝tag 未被占的新号）。
+- **取 patch 0.15.10**（依据：`check-doc-links` 复算抓出 fork `docs/kernel-integration.md` 内核 provenance 戳记停在 0.1.18，fork 子树内非台账一行 ⇒ 已发布 v0.15.9 树 ≠ 主干 fork 子树，immutable tag 只能切新号清；唯一产品面改动是那一行 prose，schema/源码零改动）。回滚：`git revert` 0.15.10 release 提交 + 删 split 仓 v0.15.10 tag。
 
 ### 五、未观测
 
