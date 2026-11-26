@@ -28,7 +28,7 @@
 ### 四、替用户做的决定
 
 - **补记 646d51d3 漏掉的金样**（依据：pin 追平而不重记＝闸替已发生的移动作掩护；fork-diff 计数与 0.15.7 同数证明非分叉面增长）。
-- **取 patch 0.15.8**（依据：`release-artifact` 要求已发布 tag 树 == 主干 fork 子树，kernel 0.1.19 追平已在主干，只能切号发出；无产品代码改动故 patch）。回滚：`git revert` 本版两笔 release 提交 + 删 split 仓 tag。
+- **取 patch 0.15.9（0.15.8 烧掉）**（依据：首次 tag 误推 lightweight 指针、split 仓 version-check 拒（objecttype=commit 无签名）；`refs/tags/v*` immutable 删/覆盖均被 repository rule 拒；被拒 tag 是指向 `ad08cd71` 的裸指针零内容可丢，唯一出路＝tag 未被占的新号）。回滚：`git revert` 本版 release 提交 + 删 split 仓 v0.15.9 tag（若已建 Release）。
 
 ### 五、未观测
 

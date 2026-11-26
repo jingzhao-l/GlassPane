@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
-## [0.15.8] — 2026-11-26
+## [0.15.9] — 2026-11-26
 
 > **取 patch**：零产品代码改动（fork 源码与 schema 不变），零用户可见面变动。本版存在有两个理由，
 > 都是收口性质：
@@ -24,8 +24,15 @@ contract does not).
 > 字节已移动）。已由本线补记并随本版发出（见 SYNCLOG 2026-11-26 条目与两笔 `[gp]` 提交）。
 >
 > 验证：`fork-diff --check`（299/143/1708，与 0.15.7 同数）/ `product-surface`（6642 agreement /
-> 0 problem @0.15.8）/ `tool-surface` / `brand-surface` / `surface-semantics` / `hook-liveness` /
+> 0 problem @0.15.9）/ `tool-surface` / `brand-surface` / `surface-semantics` / `hook-liveness` /
 > `kernel-pin`（0.1.19 + 26 文件）/ `kernel-conformance`（16 fixture）/ `release-artifact` 全绿。
+>
+> **为何取到 0.15.9（0.15.8 烧掉）**：本版首次打 tag 时误推成了 lightweight 指针（不是 annotated 签名
+> tag），split 仓 `version-check` 因 `objecttype=commit` 无签名可归属而拒。而 split 仓的 repository rule
+> 把 `refs/tags/v*` 设成 immutable——删不掉也覆盖不掉（实测 `--force` 与 `:refs/tags/v0.15.8` 均被
+> `repository rule violations` 拒）。被拒的 lightweight tag 是**指向 `ad08cd71` 的裸指针**，零字节内容
+> 可丢，唯一出路是切一个 tag 未被占的新号。故 0.15.8 号作废，0.15.9 承载完全相同的 split 字节
+> （`ad08cd71` = 同一个 fork 子树）。无用户可见面差异：0.15.8 从未发过 npm、Release 从未建成。
 
 ## [0.15.7] — 2026-11-25
 
