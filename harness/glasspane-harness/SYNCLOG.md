@@ -3,6 +3,46 @@
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
 
+## 2026-11-27（第五十二次会话）· 纯审查轮，零产品代码改动，不取号
+
+### 〇、改动面数字
+
+`fork-diff vs v1.18.32: 4625/6775 byte-identical, 299 edited, 143 added, 1708 deleted`（与 0.15.10 完全同数——本轮 fork 源码/schema/契约零改动，唯一树内移动是本条 SYNCLOG 台账，属 release-artifact 台账豁免格）。
+
+### 一、上一轮遗留核查（用内容不用分支名）
+
+两笔已知遗留经字节比对**均已落地 main、分支已被前轮清理**（`git branch -a` 与两远端 `ls-remote` 均无 `orphan`/`sc5`）：
+
+| 遗留项 | 判据（字节） | 结论 |
+| --- | --- | --- |
+| `gp-harness-orphan-20261010` 五文件 | `verify-published.ts:363` 已是"读已安装包 os/cpu/version"形状（非自回显） | 已落地 |
+| `gp-harness-sc5-fork-20261020` tip `f32ef8dd` | `providers.ts`（13KB，registerProvider 契约）+ `registry-readiness.ts`（10.8KB，被 verify-published.ts:33 import）均在 main | 已落地 |
+| README license anchor（07:30 线移交） | `README.md:38/331` 已改 `#license-and-attribution`（`&` 去掉），父仓 `check-doc-links` DEFERRED 条目已清（scripts/check-doc-links.mjs:119 记"已改掉"） | 已落地 |
+
+### 二、本轮审查发现与处置（发现 3 条 / 修复 0 / 判维持现状 3）
+
+两路并行子代理（正确性 / 安全-供应链）审全部定制面与发布通道。**安全路零发现**（publish/build/postinstall/install.sh 全 fail-closed：postinstall 先验 dist.integrity 再执行；install.sh curl 通道验 SHA256+GPG 后才解包；第三方 action 全 SHA-pin；publish job 验 HEAD_SHA==TAG_SHA）。正确性路 3 条：
+
+1. **（Low）`glasspane-compaction.ts:238` 把 `packUnreadable` 写死成 `GP_E_DECISION_LOG_RUNTIME`** —— 经读 `kernel.ts:192-208`（`readEvidenceFrame` 已把所有 `KernelSchemaError` 转成带真实 code 的 `{ok:false}`，只有非标签运行时抛出才落进 catch）与 `glasspane-decision-log.ts:144-153`（`ledgerFault` 同一约定），**判维持现状**：稳定"runtime fault"标签非自回显、非伪造内核码，锚点 schema 由 `glasspane-compaction.test.ts` 钉住，改它＝发布前契约变更。
+2. **（Info）`kernel.ts:11` 注释 "0.1.7" stale** —— 该句自免责（"the number lives in that file, not here"，实测 pin=0.1.19），带日期历史注。判维持。
+3. **（Info）`FORK.md:13` vendor/kernel 措辞** —— 同段已写明"25 个文件已删除"，是叙述退役非仍当 current。判维持。
+
+历史挂账回代码复核：`musl/baseline 无 CI lane` **已不成立**（两目标已从 `platform.dropped` 移除，release.yml:33-37 确认"没有目标所以没有 lane，不是漏了 lane"）；`packages/{app,session-ui,desktop}` 取舍**维持**（desktop=lineageOnly 第二批需签名公证账号）。
+
+### 三、闸读数（本机实测）
+
+`fork-diff --check` 绿（299/143/1708）；`tool-surface --check` 绿（A 13028/21.25%、B 14539/23.71%，crossing 已花，LOC 棘轮守，no growth）；`surface-semantics` 绿（3/3 正对照，0 hit/23 file）；`brand-surface` 绿（正对照 8/8，lineage 9698/3358 file）；`product-surface` 绿（6642 agreement/0 problem @0.15.10）；`hook-liveness` 绿（21 hook 无漂移，2/2 binding sites）；`kernel-pin --check` 绿（0.1.19 + 26 文件）+ `--probe` 绿（0.1.19 是 published latest，无漂移）；`kernel-conformance` 16 fixture 全过；`release-artifact --check` 绿（split-main==artifact==trunk 三者 `eead4d8f`，0 tolerated lag）；fork 包内固定点测试 opencode 212 pass/0 fail + tui 37 pass/0 fail；四包 typecheck 全绿；`publish.ts --dry-run` 绿（glasspane-harness-0.15.10.tgz packs cleanly）；主仓 `check-workflows --self-test`（48 case）、`check-workflows`（5 file clean）、`check-doc-links`（32 份文档/275 内链/0 死链）全绿。
+
+### 四、替用户做的决定
+
+- **不取号**（依据：本轮零产品代码/schema/契约改动，v0.15.10 已是完整一致发布态——`release-artifact` split-main/artifact/trunk 三者 tree-hash 全等 `eead4d8f`、registry 三包==0.15.10、Release 非草稿六资产。唯一移动是本条台账，落在 `release-artifact` 的台账豁免格，随 split main 搬运、不消耗版本。pre-1.0 语义：纯台账留痕不触发版本）。回滚：本轮仅 SYNCLOG 一行，`git revert <本提交>` 即可。
+
+### 五、未观测
+
+- 真 TUI 会话观感、M2 `logged` 分支证据成包真轮次、真模型轮次：本机无 daemon/模型（物理边界）。补命令：`glasspaned` 起后跑一次 `gp_act`（带 evidencePack 的方法）看 TUI `glasspaneRow` 渲染与 `metadata.decisionLog.status == "logged"`。
+- `gp_*` 工具面真机轮次（需 daemon 权限席位）：见【最终汇报】物理边界。
+
+
 ## 2026-11-26（第五十一次会话）· 收口：kernel 0.1.19 fork 侧 + 两把闸金样补记 + hook-liveness 盲区修，取 patch 0.15.8
 
 ### 〇、改动面数字
