@@ -2072,3 +2072,33 @@ updater 签名硬闸+原子 apply、install.sh 钉 tag+tag 验签）。GUI 会�
    同一判断——协议/返回形状/席位读数与已走查轮一致，无可新验证的面板行为。补上它需要的那条
    人工动作：起 `glasspane-settings`（隔离 `--state-dir <临时根>`）后用 AX helper 按 `gp-*`
    标识跑 `kAXPressAction`。
+
+## 2026-11-28 · 审查轮真机核对（零版本号：本轮唯一改动＝`harness/contracts/fork-diff.json` 金样补记）
+
+被测产物＝main `fddaee66` 的 release 构建 `engine/.build/release`（面板走查用它新组的
+`/var/tmp/glasspane-main-check/appout/GlassPane.app`，`codesign --verify --deep` 通过）。
+本轮产品面**零改动**：唯一提交补的是 `fork-diff.json` 金样（把上一笔台账移动 `SYNCLOG.md`
+`df57749a→0df66844` 记进金样，闭掉 main 上 harness-rulers lane 红了约 20h 的
+`fork-diff --check`），与发布物字节无关（归档剥 `harness/`、npm 两包不含它）。
+
+1. **面板六页 AX `kAXPressAction` 走查（这一轮把它做完了，接上 2026-11-27 那轮"未做"那一格）**：
+   自写 Swift AX helper（`AXUIElementCopyAttributeValue` 走树 → `AXUIElementPerformAction(el,
+   kAXPressAction)` 按标识），起 `GlassPane.app --state-dir /var/tmp/glasspane-main-check/panel-root`。
+   六个 nav 标识 `gp-nav-{permissions,evidence,projects,approvals,recipes,updates}` 逐个
+   `kAXPressAction` → **六个全部 result=0 OK**（不是"看起来点了"，是 AX 返回 `.success`）。
+   AX 枚举出 39 个 `gp-*` 控件，席位读数与 daemon `--permissions` 逐字一致：
+   `gp-perm-accessibility-granted` / `gp-perm-input-monitoring-granted` /
+   `gp-perm-screen-recording-granted` / `gp-perm-developer-tools-unverifiable`——面板只呈现
+   daemon 实测，developer-tools 恒诚实 unverifiable（设计如此），无越权宣称。
+2. **daemon `--permissions`（隔离 `--state-dir`）**：exit 0、`verdict=granted`，三席全 granted，
+   developer-tools `unverifiable` + 可执行 next `--check-developer-tools`；`--check-developer-tools`
+   对该 dev 二进制诚实 `denied`（真 lldb 探测，非 TCC 历史造假），退出码 1 即"not granted"信号。
+   两条命令都自报「reads no state」、实测不写状态根。
+3. **发布物 e2e + 归档自证**：树内 `npm pack` → 装进干净前缀 → stdin `initialize` 回包
+   `serverInfo.name="glasspane-mcp"`、`version="1.31.17"`、stderr 0 行；bin 是符号链接到
+   `dist/index.js`（真实交付形状，非裸 argv[1]）。发布归档 `GlassPane-1.31.17.tar.gz`
+   `make-release-archive --verify` 绿（834 entries，30 声明命令/_schema 齐全）；
+   `tar -tzf | grep -cE "(^|/)harness/"`＝**0**、`grep -cE "(^|/)\.iterate_decisions\.md$"`＝**0**。
+4. **registry 回查**：`npm view glasspane-mcp@1.31.17 version --prefer-online` 与
+   `glasspane-install@1.31.17 version --prefer-online` 均 `1.31.17`，与 `--ref v1.31.17` 被发的
+   tag 树一致。
